@@ -1,0 +1,23 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPep8Inspection" enabled="true" level="WEAK WARNING" enabled_by_default="true">
+      <option name="ignoredErrors">
+        <list>
+          <option value="E501" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyTestUnpassedFixtureInspection" enabled="true" level="INFORMATION" enabled_by_default="true" editorAttributes="INFORMATION_ATTRIBUTES" />
+    <inspection_tool class="PyUnresolvedReferencesInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredIdentifiers">
+        <list>
+          <option value="PyQt5.QtCore.pyqtBoundSignal.connect" />
+          <option value="PyQt5.QtCore.pyqtBoundSignal.emit" />
+          <option value="PyQt5.QtCore.pyqtSignal.connect" />
+          <option value="PyQt5.QtCore.pyqtSignal.emit" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>

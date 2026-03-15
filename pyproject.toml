@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "blinkview"
+version = "0.1.0.dev0"
+description = "High-performance embedded telemetry, log viewer, and plotting tool."
+readme = "README.md"
+# We allow 3.10+, but our 'daemon' env will target 3.14t for No-GIL
+requires-python = ">=3.10, <3.15"
+license = {text = "MPL-2.0"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)", # Correct format
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+authors = [
+    { name = "Roland Uuesoo", email = "rolandu@gmail.com" }
+]
+keywords = ["embedded", "telemetry", "logging", "plotting", "real-time"]
+
+# --- Core Dependencies (Safe for all runtimes, including 3.14t) ---
+dependencies = [
+    "pyserial>=3.5",
+    "rich>=13.0.0",
+    "readchar",
+#    "pyzmq>=25.0.0",  # Essential for the Daemon <-> GUI bridge
+    "jsonschema",
+    "jsonpatch",
+    "msgpack",
+    "cobs",
+    "python-can",
+    "cantools",
+    "requests",
+]
+
+# --- Optional GUI Dependencies (GIL-dependent) ---
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.6.0",
+    "pyqtdarktheme",
+]
+
+[project.scripts]
+blink = "blinkview.__main__:main"
+blinc = "blinkview.cli:main"
+bling = "blinkview.gui:main"
+blind = "blinkview.daemon:main"
+
+[dependency-groups]
+# Used by uv / hatch for development environments
+daemon = [
+    # This automatically includes everything in [project].dependencies
+    # No need to "include-group = default"
+]
+
+gui = [
+    "blinkview[gui]", # This pulls in the project dependencies + the gui extra
+]
+
+# --- HATCH SPECIFIC ---
+[tool.hatch.envs.default]
+# This makes 'hatch shell' or 'uv run' install the GUI by default
+features = ["gui"]
+
+[tool.hatch.envs.daemon]
+# Targeted for your 3.14t environment
+# It will only install [project].dependencies
+features = []
