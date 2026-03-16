@@ -117,7 +117,7 @@ def switch_profile(name, create=False):
     if project_root:
         # If we are in a project, we can also write the active profile to the project settings for easy retrieval
         settings = ProjectSettings.load()
-        settings.data["active_profile"] = name
+        settings["active_profile"] = name
         settings.save()
 
         print(f"Switched to profile '{name}' within project '{project_root.name}'")

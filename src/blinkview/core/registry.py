@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 
 class Registry:
-    def __init__(self, session_name: str, config_path: str = None, project_name: str = None, log_dir: str | Path = None):
+    def __init__(self, session_name: str, config_path: str = None, profile_name: str = None, log_dir: str | Path = None):
         # ==========================================
         # LAYER 1: Core Services
         # ==========================================
@@ -72,7 +72,7 @@ class Registry:
         factories.register("logging_processor", file_logger.BatchProcessorFactory)
         factories.register("file_logging", file_logger.FileLoggerFactory)
 
-        self.file_manager = FileManager(session_name=session_name, project_name=project_name, log_dir=log_dir, config_path=config_path)
+        self.file_manager = FileManager(session_name=session_name, profile_name=profile_name, log_dir=log_dir, config_path=config_path)
 
         self.config = ConfigManager(self.file_manager.get_config_path(), self.file_manager.get_session_path(suffix="autosave"))
         self.config.save_full_config(self.file_manager.get_session_path(suffix="start"))

@@ -26,7 +26,7 @@ class Settings(dict):
         except Exception as e:
             print(f"[ProjectSettings] Failed to read project settings: {e}")
 
-    def write(self):
+    def save(self):
         """Writes project settings to the .blinkview folder."""
         atomic_json_dump(self, self._path)
 

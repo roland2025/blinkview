@@ -53,9 +53,8 @@ from .widgets.device_sidebar import DeviceSidebarWidget
 
 class BlinkMainWindow(QMainWindow):
 
-    def __init__(self, session_name: str = None, project_name: str = None, log_dir: str | Path = None, config_path: str = None):
+    def __init__(self, session_name: str = None, profile_name: str = None, log_dir: str | Path = None, config_path: str = None):
         super().__init__()
-        self.setWindowTitle("BlinkView")
         self.resize(1280, 800)
         set_native_dark_mode(self)
 
@@ -68,7 +67,11 @@ class BlinkMainWindow(QMainWindow):
         self.gui_context.set_register_log_target(self.register_log_target)
         self.gui_context.set_deregister_log_target(self.deregister_log_target)
 
-        self.gui_context.set_registry(Registry(session_name=session_name, project_name=project_name, log_dir=log_dir, config_path=config_path))
+        self.gui_context.set_registry(Registry(session_name=session_name, profile_name=profile_name, log_dir=log_dir, config_path=config_path))
+        fm = self.gui_context.registry.file_manager
+        # Standalone is indicated at the end only if necessary
+        mode_suffix = " (Standalone)" if fm.standalone_mode else ""
+        self.setWindowTitle(f"{fm.project_name} / {fm.profile_name} - BlinkView{mode_suffix}")
 
         self.gui_context.registry.configure_system()
 
@@ -468,7 +471,7 @@ def run(args):
     app.setWindowIcon(QIcon(str(Path(__file__).parent.parent / "assets" / "icon.png")))
 
     # Pass the queue into the viewer
-    viewer = BlinkMainWindow(config_path=args.config, session_name=args.session, project_name=args.project, log_dir=args.logdir)
+    viewer = BlinkMainWindow(config_path=args.config, session_name=args.session, profile_name=args.profile, log_dir=args.logdir)
     viewer.setWindowOpacity(0)
     viewer.show()
 

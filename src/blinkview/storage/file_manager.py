@@ -40,7 +40,7 @@ def get_session_identity(config_path) -> str:
 
 
 class FileManager:
-    def __init__(self, session_name: str = None, project_name: str = None, log_dir=None, config_path=None):
+    def __init__(self, session_name: str = None, profile_name: str = None, log_dir=None, config_path=None):
         self.system_context: SystemContext = None
         self.gui_context = None
 
@@ -66,8 +66,7 @@ class FileManager:
         print(f"[FileManager] session_identity={self.session_identity}")
 
         # Resolve project name with the following precedence:
-        if project_name is None:
-            project_name = project_settings.get("project_name")
+        project_name = project_settings.get("project_name")
 
         if project_name is None:
             project_name = self._project_dir.name if self._project_dir else None
@@ -78,7 +77,7 @@ class FileManager:
         self.project_name = self._sanitize(project_name)
         print(f"[FileManager] project_name={self.project_name}")
 
-        self.profile_name = self._sanitize(self.session_identity or project_settings.get("active_profile") or global_settings.get("default_profile") or (self.project_name if self.standalone_mode else "default"))
+        self.profile_name = self._sanitize(self.session_identity or profile_name or project_settings.get("active_profile") or global_settings.get("default_profile") or (self.project_name if self.standalone_mode else "default"))
         if self.standalone_mode and self.provided_config_path:
             self.profile_name = self._sanitize(f"{self.project_name} {self.provided_config_path.stem}")
 

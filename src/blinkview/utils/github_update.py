@@ -76,7 +76,7 @@ class GitHubUpdate:
                 "latest_version": latest_v,
                 "is_prerelease": target_release.get("prerelease", False)
             }
-            settings.write()
+            settings.save()
 
             return cls._is_newer(latest_v), latest_v
 

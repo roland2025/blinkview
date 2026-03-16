@@ -104,7 +104,7 @@ def handle_config(args):
     if args.unset:
         if args.key in settings:
             settings.pop(args.key)
-            settings.write()
+            settings.save()
             print(f"Unset {args.key} ({scope_name})")
         else:
             print(f"Key '{args.key}' was not set in {scope_name} config.")
@@ -121,5 +121,5 @@ def handle_config(args):
     else:
         # SET logic
         settings[args.key] = args.value
-        settings.write()
+        settings.save()
         print(f"Set {scope_name} {args.key} to: {args.value}")
