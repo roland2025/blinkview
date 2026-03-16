@@ -196,7 +196,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
             try:
                 self.jlink.rtt_stop()
                 self.jlink.close()
-            except:
+            except Exception:
                 pass
             finally:
                 self.jlink = None
@@ -209,7 +209,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
             jl.exec_command("SuppressGUI")
 
             if self.serial_number:
-                jl.open(serial_no=self.serial_number)
+                jl.open(serial_no=int(self.serial_number))
             else:
                 jl.open()
 
