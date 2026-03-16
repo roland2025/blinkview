@@ -206,6 +206,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
             import pylink
             self.logger.info(f"Connecting to J-Link: {self.target_device}")
             jl = pylink.JLink()
+            jl.exec_command("SuppressGUI")
 
             if self.serial_number:
                 jl.open(serial_no=self.serial_number)
