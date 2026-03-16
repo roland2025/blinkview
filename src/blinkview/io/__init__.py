@@ -4,6 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from . import uart, tcp_server, logging, can_bus, binary_file_reader
+from . import uart, tcp_server, logging, can_bus, binary_file_reader, rtt
 
 # __all__ = ['uart']

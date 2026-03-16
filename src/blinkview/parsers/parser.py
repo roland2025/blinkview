@@ -23,8 +23,8 @@ TransformFunc = Callable[[Any], Any]
 
 
 @configuration_factory("parser")
-@configuration_property("max_batch", type="integer", default=200, description="Maximum number of log entries to buffer before flushing")
-@configuration_property("delay", type="integer", default=30, description="Maximum time (in milliseconds) to hold a batch before flushing")
+@configuration_property("max_batch", type="integer", default=200, description="Maximum number of log entries to buffer before flushing", ui_order=1)
+@configuration_property("delay", type="integer", default=30, description="Maximum time (in milliseconds) to hold a batch before flushing", ui_order=2)
 @configuration_property(
     "sources_",
     type="array",

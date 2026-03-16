@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "blinkview"
-version = "0.1.0.dev0"
+version = "0.1.0.dev1"
 description = "High-performance embedded telemetry, log viewer, and plotting tool."
 readme = "README.md"
 # We allow 3.10+, but our 'daemon' env will target 3.14t for No-GIL
@@ -33,7 +33,7 @@ dependencies = [
     "cobs",
     "python-can",
     "cantools",
-    "requests",
+    "requests"
 ]
 
 # --- Optional GUI Dependencies (GIL-dependent) ---
@@ -41,6 +41,10 @@ dependencies = [
 gui = [
     "PySide6>=6.6.0",
     "pyqtdarktheme",
+]
+
+jlink = [
+    "pylink-square",
 ]
 
 [project.scripts]
@@ -60,10 +64,14 @@ gui = [
     "blinkview[gui]", # This pulls in the project dependencies + the gui extra
 ]
 
+full = [
+    "blinkview[gui,jlink]", # This pulls in everything
+]
+
 # --- HATCH SPECIFIC ---
 [tool.hatch.envs.default]
-# This makes 'hatch shell' or 'uv run' install the GUI by default
-features = ["gui"]
+# This makes 'hatch shell' or 'uv run' install the FULL experience by default
+features = ["gui", "jlink"]
 
 [tool.hatch.envs.daemon]
 # Targeted for your 3.14t environment

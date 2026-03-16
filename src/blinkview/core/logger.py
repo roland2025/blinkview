@@ -41,7 +41,7 @@ class BaseLogger:
         """Helper to catch the current sys.exc_info() automatically."""
         exc_str = exc_text.splitlines()[-1]  # Just the last line
 
-        self.log(f"{msg | exc_str}", LogLevel.ERROR)
+        self.log(f"{msg} | {exc_str}", LogLevel.ERROR)
 
     log: Callable[[str, LevelIdentity], None]
 

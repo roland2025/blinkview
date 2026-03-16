@@ -115,7 +115,7 @@ class BaseDaemon(BaseBindableConfigurable):
         try:
             self.run()
         except Exception as e:
-            if self.logger: self.logger.error(f"[DAEMON] Crashed during run.", e)
+            if self.logger: self.logger.exception(f"[DAEMON] Crashed during run.", e)
 
     def run(self):
         """Override this in subclasses. Use `while not self._stop_event.is_set():`"""
