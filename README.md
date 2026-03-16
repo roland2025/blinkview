@@ -203,7 +203,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 ```bash
 # 1. Clone the repo
-git clone git@github.com:roland2025/blinkview.git
+git clone https://github.com/roland2025/blinkview.git
 cd blinkview
 
 # install the tool to system
@@ -222,8 +222,8 @@ uv tool upgrade blinkview
 
 
 ```bash
-# go to the project directory
-cd your/project
+# go to your embedded project directory
+cd your/mcu/project
 
 # initialize the default profile
 blink init
