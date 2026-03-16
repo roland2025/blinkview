@@ -73,27 +73,90 @@ Features include:
 
 ## Architecture Overview
 
-```
-Inputs: [ UART ]  [ CAN (DBC) ]  [ Socket ]  [ File ]
-            │           │             │          │
-            ▼           ▼             ▼          ▼
-     ┌───────────────────────────────────────────────┐
-     │           Multi-threaded Reader Layer         │
-     └───────────────────────────────────────────────┘
-                        │
-                        ▼
-     ┌───────────────────────────────────────────────┐
-     │  Parser Layer (Regex / DBC / MsgPack / COBS)  │
-     └───────────────────────────────────────────────┘
-                        │
-      (High-precision Timestamps + ID Alignment)
-                        ▼
-     ┌───────────────────────────────────────────────┐
-     │        Central Lock-Efficient Storage         │
-     └───────────────────────────────────────────────┘
-             │                │               │
-             ▼                ▼               ▼
-        [ Log UI ]      [ KV Panel ]     [ Plotter ]
+```mermaid
+graph TD
+    %% Source Nodes
+    UART[UART Source]
+    CAN[CAN Source]
+    Socket[Socket Source]
+    RTT[RTT Source]
+
+    %% Pipeline Subgraphs
+    subgraph UART_Pipe [UART Pipeline]
+        UART_Raw[Raw File Writer]
+        UART_P[Parser]
+        UART_KV[KV Extractor]
+    end
+
+    subgraph CAN_Pipe [CAN Pipeline]
+        CAN_Raw[Raw File Writer]
+        CAN_P[Parser]
+        CAN_KV[KV Extractor]
+    end
+
+    subgraph Sock_Pipe [Socket Pipeline]
+        Sock_Raw[Raw File Writer]
+        Sock_P[Parser]
+        Sock_KV[KV Extractor]
+    end
+
+    subgraph RTT_Pipe [RTT Pipeline]
+        RTT_Raw[Raw File Writer]
+        RTT_P[Parser]
+        RTT_KV[KV Extractor]
+    end
+
+    %% Reorder Logic
+    Reorder{Reorder Layer <br/> <i>Time-Delayed Buffer</i>}
+    
+    %% Central Hub
+    Storage((Central Storage <br/> <i>Pub/Sub Provider</i>))
+
+    %% Output Nodes
+    LogUI[Log UI]
+    KVPanel[KV Panel]
+    Plotter[Plotter]
+    UWriter[Unified File Writer]
+
+    %% Flow within Pipelines
+    UART --> UART_Raw
+    UART --> UART_P
+    UART_P --> UART_KV
+    UART_P & UART_KV --> Reorder
+
+    CAN --> CAN_Raw
+    CAN --> CAN_P
+    CAN_P --> CAN_KV
+    CAN_P & CAN_KV --> Reorder
+
+    Socket --> Sock_Raw
+    Socket --> Sock_P
+    Sock_P --> Sock_KV
+    Sock_P & Sock_KV --> Reorder
+
+    RTT --> RTT_Raw
+    RTT --> RTT_P
+    RTT_P --> RTT_KV
+    RTT_P & RTT_KV --> Reorder
+
+    %% Chronological Alignment to Hub
+    Reorder -- "Ordered Stream" --> Storage
+    
+    %% Pub/Sub Distribution
+    Storage -.-> LogUI
+    Storage -.-> KVPanel
+    Storage -.-> Plotter
+    Storage -.-> UWriter
+
+    %% B&W Styling
+    classDef bw fill:#fff,stroke:#000,stroke-width:2px,color:#000
+    class UART,CAN,Socket,RTT,UART_P,CAN_P,Sock_P,RTT_P,UART_KV,CAN_KV,Sock_KV,RTT_KV,UART_Raw,CAN_Raw,Sock_Raw,RTT_Raw,Reorder,Storage,LogUI,KVPanel,Plotter,UWriter bw
+    
+    %% Subgraph Styling
+    style UART_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
+    style CAN_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
+    style Sock_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
+    style RTT_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
 ```
 
 Core logic is fully separated from the UI for performance and flexibility.
