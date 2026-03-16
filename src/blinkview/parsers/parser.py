@@ -315,9 +315,10 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
 
 @ParserFactory.register("serial_default")
-@override_property("split", default={'char': 10})  # Default to newline character for splitting
-@override_property("printable", default="bytes_decode")
-@override_property("decode", default="bytes_decode")
-@override_property("assembler", default="default")
+@override_property("split", default={})  # Default to newline character for splitting
+@override_property("printable", default={})
+@override_property("decode", default={})
+@override_property("transform", default={"type": "default", "steps": [{"type": "ansi_filter"}]})
+@override_property("assembler", default={"type": "default", "message_index": 0})
 class SerialParserThread(ParserThread):
     __doc__ = "Splitting enabled by default for serial logs, with the split character set to newline (ASCII 10). This is a common configuration for serial log streams, where each log entry is typically separated by a newline character. Users can still customize the split character or disable splitting entirely if their log format differs."

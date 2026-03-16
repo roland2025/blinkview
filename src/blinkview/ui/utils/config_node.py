@@ -87,7 +87,7 @@ class ConfigNode(QObject):
 
             self.config = pruned_config
             self.schema = pruned_schema
-            print(f"[ConfigNode] Received update for '{path}' Config: {json.dumps(pruned_config)} Schema: {json.dumps(pruned_schema)}")
+            # print(f"[ConfigNode] Received update for '{path}' Config: {json.dumps(pruned_config)} Schema: {json.dumps(pruned_schema)}")
 
             self.signal_received.emit(self.config, self.schema)
             return
@@ -178,9 +178,9 @@ class ConfigNode(QObject):
     def factory_schema(self, category: str, type_name: str) -> dict:
         """Returns the schema blueprint for a specific factory class."""
         # Assuming you add a matching get_factory_schema to your manager/registry
-        print(f"[ConfigNode] factory schema for category '{category}', type '{type_name}' FETCHING...")
+        # print(f"[ConfigNode] factory schema for category '{category}', type '{type_name}' FETCHING...")
         schema = self.manager.get_factory_schema(category, type_name)
-        print(f"[ConfigNode] factory schema for category '{category}', type '{type_name}' schema: '{json.dumps(schema)}'")
+        # print(f"[ConfigNode] factory schema for category '{category}', type '{type_name}' schema: '{json.dumps(schema)}'")
         return schema
 
     def send_config(self, config: dict):
