@@ -38,7 +38,7 @@ def main():
     init_parser.set_defaults(func=run_init)
 
     # PROFILE Command
-    profile_parser = subparsers.add_parser("profile", help="Manage profiles")
+    profile_parser = subparsers.add_parser("switch", help="Switch profiles")
     from blinkview.utils.project_settings import setup_project_parser, handle_profile_args
     setup_project_parser(profile_parser)
     profile_parser.set_defaults(func=handle_profile_args)
@@ -61,6 +61,20 @@ def main():
     setup_config_parser(config_parser)
     config_parser.set_defaults(func=handle_config)
 
+    # --- ARGUMENT INJECTION LOGIC ---
+    # This checks if the first arg is a valid command.
+    # If not, it inserts 'gui' as the first argument so argparse handles it.
+    valid_commands = subparsers.choices.keys()
+
+    # sys.argv[0] is the script name. We check sys.argv[1].
+    if len(sys.argv) > 1:
+        # If it's not a command and not -v/--version/--help...
+        if sys.argv[1] not in valid_commands and sys.argv[1] not in ['-h', '--help', '-v', '--version']:
+            sys.argv.insert(1, "gui")
+    elif len(sys.argv) == 1:
+        # No arguments at all? Default to gui.
+        sys.argv.append("gui")
+
     args = parser.parse_args()
 
     if args.command != "config":
@@ -69,14 +83,20 @@ def main():
         if msg:
             print(f"[{msg}]\n")
 
-    # --- Execution ---
-    if args.command is None:
-        # Fallback if the user just types 'blinkview'
-        gui_args = gui_parser.parse_args(sys.argv[1:])
-        run_gui(gui_args)
-    else:
-        # This one line replaces the entire 'match' statement!
-        args.func(args)
+    try:
+        # --- Execution ---
+        if args.command is None:
+            # Fallback if the user just types 'blinkview'
+            gui_args = gui_parser.parse_args(sys.argv[1:])
+            run_gui(gui_args)
+        else:
+            # This one line replaces the entire 'match' statement!
+            args.func(args)
+    except Exception:
+        # dump formatexc
+        from traceback import print_exc
+        print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

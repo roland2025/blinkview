@@ -14,7 +14,7 @@
     <option name="ADD_SOURCE_ROOTS" value="true" />
     <option name="RUN_TOOL" value="" />
     <option name="SCRIPT_NAME" value="blinkview.__main__" />
-    <option name="PARAMETERS" value="--daemon" />
+    <option name="PARAMETERS" value="daemon" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="false" />
     <option name="MODULE_MODE" value="true" />
