@@ -45,8 +45,8 @@ def update_file_header(file_path: Path):
     new_content = f"{shebang}{HEADER_TEMPLATE}\n{content}"
 
     try:
-        file_path.write_text(new_content, encoding='utf-8')
-        print(f"✅ Updated: {file_path}")
+        file_path.write_text(new_content, encoding='utf-8', newline='\n')
+        print(f"Updated: {file_path}")
     except Exception as e:
         print(f"❌ Failed to write {file_path}: {e}")
 
