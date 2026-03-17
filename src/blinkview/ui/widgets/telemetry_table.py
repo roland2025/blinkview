@@ -330,7 +330,7 @@ class TelemetryTable(QWidget):
         state: TelemetryRowState = self.gui_context.telemetry_model._row_states[row_idx]
         module = state.module
 
-        self.gui_context.create_widget("LogViewerWidget", f"Logs: {module.device.name}.{module.name}", filtered_module=module)
+        self.gui_context.create_widget("LogViewerWidget", f"Logs: {module.device.name}.{module.name}", as_window=True, filtered_module=module)
 
     def sort_by_device(self):
         header = self.view.horizontalHeader()

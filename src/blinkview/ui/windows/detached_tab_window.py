@@ -28,7 +28,7 @@ class DetachedTabWindow(QMainWindow):
         self.widget = widget
         self.title = title
 
-        self.setWindowTitle(f"BlinkView - {title}")
+        self.setWindowTitle(f"{title} | BlinkView")
         self.setCentralWidget(widget)
         self.widget.show()
 
@@ -36,7 +36,7 @@ class DetachedTabWindow(QMainWindow):
 
     def reattach_to_main(self):
         """Programmatically pops the widget back into the main tabs and closes the shell."""
-        if self.widget:
+        if self.widget and self.gui_context.reattach_tab is not None:
             self.widget.setParent(None)
             self.gui_context.reattach_tab(self.widget, self.title)
             self.widget = None  # Clear reference so it doesn't double-fire
@@ -48,7 +48,8 @@ class DetachedTabWindow(QMainWindow):
 
         if self.widget and not self.gui_context.is_shutting_down:
             self.widget.setParent(None)
-            self.gui_context.reattach_tab(self.widget, self.title)
-            self.widget = None
+            if self.gui_context.reattach_tab is not None:
+                self.gui_context.reattach_tab(self.widget, self.title)
+                self.widget = None
 
         event.accept()

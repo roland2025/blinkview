@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QToolBar, QMenu
 )
 
+from blinkview import __version__ as blinkview_version
 from blinkview.ui.cli_args import setup_gui_parser
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.native_dark_mode import set_native_dark_mode
@@ -60,9 +61,6 @@ class BlinkMainWindow(QMainWindow):
 
         use_frameless = False  # Set to False to see the standard window frame (useful for debugging)
 
-        # 1. Instantiate the secondary Log Window (but don't show it yet)
-        # self.log_window = LogViewerWindow()
-
         self.gui_context = GUIContext()
         self.gui_context.set_register_log_target(self.register_log_target)
         self.gui_context.set_deregister_log_target(self.deregister_log_target)
@@ -71,7 +69,7 @@ class BlinkMainWindow(QMainWindow):
         fm = self.gui_context.registry.file_manager
         # Standalone is indicated at the end only if necessary
         mode_suffix = " (Standalone)" if fm.standalone_mode else ""
-        self.setWindowTitle(f"{fm.project_name} / {fm.profile_name} - BlinkView{mode_suffix}")
+        self.setWindowTitle(f"{fm.project_name} / {fm.profile_name} - BlinkView{mode_suffix} - {blinkview_version}")
 
         self.gui_context.registry.configure_system()
 
@@ -285,7 +283,7 @@ class BlinkMainWindow(QMainWindow):
         tab_index = self.central_tabs.addTab(widget, tab_name)
         self.central_tabs.setCurrentIndex(tab_index)
 
-    def create_widget(self, cls_name, name, as_window=False, **kwargs):
+    def create_widget(self, cls_name, name, as_window=False, show=True, **kwargs):
         """Routes a string class name to the correct factory method."""
 
         # 1. Prevent duplicate tabs using the helper
@@ -311,6 +309,8 @@ class BlinkMainWindow(QMainWindow):
         if as_window:
             floating_win = DetachedTabWindow(self.gui_context, widget, name)
             self.window_manager.register(floating_win, widget)
+            if show:
+                floating_win.show()
             return floating_win
         else:
             self.add_tab_focused(widget, name)

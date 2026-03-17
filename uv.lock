@@ -105,7 +105,6 @@ wheels = [
 
 [[package]]
 name = "blinkview"
-version = "0.1.0.dev2"
 source = { editable = "." }
 dependencies = [
     { name = "cantools" },

@@ -4,15 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-# src/blinkview/__init__.py
-
-try:
-    from importlib.metadata import version, PackageNotFoundError
-    __version__ = version("blinkview")
-except (PackageNotFoundError, ImportError):
-    # This happens if the package isn't installed (e.g., running from source)
-    __version__ = "unknown"
-
+__version__ = "0.1.0.dev3"
 __author__ = "Roland Uuesoo"
 
 from .core.registry import Registry

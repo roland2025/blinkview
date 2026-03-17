@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "blinkview"
-version = "0.1.0.dev2"
+dynamic = ["version"]
 description = "High-performance embedded telemetry, log viewer, and plotting tool."
 readme = "README.md"
 # We allow 3.10+, but our 'daemon' env will target 3.14t for No-GIL
@@ -70,3 +70,6 @@ features = ["gui"]
 # Targeted for your 3.14t environment
 # It will only install [project].dependencies
 features = []
+
+[tool.hatch.version]
+path = "src/blinkview/__init__.py"

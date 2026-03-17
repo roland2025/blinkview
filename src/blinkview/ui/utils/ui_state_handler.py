@@ -106,6 +106,7 @@ class UIStateHandler:
                             cls_name=win_info.get("class"),
                             name=win_info.get("name", "Floating Tool"),
                             as_window=True,
+                            show=False,
                             **(win_info.get("params", {}))
                         )
 

@@ -30,12 +30,13 @@ MPL_REGEX = re.compile(
 def update_file_header(file_path: Path):
     """Reads, cleans, and prepends the license header to a file."""
     try:
-        content = file_path.read_text(encoding='utf-8')
+        original_content = file_path.read_text(encoding='utf-8')
     except Exception as e:
         print(f"❌ Failed to read {file_path}: {e}")
         return
 
     shebang = ""
+    content = original_content
     if content.startswith("#!"):
         parts = content.split("\n", 1)
         shebang = parts[0] + "\n"
@@ -43,6 +44,10 @@ def update_file_header(file_path: Path):
 
     content = MPL_REGEX.sub("", content).lstrip()
     new_content = f"{shebang}{HEADER_TEMPLATE}\n{content}"
+
+    if original_content == new_content:
+        # print(f"  Skipped: {file_path} (No change)")
+        return
 
     try:
         file_path.write_text(new_content, encoding='utf-8', newline='\n')
@@ -73,5 +78,5 @@ if __name__ == "__main__":
     script_path = Path(__file__).resolve()
     project_root = script_path.parent.parent
 
-    print(f"🚀 Running selective license update on: {project_root}")
+    print(f"Running selective license update on: {project_root}")
     process_project(project_root)
