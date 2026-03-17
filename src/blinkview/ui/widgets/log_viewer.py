@@ -4,72 +4,21 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from time import perf_counter
+from collections import deque
+from typing import Iterable
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QToolBar, QSplitter, QSizePolicy, QComboBox
-from PySide6.QtGui import QFont, QAction, QSyntaxHighlighter, QTextCharFormat, QColor, QTextCursor, Qt
+from PySide6.QtWidgets import QSplitter, QSizePolicy, QComboBox, QWidget, QVBoxLayout, QToolBar
+from PySide6.QtGui import Qt, QAction
 
-from blinkview.core.device_identity import DeviceIdentity
-from blinkview.core.id_registry import IDRegistry
-from blinkview.core.system_context import SystemContext
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
+from blinkview.ui.widgets.log_highlighter import LogHighlighter
 from blinkview.ui.widgets.module_filter_sidebar import ModuleFilterSidebar
-from blinkview.ui.widgets.module_filter_table import ModuleFilterTable, TempLogFilter
-from blinkview.ui.widgets.telemetry_model import TelemetryModel
+from blinkview.ui.widgets.searchable_log_area import SearchableLogArea
 from blinkview.ui.widgets.telemetry_table import TelemetryTable
-from blinkview.utils.level_map import LevelMap, LogLevel
+from blinkview.utils.level_map import LogLevel
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.time_utils import ConsoleTimestampFormatter
-
-
-from collections import deque
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QToolBar
-from PySide6.QtGui import QFont, QAction
-
-
-class LogHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent, level_map: LevelMap):
-        super().__init__(parent)
-
-        self.level_map: LevelMap = level_map
-
-        # Define formats for each level
-        # self.formats = {
-        #     'I': self._create_format("#808080"),  # Gray for Info
-        #     'W': self._create_format("#FFCC00", bold=True),  # Amber for Warning
-        #     'E': self._create_format("#FF3333", bold=True),  # Red for Error
-        # }
-        self.formats = {}
-
-        self.level_index = 0
-
-        for level in level_map.levels():
-            self.formats[level.name] = self._create_format(level.color, bold=level >= LogLevel.WARN)
-
-    def _create_format(self, color_hex, bold=False):
-        fmt = QTextCharFormat()
-        fmt.setForeground(QColor(color_hex))
-        if bold:
-            fmt.setFontWeight(QFont.Bold)
-        return fmt
-
-    def set_index(self, idx):
-        self.level_index = idx
-
-    def highlightBlock(self, text):
-        """Called automatically by Qt when a line needs rendering."""
-        try:
-            idx = self.level_index
-            # Assuming the level is the 3rd 'word' in your string:
-            # "17:28:35.459 ABC E asi: ..."
-            parts = text.split(maxsplit=idx+1)  # Split into at most idx+1 parts to avoid unnecessary splitting
-            # if len(parts) > idx:
-            fmt = self.formats[parts[idx]]
-            self.setFormat(0, len(text), fmt)
-        except (KeyError, IndexError):
-            # If the expected level part is missing or not recognized, we can skip formatting
-            pass
 
 
 class LogViewerWidget(QWidget):
@@ -243,12 +192,7 @@ QToolButton[filterEnabled="true"] {
         self.filter_sidebar.setVisible(self.show_module_filter)
 
         # Text Area
-        self.text_area = QPlainTextEdit(self)
-        self.text_area.setReadOnly(True)
-        self.text_area.setFont(QFont("Consolas", 10))
-        self.text_area.setMaximumBlockCount(self.max_rows)
-        self.text_area.setUndoRedoEnabled(False)
-        self.text_area.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.text_area = SearchableLogArea(self, maxlen=self.max_rows)
         self.text_area.setMinimumWidth(300)
 
         self.splitter.addWidget(self.text_area)
@@ -302,17 +246,9 @@ QToolButton[filterEnabled="true"] {
             "filter_sidebar": self.filter_sidebar.get_state()
         }
 
-    def _fast_append(self, text: str):
-        cursor = self.text_area.textCursor()
-        cursor.movePosition(QTextCursor.End)
-
-        # This is a 'silent' insert that doesn't trigger as many UI events
-        cursor.insertText(text + "\n")
-
     def _handle_level_change(self, index):
         # Retrieve the LevelIdentity object from the userData
         level_identity = self.level_combo.itemData(index)
-        self.tab_params['log_level'] = level_identity.name_conf
         self.log_filter.set_level(level_identity.name_conf)
 
         self.clear_logs()
@@ -399,7 +335,7 @@ QToolButton[filterEnabled="true"] {
         - If load_history: Bypasses filters and velocity checks (assumed pre-filtered).
         - If Live: Applies full Baked Filter and Velocity Throttling.
         """
-        # 1. BATCH FILTERING & DE-DUPLICATION
+        # BATCH FILTERING & DE-DUPLICATION
         if load_history:
             # Optimization: History from get_rows() is already pre-filtered.
             # We only do a quick sequence check to ensure zero overlap.
@@ -412,15 +348,15 @@ QToolButton[filterEnabled="true"] {
         if not batch:
             return
 
-        # 2. UPDATE HIGH WATER MARK
+        # UPDATE HIGH WATERMARK
         # Crucial to do this BEFORE the pause check so the next batch knows where we left off.
         self.latest_seq_seen = max(self.latest_seq_seen, batch[-1].seq)
 
-        # 3. BACKGROUND STORAGE
+        # BACKGROUND STORAGE
         # Deque handles 'max_rows' via its maxlen automatically.
         self.log_history.extend(batch)
 
-        # 4. VELOCITY MONITOR (Throttling)
+        # VELOCITY MONITOR (Throttling)
         # Only run for live logs; historical loads are bursts by nature.
         if not load_history:
             if self.velocity_tracker.update_and_check(len(batch)):
@@ -428,44 +364,19 @@ QToolButton[filterEnabled="true"] {
                     self.auto_paused = True
                     self.action_pause.setChecked(True)
 
-        # 5. UI UPDATE GATE
+        # UI UPDATE GATE
         # Pause blocks the text area update, but not the background buffer (Step 3).
         if self.is_paused and not load_history:
             return
 
-        # 6. FORMATTING & RENDERING
+        # FORMATTING & RENDERING
         formatted_rows = self._format_messages(batch)
         if not formatted_rows:
             return
 
-        # --- UI RENDER BLOCK ---
-        scrollbar = self.text_area.verticalScrollBar()
-        was_at_bottom = scrollbar.value() >= (scrollbar.maximum() - 20)
+        self.text_area.append_log(formatted_rows)
 
-        # Use 'UpdatesEnabled' and 'blockSignals' to stop the UI from flickering
-        # and preventing the highlighter from running per-line during large batches.
-        self.text_area.setUpdatesEnabled(False)
-        self.text_area.blockSignals(True)
-        try:
-            # Join batch into a single string for one single layout update in QPlainTextEdit
-            self._fast_append("\n".join(formatted_rows))
-        finally:
-            self.text_area.setUpdatesEnabled(True)
-            self.text_area.blockSignals(False)
-
-        if was_at_bottom:
-            scrollbar.setValue(scrollbar.maximum())
-
-    def _toggle_pause(self, checked):
-        self.is_paused = checked
-        self.action_pause.setText("▶ Resume" if checked else "⏸ Pause")
-
-        if not checked:
-            # When unpausing, catch up the UI with everything missed
-            self.auto_paused = False
-            self._redraw_history()
-
-    def _format_messages(self, messages: list) -> list:
+    def _format_messages(self, messages: Iterable) -> list:
         """Dynamically builds the string based on the active toggles."""
         format_ts = self.timestamp_formatter.format
         rows = []
@@ -500,15 +411,14 @@ QToolButton[filterEnabled="true"] {
         self.text_area.clear()
         self.text_area.clear()
         if self.log_history:
-            # Re-sync the high water mark to the last item in our history buffer
+            # Re-sync the high watermark to the last item in our history buffer
             self.latest_seq_seen = self.log_history[-1].seq
 
             formatted_rows = self._format_messages(self.log_history)
             self.text_area.setPlainText("\n".join(formatted_rows))
 
             # Scroll to the bottom
-            scrollbar = self.text_area.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
+            self.text_area.scroll_to_end()
 
     def clear_logs(self):
         self.log_history.clear()
@@ -526,7 +436,7 @@ QToolButton[filterEnabled="true"] {
 
             self.process_log_batch(history, load_history=True)
         finally:
-            self.text_area.verticalScrollBar().setValue(self.text_area.verticalScrollBar().maximum())
+            self.text_area.scroll_to_end()
 
     def _toggle_telemetry_sidebar(self, checked):
         """Toggles the visibility of the Telemetry sidebar."""
@@ -537,7 +447,7 @@ QToolButton[filterEnabled="true"] {
     def _toggle_pause(self, checked):
         self.is_paused = checked
 
-        # 1. Update the Text
+        # Update the Text
         if checked:
             text = "▶ Resume (AUTO)" if self.auto_paused else "▶ Resume"
         else:
@@ -546,7 +456,7 @@ QToolButton[filterEnabled="true"] {
 
         self.action_pause.setText(text)
 
-        # 2. Update the Stylesheet Property
+        # Update the Stylesheet Property
         # We need to find the widget associated with the action in the toolbar
         button = self.toolbar.widgetForAction(self.action_pause)
         if button:
@@ -559,7 +469,7 @@ QToolButton[filterEnabled="true"] {
             button.style().polish(button)
             button.update()
 
-        # 3. Handle data catch-up
+        # Handle data catch-up
         if not checked:
             self._redraw_history()
 

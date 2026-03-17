@@ -105,7 +105,7 @@ wheels = [
 
 [[package]]
 name = "blinkview"
-version = "0.1.0.dev1"
+version = "0.1.0.dev2"
 source = { editable = "." }
 dependencies = [
     { name = "cantools" },
@@ -113,6 +113,7 @@ dependencies = [
     { name = "jsonpatch" },
     { name = "jsonschema" },
     { name = "msgpack" },
+    { name = "pylink-square" },
     { name = "pyserial" },
     { name = "python-can" },
     { name = "readchar" },
@@ -125,14 +126,8 @@ gui = [
     { name = "pyqtdarktheme" },
     { name = "pyside6" },
 ]
-jlink = [
-    { name = "pylink-square" },
-]
 
 [package.dev-dependencies]
-full = [
-    { name = "blinkview", extra = ["gui", "jlink"] },
-]
 gui = [
     { name = "blinkview", extra = ["gui"] },
 ]
@@ -144,7 +139,7 @@ requires-dist = [
     { name = "jsonpatch" },
     { name = "jsonschema" },
     { name = "msgpack" },
-    { name = "pylink-square", marker = "extra == 'jlink'" },
+    { name = "pylink-square" },
     { name = "pyqtdarktheme", marker = "extra == 'gui'" },
     { name = "pyserial", specifier = ">=3.5" },
     { name = "pyside6", marker = "extra == 'gui'", specifier = ">=6.6.0" },
@@ -153,11 +148,10 @@ requires-dist = [
     { name = "requests" },
     { name = "rich", specifier = ">=13.0.0" },
 ]
-provides-extras = ["gui", "jlink"]
+provides-extras = ["gui"]
 
 [package.metadata.requires-dev]
 daemon = []
-full = [{ name = "blinkview", extras = ["gui", "jlink"] }]
 gui = [{ name = "blinkview", extras = ["gui"] }]
 
 [[package]]
