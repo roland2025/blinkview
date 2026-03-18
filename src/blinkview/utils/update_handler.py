@@ -143,7 +143,7 @@ def _do_install(path, glob, version):
         "uv", "tool", "install",
         install_target,
         "--python", sys.executable,
-        "--force"
+        "--force", "--refresh"
     ]
 
     if should_be_editable:
