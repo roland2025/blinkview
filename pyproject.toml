@@ -50,6 +50,11 @@ gui = [
     "pyqtdarktheme",
 ]
 
+# --- Future-proof "All" Catch-all ---
+all = [
+    "blinkview[gui]",
+]
+
 [project.scripts]
 blink = "blinkview.__main__:main"
 blinc = "blinkview.cli:main"
@@ -67,10 +72,6 @@ gui = [
     "blinkview[gui]", # This pulls in the project dependencies + the gui extra
 ]
 
-# --- Future-proof "All" Catch-all ---
-all = [
-    "blinkview[gui]",
-]
 
 # --- HATCH SPECIFIC ---
 [tool.hatch.envs.default]
