@@ -66,6 +66,7 @@ class BaseDaemon(BaseBindableConfigurable):
         except Exception as e:
             if self.logger:
                 self.logger.error(f"{self.__class__.__name__}: Failed to apply logging.", e)
+
         if changed and self._configured:
             self.thread_needs_restart = True
 

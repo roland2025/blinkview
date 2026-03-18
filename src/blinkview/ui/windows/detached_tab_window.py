@@ -28,7 +28,7 @@ class DetachedTabWindow(QMainWindow):
         self.widget = widget
         self.title = title
 
-        self.setWindowTitle(f"{title} | BlinkView")
+        self.setWindowTitle(f"{title} - BlinkView")
         self.setCentralWidget(widget)
         self.widget.show()
 

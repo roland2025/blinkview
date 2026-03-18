@@ -164,3 +164,11 @@ class TelemetryDelegate(QStyledItemDelegate):
         painter.drawText(text_rect, alignment, text)
 
         painter.restore()
+
+    def sizeHint(self, option, index):
+        # Get the original size hint
+        size = super().sizeHint(option, index)
+        # Force the height to the minimum required by the font
+        # or a hardcoded small value
+        size.setHeight(10)
+        return size

@@ -183,10 +183,10 @@ class ConfigManager:
 
                         # Bonus: You might want to pass the global_patch to the callback
                         # so the component knows exactly what changed!
-                        needs_restart = getattr(cb, "thread_needs_restart", False)
 
                         cb.apply_config(hydrated)
 
+                        needs_restart = getattr(cb, "thread_needs_restart", False)
                         if needs_restart:
                             print(f"[ConfigManager] Note: '{cb.__class__.__name__}' indicated it needs a thread restart after config change.")
                             cb.restart()

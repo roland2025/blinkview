@@ -61,8 +61,8 @@ class KeyValueParser(BaseParser):
                     for key_value in splitted:
                         if "=" in key_value:
                             key, value = key_value.split("=", 1)
+                            value = value.rstrip(",;")
                             if key and value:
-                                value.rstrip(",;")
                                 try:
                                     module = device_identity.get_module(f"{entry.module.name}.{key}")
                                     parsed_batch.append(LogRow(entry.timestamp_ns, entry.level, module, value))

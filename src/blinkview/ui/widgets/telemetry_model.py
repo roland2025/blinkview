@@ -154,7 +154,7 @@ class TelemetryModel(QAbstractTableModel):
 
     def columnCount(self, parent=QModelIndex()):
         # 0: Name, 1: Value, 2: Actions (Buttons)
-        return 4
+        return 3
 
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():

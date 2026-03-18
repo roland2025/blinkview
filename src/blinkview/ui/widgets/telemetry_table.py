@@ -51,8 +51,8 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
         model: 'TelemetryModel' = self.sourceModel()
         state = model._row_states[source_row]
 
-        if state.module.latest_row is None:
-            return False
+        # if state.module.latest_row is None:
+        #     return False
 
         # 1. Strict Device Filter Check
         # If a device is specified, reject anything that doesn't match immediately
@@ -146,6 +146,15 @@ class TelemetryTable(QWidget):
         self.view = QTableView()
         self.view.setModel(self.proxy_model)
 
+        self.view.setStyleSheet("""
+            QTableView::item {
+                padding-top: 0px;
+                padding-bottom: 0px;
+                margin: 0px;
+                border: none;
+            }
+        """)
+
         # --- FORCE BOLD FONT WITH FALLBACKS ---
         font = self.view.font()
         # Set the family string (Qt handles comma-separated fallbacks)
@@ -170,7 +179,7 @@ class TelemetryTable(QWidget):
         v_header = self.view.verticalHeader()
         v_header.hide()
         v_header.setSectionResizeMode(QHeaderView.Fixed)
-        v_header.setDefaultSectionSize(18)
+        v_header.setDefaultSectionSize(10)
 
         h_header = self.view.horizontalHeader()
 
