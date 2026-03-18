@@ -82,7 +82,7 @@ def _do_fetch(path):
     print(f"Checking for updates in {path}...")
     try:
         import subprocess
-        subprocess.run(["git", "-C", str(path), "fetch", "--tags", "--prune", "--prune-tags"], check=True)
+        subprocess.run(["git", "-C", str(path), "fetch", "--tags"], check=True)
         print("Successfully fetched latest tags and metadata.")
     except Exception as e:
         print(f"Fetch failed: {e}")
