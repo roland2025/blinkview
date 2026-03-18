@@ -36,24 +36,6 @@ def setup_config_parser(parser):
 
 def handle_config(args):
     """Handles Git-style config get/set/list/unset logic."""
-    if args.check_updates:
-        from blinkview import __version__
-        from blinkview.utils.github_update import GitHubUpdate
-        from blinkview.utils.global_settings import GlobalSettings
-
-        # Pull the preference from GlobalSettings
-        glob = GlobalSettings()
-        use_pre = glob.get("prerelease") in [True, "true", "1", "yes"]
-
-        print(f"Checking for {'prerelease' if use_pre else 'stable'} updates (Current: v{__version__})...")
-        has_update, latest = GitHubUpdate.check(force=True, include_pre=use_pre)
-
-        if has_update:
-            print(f"🚀 A newer version is available: v{latest}")
-            print(f"Visit: {GitHubUpdate.REPO_RELEASES_URL}")
-        else:
-            print("✅ You are up to date!")
-        return
 
     # Determine Scope
     if args.global_scope:
@@ -82,12 +64,13 @@ def handle_config(args):
 
     # Handle --list
     if args.list:
-        if not settings:
+        # Check if internal data is empty
+        if not settings._data:
             print(f"--- {scope_name.capitalize()} config is empty ---")
         else:
-            # Print sorted list for better readability
-            for k, v in sorted(settings.items()):
-                print(f"{k}={v}")
+            # Uses the recursive flattener you just added
+            for path, val in sorted(settings.flattened_items()):
+                print(f"{path}={val}")
         return
 
     # Validation: If not listing, a key is required
@@ -95,15 +78,15 @@ def handle_config(args):
         print("Error: config key required. Use --list to see all settings.")
         return
 
-    if args.key and args.key not in settings.supported_keys():
-        print(f"Error: '{args.key}' is not a valid {scope_name} setting.")
+    if not settings.supported_key(args.key):
+        print(f"Error: '{args.key.split('.')[0]}' is not a valid {scope_name} setting.")
         print(f"Allowed {scope_name} keys: '{', '.join(settings.supported_keys())}'")
         return
 
     # Handle --unset
     if args.unset:
-        if args.key in settings:
-            settings.pop(args.key)
+        # Using the specific unset_deep method for safety
+        if settings.unset_deep(args.key) is not None:
             settings.save()
             print(f"Unset {args.key} ({scope_name})")
         else:
@@ -112,14 +95,15 @@ def handle_config(args):
 
     # Logic: GET vs SET
     if args.value is None:
-        # GET logic
+        # GET logic using the dot-notation enabled get()
         val = settings.get(args.key)
         if val is not None:
             print(val)
         else:
             print(f"Key '{args.key}' not set in {scope_name} config.")
     else:
-        # SET logic
-        settings[args.key] = args.value
+        # SET logic using the dot-notation enabled set()
+        # Alternatively, you could use settings[args.key] = args.value
+        settings.set(args.key, args.value)
         settings.save()
         print(f"Set {scope_name} {args.key} to: {args.value}")

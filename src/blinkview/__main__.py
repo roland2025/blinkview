@@ -61,6 +61,11 @@ def main():
     setup_config_parser(config_parser)
     config_parser.set_defaults(func=handle_config)
 
+    update_parser = subparsers.add_parser("update", help="Manage BlinkView versions")
+    from blinkview.utils.update_handler import setup_update_parser, handle_update
+    setup_update_parser(update_parser)
+    update_parser.set_defaults(func=handle_update)
+
     # --- ARGUMENT INJECTION LOGIC ---
     # This checks if the first arg is a valid command.
     # If not, it inserts 'gui' as the first argument so argparse handles it.

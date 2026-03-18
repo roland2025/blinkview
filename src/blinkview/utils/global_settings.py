@@ -23,4 +23,12 @@ class GlobalSettings(Settings):
     @classmethod
     def supported_keys(cls):
         """Returns a list of supported settings keys."""
-        return "log_dir", "update_check", "prerelease"
+        return [
+            "log_dir",
+            "update",  # dict for update specific stuff
+            # "update_check",  # Enable/disable auto-check on startup
+            # "update_source",  # Path to git repo
+            # "update_editable",  # Boolean
+            # "update_features",  # String: "gui,can,serial"
+            # "update_prerelease",  # Boolean: include alphas/betas
+        ]

@@ -112,6 +112,7 @@ dependencies = [
     { name = "jsonpatch" },
     { name = "jsonschema" },
     { name = "msgpack" },
+    { name = "packaging" },
     { name = "pylink-square" },
     { name = "pyserial" },
     { name = "python-can" },
@@ -127,6 +128,9 @@ gui = [
 ]
 
 [package.dev-dependencies]
+all = [
+    { name = "blinkview", extra = ["gui"] },
+]
 gui = [
     { name = "blinkview", extra = ["gui"] },
 ]
@@ -138,6 +142,7 @@ requires-dist = [
     { name = "jsonpatch" },
     { name = "jsonschema" },
     { name = "msgpack" },
+    { name = "packaging" },
     { name = "pylink-square" },
     { name = "pyqtdarktheme", marker = "extra == 'gui'" },
     { name = "pyserial", specifier = ">=3.5" },
@@ -150,6 +155,7 @@ requires-dist = [
 provides-extras = ["gui"]
 
 [package.metadata.requires-dev]
+all = [{ name = "blinkview", extras = ["gui"] }]
 daemon = []
 gui = [{ name = "blinkview", extras = ["gui"] }]
 

@@ -189,7 +189,7 @@ Or custom formats via parser templates.
 ### UV package manager
 UV is a modern Python tool for managing packages and tools.
 
-We recommend installing BlinkView using UV for an easy and isolated setup.
+For an optimal experience, BlinkView should be installed via uv. This ensures environment isolation and a simplified setup of all dependencies.
 
 https://docs.astral.sh/uv/getting-started/installation/
 

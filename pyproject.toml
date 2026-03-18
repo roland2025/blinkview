@@ -9,7 +9,7 @@ description = "High-performance embedded telemetry, log viewer, and plotting too
 readme = "README.md"
 # We allow 3.10+, but our 'daemon' env will target 3.14t for No-GIL
 requires-python = ">=3.10, <3.15"
-license = {text = "MPL-2.0"}
+license = { text = "MPL-2.0" }
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)", # Correct format
@@ -19,14 +19,19 @@ classifiers = [
 authors = [
     { name = "Roland Uuesoo", email = "rolandu@gmail.com" }
 ]
-keywords = ["embedded", "telemetry", "logging", "plotting", "real-time"]
+keywords = [
+    "embedded", "telemetry", "logging", "plotting", "real-time",
+    "can-bus", "serial", "uart", "jlink", "rtt", "segger",
+    "mcu", "arduino", "esp32", "stm32", "sam",
+    "diagnostics", "visualization", "data-analysis"
+]
 
 # --- Core Dependencies (Safe for all runtimes, including 3.14t) ---
 dependencies = [
     "pyserial>=3.5",
     "rich>=13.0.0",
     "readchar",
-#    "pyzmq>=25.0.0",  # Essential for the Daemon <-> GUI bridge
+    #    "pyzmq>=25.0.0",  # Essential for the Daemon <-> GUI bridge
     "jsonschema",
     "jsonpatch",
     "msgpack",
@@ -35,6 +40,7 @@ dependencies = [
     "cantools",
     "requests",
     "pylink-square",
+    "packaging"
 ]
 
 # --- Optional GUI Dependencies (GIL-dependent) ---
@@ -61,10 +67,15 @@ gui = [
     "blinkview[gui]", # This pulls in the project dependencies + the gui extra
 ]
 
+# --- Future-proof "All" Catch-all ---
+all = [
+    "blinkview[gui]",
+]
+
 # --- HATCH SPECIFIC ---
 [tool.hatch.envs.default]
 # This makes 'hatch shell' or 'uv run' install the FULL experience by default
-features = ["gui"]
+features = ["all"]
 
 [tool.hatch.envs.daemon]
 # Targeted for your 3.14t environment
