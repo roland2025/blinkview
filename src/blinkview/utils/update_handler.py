@@ -128,41 +128,54 @@ def _do_install(path, glob, version):
     print(f"Switching to version: {version}...")
 
     import subprocess
-    try:
-        import sys
+    import sys
 
-        # Checkout the requested version
-        subprocess.run(["git", "-C", str(path), "checkout", version], check=True, capture_output=True)
+    # Checkout the requested version
+    subprocess.run(["git", "-C", str(path), "checkout", version], check=True, capture_output=True)
 
-        # Build the target string: "/path/to/repo[gui,can]"
-        # Converting path to str() explicitly prevents potential Path-object weirdness in f-strings
-        install_target = f"{str(path)}{features_suffix}"
+    # Build the target string: "/path/to/repo[gui,can]"
+    # Converting path to str() explicitly prevents potential Path-object weirdness in f-strings
+    install_target = f"{str(path)}{features_suffix}"
 
-        # Build uv tool command
-        # --force ensures we overwrite the existing 'blink' shim
-        cmd = [
-            "uv", "tool", "install",
-            install_target,
-            "--python", sys.executable,
-            "--force"
-        ]
+    # Build uv tool command
+    # --force ensures we overwrite the existing 'blink' shim
+    cmd = [
+        "uv", "tool", "install",
+        install_target,
+        "--python", sys.executable,
+        "--force"
+    ]
 
-        if should_be_editable:
-            cmd.append("--editable")
+    if should_be_editable:
+        cmd.append("--editable")
 
-        print(f"Running: {' '.join(cmd)}")
-        subprocess.run(cmd, check=True)
+    print(f"Preparing to update to {version}...")
 
-        # Cleanup the success message for the user
-        mode_str = " (Editable)" if should_be_editable else ""
-        feat_info = f" with {features_suffix}" if features_suffix else ""
-        print(f"Successfully installed {version}{feat_info}{mode_str}")
+    if sys.platform == "win32":
+        # Windows Lock Bypass:
+        # Spawn a detached 'cmd' that waits 2 seconds, then runs 'uv'
+        # This gives our current 'blink' process time to exit.
+        cmd_str = " ".join(cmd)
+        detached_cmd = f'cmd /c "timeout /t 2 > nul && {cmd_str}"'
 
-    except subprocess.CalledProcessError as e:
-        # Provide more context if git or uv fails
-        error_msg = e.stderr.decode() if e.stderr else str(e)
-        print(f"Installation failed: {error_msg}")
-        print(f"Verify 'uv' is in PATH and '{version}' is a valid tag/branch.")
+        print("Self-update initiated. This window will close to complete the process.")
+
+        # Popen with DETACHED_PROCESS flag
+        subprocess.Popen(
+            detached_cmd,
+            shell=True,
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+
+        # Exit immediately to release the file lock
+        sys.exit(0)
+    else:
+        # Non-Windows systems handle file overwriting much better
+        try:
+            subprocess.run(cmd, check=True)
+            print(f"Successfully installed {version}")
+        except subprocess.CalledProcessError as e:
+            print(f"Installation failed: {e}")
 
 
 def _get_latest_tag(path) -> str:
