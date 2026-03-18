@@ -122,15 +122,16 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "pyqtdarktheme" },
+    { name = "pyside6" },
+]
 gui = [
     { name = "pyqtdarktheme" },
     { name = "pyside6" },
 ]
 
 [package.dev-dependencies]
-all = [
-    { name = "blinkview", extra = ["gui"] },
-]
 gui = [
     { name = "blinkview", extra = ["gui"] },
 ]
@@ -144,18 +145,19 @@ requires-dist = [
     { name = "msgpack" },
     { name = "packaging" },
     { name = "pylink-square" },
+    { name = "pyqtdarktheme", marker = "extra == 'all'" },
     { name = "pyqtdarktheme", marker = "extra == 'gui'" },
     { name = "pyserial", specifier = ">=3.5" },
+    { name = "pyside6", marker = "extra == 'all'", specifier = ">=6.6.0" },
     { name = "pyside6", marker = "extra == 'gui'", specifier = ">=6.6.0" },
     { name = "python-can" },
     { name = "readchar" },
     { name = "requests" },
     { name = "rich", specifier = ">=13.0.0" },
 ]
-provides-extras = ["gui"]
+provides-extras = ["all", "gui"]
 
 [package.metadata.requires-dev]
-all = [{ name = "blinkview", extras = ["gui"] }]
 daemon = []
 gui = [{ name = "blinkview", extras = ["gui"] }]
 
