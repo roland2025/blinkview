@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 __author__ = "Roland Uuesoo"
 
 from .core.registry import Registry
