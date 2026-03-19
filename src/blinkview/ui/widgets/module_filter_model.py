@@ -26,13 +26,14 @@ class ModuleFilterModel(QAbstractTableModel):
     This model NO LONGER stores checkbox or level state.
     """
     sync_paused_changed = Signal(bool)
+    registry_synced = Signal(list)  # Emits the full list of ModuleIdentity
 
     def __init__(self, gui_context, parent=None):
         super().__init__(parent)
         self.gui_context = gui_context
         self._row_states: List['ModuleIdentity'] = [] # Just the identity objects
         self._known_ids: Set[int] = set()
-        self._active_view_count = 0
+        self._usage_count = 0
 
         self._pause_count = 0
 
@@ -50,7 +51,7 @@ class ModuleFilterModel(QAbstractTableModel):
         if not current_pause:
             self.sync_registry()
 
-        print(f"[ModuleFilterModel] pause_sync: pause={pause}, _pause_count={self._pause_count}, active_views={self._active_view_count}")
+        print(f"[ModuleFilterModel] pause_sync: pause={pause}, _pause_count={self._pause_count}, active_views={self._usage_count}")
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._row_states)
@@ -59,7 +60,7 @@ class ModuleFilterModel(QAbstractTableModel):
         return 2
 
     def sync_registry(self):
-        if self._active_view_count == 0 or self._pause_count > 0:
+        if self._usage_count == 0 or self._pause_count > 0:
             return
 
         all_current = []
@@ -79,6 +80,8 @@ class ModuleFilterModel(QAbstractTableModel):
             self._row_states.sort(key=lambda m: (m.device.name, m.name))
             self.endResetModel()
 
+            self.registry_synced.emit(self._row_states)
+
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid() or index.row() >= len(self._row_states):
             return None
@@ -91,20 +94,20 @@ class ModuleFilterModel(QAbstractTableModel):
             return module
 
         if role == Qt.DisplayRole and col == 0:
-            # if module.depth == 0:
-            #     return f"[{module.device.name}] {module.short_name}"
-            #
-            #     # Use '├─' for mid-nodes and '└─' for end nodes if you have that info
-            #     # For a simple version, a consistent '└─' or '──' works well:
-            # indent = "  " * (module.depth - 1)
-            # prefix = "└─ "
-            # return f"{indent}{prefix}{module.short_name}"
             if module.depth == 0:
-                return f"● [{module.device.name}] {module.short_name}"
+                return f"{module.device.name}"
 
-                # Using the 'Light Vertical Bar' (U+23AF) or 'Middle Dot' (U+00B7)
-            indent = "· " * module.depth
-            return f"{indent}{module.short_name}"
+                # Use '├─' for mid-nodes and '└─' for end nodes if you have that info
+                # For a simple version, a consistent '└─' or '──' works well:
+            indent = "    " * (module.depth - 1)
+            prefix = "├── "
+            return f"{indent}{prefix}{module.short_name}"
+            # if module.depth == 0:
+            #     return f"● [{module.device.name}] {module.short_name}"
+            #
+            #     # Using the 'Light Vertical Bar' (U+23AF) or 'Middle Dot' (U+00B7)
+            # indent = "    "+("·   " * (module.depth-1))
+            # return f"{indent}{module.short_name}"
 
         if role == Qt.ToolTipRole:
             return f"ID: {module.id}\nPath: {module.name}"
@@ -116,13 +119,15 @@ class ModuleFilterModel(QAbstractTableModel):
         return Qt.ItemIsEnabled | Qt.ItemIsSelectable
 
     # --- Registration Logic ---
-
-    def register_view(self):
-        self._active_view_count += 1
+    def register_consumer(self):
+        self._usage_count += 1
+        print(f"[ModuleFilterModel] register_consumer: _usage_count={self._usage_count}")
         self.sync_registry()
 
-    def unregister_view(self):
-        self._active_view_count = max(0, self._active_view_count - 1)
+
+    def unregister_consumer(self):
+        self._usage_count = max(0, self._usage_count - 1)
+        print(f"[ModuleFilterModel] unregister_consumer: _usage_count={self._usage_count}")
 
     # --- Sync Logic ---
     def setData(self, index, value, role=Qt.EditRole):

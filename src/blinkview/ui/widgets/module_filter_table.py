@@ -42,11 +42,39 @@ class TempLogFilter(QObject):
 
         self.log_filter = log_filter
 
-    def get_module(self, module) -> ModuleFilterState:
+        self.gui_context.module_filter_model.register_consumer()
+        self.gui_context.module_filter_model.registry_synced.connect(self._on_registry_synced)
+
+        # initialize modules that are already in the registry (in case this filter is created after startup)
+        self._on_registry_synced(self.gui_context.id_registry.module_list)
+        print(f"[TempLogFilter] Initialized with {len(self._states)} modules from registry.")
+
+    def __del__(self):
+        # This ensures that if the log tab is closed, we don't
+        # keep the background sync running forever.
+        if hasattr(self, 'gui_context'):
+            print("[TempLogFilter] __del__ called, unregistering from module filter model.")
+            self.gui_context.module_filter_model.unregister_consumer()
+
+    def _on_registry_synced(self, modules):
+        """Pre-initialize every module found in the registry."""
+        for module in modules:
+            self.get_module(module)
+
+    def get_module(self, module: 'ModuleIdentity') -> ModuleFilterState:
         mod = self._states.get(module)
         if mod is not None:
             return mod
-        mod = ModuleFilterState(module, True, self.log_filter.log_level or LogLevel.ALL)
+        parent_mod = module.parent
+        parent_log_level = self.log_filter.log_level or LogLevel.ALL
+        parent_enabled = True
+        parent_state = self._states.get(parent_mod)
+        if parent_state is not None:
+            parent_log_level = parent_state.level
+            parent_enabled = parent_state.enabled
+        if module.device.name == "abc_key":
+            print(f"[TempLogFilter] get_module={module.name} parent={parent_mod is not None} log_level={parent_log_level} enabled={parent_enabled}")
+        mod = ModuleFilterState(module, parent_enabled, parent_log_level)
         self._states[module] = mod
         self.gui_context.index_manager.set_log_level(module, self.log_filter.filter_index, mod.level if mod.enabled else LogLevel.OFF)
         return mod
@@ -210,6 +238,7 @@ class ModuleFilterProxyModel(QSortFilterProxyModel):
         if filtered_module is not None and module != filtered_module:
             return False
 
+
         # 4. Optional: If you also use Qt's built-in text filtering (setFilterRegExp),
         # keep this call at the end so text searches still work on the remaining rows.
         return super().filterAcceptsRow(source_row, source_parent)
@@ -261,6 +290,8 @@ class ModuleFilterTable(QTableView):
         self.gui_context = gui_context
         self.log_filter = log_filter
 
+        self._registered = False
+
         font = QFont("Consolas, monospace")
         # self.value_font.setPointSizeF(10.5)
         font.setBold(True)
@@ -298,12 +329,16 @@ class ModuleFilterTable(QTableView):
     def showEvent(self, event):
         super().showEvent(event)
         # Register this specific instance with the global model to trigger 1Hz sync
-        self.gui_context.module_filter_model.register_view()
+        if not self._registered:
+            self.gui_context.module_filter_model.register_consumer()
+            self._registered = True
 
     def hideEvent(self, event):
         super().hideEvent(event)
         # Unregister to throttle the background sync if no sidebars are open
-        self.gui_context.module_filter_model.unregister_view()
+        if self._registered:
+            self.gui_context.module_filter_model.unregister_consumer()
+            self._registered = False
         if self._is_hovered:
             self._is_hovered = False
             self.gui_context.module_filter_model.pause_sync(False)

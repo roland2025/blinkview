@@ -66,7 +66,7 @@ class TelemetryDelegate(QStyledItemDelegate):
 
         self.value_font = QFont("Consolas, monospace")
         self.value_font.setPointSizeF(10.5)
-        self.value_font.setBold(True)
+        self.value_font.setBold(False)
 
     def _rebuild_cache(self):
         """Pre-calculates brushes using the current THEME values."""

@@ -26,7 +26,7 @@ class ModuleIdentity:
         self.short_name = name
         self.depth = depth
         self.device = device_identity
-        self.parent = parent
+        self.parent: 'ModuleIdentity' = parent
 
         self.submodules: dict[str, 'ModuleIdentity'] = {}
         self.submodule_list: list['ModuleIdentity'] = []
@@ -87,7 +87,9 @@ class DeviceIdentity:
         self.modules: dict[int, ModuleIdentity] = {root_id: self.root}
         self.module_list: list[ModuleIdentity] = [self.root]
 
-        # self._id_registry._register_new_modules([self.root])
+        self.path_lookup[""] = self.root  # Register the root path
+
+        self._id_registry._register_new_modules([self.root])
 
     def get_module(self, path: str) -> ModuleIdentity:
         path = path.lower()
@@ -101,7 +103,7 @@ class DeviceIdentity:
             pass
 
         if not self._VALID_NAME_REGEX.match(path):
-            raise ValueError(f"Invalid path: {path}")
+            raise ValueError(f"Invalid path: '{path}'")
 
         parts = path.split('.')
 
