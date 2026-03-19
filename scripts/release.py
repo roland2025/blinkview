@@ -62,8 +62,8 @@ def main():
     try:
         # We use standard run (no env cleaning needed for git, but safe to use)
         run(["git", "add", "src/blinkview/__init__.py"])
-        run(["git", "commit", "-m", f'\"release: v{ver}\"'])
-        run(["git", "tag", "-a", f"v{ver}", "-m", f"Release v{ver}"])
+        run(["git", "commit", "-m", f'\"Release: v{ver}\"'])
+        run(["git", "tag", "-a", f"v{ver}", "-m", f'\"Release: v{ver}\"'])
         run(["git", "push", "origin", "main"])
         run(["git", "push", "origin", "--tags"])
         print(f"\nSuccessfully released v{ver}")
