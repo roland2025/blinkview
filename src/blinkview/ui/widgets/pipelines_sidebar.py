@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from blinkview.ui.utils.config_node import ConfigNode
+from blinkview.ui.utils.in_development import set_as_in_development
 from blinkview.utils.generate_id import generate_id
 
 
@@ -69,12 +70,13 @@ class PipelineListItemWidget(QWidget):
         self.hamburger_menu = QMenu(self)
         self.action_remove = QAction("Remove", self)
         self.action_remove.triggered.connect(self._on_remove_clicked)
-
-        self.action_other = QAction("Something else", self)
-        self.action_other.triggered.connect(self._on_something_else_clicked)
-
         self.hamburger_menu.addAction(self.action_remove)
-        self.hamburger_menu.addAction(self.action_other)
+
+        set_as_in_development(self.action_remove, self, "Remove pipeline")
+
+        # self.action_other = QAction("Something else", self)
+        # self.action_other.triggered.connect(self._on_something_else_clicked)
+        # self.hamburger_menu.addAction(self.action_other)
 
         # Attach the menu to the button natively
         self.btn_menu.setMenu(self.hamburger_menu)

@@ -9,13 +9,14 @@ from blinkview.utils.log_level import LogLevel
 
 
 class LogFilter:
-    def __init__(self, id_registry, allowed_device=None, filtered_module=None, log_level=None):
+    def __init__(self, id_registry, allowed_device=None, filtered_module=None, log_level=None, filtered_module_children=False):
         self.registry = id_registry
 
         self.filter_index = None
 
         self.allowed_device = self._resolve_device(allowed_device)
         self.filtered_module: ModuleIdentity = self._resolve_module(filtered_module)
+        self.filtered_module_children = filtered_module_children
         self.log_level = LogLevel.from_string(log_level, LogLevel.ALL)
 
         self._bake()
@@ -29,6 +30,7 @@ class LogFilter:
         target_mod = self.filtered_module
         idx = self.filter_index
         base_level = self.log_level
+        include_children = self.filtered_module_children
 
         print(f"[LogFilter] allowed_dev={allowed_dev} idx={idx}, base_level={base_level} target_mod={target_mod.name if target_mod else None}")
 
@@ -38,7 +40,7 @@ class LogFilter:
         # --- ULTRA-FAST PATH: No constraints set ---
         if allowed_dev is None and target_mod is None and idx is None and base_level is None:
 
-            def fast_matches(msg) -> bool:
+            def fast_matches(_) -> bool:
                 return True
 
             def fast_filter_batch(batch: list, after_seq: int = -1) -> list:
@@ -50,19 +52,41 @@ class LogFilter:
         # --- STANDARD PATH: Constraints exist ---
         else:
             def fast_matches(msg) -> bool:
-                if target_mod is not None and msg.module != target_mod:
-                    return False
-                if allowed_dev is not None and msg.module.device != allowed_dev:
+                # --- LEVEL CHECK FIRST ---
+                # Check the global log level constraint
+                if base_level is not None and msg.level < base_level:
                     return False
 
+                # Check granular registry-based filter (from metadata)
                 try:
                     if idx is not None:
-                        return msg.level >= msg.module.meta.filter_conf[idx]
-                except Exception:
+                        if msg.level < msg.module.meta.filter_conf[idx]:
+                            return False
+                except (AttributeError, TypeError, IndexError):
                     pass
 
-                if base_level is not None:
-                    return msg.level >= base_level
+                # --- HIERARCHY CHECK (Parent Traversal) ---
+                if target_mod is not None:
+                    if include_children:
+                        # Traverse parents manually until we hit target_mod or the root (None)
+                        curr = msg.module
+                        found = False
+                        while curr is not None:
+                            if curr == target_mod:
+                                found = True
+                                break
+                            curr = curr.parent
+
+                        if not found:
+                            return False
+                    else:
+                        # Strict identity match only
+                        if msg.module != target_mod:
+                            return False
+
+                # --- DEVICE CHECK ---
+                if allowed_dev is not None and msg.module.device != allowed_dev:
+                    return False
 
                 return True
 

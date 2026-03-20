@@ -7,7 +7,7 @@
       <excludeFolder url="file://$MODULE_DIR$/logs" />
       <excludeFolder url="file://$MODULE_DIR$/src/blinkview.egg-info" />
     </content>
-    <orderEntry type="jdk" jdkName="Python 3.13 (blinkview)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="uv (blinkview)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

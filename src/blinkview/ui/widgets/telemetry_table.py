@@ -6,10 +6,11 @@
 
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableView,
-                               QHeaderView, QLineEdit, QPushButton, QToolBar)
+                               QHeaderView, QLineEdit, QPushButton, QToolBar, QMenu, QApplication)
 from PySide6.QtCore import Qt, QSortFilterProxyModel, QEvent, QSize, QTimer
 
 from blinkview.ui.gui_context import GUIContext
+from blinkview.ui.utils.in_development import set_as_in_development
 from blinkview.ui.widgets.action_button_delegate import TelemetryDelegate, TelemetryCol
 from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.telemetry_model import TelemetryModel, TelemetryRowState
@@ -173,7 +174,8 @@ class TelemetryTable(QWidget):
         # ENABLE SORTING
         self.view.setSortingEnabled(True)
 
-        self.view.clicked.connect(self._on_cell_clicked)
+        self.view.clicked.connect(lambda index: self._trigger_module_action("view_logs", self._get_module_at_index(index)))
+        self.view.doubleClicked.connect(self._on_double_clicked)
 
         # Performance & Appearance
         v_header = self.view.verticalHeader()
@@ -197,6 +199,10 @@ class TelemetryTable(QWidget):
         self.view.setMouseTracking(True)
         self.view.entered.connect(self._on_mouse_entered)
         self.view.viewport().installEventFilter(self)
+
+        # Enable custom context menus
+        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._show_context_menu)
 
         # Delegate
         self.view.setItemDelegateForColumn(TelemetryCol.VALUE, TelemetryDelegate(self.gui_context.theme, self))
@@ -278,6 +284,13 @@ class TelemetryTable(QWidget):
         if not index.isValid():
             return
 
+        # Check if we are hovering over the NAME column
+        if index.column() == TelemetryCol.NAME:
+            self.view.setCursor(Qt.PointingHandCursor)
+        else:
+            # Reset to default for other columns
+            self.view.unsetCursor()
+
         old_row = self.hovered_row
         self.hovered_row = index.row()
 
@@ -325,21 +338,31 @@ class TelemetryTable(QWidget):
         self.gui_context.telemetry_model.unregister_view(self)
         super().closeEvent(event)
 
-    def _on_cell_clicked(self, proxy_index):
-        # 1. Only trigger if the user clicked the NAME column
-        if proxy_index.column() != TelemetryCol.NAME:
+    def _get_module_at_index(self, proxy_index):
+        """Universal helper to extract the module object from a proxy index."""
+        if not proxy_index.isValid() or proxy_index.column() != TelemetryCol.NAME:
+            return None
+
+        source_index = self.proxy_model.mapToSource(proxy_index)
+        state = self.gui_context.telemetry_model._row_states[source_index.row()]
+        return state.module
+
+    def open_log_viewer(self, module, include_children=False):
+        """The central logic for opening logs."""
+        if not module:
             return
 
-        # 2. Map to source model index
-        source_index = self.proxy_model.mapToSource(proxy_index)
-        row_idx = source_index.row()
+        title = f"Logs: {module.device.name}.{module.name}"
+        if include_children:
+            title += " (+ Children)"
 
-        # 3. Retrieve the module from our state list
-        # Assuming TelemetryModel stores states in self._row_states
-        state: TelemetryRowState = self.gui_context.telemetry_model._row_states[row_idx]
-        module = state.module
-
-        self.gui_context.create_widget("LogViewerWidget", f"Logs: {module.device.name}.{module.name}", as_window=True, filtered_module=module)
+        self.gui_context.create_widget(
+            "LogViewerWidget",
+            title,
+            as_window=True,
+            filtered_module=module,
+            include_children=include_children  # Pass the flag to your widget
+        )
 
     def sort_by_device(self):
         header = self.view.horizontalHeader()
@@ -369,3 +392,86 @@ class TelemetryTable(QWidget):
         order = Qt.SortOrder(order_val)
 
         self.view.sortByColumn(col, order)
+
+    def _trigger_module_action(self, action_id, module):
+        """The central brain for all module-based actions."""
+        if not module:
+            return
+
+        if action_id == "view_logs":
+            self.gui_context.create_widget(
+                "LogViewerWidget", f"Logs: {module.device.name}.{module.name}",
+                as_window=True, filtered_module=module
+            )
+
+        elif action_id == "view_logs_children":
+            self.gui_context.create_widget(
+                "LogViewerWidget", f"Logs: {module.device.name}.{module.name} (+Children)",
+                as_window=True, filtered_module=module, filtered_module_children=True
+            )
+
+        elif action_id == "copy_name":
+            QApplication.clipboard().setText(module.name)
+
+        elif action_id == "copy_value":
+            latest_row = module.latest_row
+            if latest_row is not None:
+                QApplication.clipboard().setText(latest_row.message)
+
+        # Add more elifs here as you build new features!
+
+    def _show_context_menu(self, pos):
+        proxy_index = self.view.indexAt(pos)
+        module = self._get_module_at_index(proxy_index)  # Using the helper from the previous turn
+        if not module:
+            return
+
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+
+        # Title
+        title = menu.addAction(f"Module: {module.name}")
+        title.setEnabled(False)
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        menu.addSeparator()
+
+        # Define the Action Registry for this menu
+        # Format: (Label, Action_ID, is_wip, issue_no)
+        actions = [
+            ("View Logs", "view_logs", False, None),
+            ("View Logs with Children", "view_logs_children", False, None),
+            (None, None, False, None),  # A None entry acts as a separator
+            ("View Real-time Graph", "view_graph", True, None),
+            # ("Export Statistics", "export_stats", True, None),
+            ("Copy Module Name", "copy_name", False, None),
+            ("Copy Value", "copy_value", False, None),
+        ]
+
+        # Build the menu dynamically
+        for label, action_id, is_wip, issue_no in actions:
+            if label is None:
+                menu.addSeparator()
+                continue
+
+            action = QAction(label, self)
+
+            if is_wip:
+                # Use your helper for WIP features
+                set_as_in_development(action, self, feature_name=label, issue_no=issue_no)
+            else:
+                # Use the universal dispatcher for working features
+                action.triggered.connect(lambda checked=False, aid=action_id:
+                                         self._trigger_module_action(aid, module))
+
+            menu.addAction(action)
+
+        menu.exec_(self.view.viewport().mapToGlobal(pos))
+
+    def _on_double_clicked(self, proxy_index):
+        if proxy_index.column() == TelemetryCol.VALUE:
+            val = proxy_index.data()
+            QApplication.clipboard().setText(str(val))
+            # Optional: Show a temporary tooltip or status message "Value Copied!"
+

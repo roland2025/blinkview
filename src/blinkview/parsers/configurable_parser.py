@@ -49,17 +49,11 @@ class DecoderStep(TransformStep):
     # __slots__ = ('encoding',)
     __doc__ = "A simple bytes to string decoder step that uses the specified encoding and error handling strategy."
 
-    input_type = 'str'
-    output_type = 'str'
-
     encoding: str
     errors: str
 
     input_type = 'bytes'
     output_type = 'str'
-    #
-    # def apply_config(self, config: dict):
-    #     self.encoding = config.get("encoding", self.encoding)
 
     def process(self, data: bytes) -> str:
         return data.decode(self.encoding, errors=self.errors)
