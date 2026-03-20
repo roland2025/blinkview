@@ -22,7 +22,7 @@ from blinkview.utils.time_utils import ConsoleTimestampFormatter
 
 
 class LogViewerWidget(QWidget):
-    def __init__(self, gui_context, tab_name, allowed_device=None, filtered_module=None, view_state=None, log_level=None, filter_sidebar=None, parent=None):
+    def __init__(self, gui_context, tab_name, allowed_device=None, filtered_module=None, filtered_module_children=False, view_state=None, log_level=None, filter_sidebar=None, parent=None):
         super().__init__(parent)
 
         self.gui_context: GUIContext = gui_context
@@ -57,6 +57,17 @@ QToolButton[filterEnabled="true"] {
         self.show_lvl = True
         self.show_mod = True
         saved_sizes = None
+
+        show_dev_btn = True
+        show_mod_btn = True
+
+        if allowed_device is not None or filtered_module is not None:
+            show_dev_btn = False  # If we're filtering to a specific device, the device column is redundant
+
+        if filtered_module is not None and not filtered_module_children:
+            show_mod_btn = False  # If we're filtering to a specific module, the module column is redundant
+            show_dev_btn = False
+
         # 1. Define Defaults / Restore View State
         if view_state is not None:
             self.show_ts = view_state.get("show_ts", self.show_ts)
@@ -66,13 +77,6 @@ QToolButton[filterEnabled="true"] {
             self.show_telemetry = view_state.get("show_telemetry", self.show_telemetry)
             self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
             saved_sizes = view_state.get("splitter_sizes")
-
-        if allowed_device is not None or filtered_module is not None:
-            self.show_dev = False  # If we're filtering to a specific device, the device column is redundant
-
-        if filtered_module is not None:
-            self.show_mod = False  # If we're filtering to a specific module, the module column is redundant
-            self.show_dev = False
 
         if log_level is None:
             log_level = LogLevel.ALL.name_conf
@@ -131,10 +135,10 @@ QToolButton[filterEnabled="true"] {
         self.toolbar.addAction(self.action_all)
 
         self.column_actions['show_ts'] = self._add_toggle("Time", self.show_ts, lambda c: self._toggle_col('show_ts', c))
-        if self.show_dev:
+        if show_dev_btn:
             self.column_actions['show_dev'] = self._add_toggle("Device", self.show_dev, lambda c: self._toggle_col('show_dev', c))
         self.column_actions['show_lvl'] = self._add_toggle("Level", self.show_lvl, lambda c: self._toggle_col('show_lvl', c))
-        if self.show_mod:
+        if show_mod_btn:
             self.column_actions['show_mod'] = self._add_toggle("Module", self.show_mod, lambda c: self._toggle_col('show_mod', c))
 
         self.toolbar.addSeparator()
@@ -171,7 +175,7 @@ QToolButton[filterEnabled="true"] {
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.layout.addWidget(self.splitter)
 
-        self.log_filter = LogFilter(self.gui_context.id_registry, allowed_device, filtered_module, log_level=log_level)
+        self.log_filter = LogFilter(self.gui_context.id_registry, allowed_device, filtered_module, log_level=log_level, filtered_module_children=filtered_module_children)
 
         self.filter_sidebar = ModuleFilterSidebar(
             gui_context=self.gui_context,
@@ -233,6 +237,7 @@ QToolButton[filterEnabled="true"] {
         return {
             "allowed_device": self.log_filter.allowed_device.name if self.log_filter.allowed_device else None,
             "filtered_module": f"{self.log_filter.filtered_module.device.name}.{self.log_filter.filtered_module.name}" if self.log_filter.filtered_module else None,
+            "filtered_module_children": self.log_filter.filtered_module_children,
             "view_state": {
                 "show_ts": self.show_ts,
                 "show_dev": self.show_dev,

@@ -14,12 +14,12 @@ from ..utils.level_map import LogLevel
 
 
 @DeviceFactory.register("can")
-@configuration_property("interface", type="string", default="virtual",
+@configuration_property("interface", type="string", default="virtual", required=True, ui_order=10,
                         enum=["virtual", "socketcan", "pcan", "ixxat", "slcan"],
                         description="The python-can interface to use (e.g., 'socketcan' for Linux, 'pcan' for Windows/Peak).")
-@configuration_property("channel", type="string", default="vcan0",
+@configuration_property("channel", type="string", default="vcan0", required=True, ui_order=11,
                         description="The CAN channel or port name (e.g., 'vcan0', 'PCAN_USBBUS1', 'can0').")
-@configuration_property("bitrate", type="integer", default=500000,
+@configuration_property("bitrate", type="integer", default=250000, required=True, ui_order=12,
                         description="The CAN bus communication speed in bits per second. Usually 250000, 500000, or 1000000.")
 @configuration_property("maxlen", type="integer", default=2000,
                         description="The maximum number of CAN messages to batch before flushing downstream.")

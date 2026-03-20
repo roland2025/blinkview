@@ -128,6 +128,7 @@ Because CAN frames are already discrete packets, this parser avoids the overhead
         self._assemble = None
 
     def apply_config(self, config: dict):
+        super().apply_config(config)
         self.logger.info(f"Applying CAN parser config: {config}")
         factory_build = self.shared.factories.build
 

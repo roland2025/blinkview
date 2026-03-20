@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from PySide6.QtWidgets import QMainWindow, QMenu
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.native_dark_mode import set_native_dark_mode
@@ -18,21 +18,37 @@ class DetachedTabWindow(QMainWindow):
         super().__init__(None)
         self.gui_context: GUIContext = gui_context
 
-        set_native_dark_mode(self)
+        self.setWindowTitle(f"{title} - BlinkView")
+        self.resize(800, 600)
         # Force it to be an independent OS window, even though it has a parent
         self.setWindowFlags(Qt.Window | Qt.CustomizeWindowHint |
                             Qt.WindowTitleHint | Qt.WindowSystemMenuHint |
                             Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint)
         self.setAttribute(Qt.WA_DeleteOnClose)  # Free memory when closed
 
+        set_native_dark_mode(self)
+
         self.widget = widget
         self.title = title
 
-        self.setWindowTitle(f"{title} - BlinkView")
-        self.setCentralWidget(widget)
-        self.widget.show()
+        # self.setCentralWidget(widget)
+        # self.widget.show()
 
-        self.resize(800, 600)
+        QTimer.singleShot(0, self._attach_widget_deferred)
+
+    def _attach_widget_deferred(self):
+        """Perform the expensive layout and parenting operations."""
+        if not self.widget:
+            return
+
+        # Disable updates on the window while we cram the widget inside
+        self.setUpdatesEnabled(False)
+        try:
+            self.setCentralWidget(self.widget)
+            self.widget.show()
+        finally:
+            self.setUpdatesEnabled(True)
+            self.update()  # Force one clean final draw
 
     def reattach_to_main(self):
         """Programmatically pops the widget back into the main tabs and closes the shell."""

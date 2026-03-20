@@ -415,16 +415,22 @@ class BlinkMainWindow(QMainWindow):
 
     def detach_tab(self, index: int):
         """Removes the widget from the tab and wraps it in a floating window."""
+        self.central_tabs.setUpdatesEnabled(False)
+
         widget = self.central_tabs.widget(index)
         title = self.central_tabs.tabText(index)
+        try:
+            # Remove it from the tab layout (this does NOT destroy the widget)
+            self.central_tabs.removeTab(index)
+            widget.setParent(None)
 
-        # Remove it from the tab layout (this does NOT destroy the widget)
-        self.central_tabs.removeTab(index)
-
-        # Wrap it and show it
-        floating_win = DetachedTabWindow(self.gui_context, widget, title)
-        self.window_manager.register(floating_win, widget)
-        floating_win.show()
+            self.central_tabs.setUpdatesEnabled(True)
+            # Wrap it and show it
+            floating_win = DetachedTabWindow(self.gui_context, widget, title)
+            self.window_manager.register(floating_win, widget)
+            floating_win.show()
+        finally:
+            self.central_tabs.setUpdatesEnabled(True)
 
     def reattach_tab(self, widget, title: str):
         """Triggered by the floating window when it is closed."""
@@ -440,7 +446,7 @@ def run(args):
     if sys.platform == "win32":
         import ctypes
         try:
-            myappid = 'ee.incubator.blinkview.0.1.0'  # Arbitrary string
+            myappid = f'ee.incubator.blinkview.{blinkview_version}'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except Exception:
             pass  # Fails gracefully on non-Windows systems
