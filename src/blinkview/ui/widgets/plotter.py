@@ -3,11 +3,12 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 #
 # Copyright (c) 2026 Roland Uuesoo
+
 from dataclasses import dataclass
 from typing import List, Optional
 
 import pyqtgraph as pg
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QColor
 from pyqtgraph import GraphicsLayoutWidget
 import numpy as np
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QToolBar, QMenu
@@ -96,25 +97,27 @@ class TelemetryPlotter(QWidget):
 
         self.clear()
         series = state.get("series", [])
-        for s in series:
-            self.series_list.append(SeriesContainer(s["index"], s["name"], s["color"], s["visible"]))
+        for i, s in enumerate(series):
+            self.series_list.append(SeriesContainer(s["index"], s["name"], self.get_color(i).name(), s["visible"]))
 
     def _init_channels(self, num_channels: int):
         """Called exactly once when data first arrives."""
         self.y_data = np.zeros((self.max_points, num_channels))
 
         if not self.series_list:
-            colors = ['y', 'g', 'c', 'm', 'r', 'b']
             for i in range(num_channels):
                 self.series_list.append(SeriesContainer(
                     index=i,
                     name=f"{self.module.short_name} {i}" if num_channels > 1 else self.module.short_name,
-                    color=colors[i % len(colors)],
+                    color=self.get_color(i).name(),
                     visible=True  # Default to visible
                 ))
 
         # Now build the UI for the first time
         self.set_split_mode(self.is_split)
+
+    def get_color(self, i: int) -> QColor:
+        return QColor.fromHsv((120 + i * 80) % 360, 255, 255)
 
     @property
     def num_channels(self) -> int:
