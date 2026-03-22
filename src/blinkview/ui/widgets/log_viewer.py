@@ -236,7 +236,7 @@ QToolButton[filterEnabled="true"] {
     def get_state(self):
         return {
             "allowed_device": self.log_filter.allowed_device.name if self.log_filter.allowed_device else None,
-            "filtered_module": f"{self.log_filter.filtered_module.device.name}.{self.log_filter.filtered_module.name}" if self.log_filter.filtered_module else None,
+            "filtered_module": f"{self.log_filter.filtered_module.name_with_device()}" if self.log_filter.filtered_module else None,
             "filtered_module_children": self.log_filter.filtered_module_children,
             "view_state": {
                 "show_ts": self.show_ts,

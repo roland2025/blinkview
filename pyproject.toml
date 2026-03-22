@@ -40,7 +40,7 @@ dependencies = [
     "cantools",
     "requests",
     "pylink-square",
-    "packaging"
+    "packaging",
 ]
 
 # --- Optional GUI Dependencies (GIL-dependent) ---
@@ -48,6 +48,8 @@ dependencies = [
 gui = [
     "PySide6>=6.6.0",
     "pyqtdarktheme",
+    "pyqtgraph",
+    "numpy",
 ]
 
 # --- Future-proof "All" Catch-all ---

@@ -42,6 +42,7 @@ from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.log_viewer import LogViewerWidget
 from blinkview.ui.widgets.module_filter_model import ModuleFilterModel
 from blinkview.ui.widgets.pipelines_sidebar import PipelinesSidebarWidget
+from blinkview.ui.widgets.plotter import TelemetryPlotter
 from blinkview.ui.widgets.telemetry_model import TelemetryModel
 from blinkview.ui.widgets.telemetry_table import TelemetryTable
 from blinkview.ui.widgets.title_bar import TitleBar
@@ -221,6 +222,7 @@ class BlinkMainWindow(QMainWindow):
             "LogViewerWidget": LogViewerWidget,
             "TelemetryTable": TelemetryTable,
             "DynamicConfigWidget": DynamicConfigWidget,
+            "TelemetryPlotter": TelemetryPlotter,
         }
 
         self.gui_context.set_gui_state_handler(UIStateHandler(self))

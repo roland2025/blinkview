@@ -201,7 +201,7 @@ class TelemetryTable(QWidget):
         self.view.viewport().installEventFilter(self)
 
         # Enable custom context menus
-        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.setContextMenuPolicy(Qt.NoContextMenu)
         self.view.customContextMenuRequested.connect(self._show_context_menu)
 
         # Delegate
@@ -301,17 +301,18 @@ class TelemetryTable(QWidget):
 
     def eventFilter(self, source, event):
         """Detect mouse leaving the table to hide all buttons."""
+        if event.type() == QEvent.MouseButtonPress and source is self.view.viewport():
+            if event.button() == Qt.RightButton:
+                # Trigger the menu immediately on press
+                self._show_context_menu(event.pos())
+                return True
+
         if event.type() == QEvent.Leave and source is self.view.viewport():
             if self.hovered_row != -1:
                 row = self.hovered_row
                 self.hovered_row = -1
                 self.view.update(self.proxy_model.index(row, TelemetryCol.ACTIONS))
         return super().eventFilter(source, event)
-
-    def on_action_clicked(self, module, action_name):
-        """Route the button click back up to the main application."""
-        print(f"Action '{action_name}' triggered for {module.name}")
-        # Typically you'd emit a signal here or call a method on MainWindow
 
     def get_active_indices(self) -> list:
         """Called by the Model during refresh_active_cache."""
@@ -398,25 +399,41 @@ class TelemetryTable(QWidget):
         if not module:
             return
 
-        if action_id == "view_logs":
-            self.gui_context.create_widget(
-                "LogViewerWidget", f"Logs: {module.device.name}.{module.name}",
-                as_window=True, filtered_module=module
-            )
+        match action_id:
+            case "view_logs" | "view_logs_children":
+                # Combine logic for both log views
+                with_children = (action_id == "view_logs_children")
+                title = f"Logs: {module.name_with_device()}"
+                if with_children:
+                    title += " (+Children)"
 
-        elif action_id == "view_logs_children":
-            self.gui_context.create_widget(
-                "LogViewerWidget", f"Logs: {module.device.name}.{module.name} (+Children)",
-                as_window=True, filtered_module=module, filtered_module_children=True
-            )
+                self.gui_context.create_widget(
+                    "LogViewerWidget",
+                    title,
+                    as_window=True,
+                    filtered_module=module.name_with_device(),
+                    filtered_module_children=with_children
+                )
 
-        elif action_id == "copy_name":
-            QApplication.clipboard().setText(module.name)
+            case "copy_name":
+                QApplication.clipboard().setText(module.name)
 
-        elif action_id == "copy_value":
-            latest_row = module.latest_row
-            if latest_row is not None:
-                QApplication.clipboard().setText(latest_row.message)
+            case "copy_value":
+                if module.latest_row:
+                    QApplication.clipboard().setText(module.latest_row.message)
+
+            case "view_graph":
+                # Future home of your PyQtGraph widget
+                self.gui_context.create_widget(
+                    "TelemetryPlotter",
+                    f"Graph: {module.name}",
+                    as_window=True,
+                    module=module.name_with_device()
+                )
+
+            case _:
+                # Catch-all for undefined actions
+                print(f"Warning: No handler for action_id '{action_id}'")
 
         # Add more elifs here as you build new features!
 
@@ -443,7 +460,7 @@ class TelemetryTable(QWidget):
             ("View Logs", "view_logs", False, None),
             ("View Logs with Children", "view_logs_children", False, None),
             (None, None, False, None),  # A None entry acts as a separator
-            ("View Real-time Graph", "view_graph", True, None),
+            ("View Real-time Graph", "view_graph", False, None),
             # ("Export Statistics", "export_stats", True, None),
             ("Copy Module Name", "copy_name", False, None),
             ("Copy Value", "copy_value", False, None),

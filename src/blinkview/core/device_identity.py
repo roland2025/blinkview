@@ -48,6 +48,12 @@ class ModuleIdentity:
         """Returns all descendants in the subtree rooted at this module, excluding itself."""
         return self._descendant_cache
 
+    def name_with_device(self) -> str:
+        return f"{self.device.name}.{self.name}"
+
+    def __str__(self):
+        return self.name
+
 
 def print_tree_recursive(node: ModuleIdentity, indent=0):
     print("  " * indent + f"{node.name} (ID: {node.id}) full_path: {node.name}")
