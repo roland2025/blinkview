@@ -22,7 +22,7 @@ from blinkview.utils.time_utils import ConsoleTimestampFormatter
 
 
 class LogViewerWidget(QWidget):
-    def __init__(self, gui_context, tab_name, allowed_device=None, filtered_module=None, filtered_module_children=False, view_state=None, log_level=None, filter_sidebar=None, parent=None):
+    def __init__(self, gui_context, state=None, parent=None):
         super().__init__(parent)
 
         self.gui_context: GUIContext = gui_context
@@ -50,38 +50,25 @@ QToolButton[filterEnabled="true"] {
 }
 """)
 
+        self.tab_name = ""
+        self.allowed_device = None
+        self.filtered_module = None
+        self.filtered_module_children = False
+        self.log_level = LogLevel.ALL.name_conf
+        self.filter_sidebar_state = None
+
         self.show_telemetry = False
         self.show_module_filter = False
         self.show_ts = True
         self.show_dev = True
         self.show_lvl = True
         self.show_mod = True
-        saved_sizes = None
+        self.saved_sizes = None
 
-        show_dev_btn = True
-        show_mod_btn = True
+        self._set_defaults()
 
-        if allowed_device is not None or filtered_module is not None:
-            show_dev_btn = False  # If we're filtering to a specific device, the device column is redundant
-
-        if filtered_module is not None and not filtered_module_children:
-            show_mod_btn = False  # If we're filtering to a specific module, the module column is redundant
-            show_dev_btn = False
-
-        # 1. Define Defaults / Restore View State
-        if view_state is not None:
-            self.show_ts = view_state.get("show_ts", self.show_ts)
-            self.show_dev = view_state.get("show_dev", self.show_dev)
-            self.show_lvl = view_state.get("show_lvl", self.show_lvl)
-            self.show_mod = view_state.get("show_mod", self.show_mod)
-            self.show_telemetry = view_state.get("show_telemetry", self.show_telemetry)
-            self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
-            saved_sizes = view_state.get("splitter_sizes")
-
-        if log_level is None:
-            log_level = LogLevel.ALL.name_conf
-
-        self.tab_name = tab_name
+        if state:
+            self.restore(state)
 
         self.latest_seq_seen = -1
 
@@ -101,12 +88,11 @@ QToolButton[filterEnabled="true"] {
         self.toolbar.setMovable(False)
         self.layout.addWidget(self.toolbar)
 
-        print(f"[LogViewer] Initializing with allowed_device={allowed_device}, filtered_module={filtered_module}, log_level={log_level}")
+        print(f"[LogViewer] Initializing allowed_device={self.allowed_device} filtered_module={self.filtered_module} children={self.filtered_module_children} log_level={self.log_level}")
         self.action_toggle_filter = QAction("Filter", self)
         self.action_toggle_filter.setCheckable(True)
         self.action_toggle_filter.setChecked(self.show_module_filter)
         self.action_toggle_filter.toggled.connect(self._toggle_module_filter)
-        self.action_toggle_filter.setVisible(filtered_module is None)
         self.toolbar.addAction(self.action_toggle_filter)
 
         self.level_combo = QComboBox()
@@ -115,11 +101,6 @@ QToolButton[filterEnabled="true"] {
             self.level_combo.addItem(lvl.name_conf, lvl)  # lvl is the LevelIdentity object
 
         self.toolbar.addWidget(self.level_combo)
-
-        # select and set the current index based on the log_level in tab_params
-        idx = self.level_combo.findData(LogLevel.from_string(log_level))
-        if idx != -1:
-            self.level_combo.setCurrentIndex(idx)
 
         self.level_combo.currentIndexChanged.connect(self._handle_level_change)
 
@@ -135,11 +116,9 @@ QToolButton[filterEnabled="true"] {
         self.toolbar.addAction(self.action_all)
 
         self.column_actions['show_ts'] = self._add_toggle("Time", self.show_ts, lambda c: self._toggle_col('show_ts', c))
-        if show_dev_btn:
-            self.column_actions['show_dev'] = self._add_toggle("Device", self.show_dev, lambda c: self._toggle_col('show_dev', c))
+        self.column_actions['show_dev'] = self._add_toggle("Device", self.show_dev, lambda c: self._toggle_col('show_dev', c))
         self.column_actions['show_lvl'] = self._add_toggle("Level", self.show_lvl, lambda c: self._toggle_col('show_lvl', c))
-        if show_mod_btn:
-            self.column_actions['show_mod'] = self._add_toggle("Module", self.show_mod, lambda c: self._toggle_col('show_mod', c))
+        self.column_actions['show_mod'] = self._add_toggle("Module", self.show_mod, lambda c: self._toggle_col('show_mod', c))
 
         self.toolbar.addSeparator()
 
@@ -175,7 +154,7 @@ QToolButton[filterEnabled="true"] {
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.layout.addWidget(self.splitter)
 
-        self.log_filter = LogFilter(self.gui_context.id_registry, allowed_device, filtered_module, log_level=log_level, filtered_module_children=filtered_module_children)
+        self.log_filter = LogFilter(self.gui_context.id_registry, self.allowed_device, self.filtered_module, log_level=self.log_level, filtered_module_children=self.filtered_module_children)
 
         self.filter_sidebar = ModuleFilterSidebar(
             gui_context=self.gui_context,
@@ -183,11 +162,11 @@ QToolButton[filterEnabled="true"] {
             parent=self
         )
 
-        self.filter_sidebar.restore_state(filter_sidebar)
+        self.filter_sidebar.restore_state(self.filter_sidebar_state)
         self.filter_sidebar.log_filter.filter_changed.connect(self.reload_and_redraw)
 
-        if filter_sidebar is not None:
-            self._filter_enable_toggled(filter_sidebar.get("enabled", False))
+        if self.filter_sidebar_state is not None:
+            self._filter_enable_toggled(self.filter_sidebar_state.get("enabled", False))
 
         self.filter_sidebar.action_enable.toggled.connect(self._filter_enable_toggled)
 
@@ -209,8 +188,12 @@ QToolButton[filterEnabled="true"] {
 
         self.telemetry_sidebar = TelemetryTable(
             gui_context=self.gui_context,
-            tab_name=f"{tab_name}_sidebar",
-            filtered_device=allowed_device,
+            state={
+                "tab_name": f"{self.tab_name}_sidebar",
+                "filtered_device": self.allowed_device,
+                "filtered_module": self.filtered_module,
+                "filtered_module_children": self.filtered_module_children,
+            },
             parent=self
         )
 
@@ -224,14 +207,60 @@ QToolButton[filterEnabled="true"] {
         self.splitter.setStretchFactor(1, 6)  # Logs
         self.splitter.setStretchFactor(2, 4)  # Telemetry
 
-        if saved_sizes and len(saved_sizes) == 3:
-            if any(size <= 100 for size in saved_sizes):
-                print(f"[LogViewer] Warning: Invalid splitter sizes in view state: {saved_sizes}. Using defaults.")
+        if self.saved_sizes and len(self.saved_sizes) == 3:
+            if any(size <= 100 for size in self.saved_sizes):
+                print(f"[LogViewer] Warning: Invalid splitter sizes in view state: {self.saved_sizes}. Using defaults.")
             else:
-                self.splitter.setSizes(saved_sizes)
+                self.splitter.setSizes(self.saved_sizes)
+
+        show_dev_btn = True
+        show_mod_btn = True
+        if self.allowed_device is not None or self.filtered_module is not None:
+            show_dev_btn = False  # If we're filtering to a specific device, the device column is redundant
+
+        if self.filtered_module is not None and not self.filtered_module_children:
+            show_mod_btn = False  # If we're filtering to a specific module, the module column is redundant
+            show_dev_btn = False
+
+        self.column_actions['show_dev'].setVisible(show_dev_btn)
+        self.column_actions['show_mod'].setVisible(show_mod_btn)
+
+        self.action_toggle_filter.setVisible(self.filtered_module is None)
+
+        idx = self.level_combo.findData(LogLevel.from_string(self.log_level))
+        if idx != -1:
+            self.level_combo.setCurrentIndex(idx)
 
         self.load_history()
         self.gui_context.register_log_target(self)
+
+    def _set_defaults(self):
+        self.tab_name = self.__class__.__name__
+        self.allowed_device = None
+        self.filtered_module = None
+        self.filtered_module_children = False
+        self.log_level = None
+        self.show_filter_sidebar = None
+
+    def restore(self, state: dict):
+        self.tab_name = state.get("tab_name", self.tab_name)
+
+        self.allowed_device = state.get("allowed_device", self.allowed_device)
+        self.filtered_module = state.get("filtered_module", self.filtered_module)
+        self.filtered_module_children = state.get("filtered_module_children", self.filtered_module_children)
+        self.log_level = state.get("log_level", self.log_level)
+
+        view_state = state.get("view_state", {})
+        self.show_ts = view_state.get("show_ts", self.show_ts)
+        self.show_dev = view_state.get("show_dev", self.show_dev)
+        self.show_lvl = view_state.get("show_lvl", self.show_lvl)
+        self.show_mod = view_state.get("show_mod", self.show_mod)
+
+        self.show_telemetry = view_state.get("show_telemetry", self.show_telemetry)
+        self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
+        self.filter_sidebar_state = state.get("filter_sidebar", self.filter_sidebar_state)
+
+        self.saved_sizes = view_state.get("splitter_sizes")
 
     def get_state(self):
         return {

@@ -79,7 +79,7 @@ class ConfigNodeManager(QObject):
     def show(self, path: str, child_name=None, drop_keys: list = None, editable: bool = True):
         print(f"[ConfigManager] Request to show config for '{path}' with name='{child_name}', drop_keys={drop_keys}, editable={editable}")
         print(f"context: {self.gui_context}, create_widget: {self.gui_context.create_widget}")
-        self.gui_context.create_widget("DynamicConfigWidget", f"Settings: {child_name or path}", False, drop_keys=drop_keys, editable=editable, path=path)
+        self.gui_context.create_widget("DynamicConfigWidget", f"Settings: {child_name or path}", False,params={"drop_keys": drop_keys, "editable": editable, "path": path})
 
     def get_factory_types(self, category: str) -> list[tuple[str, str]]:
         return self.gui_context.registry.system_ctx.factories.get_category_types(category)

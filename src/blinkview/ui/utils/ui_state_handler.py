@@ -87,11 +87,13 @@ class UIStateHandler:
                     self.window.central_tabs.blockSignals(True)
 
                     for tab_info in data["open_tabs"]:
+                        params = tab_info.get("params", {})
+                        tab_name = params.get("tab_name") or tab_info.get("name")
                         self.window.create_widget(
                             cls_name=tab_info.get("class"),
-                            name=tab_info.get("name", "New Tab"),
+                            name=tab_name,
                             as_window=False,
-                            **(tab_info.get("params", {}))
+                            params=params
                         )
 
                     self.window.central_tabs.blockSignals(False)
@@ -102,12 +104,15 @@ class UIStateHandler:
                 # --- Restore Floating Windows ---
                 if "floating_windows" in data:
                     for win_info in data["floating_windows"]:
+
+                        params = win_info.get("params", {})
+                        tab_name = params.get("tab_name") or win_info.get("name", "Floating Tool")
                         new_win = self.window.create_widget(
                             cls_name=win_info.get("class"),
-                            name=win_info.get("name", "Floating Tool"),
+                            name=tab_name,
                             as_window=True,
                             show=False,
-                            **(win_info.get("params", {}))
+                            params=params
                         )
 
                         if not new_win:
@@ -131,4 +136,4 @@ class UIStateHandler:
                         QTimer.singleShot(100, restore_this_window)
 
         except Exception as e:
-            print(f"⚠️ Could not restore UI state: {e}")
+            print(f"⚠Could not restore UI state: {e}")

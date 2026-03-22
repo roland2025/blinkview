@@ -94,7 +94,8 @@ class PipelineListItemWidget(QWidget):
     def _on_log_clicked(self):
         """Triggered on standard left click of the Log button."""
         print(f"Opening log for {self.device_name} in current view...")
-        self.gui_context.create_widget("LogViewerWidget", f"Logs: {self.device_name}", allowed_device=self.device_name)
+        self.gui_context.create_widget("LogViewerWidget", f"Logs: {self.device_name}", params={
+            "allowed_device": self.device_name})
         # Emit a signal or call your main window logic here
 
     def _show_log_context_menu(self, pos):

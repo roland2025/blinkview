@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import hashlib
 
+from blinkview.core.settings_manager import SettingsManager
 from blinkview.core.system_context import SystemContext
 from blinkview.storage.file_logger import FileLogger
 from blinkview.utils.atomic_json_dump import atomic_json_dump
@@ -53,11 +54,7 @@ class FileManager:
         self._workspace_dir = get_workspace_dir()
         print(f"[FileManager] workspace_dir={self._workspace_dir}")
 
-        global_settings = GlobalSettings.load()
-        print(f"[FileManager] global_settings={global_settings}")
-
-        project_settings = ProjectSettings.load()
-        print(f"[FileManager] project_settings={project_settings}")
+        settings = SettingsManager()
 
         self.provided_config_path = Path(config_path) if config_path else None
         print(f"[FileManager] provided_config_path={self.provided_config_path}")
@@ -66,7 +63,7 @@ class FileManager:
         print(f"[FileManager] session_identity={self.session_identity}")
 
         # Resolve project name with the following precedence:
-        project_name = project_settings.get("project_name")
+        project_name = settings.get("project_name")
 
         if project_name is None:
             project_name = self._project_dir.name if self._project_dir else None
@@ -77,7 +74,7 @@ class FileManager:
         self.project_name = self._sanitize(project_name)
         print(f"[FileManager] project_name={self.project_name}")
 
-        self.profile_name = self._sanitize(self.session_identity or profile_name or project_settings.get("active_profile") or global_settings.get("default_profile") or (self.project_name if self.standalone_mode else "default"))
+        self.profile_name = self._sanitize(self.session_identity or profile_name or settings.get("active_profile") or settings.get("default_profile") or (self.project_name if self.standalone_mode else "default"))
         if self.standalone_mode and self.provided_config_path:
             self.profile_name = self._sanitize(f"{self.project_name} {self.provided_config_path.stem}")
 
@@ -95,10 +92,7 @@ class FileManager:
 
         # resolve log_dir with the following precedence:
         if log_dir is None:
-            log_dir = project_settings.get("log_dir")
-
-        if log_dir is None:
-            log_dir = global_settings.get("log_dir")
+            log_dir = settings.get("log_dir")
 
         if self.standalone_mode:
             if log_dir is None:

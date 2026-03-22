@@ -28,27 +28,23 @@ class DynamicConfigWidget(QWidget):
 
     signal_unregister = Signal(object)
 
-    def __init__(self, gui_context, path, drop_keys, editable, tab_name, child_name=None):
-        super().__init__()
+    def __init__(self, gui_context, state=None, parent=None):
+        super().__init__(parent)
         self.gui_context = gui_context
 
-        self.tab_name = tab_name
+        self.tab_name = ""
+        self.path = None
+        self.drop_keys = None
+        self.editable = None
+        self.child_name = None
 
-        self.tab_params = {
-            "path": path,
-            "drop_keys": drop_keys,
-            "editable": editable,
-        }
+        self._set_defaults()
 
-        if child_name:
-            self.tab_params["child_name"] = child_name
+        if state:
+            self.restore(state)
 
-        self.node = self.gui_context.config_manager.create_node(path, child_name, drop_keys, editable)
+        self.node = self.gui_context.config_manager.create_node(self.path, self.child_name, self.drop_keys, self.editable)
         self.node.signal_received.connect(self.update_config_schema)
-
-        # self.original_schema = deepcopy(schema or {})
-        # self.schema = deepcopy(self.original_schema)
-        # self.current_config = deepcopy(current_config or {})
 
         self.original_schema = {}
         self.schema = {}
@@ -157,6 +153,16 @@ class DynamicConfigWidget(QWidget):
         self.btn_revert.clicked.connect(self._on_revert_clicked)
 
         self.node.fetch()
+
+    def _set_defaults(self):
+        self.tab_name = self.__class__.__name__
+
+    def restore(self, state: dict):
+        self.tab_name = state.get("tab_name", self.tab_name)
+        self.path = state.get("path", self.path)
+        self.drop_keys = state.get("drop_keys", self.drop_keys)
+        self.editable = state.get("editable", self.editable)
+        self.child_name = state.get("child_name", self.child_name)
 
     def closeEvent(self, event):
         """Called automatically when the widget is instructed to close."""
@@ -959,4 +965,3 @@ class DynamicConfigWidget(QWidget):
 
         # 5. Check if the Apply button needs to light up
         self._check_for_changes()
-

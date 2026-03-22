@@ -23,6 +23,8 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
         self._global_negatives = []
         # Store the allowed device name/id (None means allow all)
         self.allowed_device = None
+        self.allowed_module = None
+        self.allowed_module_children = False
 
     def setFilterText(self, text):
         """Space = OR, + = AND, - = Global NOT"""
@@ -47,18 +49,64 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
             # Re-run the filter over all rows
             self.invalidateFilter()
 
+    def setAllowedModule(self, module_name: str | None):
+        self.allowed_module = module_name
+        self.invalidateFilter()
+
+    def setAllowedModuleChildren(self, allowed: bool):
+        self.allowed_module_children = allowed
+        self.invalidateFilter()
+
     def filterAcceptsRow(self, source_row, source_parent):
         # --- DIRECT MODEL ACCESS (High Performance) ---
         model: 'TelemetryModel' = self.sourceModel()
         state = model._row_states[source_row]
+
+        module = state.module
 
         # if state.module.latest_row is None:
         #     return False
 
         # 1. Strict Device Filter Check
         # If a device is specified, reject anything that doesn't match immediately
-        if self.allowed_device is not None and state.module.device != self.allowed_device:
+        if self.allowed_device is not None and module.device != self.allowed_device:
             return False
+
+        if self.allowed_module is not None:
+            if self.allowed_module_children:
+                # Traverse parents manually until we hit target_mod or the root (None)
+                curr = module
+                found = False
+                while curr is not None:
+                    if curr == self.allowed_module:
+                        found = True
+                        break
+                    curr = curr.parent
+
+                if not found:
+                    return False
+            else:
+                # Strict identity match only
+                if module == self.allowed_module:
+                    return True
+
+                # allow parent modules siblings only
+                parent = self.allowed_module.parent
+                if parent is not None:
+                    curr = module
+                    found = False
+                    while curr is not None:
+                        if curr == parent:
+                            found = True
+                            break
+                        curr = curr.parent
+
+                    if not found:
+                        return False
+
+            # reject all other devices
+            if module.device != self.allowed_module.device:
+                return False
 
         # 2. Empty Search Filter = Show everything (that passed the device check)
         if not self._positive_groups and not self._global_negatives:
@@ -66,7 +114,7 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
 
         # Pre-compute the search string.
         # Accessing state.module directly avoids QModelIndex and QVariant overhead.
-        row_content = f"{state.module.name} {state.module.device.name}".lower()
+        row_content = f"{module.name} {module.device.name}".lower()
 
         # 3. Check Global Negatives (NOT)
         if self._global_negatives:
@@ -85,21 +133,22 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
 
 
 class TelemetryTable(QWidget):
-    def __init__(self, gui_context, tab_name, filter_pattern=None, show_device_column=True, filtered_device=None, sort_column=TelemetryCol.DEVICE, sort_order=0, parent=None):
+    def __init__(self, gui_context, state=None, parent=None):
         super().__init__(parent)
         self.gui_context: GUIContext = gui_context
 
-        self.tab_name = tab_name
+        self.tab_name = ""
 
-        self.tab_params = {
-            "filter_pattern": filter_pattern,
-            "show_device_column": show_device_column,
-            "filtered_device": filtered_device,
-            "sort_column": sort_column,
-            "sort_order": sort_order
-        }
-        filtered_device = self.tab_params.get("filtered_device", filtered_device)
-        show_device_column = self.tab_params.get("show_device_column", show_device_column)
+        # filter_pattern = None
+        self.show_device_column = True
+        self.filtered_device = None
+        self.filtered_module = None
+        self.filtered_module_children = False
+
+        self.sort_column = TelemetryCol.DEVICE
+        self.sort_order = 0
+
+        self._set_defaults()
 
         self.hovered_row = -1
 
@@ -107,7 +156,7 @@ class TelemetryTable(QWidget):
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(4)  # Small gap between toolbar and table
 
-        # --- 1. CREATE LOCAL TOOLBAR ---
+        # --- CREATE LOCAL TOOLBAR ---
         self.toolbar = QToolBar()
         self.toolbar.setIconSize(QSize(16, 16))
         self.toolbar.setMovable(False)
@@ -135,15 +184,11 @@ class TelemetryTable(QWidget):
 
         self.layout.addWidget(self.toolbar)
 
-        # --- 2. SETUP PROXY MODEL ---
+        # --- SETUP PROXY MODEL ---
         self.proxy_model = MultiColumnFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.gui_context.telemetry_model)
 
-        if filtered_device is not None:
-            self.proxy_model.setAllowedDevice(self.gui_context.registry.get_device(filtered_device))
-            show_device_column = False  # If we're filtering by device, we can hide the device column for cleaner UI
-
-        # --- 3. SETUP THE VIEW ---
+        # --- SETUP THE VIEW ---
         self.view = QTableView()
         self.view.setModel(self.proxy_model)
 
@@ -210,16 +255,59 @@ class TelemetryTable(QWidget):
         # Add table below the toolbar
         self.layout.addWidget(self.view)
 
-        # Apply initial filter if one was passed in
+        self.gui_context.telemetry_model.layout_changed.connect(self.auto_size_columns_delayed)
+
+        if state:
+            self.restore(state)
+        else:
+            self.auto_size_columns_delayed()
+
+    def _set_defaults(self):
+        self.tab_name = self.__class__.__name__
+        self.allowed_device = None
+        self.filtered_module = None
+        self.filtered_module_children = False
+        self.log_level = None
+        self.show_filter_sidebar = None
+        self.sort_order = 0
+        self.sort_column = TelemetryCol.DEVICE
+
+    def restore(self, state: dict):
+        print(f"[TelemetryTable] {self.tab_name} Restoring state from {state}")
+        self.tab_name = state.get("tab_name", self.tab_name)
+
+        self.show_device_column = state.get("show_device_column", self.show_device_column)
+        self.filtered_device = state.get("filtered_device", self.filtered_device)
+
+        if self.filtered_device is not None:
+            self.proxy_model.setAllowedDevice(self.gui_context.registry.get_device(self.filtered_device))
+            self.show_device_column = False  # If we're filtering by device, we can hide the device column for cleaner UI
+
+        self.filtered_module = state.get("filtered_module", self.filtered_module)
+        if self.filtered_module is not None:
+            self.proxy_model.setAllowedModule(self._resolve_module(self.filtered_module))
+            self.show_device_column = False  # If we're filtering by module, the device column is redundant since the module name includes the device
+
+        self.filtered_module_children = state.get("filtered_module_children", self.filtered_module_children)
+        self.proxy_model.setAllowedModuleChildren(self.filtered_module_children)
+
+        self.action_toggle_module.setChecked(self.show_device_column)
+        self._toggle_device_column(self.show_device_column)
+
+        filter_pattern = state.get("filter_pattern")
         if filter_pattern:
             self.search_box.setText(filter_pattern)
             self.proxy_model.setFilterText(filter_pattern)  # Initialize the filter
 
-        self.action_toggle_module.setChecked(show_device_column)
-        self._toggle_device_column(show_device_column)
-        self.apply_saved_sort()
+        self.sort_column = state.get("sort_column", self.sort_column)
 
-        self.gui_context.telemetry_model.layout_changed.connect(self.auto_size_columns_delayed)
+        # Get the integer (default to 0 for Ascending)
+        self.sort_order = state.get("sort_order", self.sort_order)
+
+        # Convert integer back to the Enum type
+        order = Qt.SortOrder(self.sort_order)
+
+        self.view.sortByColumn(self.sort_column, order)
 
         self.auto_size_columns_delayed()
 
@@ -269,12 +357,8 @@ class TelemetryTable(QWidget):
             if h_header.sectionResizeMode(column_idx) != QHeaderView.Stretch:
                 self.view.setColumnWidth(column_idx, 180)
 
-        # Update tab_params so the UIStateHandler saves this preference
-        self.tab_params["show_device_column"] = visible
-
     def _on_search_changed(self, text):
         """Pass the text to our custom proxy model."""
-        self.tab_params["filter_pattern"] = text
         self.proxy_model.setFilterText(text)
         self.gui_context.telemetry_model.refresh_active_cache()
         self.auto_size_columns_delayed()
@@ -361,8 +445,9 @@ class TelemetryTable(QWidget):
             "LogViewerWidget",
             title,
             as_window=True,
-            filtered_module=module,
-            include_children=include_children  # Pass the flag to your widget
+            params={
+                "filtered_module": module,
+                "include_children": include_children}  # Pass the flag to your widget
         )
 
     def sort_by_device(self):
@@ -379,20 +464,8 @@ class TelemetryTable(QWidget):
 
     def _on_sort_indicator_changed(self, column, order):
         """Saves the current sort state whenever the user clicks a header."""
-        self.tab_params["sort_column"] = column
-        self.tab_params["sort_order"] = order.value
-
-    def apply_saved_sort(self):
-        """Restores the sort from tab_params."""
-        col = self.tab_params.get("sort_column", TelemetryCol.NAME)
-
-        # Get the integer (default to 0 for Ascending)
-        order_val = self.tab_params.get("sort_order", 0)
-
-        # Convert integer back to the Enum type
-        order = Qt.SortOrder(order_val)
-
-        self.view.sortByColumn(col, order)
+        self.sort_column = column
+        self.sort_order = order.value
 
     def _trigger_module_action(self, action_id, module):
         """The central brain for all module-based actions."""
@@ -411,8 +484,10 @@ class TelemetryTable(QWidget):
                     "LogViewerWidget",
                     title,
                     as_window=True,
-                    filtered_module=module.name_with_device(),
-                    filtered_module_children=with_children
+                    params={
+                        "filtered_module": module.name_with_device(),
+                        "filtered_module_children": with_children
+                    }
                 )
 
             case "copy_name":
@@ -428,7 +503,7 @@ class TelemetryTable(QWidget):
                     "TelemetryPlotter",
                     f"Graph: {module.name}",
                     as_window=True,
-                    module=module.name_with_device()
+                    params={"module": module.name_with_device()}
                 )
 
             case _:
@@ -461,6 +536,7 @@ class TelemetryTable(QWidget):
             ("View Logs with Children", "view_logs_children", False, None),
             (None, None, False, None),  # A None entry acts as a separator
             ("View Real-time Graph", "view_graph", False, None),
+            (None, None, False, None),  # A None entry acts as a separator
             # ("Export Statistics", "export_stats", True, None),
             ("Copy Module Name", "copy_name", False, None),
             ("Copy Value", "copy_value", False, None),
@@ -492,3 +568,20 @@ class TelemetryTable(QWidget):
             QApplication.clipboard().setText(str(val))
             # Optional: Show a temporary tooltip or status message "Value Copied!"
 
+    def get_state(self) -> dict:
+        return {
+            "filter_pattern": self.search_box.text(),
+            "show_device_column": self.show_device_column,
+            "filtered_device": self.filtered_device,
+            "sort_column": self.sort_column,
+            "sort_order": self.sort_order
+        }
+
+    def _resolve_module(self, mod_identifier):
+        if not mod_identifier: return None
+        if not isinstance(mod_identifier, str): return mod_identifier
+        try:
+            dev_name, mod_name = mod_identifier.split('.', 1)
+            return self.gui_context.registry.get_device(dev_name).get_module(mod_name)
+        except Exception:
+            return None

@@ -86,7 +86,8 @@ class BlinkMainWindow(QMainWindow):
         self.toolbar.addAction(self.btn_open_logs)
 
         self.btn_open_system_logs = QAction("System Logs", self)
-        self.btn_open_system_logs.triggered.connect(lambda _: self.create_widget("LogViewerWidget", "System Logs", allowed_device="SYSTEM"))
+        self.btn_open_system_logs.triggered.connect(lambda _: self.create_widget("LogViewerWidget", "System Logs", params={
+            "allowed_device": "SYSTEM"}))
         self.toolbar.addAction(self.btn_open_system_logs)
 
         # --- Telemetry Action ---
@@ -285,10 +286,16 @@ class BlinkMainWindow(QMainWindow):
         tab_index = self.central_tabs.addTab(widget, tab_name)
         self.central_tabs.setCurrentIndex(tab_index)
 
-    def create_widget(self, cls_name, name, as_window=False, show=True, **kwargs):
+    def create_widget(self, cls_name, name, as_window=False, show=True, params=None):
         """Routes a string class name to the correct factory method."""
 
         # 1. Prevent duplicate tabs using the helper
+        if params is None:
+            params = {}
+
+        if params.get("tab_name") is None:
+            params["tab_name"] = name
+
         if self.focus_tab_if_exists(name):
             return None
 
@@ -301,11 +308,11 @@ class BlinkMainWindow(QMainWindow):
         factory = self.widget_factories.get(cls_name)
 
         if not factory:
-            print(f"⚠️ Warning: Unknown widget class '{cls_name}'.")
+            print(f"Warning: Unknown widget class '{cls_name}'.")
             return None
 
         # 2. Instantiate core widget
-        widget = factory(self.gui_context, tab_name=name, **kwargs)
+        widget = factory(self.gui_context, params)
 
         # 3. Route to correct container
         if as_window:

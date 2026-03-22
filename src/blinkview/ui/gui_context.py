@@ -7,13 +7,14 @@
 from dataclasses import dataclass
 from typing import Callable, TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QObject
 
 from blinkview.ui.log_filter_index_manager import LogFilterIndexManager
 
 if TYPE_CHECKING:
     from blinkview.ui.utils.config_node_manager import ConfigNodeManager
     from blinkview.ui.widgets.config.style_config import StyleConfig
+    from blinkview.core.settings_manager import SettingsManager
 
 
 class GUIContext(QObject):
@@ -26,6 +27,8 @@ class GUIContext(QObject):
         super().__init__(parent)
         self.registry = None
         self.id_registry = None
+        self.settings: 'SettingsManager' = None
+
         self.telemetry_model = None
         self.module_filter_model = None
         self.theme: 'StyleConfig' = None
@@ -56,6 +59,7 @@ class GUIContext(QObject):
     def set_registry(self, registry):
         self.registry = registry
         self.id_registry = registry.id_registry
+        self.settings = registry.system_ctx.settings
 
     def set_telemetry_model(self, telemetry_model):
         self.telemetry_model = telemetry_model

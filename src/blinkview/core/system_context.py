@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from .id_registry import IDRegistry     # Adjust import path as needed
     from .task_manager import TaskManager
     from .registry import Registry
+    from .settings_manager import SettingsManager
 
 
 @dataclass(frozen=True)
@@ -21,3 +22,5 @@ class SystemContext:
     id_registry: 'IDRegistry'
     factories: 'FactoryRegistry'
     tasks: 'TaskManager'
+    settings: 'SettingsManager'
+

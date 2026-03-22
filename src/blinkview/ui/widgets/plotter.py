@@ -3,11 +3,14 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 #
 # Copyright (c) 2026 Roland Uuesoo
+from dataclasses import dataclass
+from typing import List, Optional
 
 import pyqtgraph as pg
+from PySide6.QtGui import QAction
 from pyqtgraph import GraphicsLayoutWidget
 import numpy as np
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QToolBar
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QToolBar, QMenu
 from PySide6.QtCore import QTimer
 
 from blinkview.core.device_identity import ModuleIdentity
@@ -16,68 +19,110 @@ from blinkview.ui.gui_context import GUIContext
 from blinkview.utils.log_filter import LogFilter
 
 
+@dataclass
+class SeriesContainer:
+    """The permanent record of a data channel."""
+    index: int
+    name: str
+    color: str
+    visible: bool = True
+    # These are ephemeral; they get replaced when the UI layout changes
+    curve: Optional[pg.PlotDataItem] = None
+    plot_item: Optional[pg.PlotItem] = None
+
+
 class TelemetryPlotter(QWidget):
-    def __init__(self, gui_context, tab_name, module: str, max_points=10000, parent=None):
+    def __init__(self, gui_context, state=None, parent=None):
         super().__init__(parent)
-        self.gui_context = gui_context
-        self.tab_name = tab_name
-        self.max_points = max_points
+        self.gui_context: GUIContext = gui_context
+        self.max_points = self.gui_context.settings.get('plot.max_points', 10000)
 
-        # Toggle State
-        self.is_split = False
+        self.tab_name: str = ""
+        self.is_split: bool = False
+        self.module: Optional[ModuleIdentity] = None
 
-        print(f"[TelemetryPlotter] resolving module '{module}'")
-        self.filtered_module = self._resolve_module(module)
-        print(f"[TelemetryPlotter] resolved module '{module}' -> '{self.filtered_module}'")
+        # Buffers
+        self.x_data = np.zeros(self.max_points)
+        self.y_data = None
+        self.ptr = 0
 
-        # Main Layout
+        # New Single Source of Truth for Series
+        self.series_list: List[SeriesContainer] = []
+
+        self._set_defaults()
+
+        if state:
+            self.restore(state)
+
+        # UI Setup
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(0)  # Keep toolbar flush with the graph
+        self.layout.setSpacing(0)
 
-        # Toolbar Setup
         self.toolbar = QToolBar()
-        self.toolbar.setMovable(False)  # Keep it locked at the top
         self.layout.addWidget(self.toolbar)
 
-        # Add Split Toggle Action
-        # Making it checkable gives the user visual feedback (button stays pressed)
         self.split_action = self.toolbar.addAction("Split View")
         self.split_action.setCheckable(True)
+        self.split_action.setChecked(self.is_split)
         self.split_action.triggered.connect(self.set_split_mode)
 
-        # Optional: Add a separator or clear button
+        self.channel_btn = self.toolbar.addAction("Channels")
+        self.channel_btn.triggered.connect(self._show_channel_menu)
+
         self.toolbar.addSeparator()
         self.toolbar.addAction("Clear", self.clear)
 
-        # Setup Graphics Layout (allows multiple plots in one widget)
-        # This replaces PlotWidget
         self.graph_view = pg.GraphicsLayoutWidget()
         self.layout.addWidget(self.graph_view)
 
-        # Buffers & Tracking
-        self.plots = []  # List of pg.PlotItem (the actual graph boxes)
-        self.curves = []  # List of pg.PlotDataItem (the lines)
-        self.x_data = np.zeros(self.max_points)
-        self.y_data = None  # Initialized in _init_channels as np.zeros((max_points, num_vals))
-        self.ptr = 0
-        self.num_channels = 0
-
-        # Registration & Data Loading
         self.gui_context.register_log_target(self)
-        self.set_split_mode(self.is_split)
         self.load_history()
 
-    def _init_channels(self, num_channels):
-        """Initializes data buffers and triggers the UI build."""
-        self.num_channels = num_channels
+    def _set_defaults(self):
+        self.tab_name = self.__class__.__name__
+        self.is_split = False
+
+    def restore(self, state: dict):
+        print(f"[TelemetryPlotter] restoring state '{state}'")
+        self.tab_name = state.get("tab_name", self.tab_name)
+        self.is_split = state.get("is_split", self.is_split)
+
+        module_name = state["module"]
+
+        print(f"[TelemetryPlotter] resolving module '{module_name}'")
+        self.module = self._resolve_module(state["module"])
+        print(f"[TelemetryPlotter] resolved module '{module_name}' -> '{self.module}'")
+
+        self.clear()
+        series = state.get("series", [])
+        for s in series:
+            self.series_list.append(SeriesContainer(s["index"], s["name"], s["color"], s["visible"]))
+
+    def _init_channels(self, num_channels: int):
+        """Called exactly once when data first arrives."""
         self.y_data = np.zeros((self.max_points, num_channels))
 
-        # Delegate the creation of PlotItems and PlotDataItems to the split logic
+        if not self.series_list:
+            colors = ['y', 'g', 'c', 'm', 'r', 'b']
+            for i in range(num_channels):
+                self.series_list.append(SeriesContainer(
+                    index=i,
+                    name=f"{self.module.short_name} {i}" if num_channels > 1 else self.module.short_name,
+                    color=colors[i % len(colors)],
+                    visible=True  # Default to visible
+                ))
+
+        # Now build the UI for the first time
         self.set_split_mode(self.is_split)
 
+    @property
+    def num_channels(self) -> int:
+        """Dynamically get channel count from the buffer shape."""
+        return self.y_data.shape[1] if self.y_data is not None else 0
+
     def process_log_batch(self, batch: list[LogRow], load_history=False):
-        target_mod = self.filtered_module
+        target_mod = self.module
 
         # 1. Extraction: Get timestamp and the WHOLE list of values
         extracted = [
@@ -90,8 +135,8 @@ class TelemetryPlotter(QWidget):
             return
 
         # 2. Setup channels on first valid data
-        first_vals = extracted[0][1]
         if self.y_data is None:
+            first_vals = extracted[0][1]
             self._init_channels(len(first_vals))
 
         # Convert to numpy
@@ -121,14 +166,6 @@ class TelemetryPlotter(QWidget):
 
         self._update_plots()
 
-    def clear(self):
-        self.x_data.fill(0)
-        if self.y_data is not None:
-            self.y_data.fill(0)
-        self.ptr = 0
-        for curve in self.curves:
-            curve.setData([], [])
-
     def _resolve_module(self, mod_identifier):
         if not mod_identifier or not isinstance(mod_identifier, str): return None
         try:
@@ -140,9 +177,9 @@ class TelemetryPlotter(QWidget):
 
     def load_history(self):
         """Special one-time call for the initial historical load."""
-        print(f"Loading history for '{self.filtered_module}'")
+        print(f"Loading history for '{self.module}'")
         try:
-            log_filter = LogFilter(self.gui_context.id_registry, filtered_module=self.filtered_module)
+            log_filter = LogFilter(self.gui_context.id_registry, filtered_module=self.module)
             history = self.gui_context.registry.central.get_rows(
                 log_filter,
                 total=self.max_points
@@ -156,59 +193,130 @@ class TelemetryPlotter(QWidget):
             pass
 
     def get_state(self):
-        return {"module": self.filtered_module.name_with_device()}
+        series = []
+        for s in self.series_list:
+            series.append({
+                "index": s.index,
+                "name": s.name,
+                "color": s.color,
+                "visible": s.visible,
+            })
+        return {
+            "module": self.module.name_with_device(),
+            "is_split": self.is_split,
+            "series": series,
+        }
 
     def set_split_mode(self, split: bool):
         self.is_split = split
-        if self.num_channels == 0:
+        if not self.series_list:
             return
 
-        visibility_states = [c.isVisible() for c in self.curves]
-        if not visibility_states and self.num_channels > 0:
-            visibility_states = [True] * self.num_channels
-
-        # 1. Clear the current layout and curve list
+        # 1. Clear the old UI objects from the view
         self.graph_view.clear()
-        self.plots = []
-        self.curves = []
 
-        colors = ['y', 'g', 'c', 'm', 'r', 'b']
-
+        # 2. Setup the new Layout
+        shared_plot = None
+        legend = None
         if not self.is_split:
-            # COMBINED: One plot, all curves inside
-            p = self.graph_view.addPlot(axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
-            p.addLegend()
-            self.plots.append(p)
-            for i in range(self.num_channels):
-                curve = p.plot(pen=colors[i % len(colors)], name=f"Val {i}")
-                # Re-apply visibility
-                if i < len(visibility_states):
-                    curve.setVisible(visibility_states[i])
-                self.curves.append(curve)
-        else:
-            # SPLIT: Multiple plots, one curve each
-            for i in range(self.num_channels):
-                # addPlot(row, col) - putting each on a new row
+            shared_plot = self.graph_view.addPlot(axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
+            if self.num_channels > 1:
+                legend = shared_plot.addLegend()
+
+        # 3. Re-link existing containers to new UI widgets
+        for i, s in enumerate(self.series_list):
+            if self.is_split:
                 p = self.graph_view.addPlot(row=i, col=0, axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
-                # Sync x-axes so zooming one zooms all
                 if i > 0:
-                    p.setXLink(self.plots[0])
+                    p.setXLink(self.series_list[0].plot_item)
+                s.plot_item = p
+            else:
+                s.plot_item = shared_plot
 
-                self.plots.append(p)
-                curve = p.plot(pen=colors[i % len(colors)], name=f"Val {i}")
-                # Re-apply visibility
-                if i < len(visibility_states):
-                    curve.setVisible(visibility_states[i])
-                    # If hidden, you might also want to hide the whole plot box in split mode
-                    p.setVisible(visibility_states[i])
-                self.curves.append(curve)
+            # Create new curve and store it back in the persistent container
+            s.curve = s.plot_item.plot(pen=s.color, name=s.name)
 
-        # Trigger a redraw of existing data
+            # Re-apply the container's visibility state to the new objects
+            s.curve.setVisible(s.visible)
+            if self.is_split:
+                s.plot_item.setVisible(s.visible)
+
+        if legend:
+            self._setup_legend_callbacks(legend)
+
         self._update_plots()
 
     def _update_plots(self):
-        """Helper to push buffer data to the curves."""
-        if self.ptr == 0: return
+        """Pushes data only to containers that currently have a valid curve."""
+        if self.ptr == 0:
+            return
+
         x_slice = self.x_data[:self.ptr]
-        for i, curve in enumerate(self.curves):
-            curve.setData(x_slice, self.y_data[:self.ptr, i])
+        y_slice = self.y_data[:self.ptr]
+
+        for s in self.series_list:
+            # Check if container is visible AND has a valid UI handle
+            if s.visible and s.curve is not None:
+                s.curve.setData(x_slice, y_slice[:, s.index])
+
+    def clear(self):
+        self.x_data.fill(0)
+        if self.y_data is not None:
+            self.y_data.fill(0)
+        self.ptr = 0
+        for series in self.series_list:
+            series.curve.setData([], [])
+
+    def closeEvent(self, event):
+        """Cleanup registration when the widget is closed."""
+        self.gui_context.deregister_log_target(self)
+        super().closeEvent(event)
+
+    def _show_channel_menu(self):
+        """Generates a popup menu to toggle specific series visibility."""
+        menu = QMenu(self)
+        for series in self.series_list:
+            action = QAction(series.name, menu, checkable=True)
+            action.setChecked(series.visible)
+            # Use a lambda with default argument to capture current 'series'
+            action.triggered.connect(lambda checked, s=series: self.toggle_series(s, checked))
+            menu.addAction(action)
+
+        # Position menu under the toolbar button
+        button_widget = self.toolbar.widgetForAction(self.channel_btn)
+        menu.exec(button_widget.mapToGlobal(button_widget.rect().bottomLeft()))
+
+    def _setup_legend_callbacks(self, legend):
+        """Connects legend clicks to our toggle_series logic."""
+        for sample, label in legend.items:
+            # The 'label' is a LabelItem; its 'item' is the underlying GraphicsWidget
+            # We override the click event to trigger our custom logic
+            for series in self.series_list:
+                if series.name == label.text:
+                    # Capture the series in a closure
+                    label.mouseClickEvent = lambda ev, s=series: self.toggle_series(s, not s.visible)
+                    sample.mouseClickEvent = lambda ev, s=series: self.toggle_series(s, not s.visible)
+
+    def toggle_series(self, series: SeriesContainer, visible: bool):
+        """The single source of truth for toggling visibility."""
+        series.visible = visible
+
+        if series.curve:
+            series.curve.setVisible(visible)
+
+        if self.is_split and series.plot_item:
+            series.plot_item.setVisible(visible)
+
+        # Force an auto-range so the plot area shrinks/grows to fit visible data
+        if series.plot_item:
+            series.plot_item.autoRange()
+
+    def rename_channel(self, index: int, new_name: str):
+        """Example of why persistence is great: you just update the container."""
+        if 0 <= index < len(self.series_list):
+            s = self.series_list[index]
+            s.name = new_name
+            # If the UI exists, update the legend/label immediately
+            if s.curve:
+                s.curve.opts['name'] = new_name
+                # Note: pyqtgraph legends might need a refresh call here

@@ -18,6 +18,7 @@ from .logger import SystemLogger, PrintLogger
 from .plugin_manager import PluginManager
 from .bisect_reorder import Reorder
 from .reorder_buffer import ReorderBuffer, ReorderFactory
+from .settings_manager import SettingsManager
 from .sources import SourcesManager
 from .system_context import SystemContext
 from .task_manager import TaskManager
@@ -106,7 +107,7 @@ class Registry:
 
         self.id_registry = IDRegistry()
 
-        self.system_ctx = SystemContext(time_ns=self.now_ns, registry=self, id_registry=self.id_registry, factories=factories, tasks=TaskManager())
+        self.system_ctx = SystemContext(time_ns=self.now_ns, registry=self, id_registry=self.id_registry, factories=factories, tasks=TaskManager(), settings=SettingsManager())
         self.file_manager.set_context(self.system_ctx)
 
         self.sources = None
