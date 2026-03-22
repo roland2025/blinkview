@@ -4,14 +4,15 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import re
 from dataclasses import dataclass
 from typing import List, Optional
 
 import pyqtgraph as pg
 from PySide6.QtGui import QAction, QColor
-from pyqtgraph import GraphicsLayoutWidget
+from pyqtgraph import GraphicsLayoutWidget, LinearRegionItem
 import numpy as np
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QToolBar, QMenu
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QToolBar, QMenu, QLabel, QComboBox
 from PySide6.QtCore import QTimer
 
 from blinkview.core.device_identity import ModuleIdentity
@@ -28,8 +29,9 @@ class SeriesContainer:
     color: str
     visible: bool = True
     # These are ephemeral; they get replaced when the UI layout changes
-    curve: Optional[pg.PlotDataItem] = None
-    plot_item: Optional[pg.PlotItem] = None
+    curve: Optional[pg.PlotDataItem] = None  # Main View
+    overview_curve: Optional[pg.PlotDataItem] = None  # Overview View
+    plot_item: Optional[pg.PlotItem] = None  # Main View Plot
 
 
 class TelemetryPlotter(QWidget):
@@ -49,6 +51,14 @@ class TelemetryPlotter(QWidget):
 
         # New Single Source of Truth for Series
         self.series_list: List[SeriesContainer] = []
+
+        self.overview_plot: Optional[pg.PlotItem] = None
+        self.region: Optional[LinearRegionItem] = None
+        self.is_auto_scroll = True  # Keep window on the "last 10 mins"
+        self._is_system_updating = False
+
+        self.view_duration_text = "60s"  # seconds
+        self.view_duration = 0
 
         self._set_defaults()
 
@@ -72,7 +82,30 @@ class TelemetryPlotter(QWidget):
         self.channel_btn.triggered.connect(self._show_channel_menu)
 
         self.toolbar.addSeparator()
+        self.toolbar.addWidget(QLabel(" Window: "))
+        self.duration_combo = QComboBox()
+        self.duration_combo.setEditable(True)
+        self.duration_combo.addItems(["10s", "30s", "60s", "5m", "10m", "30m", "1h"])
+
+        idx = self.duration_combo.findText(self.view_duration_text)
+        if idx >= 0:
+            self.duration_combo.setCurrentIndex(idx)
+        else:
+            # Fallback if someone changes the list but forgets the default
+            self.duration_combo.setCurrentText(self.view_duration_text)
+
+        self.duration_combo.currentTextChanged.connect(self._on_duration_changed)
+        self.toolbar.addWidget(self.duration_combo)
+
         self.toolbar.addAction("Clear", self.clear)
+
+        self.toolbar.addSeparator()
+
+        # Add an Auto-Scroll toggle to the toolbar
+        self.autoscroll_action = self.toolbar.addAction("Auto-Scroll: ON")
+        self.autoscroll_action.setCheckable(True)
+        self.autoscroll_action.setChecked(True)
+        self.autoscroll_action.triggered.connect(self.set_autoscroll)
 
         self.graph_view = pg.GraphicsLayoutWidget()
         self.layout.addWidget(self.graph_view)
@@ -83,11 +116,18 @@ class TelemetryPlotter(QWidget):
     def _set_defaults(self):
         self.tab_name = self.__class__.__name__
         self.is_split = False
+        self.is_auto_scroll = True
+        self.is_system_updating = True
+        self.view_duration_text = "60s"
+        self.view_duration = 60
 
     def restore(self, state: dict):
         print(f"[TelemetryPlotter] restoring state '{state}'")
         self.tab_name = state.get("tab_name", self.tab_name)
         self.is_split = state.get("is_split", self.is_split)
+
+        self.view_duration_text = state.get("view_duration", self.view_duration_text)
+        self.view_duration = self._parse_duration(self.view_duration_text)
 
         module_name = state["module"]
 
@@ -99,6 +139,41 @@ class TelemetryPlotter(QWidget):
         series = state.get("series", [])
         for i, s in enumerate(series):
             self.series_list.append(SeriesContainer(s["index"], s["name"], self.get_color(i).name(), s["visible"]))
+
+    def _parse_duration(self, text: str) -> Optional[int]:
+        """Parses strings like '10s', '5m', '2h' into total seconds."""
+        text = text.lower().strip()
+        # Regex to capture the number and the unit suffix
+        match = re.match(r"^(\d*\.?\d+)\s*([smh]?)$", text)
+        if not match:
+            return None
+
+        value = float(match.group(1))
+        unit = match.group(2)
+
+        if unit == 'm':
+            return int(value * 60)
+        elif unit == 'h':
+            return int(value * 3600)
+        else:  # Default to seconds if 's' or no unit provided
+            return int(value)
+
+    def _on_duration_changed(self, text: str):
+        seconds = self._parse_duration(text)
+        if seconds is None or seconds <= 0:
+            return
+
+        self.view_duration = seconds
+
+        if self.ptr > 0:
+            if self.is_auto_scroll:
+                # Snap to the live edge
+                now = self.x_data[self.ptr - 1]
+                self._apply_view_range(now - self.view_duration, now)
+            else:
+                # Stay where we are, but expand/shrink the window to the left
+                _, current_max_x = self.region.getRegion()
+                self._apply_view_range(current_max_x - self.view_duration, current_max_x)
 
     def _init_channels(self, num_channels: int):
         """Called exactly once when data first arrives."""
@@ -208,6 +283,7 @@ class TelemetryPlotter(QWidget):
             "module": self.module.name_with_device(),
             "is_split": self.is_split,
             "series": series,
+            "view_duration": self.duration_combo.currentText(),
         }
 
     def set_split_mode(self, split: bool):
@@ -215,31 +291,35 @@ class TelemetryPlotter(QWidget):
         if not self.series_list:
             return
 
-        # 1. Clear the old UI objects from the view
         self.graph_view.clear()
 
-        # 2. Setup the new Layout
+        # Setup Overview Plot with DateAxis
+        self.overview_plot = self.graph_view.addPlot(
+            row=0,
+            col=0,
+            # title="History Overview",
+            axisItems={'bottom': pg.DateAxisItem(orientation='bottom')}
+        )
+        self.overview_plot.setMaximumHeight(120)
+
+        # Setup Main Plots
         shared_plot = None
         legend = None
         if not self.is_split:
-            shared_plot = self.graph_view.addPlot(axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
+            shared_plot = self.graph_view.addPlot(row=1, col=0, axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
             if self.num_channels > 1:
                 legend = shared_plot.addLegend()
 
-        # 3. Re-link existing containers to new UI widgets
         for i, s in enumerate(self.series_list):
             if self.is_split:
-                p = self.graph_view.addPlot(row=i, col=0, axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
+                p = self.graph_view.addPlot(row=i+1, col=0, axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
                 if i > 0:
                     p.setXLink(self.series_list[0].plot_item)
                 s.plot_item = p
             else:
                 s.plot_item = shared_plot
 
-            # Create new curve and store it back in the persistent container
             s.curve = s.plot_item.plot(pen=s.color, name=s.name)
-
-            # Re-apply the container's visibility state to the new objects
             s.curve.setVisible(s.visible)
             if self.is_split:
                 s.plot_item.setVisible(s.visible)
@@ -247,20 +327,90 @@ class TelemetryPlotter(QWidget):
         if legend:
             self._setup_legend_callbacks(legend)
 
+
+        # Setup Region with Smart Initialization
+        current_now = self.x_data[self.ptr - 1] if self.ptr > 0 else 60
+        start_region = current_now - self.view_duration
+
+        self.region = LinearRegionItem([start_region, current_now])
+        self.region.setZValue(10)
+        self.overview_plot.addItem(self.region)
+
+        for s in self.series_list:
+            s.overview_curve = self.overview_plot.plot(pen=s.color)
+            s.overview_curve.setVisible(s.visible)
+
+        # --- SYNC LOGIC ---
+        def update_main_from_region():
+            # 1. Break the infinite feedback loop
+            if self._is_system_updating:
+                return
+
+            minX, maxX = self.region.getRegion()
+
+            # 2. Auto-Scroll Snap Logic
+            if self.ptr > 0:
+                latest_time = self.x_data[self.ptr - 1]
+                snap_tolerance = self.view_duration * 0.05
+
+                if maxX >= latest_time - snap_tolerance:
+                    self.set_autoscroll(True)
+                else:
+                    self.set_autoscroll(False)
+
+            # 3. Apply the range to all main plots
+            for s in self.series_list:
+                if s.plot_item:
+                    s.plot_item.setXRange(minX, maxX, padding=0)
+
+        def update_region_from_main(window, viewRange):
+            # 1. Break the infinite feedback loop
+            if self._is_system_updating:
+                return
+
+            rlow, rhigh = viewRange[0]
+
+            # 2. Auto-Scroll Snap Logic
+            if self.ptr > 0:
+                latest_time = self.x_data[self.ptr - 1]
+                snap_tolerance = self.view_duration * 0.05
+
+                if rhigh >= latest_time - snap_tolerance:
+                    self.set_autoscroll(True)
+                else:
+                    self.set_autoscroll(False)
+
+            # 3. Safely update the overview region
+            self._is_system_updating = True  # Lock
+            self.region.setRegion([rlow, rhigh])  # Triggers update_main_from_region, which will safely return
+            self._is_system_updating = False  # Unlock
+
+        # Connect the signals once and leave them alone
+        self.region.sigRegionChanged.connect(update_main_from_region)
+
+        main_p = self.series_list[0].plot_item
+        if main_p:
+            main_p.sigRangeChanged.connect(update_region_from_main)
+
         self._update_plots()
 
     def _update_plots(self):
-        """Pushes data only to containers that currently have a valid curve."""
-        if self.ptr == 0:
-            return
+        if self.ptr == 0: return
 
         x_slice = self.x_data[:self.ptr]
         y_slice = self.y_data[:self.ptr]
+        current_time = x_slice[-1]
 
+        # ALWAYS update data so unhiding is instantaneous
         for s in self.series_list:
-            # Check if container is visible AND has a valid UI handle
-            if s.visible and s.curve is not None:
+            if s.curve:
                 s.curve.setData(x_slice, y_slice[:, s.index])
+            if s.overview_curve:
+                s.overview_curve.setData(x_slice, y_slice[:, s.index])
+
+        # Handle the sliding window for Auto-Scroll
+        if self.is_auto_scroll:
+            self._apply_view_range(current_time - self.view_duration, current_time)
 
     def clear(self):
         self.x_data.fill(0)
@@ -304,15 +454,28 @@ class TelemetryPlotter(QWidget):
         """The single source of truth for toggling visibility."""
         series.visible = visible
 
+        # 1. Toggle main curve visibility
         if series.curve:
             series.curve.setVisible(visible)
 
+        # 2. Toggle overview curve visibility (The small history lines)
+        if series.overview_curve:
+            series.overview_curve.setVisible(visible)
+
+        # 3. Handle Split View Layout
         if self.is_split and series.plot_item:
             series.plot_item.setVisible(visible)
 
-        # Force an auto-range so the plot area shrinks/grows to fit visible data
-        if series.plot_item:
+        # 4. Trigger a Y-axis rescale
+        # If unhiding, we want the plot to jump to the data's scale immediately
+        if visible and series.plot_item:
             series.plot_item.autoRange()
+
+        if self.overview_plot:
+            # We tell the overview plot to fit its view to currently visible items
+            self.overview_plot.autoRange()
+
+        # self.graph_view.ci.layout.activate()
 
     def rename_channel(self, index: int, new_name: str):
         """Example of why persistence is great: you just update the container."""
@@ -323,3 +486,30 @@ class TelemetryPlotter(QWidget):
             if s.curve:
                 s.curve.opts['name'] = new_name
                 # Note: pyqtgraph legends might need a refresh call here
+
+    def set_autoscroll(self, enabled: bool):
+        """Updates the auto-scroll state and UI."""
+        self.is_auto_scroll = enabled
+        self.autoscroll_action.setChecked(enabled)
+        self.autoscroll_action.setText(f"Auto-Scroll: {'ON' if enabled else 'OFF'}")
+
+        # If turned back on, force a snap to the present immediately
+        if enabled:
+            self._update_plots()
+
+    def _apply_view_range(self, start_time: float, end_time: float):
+        """Safely updates both the region and the main plots without triggering feedback loops."""
+        if not self.region:
+            return
+
+        self._is_system_updating = True
+        try:
+            # 1. Update the overview slider
+            self.region.setRegion([start_time, end_time])
+
+            # 2. Update the main plots (the bottom views)
+            for s in self.series_list:
+                if s.plot_item:
+                    s.plot_item.setXRange(start_time, end_time, padding=0)
+        finally:
+            self._is_system_updating = False
