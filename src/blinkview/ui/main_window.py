@@ -460,19 +460,24 @@ class BlinkMainWindow(QMainWindow):
         """Creates or removes toolbars based on the current sources config."""
 
         # Remove toolbars for sources that no longer exist
-        existing_ids = set(sources_config.keys())
         tracked_ids = list(self.device_toolbars.keys())
-
         for source_id in tracked_ids:
-            if source_id not in existing_ids:
+            config = sources_config.get(source_id)
+
+            # If the source was deleted OR it's now disabled, kill the toolbar
+            if not config or not config.get("enabled", False):
                 toolbar = self.device_toolbars.pop(source_id)
                 self.removeToolBar(toolbar)
                 toolbar.deleteLater()
+                print(f"[UI] Removed toolbar for: {source_id}")
 
-        # Add toolbars for new sources
+        # Handle Additions (New in config AND toggled to Enabled)
         for source_id, config in sources_config.items():
-            if source_id not in self.device_toolbars:
+            is_enabled = config.get("enabled", False)
+
+            if is_enabled and source_id not in self.device_toolbars:
                 self.create_device_control_toolbar(source_id, config.get("name", source_id))
+                print(f"[UI] Created toolbar for: {source_id}")
 
     def create_device_control_toolbar(self, source_id, device_name):
         """Generates a dedicated toolbar for a specific device."""

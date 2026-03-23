@@ -164,6 +164,15 @@ class DynamicConfigWidget(QWidget):
         self.editable = state.get("editable", self.editable)
         self.child_name = state.get("child_name", self.child_name)
 
+    def get_state(self):
+        return {
+            "tab_name": self.tab_name,
+            "path": self.path,
+            "drop_keys": self.drop_keys,
+            "editable": self.editable,
+            "child_name": self.child_name
+        }
+
     def closeEvent(self, event):
         """Called automatically when the widget is instructed to close."""
         print(f"[Widget] Closing. Deregistering node for {self.node.active_path}")

@@ -74,7 +74,10 @@ class ConfigNodeManager(QObject):
         Nodes will automatically ignore updates that don't match their active_path.
         """
         for node in self.nodes:
-            node.recv_config_schema(path, config, schema)
+            try:
+                node.recv_config_schema(path, config, schema)
+            except Exception as e:
+                print(f"[ConfigManager] Broadcasting '{path}' failed: {e}")
 
     def show(self, path: str, child_name=None, drop_keys: list = None, editable: bool = True):
         print(f"[ConfigManager] Request to show config for '{path}' with name='{child_name}', drop_keys={drop_keys}, editable={editable}")
