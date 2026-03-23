@@ -4,10 +4,10 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtGui import QAction, QFont, QPixmap, QPainter, QColor, QDrag
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableView,
                                QHeaderView, QLineEdit, QPushButton, QToolBar, QMenu, QApplication)
-from PySide6.QtCore import Qt, QSortFilterProxyModel, QEvent, QSize, QTimer
+from PySide6.QtCore import Qt, QSortFilterProxyModel, QEvent, QSize, QTimer, QMimeData
 
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.in_development import set_as_in_development
@@ -149,6 +149,8 @@ class TelemetryTable(QWidget):
         self.sort_order = 0
 
         self._set_defaults()
+
+        self.drag_start_pos = None
 
         self.hovered_row = -1
 
@@ -384,18 +386,40 @@ class TelemetryTable(QWidget):
         self.view.update(self.proxy_model.index(self.hovered_row, TelemetryCol.ACTIONS))
 
     def eventFilter(self, source, event):
-        """Detect mouse leaving the table to hide all buttons."""
-        if event.type() == QEvent.MouseButtonPress and source is self.view.viewport():
-            if event.button() == Qt.RightButton:
-                # Trigger the menu immediately on press
-                self._show_context_menu(event.pos())
-                return True
+        if source is not self.view.viewport():
+            return super().eventFilter(source, event)
 
-        if event.type() == QEvent.Leave and source is self.view.viewport():
-            if self.hovered_row != -1:
-                row = self.hovered_row
-                self.hovered_row = -1
-                self.view.update(self.proxy_model.index(row, TelemetryCol.ACTIONS))
+        match event.type():
+            case QEvent.MouseButtonPress:
+                match event.button():
+                    case Qt.LeftButton:
+                        self.drag_start_pos = event.pos()
+                    case Qt.RightButton:
+                        self._show_context_menu(event.pos())
+                        return True
+
+            case QEvent.MouseMove:
+                # 1. Ensure left button is held and we have a valid start position
+                if not (event.buttons() & Qt.LeftButton) or self.drag_start_pos is None:
+                    return False
+
+                # 2. Check if moved beyond the system drag threshold (usually ~4-10px)
+                if (event.pos() - self.drag_start_pos).manhattanLength() < QApplication.startDragDistance():
+                    return False
+
+                # 3. Resolve the module under the start position
+                index = self.view.indexAt(self.drag_start_pos)
+                if index.isValid() and index.column() == TelemetryCol.NAME:
+                    self._perform_drag(index)
+                    self.drag_start_pos = None  # Reset to prevent double-triggering
+                    return True
+
+            case QEvent.Leave:
+                if self.hovered_row != -1:
+                    row = self.hovered_row
+                    self.hovered_row = -1
+                    self.view.update(self.proxy_model.index(row, TelemetryCol.ACTIONS))
+
         return super().eventFilter(source, event)
 
     def get_active_indices(self) -> list:
@@ -503,7 +527,7 @@ class TelemetryTable(QWidget):
                     "TelemetryPlotter",
                     f"Graph: {module.name}",
                     as_window=True,
-                    params={"module": module.name_with_device()}
+                    params={"modules": [module.name_with_device()]}
                 )
 
             case _:
@@ -585,3 +609,45 @@ class TelemetryTable(QWidget):
             return self.gui_context.registry.get_device(dev_name).get_module(mod_name)
         except Exception:
             return None
+
+    def _perform_drag(self, proxy_index):
+        module = self._get_module_at_index(proxy_index)
+        if not module:
+            return
+
+        # 1. Package the data
+        mime_data = QMimeData()
+        # This matches the 'mod_identifier' your Plotter is looking for
+        mime_data.setText(module.name_with_device())
+
+        # 2. Create a "Ghost" Pixmap for the cursor
+        # We'll draw a small themed badge for the module
+        padding = 10
+        font_metrics = self.view.fontMetrics()
+        text_width = font_metrics.horizontalAdvance(module.name)
+        pixmap = QPixmap(text_width + (padding * 2), 24)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Draw a rounded background
+        painter.setBrush(QColor(60, 60, 60, 200))  # Semi-transparent dark gray
+        painter.setPen(QColor(100, 100, 255))  # Subtle blue border
+        painter.drawRoundedRect(pixmap.rect().adjusted(1, 1, -1, -1), 5, 5)
+
+        # Draw text
+        painter.setPen(Qt.white)
+        painter.drawText(pixmap.rect(), Qt.AlignCenter, module.name)
+        painter.end()
+
+        # 3. Start the Drag
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+        drag.setPixmap(pixmap)
+
+        # Center the pixmap on the cursor
+        drag.setHotSpot(pixmap.rect().center())
+
+        # This blocks until the drop is finished or cancelled
+        drag.exec_(Qt.CopyAction)

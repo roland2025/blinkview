@@ -22,16 +22,25 @@ from blinkview.utils.log_filter import LogFilter
 
 
 @dataclass
+class ModuleBuffer:
+    """Holds the rolling buffers for a specific module."""
+    x_data: np.ndarray
+    y_data: Optional[np.ndarray] = None
+    ptr: int = 0
+    num_channels: int = 0
+
+
+@dataclass
 class SeriesContainer:
     """The permanent record of a data channel."""
+    module: ModuleIdentity  # NEW: Track which module this series belongs to
     index: int
     name: str
     color: str
     visible: bool = True
-    # These are ephemeral; they get replaced when the UI layout changes
-    curve: Optional[pg.PlotDataItem] = None  # Main View
-    overview_curve: Optional[pg.PlotDataItem] = None  # Overview View
-    plot_item: Optional[pg.PlotItem] = None  # Main View Plot
+    curve: Optional[pg.PlotDataItem] = None
+    overview_curve: Optional[pg.PlotDataItem] = None
+    plot_item: Optional[pg.PlotItem] = None
 
 
 class TelemetryPlotter(QWidget):
@@ -45,9 +54,8 @@ class TelemetryPlotter(QWidget):
         self.module: Optional[ModuleIdentity] = None
 
         # Buffers
-        self.x_data = np.zeros(self.max_points)
-        self.y_data = None
-        self.ptr = 0
+        self.modules: List[ModuleIdentity] = []
+        self.buffers: dict[ModuleIdentity, ModuleBuffer] = {}
 
         # New Single Source of Truth for Series
         self.series_list: List[SeriesContainer] = []
@@ -82,8 +90,9 @@ class TelemetryPlotter(QWidget):
         self.channel_btn.triggered.connect(self._show_channel_menu)
 
         self.toolbar.addSeparator()
-        self.toolbar.addWidget(QLabel(" Window: "))
+        self.toolbar.addWidget(QLabel("Window:"))
         self.duration_combo = QComboBox()
+        self.duration_combo.setMinimumWidth(60)
         self.duration_combo.setEditable(True)
         self.duration_combo.addItems(["10s", "30s", "60s", "5m", "10m", "30m", "1h"])
 
@@ -95,7 +104,6 @@ class TelemetryPlotter(QWidget):
             self.duration_combo.setCurrentText(self.view_duration_text)
 
         self.duration_combo.currentTextChanged.connect(self._on_duration_changed)
-        self.toolbar.addWidget(self.duration_combo)
 
         self.toolbar.addAction("Clear", self.clear)
 
@@ -107,8 +115,12 @@ class TelemetryPlotter(QWidget):
         self.autoscroll_action.setChecked(True)
         self.autoscroll_action.triggered.connect(self.set_autoscroll)
 
+        self.toolbar.addWidget(self.duration_combo)
+
         self.graph_view = pg.GraphicsLayoutWidget()
         self.layout.addWidget(self.graph_view)
+
+        self.setAcceptDrops(True)
 
         self.gui_context.register_log_target(self)
         self.load_history()
@@ -125,20 +137,26 @@ class TelemetryPlotter(QWidget):
         print(f"[TelemetryPlotter] restoring state '{state}'")
         self.tab_name = state.get("tab_name", self.tab_name)
         self.is_split = state.get("is_split", self.is_split)
-
         self.view_duration_text = state.get("view_duration", self.view_duration_text)
         self.view_duration = self._parse_duration(self.view_duration_text)
 
-        module_name = state["module"]
-
-        print(f"[TelemetryPlotter] resolving module '{module_name}'")
-        self.module = self._resolve_module(state["module"])
-        print(f"[TelemetryPlotter] resolved module '{module_name}' -> '{self.module}'")
+        # Restore multiple modules
+        module_names = state.get("modules", [])
+        self.modules = [m for m in (self._resolve_module(name) for name in module_names) if m]
 
         self.clear()
+
         series = state.get("series", [])
         for i, s in enumerate(series):
-            self.series_list.append(SeriesContainer(s["index"], s["name"], self.get_color(i).name(), s["visible"]))
+            mod = self._resolve_module(s.get("module"))
+            if mod:
+                self.series_list.append(SeriesContainer(
+                    module=mod,
+                    index=s["index"],
+                    name=s["name"],
+                    color=self.get_color(i).name(),
+                    visible=s["visible"]
+                ))
 
     def _parse_duration(self, text: str) -> Optional[int]:
         """Parses strings like '10s', '5m', '2h' into total seconds."""
@@ -164,85 +182,91 @@ class TelemetryPlotter(QWidget):
             return
 
         self.view_duration = seconds
+        latest_now = self._get_latest_timestamp()  # Use the helper
 
-        if self.ptr > 0:
+        if latest_now > 0:  # Check if we actually have data
             if self.is_auto_scroll:
                 # Snap to the live edge
-                now = self.x_data[self.ptr - 1]
-                self._apply_view_range(now - self.view_duration, now)
+                self._apply_view_range(latest_now - self.view_duration, latest_now)
             else:
                 # Stay where we are, but expand/shrink the window to the left
                 _, current_max_x = self.region.getRegion()
                 self._apply_view_range(current_max_x - self.view_duration, current_max_x)
 
-    def _init_channels(self, num_channels: int):
-        """Called exactly once when data first arrives."""
-        self.y_data = np.zeros((self.max_points, num_channels))
+    def _init_module_channels(self, module: ModuleIdentity, num_channels: int):
+        """Called exactly once per module when data first arrives."""
+        buf = self.buffers[module]
+        buf.y_data = np.zeros((self.max_points, num_channels))
+        buf.num_channels = num_channels
 
-        if not self.series_list:
+        # If we didn't restore series from state, generate them now
+        if not any(s.module == module for s in self.series_list):
+            # Calculate a global offset for colors so modules don't look identical
+            existing_series_count = len(self.series_list)
             for i in range(num_channels):
                 self.series_list.append(SeriesContainer(
+                    module=module,
                     index=i,
-                    name=f"{self.module.short_name} {i}" if num_channels > 1 else self.module.short_name,
-                    color=self.get_color(i).name(),
-                    visible=True  # Default to visible
+                    name=f"{module.short_name} {i}" if num_channels > 1 else module.short_name,
+                    color=self.get_color(existing_series_count + i).name(),
+                    visible=True
                 ))
 
-        # Now build the UI for the first time
+        # Re-trigger UI building
         self.set_split_mode(self.is_split)
 
     def get_color(self, i: int) -> QColor:
         return QColor.fromHsv((120 + i * 80) % 360, 255, 255)
 
     @property
-    def num_channels(self) -> int:
-        """Dynamically get channel count from the buffer shape."""
-        return self.y_data.shape[1] if self.y_data is not None else 0
+    def total_series_count(self) -> int:
+        return len(self.series_list)
 
     def process_log_batch(self, batch: list[LogRow], load_history=False):
-        target_mod = self.module
+        updated = False
 
-        # 1. Extraction: Get timestamp and the WHOLE list of values
-        extracted = [
-            (row.timestamp, row.get_values())
-            for row in batch
-            if row.module == target_mod and row.get_values()
-        ]
+        for module in self.modules:
+            # Extraction per module
+            extracted = [
+                (row.timestamp, row.get_values())
+                for row in batch
+                if row.module == module and row.get_values()
+            ]
 
-        if not extracted:
-            return
+            if not extracted:
+                continue
 
-        # 2. Setup channels on first valid data
-        if self.y_data is None:
-            first_vals = extracted[0][1]
-            self._init_channels(len(first_vals))
+            try:
+                buf = self.buffers[module]
+            except KeyError:
+                buf = ModuleBuffer(x_data=np.zeros(self.max_points))
+                self.buffers[module] = buf
+                self._init_module_channels(module, len(extracted[0][1]))
 
-        # Convert to numpy
-        new_times = np.array([t for t, v in extracted], dtype=float)
-        # Ensure all rows have the same number of columns as our buffer
-        new_values = np.array([v[:self.num_channels] for t, v in extracted], dtype=float)
-        num_new = new_times.size
+            # Convert to numpy
+            new_times = np.array([t for t, v in extracted], dtype=float)
+            new_values = np.array([v[:buf.num_channels] for t, v in extracted], dtype=float)
+            num_new = new_times.size
 
-        # 3. Buffer Management (2D Rolling)
-        if self.ptr + num_new <= self.max_points:
-            self.x_data[self.ptr: self.ptr + num_new] = new_times
-            self.y_data[self.ptr: self.ptr + num_new, :] = new_values
-            self.ptr += num_new
-        else:
-            shift = (self.ptr + num_new) - self.max_points
-            self.x_data[:-shift] = self.x_data[shift:]
-            self.y_data[:-shift, :] = self.y_data[shift:, :]
+            # Buffer Management (2D Rolling)
+            if buf.ptr + num_new <= self.max_points:
+                buf.x_data[buf.ptr: buf.ptr + num_new] = new_times
+                buf.y_data[buf.ptr: buf.ptr + num_new, :] = new_values
+                buf.ptr += num_new
+            else:
+                shift = (buf.ptr + num_new) - self.max_points
+                buf.x_data[:-shift] = buf.x_data[shift:]
+                buf.y_data[:-shift, :] = buf.y_data[shift:, :]
 
-            self.x_data[-num_new:] = new_times
-            self.y_data[-num_new:, :] = new_values
-            self.ptr = self.max_points
+                buf.x_data[-num_new:] = new_times
+                buf.y_data[-num_new:, :] = new_values
+                buf.ptr = self.max_points
 
-        # 4. Visual Update
-        # x_slice = self.x_data[:self.ptr]
-        # for i, curve in enumerate(self.curves):
-        #     curve.setData(x_slice, self.y_data[:self.ptr, i])
+            updated = True
 
-        self._update_plots()
+        # Visual Update only if we ingested something
+        if updated:
+            self._update_plots()
 
     def _resolve_module(self, mod_identifier):
         if not mod_identifier or not isinstance(mod_identifier, str): return None
@@ -253,34 +277,34 @@ class TelemetryPlotter(QWidget):
         except Exception:
             return None
 
-    def load_history(self):
-        """Special one-time call for the initial historical load."""
-        print(f"Loading history for '{self.module}'")
-        try:
-            log_filter = LogFilter(self.gui_context.id_registry, filtered_module=self.module)
-            history = self.gui_context.registry.central.get_rows(
-                log_filter,
-                total=self.max_points
-            )
-            # print(history)
-            if not history:
-                return
-            print(f"Loaded {len(history)} log entries for module '{history[0].module}' during initialization.")
+    def _load_module_history(self, module: ModuleIdentity):
+        """Helper to load history for a single module (used during drop)."""
+        print(f"Loading history for newly dropped module: '{module}'")
+        log_filter = LogFilter(self.gui_context.id_registry, filtered_module=module)
+        history = self.gui_context.registry.central.get_rows(
+            log_filter,
+            total=self.max_points
+        )
+        if history:
             self.process_log_batch(history, load_history=True)
-        finally:
-            pass
+
+    def load_history(self):
+        """Load history for all configured modules (used on startup)."""
+        for module in self.modules:
+            self._load_module_history(module)
 
     def get_state(self):
         series = []
         for s in self.series_list:
             series.append({
+                "module": s.module.name_with_device(),
                 "index": s.index,
                 "name": s.name,
                 "color": s.color,
                 "visible": s.visible,
             })
         return {
-            "module": self.module.name_with_device(),
+            "modules": [m.name_with_device() for m in self.modules],
             "is_split": self.is_split,
             "series": series,
             "view_duration": self.duration_combo.currentText(),
@@ -307,12 +331,15 @@ class TelemetryPlotter(QWidget):
         legend = None
         if not self.is_split:
             shared_plot = self.graph_view.addPlot(row=1, col=0, axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
-            if self.num_channels > 1:
+            shared_plot.setTitle(None)
+            if self.total_series_count > 1:
                 legend = shared_plot.addLegend()
 
         for i, s in enumerate(self.series_list):
             if self.is_split:
                 p = self.graph_view.addPlot(row=i+1, col=0, axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
+                p.setTitle(f'<span style="color: {s.color}; font-weight: bold;">{s.name}</span>')
+                # p.setTitle(s.name)
                 if i > 0:
                     p.setXLink(self.series_list[0].plot_item)
                 s.plot_item = p
@@ -327,12 +354,12 @@ class TelemetryPlotter(QWidget):
         if legend:
             self._setup_legend_callbacks(legend)
 
-
         # Setup Region with Smart Initialization
-        current_now = self.x_data[self.ptr - 1] if self.ptr > 0 else 60
+        latest_now = self._get_latest_timestamp()
+        current_now = latest_now if latest_now > 0 else 60
         start_region = current_now - self.view_duration
-
         self.region = LinearRegionItem([start_region, current_now])
+
         self.region.setZValue(10)
         self.overview_plot.addItem(self.region)
 
@@ -348,16 +375,6 @@ class TelemetryPlotter(QWidget):
 
             minX, maxX = self.region.getRegion()
 
-            # 2. Auto-Scroll Snap Logic
-            if self.ptr > 0:
-                latest_time = self.x_data[self.ptr - 1]
-                snap_tolerance = self.view_duration * 0.05
-
-                if maxX >= latest_time - snap_tolerance:
-                    self.set_autoscroll(True)
-                else:
-                    self.set_autoscroll(False)
-
             # 3. Apply the range to all main plots
             for s in self.series_list:
                 if s.plot_item:
@@ -370,17 +387,7 @@ class TelemetryPlotter(QWidget):
 
             rlow, rhigh = viewRange[0]
 
-            # 2. Auto-Scroll Snap Logic
-            if self.ptr > 0:
-                latest_time = self.x_data[self.ptr - 1]
-                snap_tolerance = self.view_duration * 0.05
-
-                if rhigh >= latest_time - snap_tolerance:
-                    self.set_autoscroll(True)
-                else:
-                    self.set_autoscroll(False)
-
-            # 3. Safely update the overview region
+            # Safely update the overview region
             self._is_system_updating = True  # Lock
             self.region.setRegion([rlow, rhigh])  # Triggers update_main_from_region, which will safely return
             self._is_system_updating = False  # Unlock
@@ -395,30 +402,38 @@ class TelemetryPlotter(QWidget):
         self._update_plots()
 
     def _update_plots(self):
-        if self.ptr == 0: return
+        latest_time = 0.0
 
-        x_slice = self.x_data[:self.ptr]
-        y_slice = self.y_data[:self.ptr]
-        current_time = x_slice[-1]
-
-        # ALWAYS update data so unhiding is instantaneous
         for s in self.series_list:
+            buf = self.buffers.get(s.module)
+            if not buf or buf.ptr == 0:
+                continue
+
+            x_slice = buf.x_data[:buf.ptr]
+            y_slice = buf.y_data[:buf.ptr]
+
+            # Track the absolute latest time across all modules for auto-scrolling
+            if x_slice[-1] > latest_time:
+                latest_time = x_slice[-1]
+
             if s.curve:
                 s.curve.setData(x_slice, y_slice[:, s.index])
             if s.overview_curve:
                 s.overview_curve.setData(x_slice, y_slice[:, s.index])
 
-        # Handle the sliding window for Auto-Scroll
-        if self.is_auto_scroll:
-            self._apply_view_range(current_time - self.view_duration, current_time)
+        if self.is_auto_scroll and latest_time > 0:
+            self._apply_view_range(latest_time - self.view_duration, latest_time)
 
     def clear(self):
-        self.x_data.fill(0)
-        if self.y_data is not None:
-            self.y_data.fill(0)
-        self.ptr = 0
+        for buf in self.buffers.values():
+            buf.x_data.fill(0)
+            if buf.y_data is not None:
+                buf.y_data.fill(0)
+            buf.ptr = 0
+
         for series in self.series_list:
-            series.curve.setData([], [])
+            if series.curve:
+                series.curve.setData([], [])
 
     def closeEvent(self, event):
         """Cleanup registration when the widget is closed."""
@@ -513,3 +528,40 @@ class TelemetryPlotter(QWidget):
                     s.plot_item.setXRange(start_time, end_time, padding=0)
         finally:
             self._is_system_updating = False
+
+    def _get_latest_timestamp(self) -> float:
+        """Finds the most recent timestamp across all active module buffers."""
+        latest = 0.0
+        for buf in self.buffers.values():
+            if buf.ptr > 0:
+                ts = buf.x_data[buf.ptr - 1]
+                if ts > latest:
+                    latest = ts
+        return latest
+
+    def dragEnterEvent(self, event):
+        # We accept the drop if the mime data contains text
+        # (Assuming your sidebar drags the module identifier as text)
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        mod_identifier = event.mimeData().text()
+        module = self._resolve_module(mod_identifier)
+
+        if not module:
+            print(f"Cannot resolve module: {mod_identifier}")
+            return
+
+        if module in self.modules:
+            print(f"Module {module.short_name} already in plot.")
+            return
+
+        # 1. Add to our tracking list
+        self.modules.append(module)
+
+        # 2. Immediately try to load existing history for just this module
+        self._load_module_history(module)
+
+        # 3. Accept the action
+        event.acceptProposedAction()
