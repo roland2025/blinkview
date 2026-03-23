@@ -231,6 +231,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         if self.jlink and self.jlink.opened():
             try:
                 # rtt_write returns the number of bytes actually written
+                # print(f"Sending data to J-Link: '{self.target_device}' data: {data}")
                 return self.jlink.rtt_write(channel, list(data))
             except Exception as e:
                 self.logger.error(f"RTT Write failed", e)

@@ -101,3 +101,12 @@ class SourcesManager(BaseBindableConfigurable):
 
     def get(self, source_id: str):
         return self.sources.get(source_id)
+
+    def send_command(self, source_id: str, command: str):
+        # find source
+        source = self.sources.get(source_id)
+        if source is None:
+            return
+        # if source has send_data
+        if hasattr(source, "send_data"):
+            source.send_data(command.encode())

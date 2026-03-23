@@ -9,9 +9,10 @@ import sys
 
 import signal
 from pathlib import Path
+from sys import exception
 from time import perf_counter
 
-from PySide6.QtWidgets import QApplication, QToolButton
+from PySide6.QtWidgets import QApplication, QToolButton, QLineEdit, QPushButton, QMessageBox, QLabel
 from PySide6.QtCore import Slot
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from blinkview import __version__ as blinkview_version
+from blinkview.core.task_manager import TaskManager
 from blinkview.ui.cli_args import setup_gui_parser
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.native_dark_mode import set_native_dark_mode
@@ -229,7 +231,12 @@ class BlinkMainWindow(QMainWindow):
         self.gui_context.set_gui_state_handler(UIStateHandler(self))
         self.gui_context.registry.file_manager.set_gui_context(self.gui_context)
 
+        self.device_toolbars = {}
+        self.sources_node = self.gui_context.config_manager.create_node("/sources")
+        self.sources_node.signal_received.connect(self.sync_device_toolbars)
+
         self.gui_context.registry.start()
+        self.sources_node.fetch()
         print("[BlinkMainWindow] Initialization complete.")
 
     def load_ui_state(self):
@@ -448,6 +455,64 @@ class BlinkMainWindow(QMainWindow):
 
         # Immediately focus the re-attached tab
         self.central_tabs.setCurrentIndex(tab_index)
+
+    def sync_device_toolbars(self, sources_config: dict, schema: dict):
+        """Creates or removes toolbars based on the current sources config."""
+
+        # Remove toolbars for sources that no longer exist
+        existing_ids = set(sources_config.keys())
+        tracked_ids = list(self.device_toolbars.keys())
+
+        for source_id in tracked_ids:
+            if source_id not in existing_ids:
+                toolbar = self.device_toolbars.pop(source_id)
+                self.removeToolBar(toolbar)
+                toolbar.deleteLater()
+
+        # Add toolbars for new sources
+        for source_id, config in sources_config.items():
+            if source_id not in self.device_toolbars:
+                self.create_device_control_toolbar(source_id, config.get("name", source_id))
+
+    def create_device_control_toolbar(self, source_id, device_name):
+        """Generates a dedicated toolbar for a specific device."""
+        toolbar = QToolBar(f"Control: {device_name}")
+        toolbar.setObjectName(f"toolbar_{source_id}")  # Good for state saving
+
+        # Add a label so we know which device this is
+        toolbar.addWidget(QLabel(f" <b>{device_name}:</b> "))
+
+        # Create the Textbox
+        text_input = QLineEdit()
+        text_input.setPlaceholderText("Enter command...")
+        text_input.setMaximumWidth(200)
+        toolbar.addWidget(text_input)
+
+        # Create the Send Button
+        btn_send = QPushButton("Send")
+
+        # Connect the logic
+        def handle_send():
+            val = text_input.text()
+            # add newline
+            val = f"{val}\n"
+            # QMessageBox.information(self, "Device Command", f"Sending to {device_name}:\n\n{val}")
+            try:
+                tasks: TaskManager = self.gui_context.registry.system_ctx.tasks
+                devices = self.gui_context.registry.sources
+                tasks.run_task(devices.send_command, source_id, val)
+            except Exception as e:
+                print(f"Error sending command to device '{device_name}': {e}")
+
+            text_input.clear()
+
+        text_input.returnPressed.connect(handle_send)
+        btn_send.clicked.connect(handle_send)
+        toolbar.addWidget(btn_send)
+
+        # Add to Main Window and track it
+        self.addToolBar(Qt.TopToolBarArea, toolbar)
+        self.device_toolbars[source_id] = toolbar
 
 
 def run(args):

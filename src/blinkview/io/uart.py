@@ -42,6 +42,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         self.logging_type = "default"  # Use the default logging mechanism
         self.logging_processor = "binary"
 
+        self.serial = None
+
     @classmethod
     def get_config_schema(cls) -> dict:
         # 1. Grab the static, merged schema from BaseConfigurable
@@ -93,6 +95,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
         push_log = self.local.push_log
 
+        self.serial = None
         ser = None
 
         def flush():
@@ -145,6 +148,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             except Exception as e:
                 logger.error("error", e)
                 ser = None
+                self.serial = None
                 sleep(1.0)
 
         # Flush any remaining batch on exit
@@ -164,6 +168,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 timeout=0.01,
                 inter_byte_timeout=0.01
             )
+            self.serial = ser
             try:
                 ser.set_buffer_size(rx_size=BUF_SIZE)
             except Exception as e:
@@ -175,3 +180,10 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             return ser
         except Exception as e:
             self.logger.error(f"Failed to open serial port.", e)
+
+    def send_data(self, data: bytes):
+        if self.serial and self.serial.is_open:
+            try:
+                self.serial.write(data)
+            except Exception as e:
+                self.logger.exception("Failed to send data", e)
