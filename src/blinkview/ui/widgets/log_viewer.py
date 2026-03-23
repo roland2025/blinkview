@@ -126,6 +126,10 @@ QToolButton[filterEnabled="true"] {
         self.action_clear.triggered.connect(self.clear_logs)
         self.toolbar.addAction(self.action_clear)
 
+        self.action_end = QAction("Scroll to End", self)
+        self.action_end.setToolTip("Scroll to the latest logs")
+        self.toolbar.addAction(self.action_end)
+
         self.is_paused = False
         self.auto_paused = False
 
@@ -177,6 +181,8 @@ QToolButton[filterEnabled="true"] {
         # Text Area
         self.text_area = SearchableLogArea(self, maxlen=self.max_rows)
         self.text_area.setMinimumWidth(300)
+
+        self.action_end.triggered.connect(self.text_area.scroll_to_end)
 
         self.splitter.addWidget(self.text_area)
 
