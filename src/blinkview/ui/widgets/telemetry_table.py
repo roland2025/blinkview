@@ -4,11 +4,14 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from typing import Optional
+
 from PySide6.QtGui import QAction, QFont, QPixmap, QPainter, QColor, QDrag
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableView,
                                QHeaderView, QLineEdit, QPushButton, QToolBar, QMenu, QApplication)
 from PySide6.QtCore import Qt, QSortFilterProxyModel, QEvent, QSize, QTimer, QMimeData
 
+from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.in_development import set_as_in_development
 from blinkview.ui.widgets.action_button_delegate import TelemetryDelegate, TelemetryCol
@@ -22,8 +25,8 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
         self._positive_groups = []
         self._global_negatives = []
         # Store the allowed device name/id (None means allow all)
-        self.allowed_device = None
-        self.allowed_module = None
+        self.allowed_device: Optional[DeviceIdentity] = None
+        self.allowed_module: Optional[ModuleIdentity] = None
         self.allowed_module_children = False
 
     def setFilterText(self, text):
@@ -42,15 +45,15 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
 
         self.invalidateFilter()
 
-    def setAllowedDevice(self, device_name: str | None):
+    def setAllowedDevice(self, device: Optional[DeviceIdentity]):
         """Sets a strict device filter. Only rows from this device will be shown."""
-        if self.allowed_device != device_name:
-            self.allowed_device = device_name
+        if self.allowed_device != device:
+            self.allowed_device = device
             # Re-run the filter over all rows
             self.invalidateFilter()
 
-    def setAllowedModule(self, module_name: str | None):
-        self.allowed_module = module_name
+    def setAllowedModule(self, module: Optional[ModuleIdentity]):
+        self.allowed_module = module
         self.invalidateFilter()
 
     def setAllowedModuleChildren(self, allowed: bool):
@@ -73,6 +76,9 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
             return False
 
         if self.allowed_module is not None:
+            if module.device != self.allowed_module.device:
+                return False
+
             if self.allowed_module_children:
                 # Traverse parents manually until we hit target_mod or the root (None)
                 curr = module
@@ -86,10 +92,6 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
                 if not found:
                     return False
             else:
-                # Strict identity match only
-                if module == self.allowed_module:
-                    return True
-
                 # allow parent modules siblings only
                 parent = self.allowed_module.parent
                 if parent is not None:
@@ -103,10 +105,6 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
 
                     if not found:
                         return False
-
-            # reject all other devices
-            if module.device != self.allowed_module.device:
-                return False
 
         # 2. Empty Search Filter = Show everything (that passed the device check)
         if not self._positive_groups and not self._global_negatives:
@@ -141,8 +139,8 @@ class TelemetryTable(QWidget):
 
         # filter_pattern = None
         self.show_device_column = True
-        self.filtered_device = None
-        self.filtered_module = None
+        self.filtered_device: Optional[DeviceIdentity] = None
+        self.filtered_module: Optional[ModuleIdentity] = None
         self.filtered_module_children = False
 
         self.sort_column = TelemetryCol.DEVICE
@@ -279,15 +277,15 @@ class TelemetryTable(QWidget):
         self.tab_name = state.get("tab_name", self.tab_name)
 
         self.show_device_column = state.get("show_device_column", self.show_device_column)
-        self.filtered_device = state.get("filtered_device", self.filtered_device)
 
+        self.filtered_device = self.gui_context.id_registry.resolve_device(state.get("filtered_device", self.filtered_device))
         if self.filtered_device is not None:
-            self.proxy_model.setAllowedDevice(self.gui_context.registry.get_device(self.filtered_device))
+            self.proxy_model.setAllowedDevice(self.filtered_device)
             self.show_device_column = False  # If we're filtering by device, we can hide the device column for cleaner UI
 
-        self.filtered_module = state.get("filtered_module", self.filtered_module)
+        self.filtered_module = self.gui_context.id_registry.resolve_module(state.get("filtered_module", self.filtered_module))
         if self.filtered_module is not None:
-            self.proxy_model.setAllowedModule(self._resolve_module(self.filtered_module))
+            self.proxy_model.setAllowedModule(self.filtered_module)
             self.show_device_column = False  # If we're filtering by module, the device column is redundant since the module name includes the device
 
         self.filtered_module_children = state.get("filtered_module_children", self.filtered_module_children)
@@ -312,6 +310,17 @@ class TelemetryTable(QWidget):
         self.view.sortByColumn(self.sort_column, order)
 
         self.auto_size_columns_delayed()
+
+    def get_state(self) -> dict:
+        return {
+            "filter_pattern": self.search_box.text(),
+            "show_device_column": self.show_device_column,
+            "filtered_device": self.filtered_device.name if self.filtered_device else None,
+            "filtered_module": self.filtered_module.name_with_device() if self.filtered_module else None,
+            "filtered_module_children": self.filtered_module_children,
+            "sort_column": self.sort_column,
+            "sort_order": self.sort_order
+        }
 
     def auto_size_columns_delayed(self):
         QTimer.singleShot(50, lambda: self.auto_size_columns())
@@ -591,24 +600,6 @@ class TelemetryTable(QWidget):
             val = proxy_index.data()
             QApplication.clipboard().setText(str(val))
             # Optional: Show a temporary tooltip or status message "Value Copied!"
-
-    def get_state(self) -> dict:
-        return {
-            "filter_pattern": self.search_box.text(),
-            "show_device_column": self.show_device_column,
-            "filtered_device": self.filtered_device,
-            "sort_column": self.sort_column,
-            "sort_order": self.sort_order
-        }
-
-    def _resolve_module(self, mod_identifier):
-        if not mod_identifier: return None
-        if not isinstance(mod_identifier, str): return mod_identifier
-        try:
-            dev_name, mod_name = mod_identifier.split('.', 1)
-            return self.gui_context.registry.get_device(dev_name).get_module(mod_name)
-        except Exception:
-            return None
 
     def _perform_drag(self, proxy_index):
         module = self._get_module_at_index(proxy_index)

@@ -4,8 +4,10 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from blinkview.core.device_identity import ModuleIdentity
-from blinkview.utils.log_level import LogLevel
+from typing import Optional
+
+from blinkview.core.device_identity import ModuleIdentity, DeviceIdentity
+from blinkview.utils.log_level import LogLevel, LevelIdentity
 
 
 class LogFilter:
@@ -14,10 +16,10 @@ class LogFilter:
 
         self.filter_index = None
 
-        self.allowed_device = self._resolve_device(allowed_device)
-        self.filtered_module: ModuleIdentity = self._resolve_module(filtered_module)
+        self.allowed_device: Optional[DeviceIdentity] = id_registry.resolve_device(allowed_device)
+        self.filtered_module: Optional[ModuleIdentity] = id_registry.resolve_module(filtered_module)
         self.filtered_module_children = filtered_module_children
-        self.log_level = LogLevel.from_string(log_level, LogLevel.ALL)
+        self.log_level: Optional[LevelIdentity] = LogLevel.from_string(log_level, LogLevel.ALL)
 
         self._bake()
 
@@ -106,16 +108,3 @@ class LogFilter:
     def set_level(self, log_level):
         self.log_level = LogLevel.from_string(log_level)
         self._bake()
-
-    def _resolve_module(self, mod_identifier):
-        if not mod_identifier: return None
-        if not isinstance(mod_identifier, str): return mod_identifier
-        try:
-            dev_name, mod_name = mod_identifier.split('.', 1)
-            return self.registry.get_device(dev_name).get_module(mod_name)
-        except Exception:
-            return None
-
-    def _resolve_device(self, dev_identifier):
-        if not dev_identifier: return None
-        return self.registry.get_device(dev_identifier)

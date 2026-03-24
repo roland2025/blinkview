@@ -131,8 +131,7 @@ class TempLogFilter(QObject):
             return
 
         for mod_id, mod_state in state.items():
-            device_name, module_name = mod_id.split('.', 1)
-            module = self.gui_context.registry.get_device(device_name).get_module(module_name)
+            module = self.gui_context.id_registry.resolve_module(mod_id)
             if not module:
                 print(f"[TempLogFilter] Warning: Module '{mod_id}' not found during state restore.")
                 continue

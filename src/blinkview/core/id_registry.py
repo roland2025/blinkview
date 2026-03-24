@@ -51,17 +51,17 @@ class IDRegistry:
         # This is called from within the DeviceIdentity's lock,
         # but we use our own lock to protect the global counters and list.
         with self._lock:
-            self.module_list = self.module_list + modules
+            self.module_list = self.module_list + modules  # noqa
 
     def get_device(self, name: str) -> DeviceIdentity:
         """Retrieve or create a DeviceIdentity by name."""
         name = name.lower()
 
-        # 1. HOT PATH: Simple lookup (Dicts are thread-safe for reading in CPython)
+        # HOT PATH: Simple lookup (Dicts are thread-safe for reading in CPython)
         if name in self.device_lookup:
             return self.device_lookup[name]
 
-        # 2. DISCOVERY PATH: Locked
+        # DISCOVERY PATH: Locked
         with self._lock:
             # Double-check inside lock
             if name in self.device_lookup:
@@ -86,3 +86,43 @@ class IDRegistry:
     def get_all_devices(self) -> List[DeviceIdentity]:
         """Lock-free access to all registered hardware devices."""
         return self.device_list
+
+    def resolve_module(self, mod_identifier):
+        if mod_identifier is None:
+            return None
+
+        # if already a ModuleIdentifier object, return itself
+        if isinstance(mod_identifier, ModuleIdentity):
+            return mod_identifier
+
+        if not mod_identifier or not isinstance(mod_identifier, str):
+            return None
+
+        try:
+            dev_name, mod_name = mod_identifier.split('.', 1)
+
+            return self.get_device(dev_name).get_module(mod_name)
+        except Exception:
+            return None
+
+    def resolve_modules(self, identifiers: list) -> list[ModuleIdentity]:
+        """
+        Resolves a list of strings or identities into a list of valid ModuleIdentity objects.
+        Automatically filters out any that could not be resolved.
+        """
+        if not identifiers:
+            return []
+
+        return [m for ident in identifiers if (m := self.resolve_module(ident)) is not None]
+
+    def resolve_device(self, dev_identifier):
+        if dev_identifier is None:
+            return None
+
+        if isinstance(dev_identifier, DeviceIdentity):
+            return dev_identifier
+
+        if not dev_identifier or not isinstance(dev_identifier, str):
+            return None
+
+        return self.get_device(dev_identifier)

@@ -54,6 +54,9 @@ class ModuleIdentity:
     def __str__(self):
         return self.name
 
+    def __repr__(self):
+        return f"ModuleIdentity({self.id}: '{self.device.name}.{self.name}')"
+
 
 def print_tree_recursive(node: ModuleIdentity, indent=0):
     print("  " * indent + f"{node.name} (ID: {node.id}) full_path: {node.name}")
@@ -176,3 +179,6 @@ class DeviceIdentity:
 
     def __str__(self):
         return self.name
+
+    def __repr__(self):
+        return f"ModuleIdentity({self.id}: '{self.name}')"

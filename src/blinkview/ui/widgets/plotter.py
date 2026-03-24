@@ -141,14 +141,13 @@ class TelemetryPlotter(QWidget):
         self.view_duration = self._parse_duration(self.view_duration_text)
 
         # Restore multiple modules
-        module_names = state.get("modules", [])
-        self.modules = [m for m in (self._resolve_module(name) for name in module_names) if m]
+        self.modules = self.gui_context.id_registry.resolve_modules(state.get("modules", []))
 
         self.clear()
 
         series = state.get("series", [])
         for i, s in enumerate(series):
-            mod = self._resolve_module(s.get("module"))
+            mod = self.gui_context.id_registry.resolve_module(s.get("module"))
             if mod:
                 self.series_list.append(SeriesContainer(
                     module=mod,
@@ -267,15 +266,6 @@ class TelemetryPlotter(QWidget):
         # Visual Update only if we ingested something
         if updated:
             self._update_plots()
-
-    def _resolve_module(self, mod_identifier):
-        if not mod_identifier or not isinstance(mod_identifier, str): return None
-        try:
-            dev_name, mod_name = mod_identifier.split('.', 1)
-            # Use id_registry from gui_context as established earlier
-            return self.gui_context.id_registry.get_device(dev_name).get_module(mod_name)
-        except Exception:
-            return None
 
     def _load_module_history(self, module: ModuleIdentity):
         """Helper to load history for a single module (used during drop)."""
@@ -547,7 +537,7 @@ class TelemetryPlotter(QWidget):
 
     def dropEvent(self, event):
         mod_identifier = event.mimeData().text()
-        module = self._resolve_module(mod_identifier)
+        module = self.gui_context.id_registry.resolve_module(mod_identifier)
 
         if not module:
             print(f"Cannot resolve module: {mod_identifier}")

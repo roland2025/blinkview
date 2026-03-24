@@ -251,8 +251,10 @@ QToolButton[filterEnabled="true"] {
     def restore(self, state: dict):
         self.tab_name = state.get("tab_name", self.tab_name)
 
-        self.allowed_device = state.get("allowed_device", self.allowed_device)
-        self.filtered_module = state.get("filtered_module", self.filtered_module)
+        self.allowed_device = self.gui_context.id_registry.resolve_device(state.get("allowed_device", self.allowed_device))
+
+        self.filtered_module = self.gui_context.id_registry.resolve_module(state.get("filtered_module", self.filtered_module))
+
         self.filtered_module_children = state.get("filtered_module_children", self.filtered_module_children)
         self.log_level = state.get("log_level", self.log_level)
 
@@ -270,9 +272,9 @@ QToolButton[filterEnabled="true"] {
 
     def get_state(self):
         return {
-            "allowed_device": self.log_filter.allowed_device.name if self.log_filter.allowed_device else None,
-            "filtered_module": f"{self.log_filter.filtered_module.name_with_device()}" if self.log_filter.filtered_module else None,
-            "filtered_module_children": self.log_filter.filtered_module_children,
+            "allowed_device": self.allowed_device.name if self.allowed_device else None,
+            "filtered_module": f"{self.filtered_module.name_with_device()}" if self.filtered_module else None,
+            "filtered_module_children": self.filtered_module_children,
             "view_state": {
                 "show_ts": self.show_ts,
                 "show_dev": self.show_dev,
