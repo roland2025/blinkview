@@ -74,7 +74,7 @@ class LogFilter:
                         curr = msg.module
                         found = False
                         while curr is not None:
-                            if curr == target_mod:
+                            if curr is target_mod:
                                 found = True
                                 break
                             curr = curr.parent
@@ -83,11 +83,11 @@ class LogFilter:
                             return False
                     else:
                         # Strict identity match only
-                        if msg.module != target_mod:
+                        if msg.module is not target_mod:
                             return False
 
                 # --- DEVICE CHECK ---
-                if allowed_dev is not None and msg.module.device != allowed_dev:
+                if allowed_dev is not None and msg.module.device is not allowed_dev:
                     return False
 
                 return True

@@ -49,6 +49,8 @@ class GUIContext(QObject):
 
         self.gui_state = None
 
+        self.updatable = []
+
         # Central Heartbeat: Drives all 30fps UI animations/updates
         # self.update_timer = QTimer(self)
         # self.update_timer.timeout.connect(self._on_heartbeat)
@@ -93,6 +95,18 @@ class GUIContext(QObject):
     def on_update(self):
         """Dispatches the update signal to all registered views for a fast sync."""
         self.telemetry_model.apply_updates()
+        if self.updatable:
+            for updatable in self.updatable:
+                updatable.apply_updates()
+
+    def add_updatable(self, updatable):
+        """Registers a view/component to receive update signals."""
+        self.updatable.append(updatable)
+
+    def remove_updatable(self, updatable):
+        """Unregisters a view/component from receiving update signals."""
+        if updatable in self.updatable:
+            self.updatable.remove(updatable)
     #
     # def create_log_filter(self, allowed_device=None, excluded_device=None, module=None):
     #     """Factory method to create a pre-configured LogFilter."""

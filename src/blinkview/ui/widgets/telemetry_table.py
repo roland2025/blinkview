@@ -279,13 +279,12 @@ class TelemetryTable(QWidget):
         self.show_device_column = state.get("show_device_column", self.show_device_column)
 
         self.filtered_device = self.gui_context.id_registry.resolve_device(state.get("filtered_device", self.filtered_device))
-        if self.filtered_device is not None:
-            self.proxy_model.setAllowedDevice(self.filtered_device)
-            self.show_device_column = False  # If we're filtering by device, we can hide the device column for cleaner UI
+        self.proxy_model.setAllowedDevice(self.filtered_device)
+        self.show_device_column = self.filtered_device is not None  # If we're filtering by device, we can hide the device column for cleaner UI
 
         self.filtered_module = self.gui_context.id_registry.resolve_module(state.get("filtered_module", self.filtered_module))
+        self.proxy_model.setAllowedModule(self.filtered_module)
         if self.filtered_module is not None:
-            self.proxy_model.setAllowedModule(self.filtered_module)
             self.show_device_column = False  # If we're filtering by module, the device column is redundant since the module name includes the device
 
         self.filtered_module_children = state.get("filtered_module_children", self.filtered_module_children)

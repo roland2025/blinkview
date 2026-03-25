@@ -39,6 +39,7 @@ from blinkview.ui.utils.config_node import ConfigNode
 from blinkview.ui.utils.config_node_manager import ConfigNodeManager
 from blinkview.ui.utils.ui_state_handler import UIStateHandler
 from blinkview.ui.utils.window_manager import WindowManager
+from blinkview.ui.widgets.TelemetryWatch import TelemetryWatch
 from blinkview.ui.widgets.config.dynamic_config import DynamicConfigWidget
 from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.log_viewer import LogViewerWidget
@@ -109,6 +110,10 @@ class BlinkMainWindow(QMainWindow):
         self.btn_show_plugins.triggered.connect(
             lambda: self.gui_context.config_manager.show("/plugins", "Plugins"))
         self.toolbar.addAction(self.btn_show_plugins)
+
+        self.btn_show_telemetry_watch = QAction("Watch", self)
+        self.btn_show_telemetry_watch.triggered.connect(lambda _: self.create_widget("TelemetryWatch", "Watch"))
+        self.toolbar.addAction(self.btn_show_telemetry_watch)
 
         # --- Sidebar Setup ---
         self.sources_dock = QDockWidget("Sources", self)
@@ -226,6 +231,7 @@ class BlinkMainWindow(QMainWindow):
             "TelemetryTable": TelemetryTable,
             "DynamicConfigWidget": DynamicConfigWidget,
             "TelemetryPlotter": TelemetryPlotter,
+            "TelemetryWatch": TelemetryWatch
         }
 
         self.gui_context.set_gui_state_handler(UIStateHandler(self))
