@@ -182,13 +182,11 @@ class BlinkMainWindow(QMainWindow):
         devices_config_node = self.gui_context.config_manager.create_node("/sources")
         self.device_sidebar = DeviceSidebarWidget(devices_config_node, gui_context=self.gui_context)
         self.sources_dock.setWidget(self.device_sidebar)
-        devices_config_node.fetch()
 
         pipelines_config_node = self.gui_context.config_manager.create_node("/pipelines")
         self.pipelines_sidebar = PipelinesSidebarWidget(pipelines_config_node, gui_context=self.gui_context)
         # self.pipelines_sidebar.device_added.connect(self.on_add_device)
         self.pipelines_dock.setWidget(self.pipelines_sidebar)
-        pipelines_config_node.fetch()
 
         # Keep a list so Python's garbage collector doesn't destroy our floating windows
         self.window_manager = WindowManager()
@@ -273,11 +271,8 @@ class BlinkMainWindow(QMainWindow):
         self.sources_node.on_update(self.sync_device_toolbars)
 
         self.gui_context.registry.start()
-        self.sources_node.fetch()
 
         self.watches_node = self.gui_context.gui_config_manager.create_node("/watches")
-        # self.watches_node.on_update(self.sync_watches_list)
-        self.watches_node.fetch()
 
         print("[BlinkMainWindow] Initialization complete.")
 

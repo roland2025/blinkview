@@ -6,7 +6,7 @@
 
 from typing import Any
 
-from PySide6.QtCore import QObject, Slot, Signal
+from PySide6.QtCore import QObject, Slot, Signal, QTimer
 
 from blinkview.core.config_manager import ConfigManager
 from blinkview.ui.gui_context import GUIContext
@@ -64,7 +64,7 @@ class ConfigNodeManager(QObject):
 
         self.nodes.append(node)
 
-        node.fetch()
+        QTimer.singleShot(0, node.fetch)
 
         return node
 

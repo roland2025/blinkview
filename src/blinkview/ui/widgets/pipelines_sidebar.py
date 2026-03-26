@@ -278,7 +278,6 @@ class PipelinesSidebarWidget(QWidget):
             item = QListWidgetItem(self.list_widget)
             node = self.config_node.create_child(f"{item_id}", name=f"Pipeline - {item_config.get('name', item_id)}")
             row_widget = PipelineListItemWidget(node, gui_context=self.gui_context)
-            node.fetch()
 
             item.setSizeHint(row_widget.sizeHint())
             self.list_widget.setItemWidget(item, row_widget)

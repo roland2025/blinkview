@@ -151,8 +151,6 @@ class DynamicConfigWidget(QWidget):
         self.btn_apply.clicked.connect(self._on_apply_clicked)
         self.btn_revert.clicked.connect(self._on_revert_clicked)
 
-        self.node.fetch()
-
     def _set_defaults(self):
         self.tab_name = self.__class__.__name__
 

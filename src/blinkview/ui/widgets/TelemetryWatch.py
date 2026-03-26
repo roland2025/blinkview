@@ -189,10 +189,9 @@ class TelemetryWatch(QScrollArea):
             self.restore(state)
         else:
             self.node = self.gui_context.gui_config_manager.create_node("watches", self.watch_id,
-                                                                        received=self.update_config_schema)
+                                                                        on_update=self.update_config_schema)
             self.rebuild_ui()
 
-        self.node.fetch()
         self.gui_context.add_updatable(self)
 
     def __del__(self):
