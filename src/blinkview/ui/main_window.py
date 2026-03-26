@@ -68,7 +68,13 @@ class BlinkMainWindow(QMainWindow):
         self.gui_context = GUIContext()
         self.gui_context.set_register_log_target(self.register_log_target)
         self.gui_context.set_deregister_log_target(self.deregister_log_target)
-        self.gui_context.set_update_version = set_update_version
+
+        if set_update_version is not None:
+            def set_update_and_close(ver):
+                set_update_version(ver)
+                self.close()
+
+            self.gui_context.set_update_version = set_update_and_close
 
         self.gui_context.set_registry(registry)
 
