@@ -62,7 +62,7 @@ def main():
     config_parser.set_defaults(func=handle_config)
 
     update_parser = subparsers.add_parser("update", help="Manage BlinkView versions")
-    from blinkview.utils.update_handler import setup_update_parser, handle_update
+    from blinkview.utils.cli_updater import setup_update_parser, handle_update
     setup_update_parser(update_parser)
     update_parser.set_defaults(func=handle_update)
 

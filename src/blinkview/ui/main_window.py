@@ -4,15 +4,13 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import os
 import sys
 
 import signal
 from pathlib import Path
-from sys import exception
 from time import perf_counter
 
-from PySide6.QtWidgets import QApplication, QToolButton, QLineEdit, QPushButton, QMessageBox, QLabel
+from PySide6.QtWidgets import QApplication, QToolButton, QLineEdit, QPushButton, QMessageBox, QLabel, QInputDialog
 from PySide6.QtCore import Slot
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
@@ -31,12 +29,13 @@ from PySide6.QtWidgets import (
 )
 
 from blinkview import __version__ as blinkview_version
+from blinkview.core.config_manager import ConfigManager
 from blinkview.core.task_manager import TaskManager
 from blinkview.ui.cli_args import setup_gui_parser
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.native_dark_mode import set_native_dark_mode
-from blinkview.ui.utils.config_node import ConfigNode
 from blinkview.ui.utils.config_node_manager import ConfigNodeManager
+from blinkview.ui.utils.in_development import set_as_in_development
 from blinkview.ui.utils.ui_state_handler import UIStateHandler
 from blinkview.ui.utils.window_manager import WindowManager
 from blinkview.ui.widgets.TelemetryWatch import TelemetryWatch
@@ -49,6 +48,7 @@ from blinkview.ui.widgets.plotter import TelemetryPlotter
 from blinkview.ui.widgets.telemetry_model import TelemetryModel
 from blinkview.ui.widgets.telemetry_table import TelemetryTable
 from blinkview.ui.widgets.title_bar import TitleBar
+from blinkview.ui.widgets.update_widget import UpdateWidget
 from blinkview.ui.windows.detached_tab_window import DetachedTabWindow
 from ..core.batch_queue import BatchQueue
 from ..core.registry import Registry
@@ -58,7 +58,7 @@ from .widgets.device_sidebar import DeviceSidebarWidget
 
 class BlinkMainWindow(QMainWindow):
 
-    def __init__(self, registry):
+    def __init__(self, registry, set_update_version=None):
         super().__init__()
         self.resize(1280, 800)
         set_native_dark_mode(self)
@@ -68,8 +68,10 @@ class BlinkMainWindow(QMainWindow):
         self.gui_context = GUIContext()
         self.gui_context.set_register_log_target(self.register_log_target)
         self.gui_context.set_deregister_log_target(self.deregister_log_target)
+        self.gui_context.set_update_version = set_update_version
 
         self.gui_context.set_registry(registry)
+
         fm = self.gui_context.registry.file_manager
         # Standalone is indicated at the end only if necessary
         mode_suffix = " (Standalone)" if fm.standalone_mode else ""
@@ -79,10 +81,25 @@ class BlinkMainWindow(QMainWindow):
 
         self.gui_context.set_config_manager(ConfigNodeManager(self.gui_context))
 
+        gui_config = ConfigManager(fm.get_config_path("gui"), fm.get_session_path("gui", suffix="autosave"), {"watches": {}})
+
+        self.gui_context.set_gui_config_handler(gui_config)
+        self.gui_context.set_gui_config_manager(ConfigNodeManager(self.gui_context, gui_config))
+
         self.gui_context.set_widget_factory(self.create_widget)
 
         # 2. Setup the Toolbar and Button
         self.toolbar = QToolBar("Main Toolbar")
+
+        self.main_menu_btn = QToolButton()
+        self.main_menu_btn.setText("Menu")
+        self.main_menu_btn.setPopupMode(QToolButton.InstantPopup)
+
+        # Initialize the menu and connect the "On the Fly" signal
+        self.app_menu = QMenu(self)
+        self.app_menu.aboutToShow.connect(self.populate_main_menu)
+        self.main_menu_btn.setMenu(self.app_menu)
+        self.toolbar.addWidget(self.main_menu_btn)
 
         self.btn_open_logs = QAction("Live Logs", self)
         self.btn_open_logs.triggered.connect(lambda _: self.create_widget("LogViewerWidget", "Live Logs"))
@@ -101,19 +118,26 @@ class BlinkMainWindow(QMainWindow):
 
         self.toolbar.addSeparator()
 
-        self.btn_show_settings = QAction("Settings", self)
-        self.btn_show_settings.triggered.connect(
-            lambda: self.gui_context.config_manager.show("/", "System", drop_keys=["plugins", "version", "pipelines", "sources"]))
-        self.toolbar.addAction(self.btn_show_settings)
+        # self.btn_show_settings = QAction("Settings", self)
+        # self.btn_show_settings.triggered.connect(
+        #     lambda: self.gui_context.config_manager.show("/", "System", drop_keys=["plugins", "version", "pipelines", "sources"]))
+        # self.toolbar.addAction(self.btn_show_settings)
+        #
+        # self.btn_show_plugins = QAction("Plugins", self)
+        # self.btn_show_plugins.triggered.connect(
+        #     lambda: self.gui_context.config_manager.show("/plugins", "Plugins"))
+        # self.toolbar.addAction(self.btn_show_plugins)
 
-        self.btn_show_plugins = QAction("Plugins", self)
-        self.btn_show_plugins.triggered.connect(
-            lambda: self.gui_context.config_manager.show("/plugins", "Plugins"))
-        self.toolbar.addAction(self.btn_show_plugins)
+        self.watch_button = QToolButton()
+        self.watch_button.setText("Watch")
+        self.watch_button.setPopupMode(QToolButton.InstantPopup)
 
-        self.btn_show_telemetry_watch = QAction("Watch", self)
-        self.btn_show_telemetry_watch.triggered.connect(lambda _: self.create_widget("TelemetryWatch", "Watch"))
-        self.toolbar.addAction(self.btn_show_telemetry_watch)
+        self.watch_menu = QMenu(self)
+        self.watch_menu.aboutToShow.connect(self.populate_watch_menu)
+
+        self.watch_button.setMenu(self.watch_menu)
+
+        self.toolbar.addWidget(self.watch_button)
 
         # --- Sidebar Setup ---
         self.sources_dock = QDockWidget("Sources", self)
@@ -231,7 +255,8 @@ class BlinkMainWindow(QMainWindow):
             "TelemetryTable": TelemetryTable,
             "DynamicConfigWidget": DynamicConfigWidget,
             "TelemetryPlotter": TelemetryPlotter,
-            "TelemetryWatch": TelemetryWatch
+            "TelemetryWatch": TelemetryWatch,
+            "UpdateWidget": UpdateWidget,
         }
 
         self.gui_context.set_gui_state_handler(UIStateHandler(self))
@@ -239,10 +264,15 @@ class BlinkMainWindow(QMainWindow):
 
         self.device_toolbars = {}
         self.sources_node = self.gui_context.config_manager.create_node("/sources")
-        self.sources_node.signal_received.connect(self.sync_device_toolbars)
+        self.sources_node.on_update(self.sync_device_toolbars)
 
         self.gui_context.registry.start()
         self.sources_node.fetch()
+
+        self.watches_node = self.gui_context.gui_config_manager.create_node("/watches")
+        # self.watches_node.on_update(self.sync_watches_list)
+        self.watches_node.fetch()
+
         print("[BlinkMainWindow] Initialization complete.")
 
     def load_ui_state(self):
@@ -276,7 +306,7 @@ class BlinkMainWindow(QMainWindow):
         def fetch():
             try:
                 print(f"[Fetching] system schema")
-                schema = self.gui_context.registry.get_config_schema()
+                schema = self.gui_context.registry.config.get_by_path()
                 print(f"[Fetching] system schema: {schema}")
                 callback(schema)
             except Exception as e:
@@ -298,6 +328,50 @@ class BlinkMainWindow(QMainWindow):
         """Adds a new tab and immediately switches focus to it."""
         tab_index = self.central_tabs.addTab(widget, tab_name)
         self.central_tabs.setCurrentIndex(tab_index)
+
+    def populate_main_menu(self):
+        """Generates the main application menu dynamically."""
+        menu = self.app_menu
+        menu.clear()
+
+        # Core Config Actions
+        settings_act = menu.addAction("Settings")
+        settings_act.triggered.connect(
+            lambda: self.gui_context.config_manager.show("/", "System",
+                                                         drop_keys=["plugins", "version", "pipelines", "sources"]))
+
+        plugins_act = menu.addAction("Plugins")
+        plugins_act.triggered.connect(
+            lambda: self.gui_context.config_manager.show("/plugins", "Plugins"))
+
+        menu.addSeparator()
+
+        # Dynamic Content: Context-Aware Actions
+        # Example: Only show 'Close All Tabs' if there are tabs open
+        # if self.central_tabs.count() > 0:
+        #     close_all_act = menu.addAction("❌ Close All Tabs")
+        #     close_all_act.triggered.connect(self.close_all_tabs)  # You'll need to implement this
+        #     menu.addSeparator()
+
+        # List Recently Opened Watches (Optional Fun Feature)
+        # You can pull this from your gui_config
+        # watches = self.watches_node.config or {}
+        # if watches:
+        #     recent_menu = menu.addMenu("Recent Watches")
+        #     for wid, data in list(watches.items())[:5]:  # Show top 5
+        #         name = data.get("tab_name", wid)
+        #         act = recent_menu.addAction(name)
+        #         act.triggered.connect(lambda checked=False, w=wid: self.open_watch(w))
+
+        update_act = menu.addAction("Check for updates")
+        update_act.triggered.connect(lambda: self.create_widget("UpdateWidget", "Updates", as_window=True))
+
+        # set_as_in_development(update_act, self)
+
+        # Global Exit
+        menu.addSeparator()
+        exit_act = menu.addAction("Quit")
+        exit_act.triggered.connect(self.close)
 
     def create_widget(self, cls_name, name, as_window=False, show=True, params=None):
         """Routes a string class name to the correct factory method."""
@@ -485,6 +559,62 @@ class BlinkMainWindow(QMainWindow):
                 self.create_device_control_toolbar(source_id, config.get("name", source_id))
                 print(f"[UI] Created toolbar for: {source_id}")
 
+    def sync_watches_list(self, sources_config: dict, schema: dict):
+        """Updates the Telemetry Watch list based on the current GUI config."""
+        pass
+    #     for key, item in sources_config.items():
+
+    def populate_watch_menu(self):
+        """Triggered right before the menu paints on screen."""
+        self.watch_menu.clear()
+
+        # Dynamic Actions from current config
+        watches_config = self.watches_node.config
+
+        if not watches_config:
+            disabled_act = self.watch_menu.addAction("No saved watches")
+            disabled_act.setEnabled(False)
+        else:
+            for watch_id, data in watches_config.items():
+                # Use the name from config, or fallback to the ID/Key
+                action = self.watch_menu.addAction(data.get("name", "Default"))
+
+                # Closure fix: capture wid=watch_id
+                action.triggered.connect(lambda checked=False, wid=watch_id: self.open_watch(wid))
+
+        self.watch_menu.addSeparator()
+        # Static Action
+        new_action = self.watch_menu.addAction("+ New Watch...")
+        new_action.triggered.connect(lambda: self.open_watch(None))
+
+    def open_watch(self, watch_id=None):
+        """Opens a Telemetry Watch tab for the given watch name."""
+        # watches = self.watches_node.config
+        node = self.watches_node
+        if watch_id is None:
+            name, ok = QInputDialog.getText(
+                self,
+                "New Watch",
+                "Enter a name for this watch:",
+                text="New Watch"
+            )
+
+            # If user clicks 'Cancel' or gives an empty string, abort creation
+            if not ok or not name.strip():
+                return
+
+            watches = node.get_copy()
+            watch_id, conf = TelemetryWatch.new_watch(name)
+            watches[watch_id] = conf
+            node.send_config(watches)
+
+        else:
+            conf = node.get(watch_id)
+
+        name = conf.get("name", "Default")
+
+        self.create_widget("TelemetryWatch", f"Watch {name}", params={"id": watch_id})
+
     def create_device_control_toolbar(self, source_id, device_name):
         """Generates a dedicated toolbar for a specific device."""
         toolbar = QToolBar(f"Control: {device_name}")
@@ -527,59 +657,71 @@ class BlinkMainWindow(QMainWindow):
 
 
 def run(args):
-    # Force Windows to show the custom icon in the taskbar
-    if sys.platform == "win32":
-        import ctypes
-        try:
-            myappid = f'ee.incubator.blinkview.{blinkview_version}'
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-        except Exception:
-            pass  # Fails gracefully on non-Windows systems
+    install_version = None  # version to install when closing app
 
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-    app = QApplication(sys.argv)
+    def set_update_version(ver):
+        nonlocal install_version
+        install_version = ver
 
-    use_qdarktheme = True
-    if use_qdarktheme:
+    try:
+        # Force Windows to show the custom icon in the taskbar
+        if sys.platform == "win32":
+            import ctypes
+            try:
+                myappid = f'ee.incubator.blinkview.{blinkview_version}'
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            except Exception:
+                pass  # Fails gracefully on non-Windows systems
 
-        import qdarktheme
-        qdarktheme.setup_theme("dark", corner_shape="sharp")
-        custom_tooltips = """
-        QToolTip {
-            background-color: #1e1f22; /* Deep charcoal (PyCharm tooltip bg) */
-            color: #bcbec4;            /* Soft light gray text */
-            border: 1px solid #4e5157; /* Subtle border for definition */
-            padding: 5px;              /* Breathe room */
-            border-radius: 0px;        /* Sharp corners to match your 'sharp' setting */
-        }
-        """
-        app.setStyleSheet(app.styleSheet() + custom_tooltips)
-    else:
-        app.setStyle('Fusion')
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+        app = QApplication(sys.argv)
 
-    # Set the global application icon
-    app.setWindowIcon(QIcon(str(Path(__file__).parent.parent / "assets" / "icon.png")))
+        use_qdarktheme = True
+        if use_qdarktheme:
 
-    registry = Registry(session_name=args.session, profile_name=args.profile, log_dir=args.logdir, config_path=args.config)
+            import qdarktheme
+            qdarktheme.setup_theme("dark", corner_shape="sharp")
+            custom_tooltips = """
+            QToolTip {
+                background-color: #1e1f22; /* Deep charcoal (PyCharm tooltip bg) */
+                color: #bcbec4;            /* Soft light gray text */
+                border: 1px solid #4e5157; /* Subtle border for definition */
+                padding: 5px;              /* Breathe room */
+                border-radius: 0px;        /* Sharp corners to match your 'sharp' setting */
+            }
+            """
+            app.setStyleSheet(app.styleSheet() + custom_tooltips)
+        else:
+            app.setStyle('Fusion')
 
-    viewer = BlinkMainWindow(registry)
-    viewer.setWindowOpacity(0)
-    viewer.show()
+        # Set the global application icon
+        app.setWindowIcon(QIcon(str(Path(__file__).parent.parent / "assets" / "icon.png")))
 
-    def finalize_ui_restore():
-        # Because this runs AFTER app.exec() starts, Qt's geometry math will be flawless.
-        viewer.load_ui_state()
+        registry = Registry(session_name=args.session, profile_name=args.profile, log_dir=args.logdir, config_path=args.config)
 
-        viewer.raise_()
-        viewer.activateWindow()
-        # Materialize the window in its perfect location
-        viewer.setWindowOpacity(1.0)
+        viewer = BlinkMainWindow(registry, set_update_version=set_update_version)
+        viewer.setWindowOpacity(0)
+        viewer.show()
 
-    # 4. Schedule the restoration to happen on the very first frame of the Event Loop
-    QTimer.singleShot(50, finalize_ui_restore)
+        def finalize_ui_restore():
+            # Because this runs AFTER app.exec() starts, Qt's geometry math will be flawless.
+            viewer.load_ui_state()
 
-    sys.exit(app.exec())
+            viewer.raise_()
+            viewer.activateWindow()
+            # Materialize the window in its perfect location
+            viewer.setWindowOpacity(1.0)
+
+        # 4. Schedule the restoration to happen on the very first frame of the Event Loop
+        QTimer.singleShot(50, finalize_ui_restore)
+        sys.exit(app.exec())
+    finally:
+        if install_version is not None:
+            from blinkview.utils.updater import Updater
+            updater = Updater()
+            updater.install(install_version)
+
 
 
 def main():

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QLabel, QCheckBox, QPushButton, QListWidgetItem
 )
 
+from blinkview.io.BaseReader import BaseReader
 from blinkview.ui.utils.config_node import ConfigNode
 from blinkview.utils.generate_id import generate_id
 
@@ -53,7 +54,7 @@ class DeviceListItemWidget(QWidget):
         self.btn_config.setToolTip("Open Configuration")
         self.btn_config.clicked.connect(lambda: self.config_node.show())
         layout.addWidget(self.btn_config)
-        self.config_node.signal_received.connect(self._on_config_update)
+        self.config_node.on_update(self._on_config_update)
 
         self.setEnabled(False)
 
@@ -122,7 +123,7 @@ class DeviceSidebarWidget(QWidget):
 
         # Connect the click directly to the pop-up logic
         self.btn_add_device.triggered.connect(self.start_device_fetch_and_show_menu)
-        self.config_node.signal_received.connect(self._on_config_update)
+        self.config_node.on_update(self._on_config_update)
 
     def start_device_fetch_and_show_menu(self):
         """Creates the menu instantly, starts the fetch, and blocks on the menu."""
@@ -191,16 +192,12 @@ class DeviceSidebarWidget(QWidget):
         if not ok or not name:
             return  # User cancelled or entered an empty name
 
-        config = deepcopy(self.config_node.config)
-        source_id = generate_id("src")
-        config[source_id] = {
-            "enabled": True,
-            "type": device_type,
-            "name": name
-        }
+        config = self.config_node.get_copy()
+        id_, conf = BaseReader.new_daemon(name, device_type, prefix="src", parent=config)
+        config[id_] = conf
 
         self.config_node.send_config(config)
-        self.config_node.show(source_id, name)
+        self.config_node.show(id_, name)
 
     def _on_config_update(self, sources: dict, schema: dict):
         """Listens for config updates to keep the sidebar in sync with external changes."""
@@ -211,7 +208,6 @@ class DeviceSidebarWidget(QWidget):
             item = QListWidgetItem(self.list_widget)
             node = self.config_node.create_child(f"{source_id}", name=f"Source - {source_config.get('name', source_id)}")
             row_widget = DeviceListItemWidget(node, gui_context=self.gui_context)
-            node.fetch()
 
             item.setSizeHint(row_widget.sizeHint())
             self.list_widget.setItemWidget(item, row_widget)

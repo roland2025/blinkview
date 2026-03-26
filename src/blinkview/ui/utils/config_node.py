@@ -13,10 +13,10 @@ from copy import deepcopy
 
 
 class ConfigNode(QObject):
-    signal_received = Signal(Any, dict)
+    signal_received = Signal(Any, Any)
     signal_unregister = Signal(object)
 
-    def __init__(self, manager, active_path: str, name: str = None, drop_keys: list = None, depth: int = None, parent=None):
+    def __init__(self, manager, active_path: str, name: str = None, drop_keys: list = None, depth: int = None, on_update=None, parent=None):
         super().__init__(parent)
 
         # Safely hold a reference back to the ConfigManager
@@ -36,6 +36,13 @@ class ConfigNode(QObject):
 
         self.config = {}
         self.schema = {}
+
+        if on_update is not None:
+            self.on_update(on_update)
+
+    def on_update(self, callback):
+        """Registers a callback to be called whenever this node receives new config/schema data."""
+        self.signal_received.connect(callback)
 
     def create_child(self, relative_path: str, name: str = None, drop_keys: list = None, editable: bool = True, depth: int = None) -> 'ConfigNode':
         """
@@ -185,8 +192,8 @@ class ConfigNode(QObject):
 
     def send_config(self, config: dict):
         """Sends the entire config dictionary back to the main application."""
-
         self.send(jsonpatch.make_patch(self.config, config).patch)
+        self.config = config
 
     def get_copy(self):
         """Returns a deep copy of the current config."""

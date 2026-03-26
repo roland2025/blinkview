@@ -78,7 +78,7 @@ class SectionEntry(TelemetryEntry):
 @dataclass(slots=True)
 class RowEntry(TelemetryEntry):
     label: str
-    key: str = field(default_factory=generate_id)
+    key: str = field(default_factory=lambda: generate_id("row"))
     modules: List[ModuleIdentity] = field(default_factory=list)
 
     # UI/Runtime State
@@ -179,13 +179,20 @@ class TelemetryWatch(QScrollArea):
 
         self.gui_context: GUIContext = gui_context
         self.tab_name = ""
+        self.name = None
+        self.watch_id = generate_id("watch")
         self._set_defaults()
+
+        self.node = None
 
         if state:
             self.restore(state)
         else:
+            self.node = self.gui_context.gui_config_manager.create_node("watches", self.watch_id,
+                                                                        received=self.update_config_schema)
             self.rebuild_ui()
 
+        self.node.fetch()
         self.gui_context.add_updatable(self)
 
     def __del__(self):
@@ -221,7 +228,7 @@ class TelemetryWatch(QScrollArea):
             if new_index > old_index:
                 new_index -= 1
             self.entries.insert(max(0, new_index), item)
-            self.rebuild_ui()
+            self.save_config()
 
     def _handle_external_drop(self, module_id: str, pos):
         target_index = self._calculate_drop_index(pos)
@@ -232,7 +239,8 @@ class TelemetryWatch(QScrollArea):
             if isinstance(target, RowEntry):
                 if module not in target.modules:
                     target.modules.append(module)
-                self.rebuild_ui()
+
+                    self.save_config()
                 return
 
         # Fallback: Create new row
@@ -241,7 +249,9 @@ class TelemetryWatch(QScrollArea):
             modules=[module]
         )
         self.entries.insert(target_index, new_row)
-        self.rebuild_ui()
+        # self.rebuild_ui()
+
+        self.save_config()
 
     def _calculate_drop_index(self, pos):
         # Map global drop position to the container's coordinate system
@@ -261,6 +271,8 @@ class TelemetryWatch(QScrollArea):
         self.edit_action.setText("✓ Done Editing" if self.edit_mode else "✎ Edit Layout")
         self.add_section_action.setVisible(self.edit_mode)
         self.add_row_action.setVisible(self.edit_mode)
+        if not self.edit_mode:
+            self.save_config()
         self.rebuild_ui()
 
     def rebuild_ui(self):
@@ -317,28 +329,28 @@ class TelemetryWatch(QScrollArea):
         self.entries.pop(index)
         self.rebuild_ui()
 
-    # --- Entries Management ---
-
-    def add_section(self, title):
-        self.entries.append(SectionEntry(title))
-        self.rebuild_ui()
-
-    def add_row(self, key, label):
-        self.entries.append(RowEntry(key=key, label=label))
-        self.rebuild_ui()
-
     # --- State ---
 
     def get_state(self) -> dict:
         return {
             "tab_name": self.tab_name,
-            "entries": [e.to_dict() for e in self.entries]
+            "id": self.watch_id
         }
 
     def restore(self, state: dict):
+        self.print(f"restore: {state}")
         self.tab_name = state.get("tab_name", self.tab_name)
-        raw_entries = state.get("entries", [])
+        self.watch_id = state.get("id") or self.watch_id
 
+        self.node = self.gui_context.gui_config_manager.create_node(f"/watches/{self.watch_id}", on_update=self.update_config_schema)
+
+        self.rebuild_ui()
+
+    def update_config_schema(self, config_: dict, schema_: dict):
+        self.print(f"update_config_schema: {config_}")
+        raw_entries = config_.get("entries", [])
+        self.print(f"id: {self.watch_id}")
+        self.name = config_.get("name")
         self.entries = []
         for e in raw_entries:
             if e.get("type") == "section":
@@ -350,20 +362,40 @@ class TelemetryWatch(QScrollArea):
                     label=e["label"],
                     modules=mods
                 ))
-        self.rebuild_ui()
 
+        self.rebuild_ui()
     # --- Prompts ---
+
+    def save_config(self):
+        self.node.send_config({
+            "name": self.name,
+            "tab_name": self.tab_name,
+            "id": self.watch_id,
+            "entries": [e.to_dict() for e in self.entries]
+        })
 
     def prompt_add_row(self):
         # We don't even need a dialog anymore if we don't want to!
         # Just add a generic row and let the user type the name in the QLineEdit.
         self.entries.append(RowEntry(label="New Metric"))
-        self.rebuild_ui()
+        self.save_config()
+        # self.rebuild_ui()
 
     def prompt_add_section(self):
         self.entries.append(SectionEntry(label="NEW SECTION"))
-        self.rebuild_ui()
+        # self.rebuild_ui()
+        self.save_config()
 
     def apply_updates(self):
         for entry in self.entries:
             entry.update()
+
+    @classmethod
+    def new_watch(cls, name, parent: dict = None):
+        parent = parent or {}
+        id_ = generate_id("watch", list(parent.keys()))
+        conf = {
+            "id": id_,
+            "name": name,
+        }
+        return id_, conf

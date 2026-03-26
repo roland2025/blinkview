@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from threading import Lock
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 import re
 
 if TYPE_CHECKING:

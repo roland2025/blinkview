@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from blinkview.core.BaseBindableConfigurable import BaseBindableConfigurable
 from blinkview.core.base_configurable import configuration_property
 from blinkview.core.constants import SysCat
+from blinkview.utils.generate_id import generate_id
 from blinkview.utils.settings_updater import update_object_from_config
 
 
@@ -169,3 +170,15 @@ class BaseDaemon(BaseBindableConfigurable):
 
         with self._subscribers_lock:
             self.subscribers.clear()
+
+    @classmethod
+    def new_daemon(cls, name, kind, enabled=True, prefix=None, parent: dict = None):
+        parent = parent or {}
+        id_ = generate_id(prefix, list(parent.keys()))
+        conf = {
+            "id": id_,
+            "enabled": True,
+            "type": kind,
+            "name": name
+        }
+        return id_, conf

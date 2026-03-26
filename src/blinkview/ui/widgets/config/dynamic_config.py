@@ -43,8 +43,7 @@ class DynamicConfigWidget(QWidget):
         if state:
             self.restore(state)
 
-        self.node = self.gui_context.config_manager.create_node(self.path, self.child_name, self.drop_keys, self.editable)
-        self.node.signal_received.connect(self.update_config_schema)
+        self.node = self.gui_context.config_manager.create_node(self.path, self.child_name, self.drop_keys, self.editable, on_update=self.update_config_schema)
 
         self.original_schema = {}
         self.schema = {}

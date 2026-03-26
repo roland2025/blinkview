@@ -75,9 +75,17 @@ class Registry:
 
         self.file_manager = FileManager(session_name=session_name, profile_name=profile_name, log_dir=log_dir, config_path=config_path)
 
-        self.config = ConfigManager(self.file_manager.get_config_path(), self.file_manager.get_session_path(suffix="autosave"))
+        default_config = {
+            "version": "0.2",
+            "sources": {},
+            "pipelines": {},
+            "plugins": {},
+            "reorder": {"enabled": True, "type": "default"},
+            "central": {"enabled": True, "type": "default"}
+        }
+        self.config = ConfigManager(self.file_manager.get_config_path(), self.file_manager.get_session_path(suffix="autosave"), default_config)
         self.config.save_full_config(self.file_manager.get_session_path(suffix="start"))
-        self.config_changed_cb = None
+        self.config.get_schema_by_path = self.get_schema_by_path
 
         self.plugins = PluginManager(self, self.logger_creator("plugins")())
 
@@ -210,28 +218,6 @@ class Registry:
                     return self.pipelines.get_schema(splitted[1])
 
         return schema
-
-    def get_config_schema(self, path: str, drop_keys: list = None, editable: bool = True, depth: int = None):
-        return self.config.get_by_path(path, drop_keys=drop_keys, make_deep_copy=editable, depth=depth), self.get_schema_by_path(path, drop_keys=drop_keys)
-
-    def set_config(self, path: str, patch: list):
-        try:
-            print(f"[Registry] set_config: {path} -> {patch}")
-            # self.logger.info(f"set_config: {path} -> {new_config}")
-            self.config.apply_patch(path, patch)
-
-            # print(f"[Registry] Notifying config change for {path}")
-
-            if self.config_changed_cb is not None:
-                new_config = self.config.get_by_path(path)
-                # print(f"[Registry] Calling config_changed_cb for {path} with new_config: {new_config}")
-                self.config_changed_cb(path, new_config, self.get_schema_by_path(path))
-
-            print(f"[Registry] Finished set_config for {path}")
-            # self.config.set_by_path(path, new_config)
-        except Exception as e:
-            print(f"[Registry] Error in set_config for {path}: {e}")
-            self.logger.error(f"set_config failed for {path}", e)
 
     def stop(self):
         """Cleanly tear down the session."""

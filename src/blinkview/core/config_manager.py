@@ -16,18 +16,24 @@ from blinkview.utils.atomic_json_dump import atomic_json_dump
 
 
 class ConfigManager:
-    def __init__(self, filepath, autosave_path):
+    def __init__(self, filepath, autosave_path, default_config=None):
         self.filepath = filepath
         self.autosave_path = autosave_path
 
         print(f"[ConfigManager] Initialized with filepath: {self.filepath}, autosave_path: {self.autosave_path}")
 
         self._lock = threading.RLock()
+
+        self.default_config = default_config or {}
+
         self._data = self._load_or_create_default()
 
         # Maps path -> list of callback functions
         # e.g., {"/plugins": [on_plugin_change], "/devices/ABC": [on_abc_change]}
         self._subscriptions: Dict[str, List] = {}
+
+        self.config_changed_cb = None  # Optional global callback for any config change
+        self.get_schema_by_path = None  #
 
     def session_autosave(self):
         """Points the autosave to the current session folder."""
@@ -60,15 +66,7 @@ class ConfigManager:
             except Exception as e:
                 print(f"[ConfigManager] Error: {e}")
 
-        default_config = {
-            "version": "0.2",
-            "sources": {},
-            "pipelines": {},
-            "plugins": {},
-            "reorder": {"enabled": True, "type": "default"},
-            "central": {"enabled": True, "type": "default"}
-        }
-        return default_config
+        return self.default_config
 
     # ==========================================
     # PUBLIC API: Read Operations
@@ -141,6 +139,12 @@ class ConfigManager:
                 # 3. Notify Subscribers
                 self._notify_subscribers(global_patch)
 
+                if self.config_changed_cb is not None:
+                    new_config = self.get_by_path(path, make_deep_copy=True)
+                    # print(f"[Registry] Calling config_changed_cb for {path} with new_config: {new_config}")
+                    schema = self.get_schema_by_path(path) if self.get_schema_by_path else None
+                    self.config_changed_cb(path, new_config, schema)
+
             except Exception as e:
                 print(f"[ConfigManager] Error applying patch: {e}")
 
@@ -150,7 +154,9 @@ class ConfigManager:
         # Get all paths affected by this patch
         affected_paths = {op["path"] for op in global_patch}
 
-        for sub_path, callbacks in self._subscriptions.items():
+        current_subscriptions = list(self._subscriptions.items())  # Snapshot to avoid issues if subscriptions change during iteration
+
+        for sub_path, callbacks in current_subscriptions:
 
             # Enforce trailing slashes to prevent substring false-positives
             # e.g., "/devices/A" vs "/devices/ABC"
@@ -199,3 +205,11 @@ class ConfigManager:
         base_name = self.filepath.stem  # e.g., 'blink_config'
         new_name = f"{base_name}_{sub}.json"  # e.g., 'blink_config_devices.json'
         return self.filepath.parent / new_name
+
+    def get_config_schema(self, path: str, drop_keys: list = None, editable: bool = True, depth: int = None):
+        config = self.get_by_path(path, drop_keys=drop_keys, make_deep_copy=editable, depth=depth)
+        schema = self.get_schema_by_path(path, drop_keys=drop_keys) if self.get_schema_by_path else None
+        return config, schema
+
+    def get_data(self):
+        return self._data

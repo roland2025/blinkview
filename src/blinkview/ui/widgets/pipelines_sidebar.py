@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QLabel, QCheckBox, QPushButton, QListWidgetItem
 )
 
+from blinkview.parsers.parser import ParserThread
 from blinkview.ui.utils.config_node import ConfigNode
 from blinkview.ui.utils.in_development import set_as_in_development
 from blinkview.utils.generate_id import generate_id
@@ -86,7 +87,7 @@ class PipelineListItemWidget(QWidget):
         layout.addWidget(self.btn_menu)
 
         # Connections
-        self.config_node.signal_received.connect(self._on_config_update)
+        self.config_node.on_update(self._on_config_update)
         self.setEnabled(False)
 
     # --- Button Handlers ---
@@ -184,7 +185,7 @@ class PipelinesSidebarWidget(QWidget):
 
         # Connect the click directly to the pop-up logic
         self.btn_add.triggered.connect(self.fetch_types_and_show_menu)
-        self.config_node.signal_received.connect(self._on_config_update)
+        self.config_node.on_update(self._on_config_update)
 
     def fetch_types_and_show_menu(self):
         """Creates the menu instantly, starts the fetch, and blocks on the menu."""
@@ -261,15 +262,12 @@ class PipelinesSidebarWidget(QWidget):
             return  # User cancelled or entered an empty name
 
         config = self.config_node.get_copy()
-        source_id = generate_id("pipe")
-        config[source_id] = {
-            "enabled": True,
-            "type": device_type,
-            "name": name
-        }
+        id_, conf = ParserThread.new_daemon(name, device_type, prefix="pipe", parent=config)
+
+        config[id_] = conf
 
         self.config_node.send_config(config)
-        self.config_node.show(source_id, name)
+        self.config_node.show(id_, name)
 
     def _on_config_update(self, items: dict, schema: dict):
         """Listens for config updates to keep the sidebar in sync with external changes."""

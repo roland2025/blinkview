@@ -8,6 +8,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, Slot, Signal
 
+from blinkview.core.config_manager import ConfigManager
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.config_node import ConfigNode
 
@@ -19,27 +20,31 @@ class ConfigNodeManager(QObject):
     """
 
     # Global bus for registry updates
-    signal_received_config_schema = Signal(str, Any, dict)
+    signal_received_config_schema = Signal(str, Any, Any)
 
-    def __init__(self, context: GUIContext, parent=None):
+    def __init__(self, context: GUIContext, config_manager=None, parent=None):
         super().__init__(parent)
         self.gui_context = context
-        self.nodes = []
+        self.manager: ConfigManager = config_manager or self.gui_context.registry.config
 
-        self.gui_context.registry.config_changed_cb = self.signal_received_config_schema.emit
         self.signal_received_config_schema.connect(self._broadcast)
 
-    def create_node(self, path: str, name: str = None, drop_keys: list = None, editable: bool = True, depth: int = None) -> ConfigNode:
+        self.manager.config_changed_cb = self.signal_received_config_schema.emit  # Redirect backend updates to the signal
+
+        self.nodes = []
+
+    def create_node(self, path: str, name: str = None, drop_keys: list = None, editable: bool = True, depth: int = None, on_update=None) -> ConfigNode:
         """Creates a ConfigNode and wires it securely to the backend registry."""
         print(f"[ConfigManager] Creating node for {path}")
-        node = ConfigNode(self, path, name, drop_keys=drop_keys, depth=depth)
+        node = ConfigNode(self, path, name, drop_keys=drop_keys, depth=depth, on_update=on_update)
 
         # Extract backend functions
         run_task = self.gui_context.registry.system_ctx.tasks.run_task
-        get_config_schema = self.gui_context.registry.get_config_schema
-        set_config = self.gui_context.registry.set_config
 
-        # 1. Wire the GET function
+        get_config_schema = self.manager.get_config_schema
+        set_config = self.manager.apply_patch
+
+        # Wire the GET function
         def fetch(path_):
             try:
                 print(f"[ConfigManager] Fetching '{path_}'")
@@ -51,13 +56,16 @@ class ConfigNodeManager(QObject):
 
         node.get_fn = lambda path_: run_task(fetch, path_)
 
-        # 2. Wire the SEND function
+        # Wire the SEND function
         node.send_fn = lambda path_, patch_: run_task(set_config, path_, patch_)
 
-        # 3. Wire the cleanup lifecycle
+        # Wire the cleanup lifecycle
         node.signal_unregister.connect(self.deregister_node)
 
         self.nodes.append(node)
+
+        node.fetch()
+
         return node
 
     @Slot(object)

@@ -4,7 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import os
 import re
 import json
 import platform
@@ -13,15 +12,16 @@ import shutil
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import hashlib
 
+from blinkview import __version__ as blinkview_version
 from blinkview.core.settings_manager import SettingsManager
 from blinkview.core.system_context import SystemContext
 from blinkview.storage.file_logger import FileLogger
 from blinkview.utils.atomic_json_dump import atomic_json_dump
-from blinkview.utils.global_settings import get_blink_home, GlobalSettings
-from blinkview.utils.project_settings import get_workspace_dir, get_project_root, ProjectSettings
+from blinkview.utils.global_settings import get_blink_home
+from blinkview.utils.project_settings import get_workspace_dir, get_project_root
 
 
 def _get_file_hash(path: Path) -> str:
@@ -115,6 +115,7 @@ class FileManager:
             "session_id": self.session_dir.name,  # Unique ID based on timestamp
             "status": "active",
             "created_at": datetime.now(timezone.utc).isoformat() + "Z",
+            "version": blinkview_version,
 
             "project": {
                 "name": self.project_name,

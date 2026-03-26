@@ -5,19 +5,26 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from secrets import token_hex
+from typing import List, Optional
 
 
-def generate_id(prefix: str = "") -> str:
-    """Generates a short, random hex ID. Example: src_8f14e45f"""
-    # token_hex(4) generates 4 bytes, which becomes an 8-character hex string
-    random_hex = token_hex(4)
+def generate_id(prefix: str = "", prev: Optional[List[str]] = None) -> str:
+    """
+    Generates a short, random hex ID. Example: src_8f14e45f
+    Ensures the ID does not exist in the 'prev' list if provided.
+    """
+    while True:
+        random_hex = token_hex(4)
 
-    if prefix:
-        # Ensure the prefix ends with an underscore for consistency
-        clean_prefix = prefix if prefix.endswith('_') else f"{prefix}_"
-        return f"{clean_prefix}{random_hex}"
+        if prefix:
+            clean_prefix = prefix if prefix.endswith('_') else f"{prefix}_"
+            new_id = f"{clean_prefix}{random_hex}"
+        else:
+            new_id = random_hex
 
-    return random_hex
+        # If prev is None or new_id isn't in the list, we are good to go
+        if prev is None or new_id not in prev:
+            return new_id
 
 
 def main():

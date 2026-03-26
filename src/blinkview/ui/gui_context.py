@@ -40,6 +40,8 @@ class GUIContext(QObject):
 
         self.config_manager: 'ConfigNodeManager' = None
 
+        self.gui_config_manager: 'ConfigNodeManager' = None
+
         self.register_log_target = None
         self.deregister_log_target = None
 
@@ -49,7 +51,11 @@ class GUIContext(QObject):
 
         self.gui_state = None
 
+        self.gui_config = None
+
         self.updatable = []
+
+        self.set_update_version = None
 
         # Central Heartbeat: Drives all 30fps UI animations/updates
         # self.update_timer = QTimer(self)
@@ -74,6 +80,9 @@ class GUIContext(QObject):
 
     def set_config_manager(self, config_manager: 'ConfigNodeManager'):
         self.config_manager = config_manager
+
+    def set_gui_config_manager(self, gui_config_manager: 'ConfigNodeManager'):
+        self.gui_config_manager = gui_config_manager
 
     def set_register_log_target(self, log_target_fn):
         self.register_log_target = log_target_fn
@@ -115,3 +124,6 @@ class GUIContext(QObject):
 
     def set_gui_state_handler(self, ui_state):
         self.gui_state = ui_state
+
+    def set_gui_config_handler(self, gui_config):
+        self.gui_config = gui_config
