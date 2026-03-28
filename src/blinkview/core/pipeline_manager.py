@@ -67,9 +67,9 @@ class PipelineManager(BaseBindableConfigurable):
             try:
                 item = self.pipelines.get(item_id)
 
+                name = item_config.get("name", item_id)
                 if item is None:
                     # Logic for creating a brand new pipeline
-                    name = item_config.get("name", item_id)
                     self.logger.info(f"Creating new pipeline: '{name}' ({item_id})")
 
                     device_id = self.shared.id_registry.get_device(name)
@@ -87,6 +87,8 @@ class PipelineManager(BaseBindableConfigurable):
                     if not self.needs_delayed_init:
                         self.apply_target(item_id, item)
                         item.start()
+
+                    self.subscribe(name, item)
                 else:
                     # Update existing pipeline and check for changes
                     config_changed = item.apply_config(item_config)
@@ -101,6 +103,7 @@ class PipelineManager(BaseBindableConfigurable):
                         # Re-bind connections
                         if not self.needs_delayed_init:
                             self.apply_target(item_id, item)
+                            self.subscribe(name, item)
 
                         # Handle potential thread restart if specific fields changed
                         if getattr(item, "thread_needs_restart", False):

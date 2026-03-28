@@ -5,63 +5,62 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from PySide6.QtCore import QEasingCurve, QObject, QPropertyAnimation, QRectF, Qt, QVariantAnimation, Signal, Slot
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QWidget
 
 
 class ToastType:
-    INFO = {"color": "#2b2d30", "icon": "ⓘ", "text": "#bcbec4"}
-    SUCCESS = {"color": "#2e3c2e", "icon": "✔", "text": "#addb67"}
-    WARNING = {"color": "#3e3925", "icon": "⚠", "text": "#e2c08d"}
-    ERROR = {"color": "#482323", "icon": "✖", "text": "#ff5555"}
+    # (x, y) offset: +x moves right, +y moves down
+    INFO = {"color": "#2b2d30", "icon": "ⓘ", "text": "#bcbec4", "offset": (0, 0)}
+    SUCCESS = {"color": "#2e3c2e", "icon": "✔", "text": "#addb67", "offset": (0, 0)}
+    WARNING = {"color": "#3e3925", "icon": "⚠", "text": "#e2c08d", "offset": (0, 2)}
+    ERROR = {"color": "#482323", "icon": "✖", "text": "#ff5555", "offset": (0, 0)}
 
 
 class ToastIcon(QLabel):
-    """A custom label that draws a circular progress ring around the icon."""
+    def __init__(self, config, parent=None):
+        super().__init__(config["icon"], parent)
+        self._progress = 1.0
+        self._color = QColor(config["text"])
 
-    def __init__(self, icon_text, color, parent=None):
-        super().__init__(icon_text, parent)
-        self._progress = 1.0  # 1.0 to 0.0
-        self._color = QColor(color)
-        self.setMargin(0)
-        self.setContentsMargins(0, 0, 0, 0)
-        # Ensure the label doesn't try to grow
-        self.setFixedSize(24, 24)
+        # Pull offset directly from the ToastType dict
+        self.ring_offset = config.get("offset", (0, 0))
 
+        self.setFixedSize(32, 36)
         self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("background: transparent; font-weight: bold; font-size: 14px;")
+        self.setStyleSheet(f"""
+            background: transparent; 
+            font-weight: bold; 
+            font-size: 14px; 
+            color: {config["text"]}; 
+            padding-top: 2px;
+        """)
 
     def set_progress(self, value):
         self._progress = value
         self.update()
 
     def paintEvent(self, event):
-        # Create the painter
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        # Calculate a perfectly centered square for the circle
-        # Using adjusted() is cleaner than hardcoded (2, 2, w-4, h-4)
-        rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
+        # Create the circle rect and slide it by the per-type offset
+        rect = QRectF(3, 3, 26, 26).translated(0.5 + self.ring_offset[0], 4 + self.ring_offset[1])
 
-        # Draw background track
+        # Draw track
         pen = QPen(QColor(255, 255, 255, 30))
-        pen.setWidth(2)
+        pen.setWidth(3)
         painter.setPen(pen)
         painter.drawEllipse(rect)
 
-        # Draw progress arc
+        # Draw progress
         pen.setColor(self._color)
         painter.setPen(pen)
         start_angle = 90 * 16
         span_angle = int(self._progress * 360 * 16)
         painter.drawArc(rect, start_angle, span_angle)
 
-        # End the painter before calling super().paintEvent (the text)
-        # This prevents the text from being "clipped" or affected by painter settings
         painter.end()
-
-        # Now draw the text icon (ⓘ, ✔, etc.) centered in the widget
         super().paintEvent(event)
 
 
@@ -70,7 +69,7 @@ class ToastWidget(QWidget):
         self,
         message,
         toast_type=ToastType.INFO,
-        duration=5000,
+        duration=5.0,
         action_text=None,
         action_callback=None,
         click_callback=None,
@@ -81,6 +80,8 @@ class ToastWidget(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
 
         self.setFixedWidth(300)
+
+        self.is_hovered = False
 
         self.action_callback = action_callback
         self.click_callback = click_callback
@@ -141,7 +142,7 @@ class ToastWidget(QWidget):
         frame_layout.setSpacing(12)
 
         # Custom Progress Icon
-        self.icon_widget = ToastIcon(toast_type["icon"], toast_type["text"])
+        self.icon_widget = ToastIcon(toast_type)
         frame_layout.addWidget(self.icon_widget, 0, Qt.AlignVCenter)
 
         # Message Body
@@ -172,7 +173,7 @@ class ToastWidget(QWidget):
         self.prog_anim = QVariantAnimation(self)
         self.prog_anim.setStartValue(1.0)
         self.prog_anim.setEndValue(0.0)
-        self.prog_anim.setDuration(duration)
+        self.prog_anim.setDuration(int((duration * 1000)))
         self.prog_anim.valueChanged.connect(self.icon_widget.set_progress)
         self.prog_anim.finished.connect(self.hide_toast)
 
@@ -182,17 +183,24 @@ class ToastWidget(QWidget):
         self.fade_anim = QPropertyAnimation(self.opacity_effect, b"opacity")
         self.fade_anim.setDuration(300)
 
+        self.setAttribute(Qt.WA_Hover)
+        self.setMouseTracking(True)
+
     # --- Event Handlers ---
 
     def enterEvent(self, event):
         """Pause the countdown when the user hovers over the toast."""
+        self.is_hovered = True
         self.prog_anim.pause()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         """Resume the countdown when the mouse leaves."""
+        self.is_hovered = False
         self.prog_anim.resume()
         super().leaveEvent(event)
+
+        ToastManager._reposition_toasts()
 
     def mousePressEvent(self, event):
         """Handle global click on the toast body."""
@@ -236,14 +244,14 @@ class ToastManager:
         cls,
         message,
         toast_type=ToastType.INFO,
-        duration=5000,
+        duration=5.0,
         action_text=None,
         action_callback=None,
         click_callback=None,
         parent=None,
     ):
-
-        # 1. Resolve Parent: Use provided, or fallback to active, or abort
+        print(f"[ToastManager]: show: {message}")
+        # Resolve Parent: Use provided, or fallback to active, or abort
         target_parent = parent or QApplication.activeWindow()
         if not target_parent:
             return
@@ -264,35 +272,30 @@ class ToastManager:
 
     @classmethod
     def _reposition_toasts(cls):
-        # We use a dict to keep track of the 'current_y' for EACH window separately
-        # Key: Window Object, Value: current_y_anchor
         anchors = {}
-
         margin_right = 20
         margin_bottom = 20
         spacing = 10
 
-        # Process from newest to oldest
-        for toast in reversed(cls._toasts):
+        for toast in cls._toasts:
             parent = toast.parentWidget()
             if not parent:
                 continue
 
             parent_geo = parent.geometry()
-
-            # Initialize the anchor for this specific window if not already present
             if parent not in anchors:
                 anchors[parent] = parent_geo.bottom() - margin_bottom
 
             toast.adjustSize()
-
-            # Calculate X (right aligned to this specific parent)
             x = parent_geo.right() - toast.width() - margin_right
-
-            # Calculate Y (stacked up from this parent's specific anchor)
             y = anchors[parent] - toast.height()
 
-            toast.move(x, y)
-
-            # Update the anchor for the NEXT toast in THIS window
-            anchors[parent] = y - spacing
+            # The clean, reliable hover check
+            if not toast.is_hovered:
+                toast.move(x, y)
+                # Update the anchor based on where it safely moved
+                anchors[parent] = y - spacing
+            else:
+                # The toast is frozen. Update the anchor based on its ACTUAL
+                # physical position so the toasts above it don't collapse into it!
+                anchors[parent] = toast.y() - spacing

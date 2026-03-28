@@ -48,6 +48,15 @@ class MessageBox:
         return msg.exec()
 
     @staticmethod
+    def info(parent, title, text, buttons=None):
+        from PySide6.QtWidgets import QMessageBox
+
+        if buttons is None:
+            buttons = QMessageBox.StandardButton.Ok
+        # 'Information' is the internal Qt name for the blue info icon
+        return MessageBox._show(parent, title, text, "Information", buttons, buttons)
+
+    @staticmethod
     def question(parent, title, text, buttons=None, default_btn=None):
         from PySide6.QtWidgets import QMessageBox
 

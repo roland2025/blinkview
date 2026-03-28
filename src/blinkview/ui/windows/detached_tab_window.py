@@ -15,10 +15,11 @@ from blinkview.ui.native_dark_mode import set_native_dark_mode
 class DetachedTabWindow(QMainWindow):
     """A floating window that holds a detached tab and re-attaches it when closed."""
 
-    def __init__(self, gui_context, widget, title):
+    def __init__(self, gui_context, widget, title, reattach=True):
         super().__init__(None)
         self.gui_context: GUIContext = gui_context
         self._force_destroy = False
+        self.reattach_on_close = reattach
 
         self.setWindowTitle(f"{title} - BlinkView")
         self.resize(800, 600)
@@ -69,7 +70,7 @@ class DetachedTabWindow(QMainWindow):
         """Handle window closing, ensuring we don't touch deleted C++ objects."""
 
         # If we are force-destroying, just clear references and exit
-        if self._force_destroy:
+        if self._force_destroy or not self.reattach_on_close:
             self.setCentralWidget(None)
             self.widget = None
             event.accept()

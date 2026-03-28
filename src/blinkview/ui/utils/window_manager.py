@@ -156,6 +156,7 @@ class WindowManager:
                         "window_geometry": get_window_geometry_data(window),
                         # Grab the parameters we defined earlier for restoration
                         "params": params,
+                        "reattach_on_close": getattr(window, "reattach_on_close", True),
                     }
                 )
             except RuntimeError:

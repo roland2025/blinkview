@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 class ToastDispatcher(QObject):
     _instance = None
     # Signal: message, type, duration, action_text, action_cb, click_cb, parent
-    _request_signal = Signal(str, dict, int, object, object, object, object)
+    _request_signal = Signal(str, dict, float, object, object, object, object)
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -29,7 +29,7 @@ class ToastDispatcher(QObject):
         self._initialized = True
         self._request_signal.connect(self._handle_request)
 
-    @Slot(str, dict, int, object, object, object, object)
+    @Slot(str, dict, float, object, object, object, object)
     def _handle_request(self, msg, t_type, dur, a_text, a_cb, c_cb, parent):
         from blinkview.ui.widgets.toast import ToastManager
 
@@ -40,14 +40,14 @@ class ToastDispatcher(QObject):
             action_text=a_text,
             action_callback=a_cb,
             click_callback=c_cb,
-            parent=parent,  # Now passed correctly to the manager
+            parent=parent,
         )
 
     def notify(
         self,
         message,
         toast_type: "ToastType" = None,
-        duration=5000,
+        duration=5.0,
         action_text=None,
         action_callback=None,
         click_callback=None,

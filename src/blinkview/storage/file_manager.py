@@ -212,14 +212,16 @@ class FileManager:
 
     def save_snapshot(self, paths_to_save: list[str | Path]):
         """
-        Copies files or directories using pure Pathlib/OS to avoid the Shutil memory tax.
+        Snapshots files/directories using shutil for kernel-level
+        efficiency and low memory overhead.
         """
+        import shutil
+
         snapshot_dir = self.session_dir / "snapshot"
         snapshot_dir.mkdir(exist_ok=True)
 
-        # Patterns to ignore
-        ignore_set = {"__pycache__", ".git", ".pytest_cache"}
-        ignore_ext = {".pyc", ".pyo"}
+        # Define the ignore pattern
+        ignore_patterns = shutil.ignore_patterns("__pycache__", ".git", ".pytest_cache", "*.pyc", "*.pyo")
 
         for path_str in paths_to_save:
             src = Path(path_str)
@@ -230,24 +232,14 @@ class FileManager:
 
             try:
                 if src.is_dir():
-                    # Recursive walk without importing 'shutil'
-                    for item in src.rglob("*"):
-                        # Check if any part of the path is in our ignore list
-                        if any(part in ignore_set for part in item.parts) or item.suffix in ignore_ext:
-                            continue
-
-                        # Create the relative destination path
-                        relative_dst = dst / item.relative_to(src)
-
-                        if item.is_dir():
-                            relative_dst.mkdir(parents=True, exist_ok=True)
-                        else:
-                            relative_dst.parent.mkdir(parents=True, exist_ok=True)
-                            relative_dst.write_bytes(item.read_bytes())
+                    # dirs_exist_ok=True allows overwriting/merging if called twice
+                    shutil.copytree(src, dst, ignore=ignore_patterns, dirs_exist_ok=True)
                 else:
-                    # Direct file copy
-                    dst.write_bytes(src.read_bytes())
+                    # copy2 preserves metadata (timestamps, permissions)
+                    shutil.copy2(src, dst)
+
             except Exception as e:
+                # Using your existing log style
                 print(f"[FileManager] Failed to snapshot {src}: {e}")
 
     def get_path_for_log(self, file_logger: FileLogger, part: int = 0) -> Path:
@@ -380,14 +372,18 @@ class FileManager:
         return self.session_dir / filename
 
     def _snapshot_master_to_session(self, type_name: str):
-        """Copies the live workspace file to the session folder as a '.start' record."""
-
+        """
+        Copies the live workspace file to the session folder as a '.start' record.
+        Preserves original timestamps and permissions.
+        """
         master_path = self.get_config_path(type_name)
         session_start_path = self.get_session_path(type_name, suffix="start")
 
         if master_path.exists():
             try:
-                # We copy the raw file to preserve exactly what was on disk
-                session_start_path.write_bytes(master_path.read_bytes())
+                import shutil
+                # copy2 preserves metadata/timestamps; read_bytes does not.
+                shutil.copy2(master_path, session_start_path)
             except Exception as e:
+                # Assuming you have a logger, or sticking to your print style:
                 print(f"[FileManager] Failed to snapshot {type_name}: {e}")

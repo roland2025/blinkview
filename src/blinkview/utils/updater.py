@@ -20,8 +20,6 @@ class UpdateError(Exception):
 
 
 class Updater:
-    COOLDOWN = 3600
-
     def __init__(self, settings: SettingsManager | None = None):
         self.settings = settings or SettingsManager()
 
@@ -38,11 +36,38 @@ class Updater:
         features_raw = self.settings.get("update.features", "all")
         self.features_suffix = self._parse_features(features_raw)
 
+        # Retrieve update channel (defaults to stable)
+        self.channel = str(self.settings.get("update.channel", "stable")).lower()
+
     def _parse_features(self, features_raw: str) -> str:
         if not features_raw:
             return ""
         clean_features = ",".join([f.strip() for f in features_raw.split(",") if f.strip()])
         return f"[{clean_features}]" if clean_features else ""
+
+    def _is_version_allowed(self, tag: str) -> bool:
+        """Filters versions based on the selected update channel."""
+        v = parse_version(tag)
+
+        if self.channel == "stable":
+            # Stable: No pre-releases (alpha, beta, rc) and no dev releases
+            return not v.is_prerelease and not v.is_devrelease
+
+        elif self.channel == "rc":
+            # RC: Allow stable releases and specifically 'rc' pre-releases. Reject dev/alpha/beta.
+            if v.is_devrelease:
+                return False
+            if v.is_prerelease:
+                # v.pre is a tuple like ('rc', 1) or ('a', 0)
+                return v.pre is not None and v.pre[0] == "rc"
+            return True  # It's a stable release
+
+        elif self.channel == "dev":
+            # Dev: Unrestricted (stable, rc, alpha, beta, dev)
+            return True
+
+        # Fallback to stable if an unknown channel is set
+        return not v.is_prerelease and not v.is_devrelease
 
     @staticmethod
     def is_valid_repo(path: Path | str) -> bool:
@@ -69,18 +94,26 @@ class Updater:
         Returns True if a network fetch was performed, False otherwise.
         """
         import subprocess
+        from datetime import datetime
 
         # Check Cooldown
-        last_fetch = self.settings.get("update.last_fetch_time", 0)
-        elapsed = time() - last_fetch
+        last_fetch_ts = self.settings.get("update.last_fetch_time", 0)
 
-        custom_cooldown = self.settings.get("update.cooldown_seconds", self.COOLDOWN)
-        if not force and elapsed < custom_cooldown:
-            return False
+        if not force and last_fetch_ts > 0:
+            custom_cooldown = self.settings.get("update.cooldown_seconds")
 
-        if not force and elapsed < custom_cooldown:
-            print(f"[Updater] Fetch skipped. Last check was {int(elapsed)}s ago.")
-            return False
+            if custom_cooldown is not None:
+                # Option A: Fixed seconds-based cooldown
+                if time() - last_fetch_ts < int(custom_cooldown):
+                    return False
+            else:
+                # Option B: Date-change logic (Default)
+                last_date = datetime.fromtimestamp(last_fetch_ts).date()
+                current_date = datetime.now().date()
+
+                if last_date == current_date:
+                    print(f"[Updater] Fetch skipped. Already checked today ({last_date}).")
+                    return False
 
         # Execute Network Call
         try:
@@ -110,7 +143,9 @@ class Updater:
                 tags = [line.split("refs/tags/")[-1] for line in lines if "refs/tags/" in line]
             else:
                 tags = lines
-            return sorted(tags, key=lambda t: parse_version(t), reverse=True) if tags else []
+            # Apply channel filtering before sorting
+            valid_tags = [t for t in tags if self._is_version_allowed(t)]
+            return sorted(valid_tags, key=lambda t: parse_version(t), reverse=True) if tags else []
 
         except subprocess.CalledProcessError as e:
             raise UpdateError(f"Failed to list versions: {e.stderr or str(e)}")
@@ -122,11 +157,16 @@ class Updater:
     def install(self, version: str) -> bool:
         import subprocess
 
+        # Mark that we are attempting an upgrade to this specific version
+        self.settings.set("update.pending_version", version, scope="global")
+
         try:
             subprocess.run(
                 ["git", "-C", str(self.repo_path), "checkout", version], check=True, capture_output=True, text=True
             )
         except subprocess.CalledProcessError as e:
+            # If git fails, we haven't actually started the install yet
+            self.settings.set("update.pending_version", None, scope="global")
             raise UpdateError(f"Failed to checkout {version}: {e.stderr or str(e)}")
 
         install_target = f"{self.repo_path}{self.features_suffix}"
@@ -163,3 +203,30 @@ class Updater:
 
         requires_exit = self.install(target)
         return True, target
+
+    def clear_pending_status(self):
+        """Removes the pending version flag from settings."""
+        self.settings.set("update.pending_version", None, scope="global")
+
+    def check_version_status(self, current_version_str: str) -> tuple[bool | None, str | None]:
+        """
+        Compares the current app version against the pending version.
+        Returns (Success, VersionString) or (None, None) if no update was pending.
+        """
+        pending = self.settings.get("update.pending_version")
+        if not pending:
+            return None, None
+
+        # Clear the flag immediately so we don't nag the user on every launch
+        self.settings.set("update.pending_version", None, scope="global")
+
+        try:
+            v_current = parse_version(current_version_str)
+            v_pending = parse_version(pending)
+
+            # Success is defined as the current version being equal to or newer
+            # than what we tried to install.
+            return v_current >= v_pending, pending
+        except Exception:
+            # Fallback for invalid version strings
+            return current_version_str == pending, pending

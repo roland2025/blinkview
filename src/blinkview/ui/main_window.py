@@ -53,7 +53,7 @@ from blinkview.ui.widgets.telemetry_table import TelemetryTable
 from blinkview.ui.widgets.TelemetryWatch import TelemetryWatch
 from blinkview.ui.widgets.title_bar import TitleBar
 from blinkview.ui.widgets.toast import ToastManager, ToastType
-from blinkview.ui.widgets.update_widget import UpdateWidget
+from blinkview.ui.widgets.update_widget import UpdateWidget, check_post_update
 from blinkview.ui.windows.detached_tab_window import DetachedTabWindow
 from blinkview.utils.used_modules import print_used_modules
 
@@ -269,15 +269,15 @@ class BlinkMainWindow(QMainWindow):
 
         print("[BlinkMainWindow] Initialization complete.")
 
-        QTimer.singleShot(1000, lambda: check_for_updates_silently(self.gui_context))
+        QTimer.singleShot(1000, lambda: check_for_updates_silently(self.gui_context, parent=self))
 
     def load_ui_state(self):
         self.gui_context.gui_state.load_ui_state(self.gui_context.registry.file_manager.get_config_path("gui_state"))
 
-        # QTimer.singleShot(0, lambda: ToastManager.show("Something happened...", ToastType.INFO))
-        # QTimer.singleShot(333, lambda: ToastManager.show("WAARNING...", ToastType.WARNING))
-        # QTimer.singleShot(666, lambda: ToastManager.show("WHoop success...", ToastType.SUCCESS))
-        # QTimer.singleShot(999, lambda: ToastManager.show("Attention error...", ToastType.ERROR))
+        QTimer.singleShot(0, lambda: ToastManager.show("Something happened...", ToastType.INFO))
+        QTimer.singleShot(333, lambda: ToastManager.show("WAARNING...", ToastType.WARNING))
+        QTimer.singleShot(666, lambda: ToastManager.show("WHoop success...", ToastType.SUCCESS))
+        QTimer.singleShot(999, lambda: ToastManager.show("Attention error...", ToastType.ERROR))
 
     def register_log_target(self, target):
         """Adds a target that expects a 'process_log_batch(list)' method."""
@@ -366,7 +366,9 @@ class BlinkMainWindow(QMainWindow):
         #         act.triggered.connect(lambda checked=False, w=wid: self.open_watch(w))
 
         update_act = menu.addAction("Check for updates")
-        update_act.triggered.connect(lambda: self.create_widget("UpdateWidget", "Updates", as_window=True))
+        update_act.triggered.connect(
+            lambda: self.create_widget("UpdateWidget", "Updates", as_window=True, reattach_on_close=False)
+        )
 
         # set_as_in_development(update_act, self)
 
@@ -375,7 +377,7 @@ class BlinkMainWindow(QMainWindow):
         exit_act = menu.addAction("Quit")
         exit_act.triggered.connect(self.close)
 
-    def create_widget(self, cls_name, name, as_window=False, show=True, params=None):
+    def create_widget(self, cls_name, name, as_window=False, show=True, params=None, reattach_on_close=True):
         """Routes a string class name to the correct factory method."""
 
         # Prevent duplicate tabs using the helper
@@ -407,7 +409,7 @@ class BlinkMainWindow(QMainWindow):
 
         # Route to correct container
         if as_window:
-            floating_win = DetachedTabWindow(self.gui_context, widget, name)
+            floating_win = DetachedTabWindow(self.gui_context, widget, name, reattach=reattach_on_close)
 
             if signal_destroy:
                 signal_destroy.connect(lambda _: floating_win.force_destroy())

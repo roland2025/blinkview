@@ -5,8 +5,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 # --- CONFIGURATION ---
 AUTHOR = "Roland Uuesoo"
@@ -18,19 +18,18 @@ HEADER_TEMPLATE = f"""# This Source Code Form is subject to the terms of the Moz
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 #
-# Copyright (c) {YEAR} {AUTHOR}
-"""
+# Copyright (c) {YEAR} {AUTHOR}"""
 
 MPL_REGEX = re.compile(
     r"# This Source Code Form is subject to the terms of the Mozilla Public.*?\n# Copyright \(c\) \d{4} .*?\n",
-    re.DOTALL
+    re.DOTALL,
 )
 
 
 def update_file_header(file_path: Path):
     """Reads, cleans, and prepends the license header to a file."""
     try:
-        original_content = file_path.read_text(encoding='utf-8')
+        original_content = file_path.read_text(encoding="utf-8")
     except Exception as e:
         print(f"❌ Failed to read {file_path}: {e}")
         return
@@ -42,15 +41,17 @@ def update_file_header(file_path: Path):
         shebang = parts[0] + "\n"
         content = parts[1] if len(parts) > 1 else ""
 
-    content = MPL_REGEX.sub("", content).lstrip()
-    new_content = f"{shebang}{HEADER_TEMPLATE}\n{content}"
+    content = MPL_REGEX.sub("", content)
+    # Add an extra newline only if the content doesn't already start with one
+    gap = "\n" if content and not content.startswith("\n") else ""
+    new_content = f"{shebang}{HEADER_TEMPLATE}\n{gap}{content}"
 
     if original_content == new_content:
         # print(f"  Skipped: {file_path} (No change)")
         return
 
     try:
-        file_path.write_text(new_content, encoding='utf-8', newline='\n')
+        file_path.write_text(new_content, encoding="utf-8", newline="\n")
         print(f"Updated: {file_path}")
     except Exception as e:
         print(f"❌ Failed to write {file_path}: {e}")

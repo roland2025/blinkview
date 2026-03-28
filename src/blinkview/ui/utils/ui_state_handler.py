@@ -97,7 +97,12 @@ class UIStateHandler:
                         params = win_info.get("params", {})
                         tab_name = params.get("tab_name") or win_info.get("name", "Floating Tool")
                         new_win = self.window.create_widget(
-                            cls_name=win_info.get("class"), name=tab_name, as_window=True, show=False, params=params
+                            cls_name=win_info.get("class"),
+                            name=tab_name,
+                            as_window=True,
+                            show=False,
+                            params=params,
+                            reattach_on_close=win_info.get("reattach_on_close", True),
                         )
 
                         if not new_win:

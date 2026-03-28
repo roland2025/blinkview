@@ -1,0 +1,26 @@
+site_name: blinkview
+site_description: High-performance embedded telemetry and log viewer.
+site_url: https://your-username.github.io/blinkview  # Change this later
+
+theme:
+  name: material
+  palette:
+    scheme: slate  # Dark mode by default, fits the "embedded" vibe
+    primary: indigo
+  features:
+    - navigation.sections
+    - content.code.copy
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: true
+            show_root_heading: true
+            show_if_no_docstring: true
+
+nav:
+  - API Reference: reference.md

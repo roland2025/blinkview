@@ -9,6 +9,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from blinkview import __version__
 from blinkview.ui.gui_context import GUIContext
+from blinkview.ui.utils.update_checker import check_post_update
 from blinkview.ui.widgets.message_box import MessageBox
 from blinkview.utils.updater import UpdateError, Updater
 
@@ -48,6 +50,8 @@ class UpdateWidget(QWidget):
 
         if self.ensure_updater():
             # Show local cache immediately
+
+            QTimer.singleShot(0, lambda: check_post_update(self.updater, parent=self))
             QTimer.singleShot(0, self.list_local_versions)
             self.update_status()
 
@@ -60,6 +64,27 @@ class UpdateWidget(QWidget):
 
         self.status_label = QLabel("<b>Status:</b> Initializing...")
         layout.addWidget(self.status_label)
+
+        # --- Channel Selector ---
+        channel_layout = QHBoxLayout()
+        channel_layout.addWidget(QLabel("Update Channel:"))
+
+        self.channel_combo = QComboBox()
+        self.channel_combo.addItem("Stable", "stable")
+        self.channel_combo.addItem("Release Candidate", "rc")
+        self.channel_combo.addItem("Development", "dev")
+
+        # Set the combo box to the currently saved setting
+        current_channel = str(self.gui_context.settings.get("update.channel", "stable")).lower()
+        idx = self.channel_combo.findData(current_channel)
+        if idx >= 0:
+            self.channel_combo.setCurrentIndex(idx)
+
+        self.channel_combo.currentIndexChanged.connect(self._on_channel_changed)
+        channel_layout.addWidget(self.channel_combo)
+        channel_layout.addStretch()  # Push the combo box to the left
+        layout.addLayout(channel_layout)
+        # ------------------------
 
         layout.addWidget(QLabel("Available Versions:"))
         self.version_list = QListWidget()
@@ -86,6 +111,20 @@ class UpdateWidget(QWidget):
         btn_layout.addWidget(self.install_btn)
         btn_layout.addWidget(self.config_btn)
         layout.addLayout(btn_layout)
+
+    def _on_channel_changed(self, index: int):
+        """Triggered when the user changes the update channel dropdown."""
+        selected_channel = self.channel_combo.itemData(index)
+
+        # Save the new preference
+        self.gui_context.settings.set("update.channel", selected_channel, scope="global")
+
+        if self.updater:
+            # Update the active updater instance so we don't need to recreate it
+            self.updater.channel = selected_channel
+
+            # Instantly re-filter and display the local tags
+            self.list_local_versions()
 
     def list_local_versions(self):
         """Populates the list with tags already present in the local repository."""

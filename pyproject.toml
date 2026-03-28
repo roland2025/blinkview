@@ -75,6 +75,12 @@ gui = [
     "blinkview[gui]", # This pulls in the project dependencies + the gui extra
 ]
 
+docs = [
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.25.0",
+]
+
 
 # --- HATCH SPECIFIC ---
 [tool.hatch.envs.default]
