@@ -7,8 +7,6 @@
 import re
 import json
 import platform
-import subprocess
-import shutil
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
@@ -180,6 +178,7 @@ class FileManager:
 
     def _get_git_info(self) -> Dict[str, Any]:
         """Captures basic git metadata."""
+        import subprocess
         try:
             # Short hash
             sha = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'],
@@ -206,32 +205,41 @@ class FileManager:
 
     def save_snapshot(self, paths_to_save: list[str | Path]):
         """
-        Copies specified files or directories into a 'snapshot' folder
-        within the session directory.
+        Copies files or directories using pure Pathlib/OS to avoid the Shutil memory tax.
         """
         snapshot_dir = self.session_dir / "snapshot"
         snapshot_dir.mkdir(exist_ok=True)
 
+        # Patterns to ignore
+        ignore_set = {"__pycache__", ".git", ".pytest_cache"}
+        ignore_ext = {".pyc", ".pyo"}
+
         for path_str in paths_to_save:
             src = Path(path_str)
             if not src.exists():
-                print(f"[FileManager] Warning: Snapshot source {src} not found.")
                 continue
 
-            # Target path inside the snapshot folder
             dst = snapshot_dir / src.name
 
             try:
                 if src.is_dir():
-                    # Copy tree, ignoring __pycache__ and other junk
-                    shutil.copytree(
-                        src, dst,
-                        dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git")
-                    )
+                    # Recursive walk without importing 'shutil'
+                    for item in src.rglob("*"):
+                        # Check if any part of the path is in our ignore list
+                        if any(part in ignore_set for part in item.parts) or item.suffix in ignore_ext:
+                            continue
+
+                        # Create the relative destination path
+                        relative_dst = dst / item.relative_to(src)
+
+                        if item.is_dir():
+                            relative_dst.mkdir(parents=True, exist_ok=True)
+                        else:
+                            relative_dst.parent.mkdir(parents=True, exist_ok=True)
+                            relative_dst.write_bytes(item.read_bytes())
                 else:
-                    # Copy individual file
-                    shutil.copy2(src, dst)
+                    # Direct file copy
+                    dst.write_bytes(src.read_bytes())
             except Exception as e:
                 print(f"[FileManager] Failed to snapshot {src}: {e}")
 
@@ -368,12 +376,13 @@ class FileManager:
 
     def _snapshot_master_to_session(self, type_name: str):
         """Copies the live workspace file to the session folder as a '.start' record."""
+
         master_path = self.get_config_path(type_name)
         session_start_path = self.get_session_path(type_name, suffix="start")
 
         if master_path.exists():
             try:
                 # We copy the raw file to preserve exactly what was on disk
-                shutil.copy2(master_path, session_start_path)
+                session_start_path.write_bytes(master_path.read_bytes())
             except Exception as e:
                 print(f"[FileManager] Failed to snapshot {type_name}: {e}")

@@ -4,15 +4,19 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from concurrent.futures import ThreadPoolExecutor, Future
+
 import time
 import threading
-import uuid
-from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Callable
 
 
 class TaskManager:
     def __init__(self, max_workers: int = 5):
+        from concurrent.futures import ThreadPoolExecutor
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
 
         self._periodic_tasks: dict[str, dict] = {}
@@ -24,12 +28,14 @@ class TaskManager:
         self._scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
         self._scheduler_thread.start()
 
-    def run_task(self, func: Callable, *args, **kwargs) -> Future:
+    def run_task(self, func: Callable, *args, **kwargs) -> 'Future':
         """Runs a one-off task immediately in the thread pool."""
         return self.executor.submit(func, *args, **kwargs)
 
     def run_periodic(self, interval_seconds: float, func: Callable, *args, **kwargs) -> str:
         """Registers a task and wakes the scheduler to recalculate its sleep time."""
+
+        import uuid
         task_id = str(uuid.uuid4())
 
         with self._condition:

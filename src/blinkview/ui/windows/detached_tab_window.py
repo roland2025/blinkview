@@ -4,8 +4,9 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtWidgets import QMainWindow, QMenu
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QMainWindow, QMenu
+from shiboken6 import isValid
 
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.native_dark_mode import set_native_dark_mode
@@ -17,13 +18,19 @@ class DetachedTabWindow(QMainWindow):
     def __init__(self, gui_context, widget, title):
         super().__init__(None)
         self.gui_context: GUIContext = gui_context
+        self._force_destroy = False
 
         self.setWindowTitle(f"{title} - BlinkView")
         self.resize(800, 600)
         # Force it to be an independent OS window, even though it has a parent
-        self.setWindowFlags(Qt.Window | Qt.CustomizeWindowHint |
-                            Qt.WindowTitleHint | Qt.WindowSystemMenuHint |
-                            Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint)
+        self.setWindowFlags(
+            Qt.Window
+            | Qt.CustomizeWindowHint
+            | Qt.WindowTitleHint
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinMaxButtonsHint
+            | Qt.WindowCloseButtonHint
+        )
         self.setAttribute(Qt.WA_DeleteOnClose)  # Free memory when closed
 
         set_native_dark_mode(self)
@@ -59,13 +66,43 @@ class DetachedTabWindow(QMainWindow):
         self.close()
 
     def closeEvent(self, event):
-        """When the user closes this window, pop the widget back into the main tabs."""
-        # Safety check: Don't reattach if the main app is shutting down!
+        """Handle window closing, ensuring we don't touch deleted C++ objects."""
 
-        if self.widget and not self.gui_context.is_shutting_down:
-            self.widget.setParent(None)
-            if self.gui_context.reattach_tab is not None:
-                self.gui_context.reattach_tab(self.widget, self.title)
-                self.widget = None
+        # 1. If we are force-destroying, just clear references and exit
+        if self._force_destroy:
+            self.setCentralWidget(None)
+            self.widget = None
+            event.accept()
+            return
 
+        # 2. Re-attach logic (Standard close)
+        # Check if the python reference exists AND the C++ object is still alive
+        if self.widget is not None and isValid(self.widget):
+            try:
+                if not self.gui_context.is_shutting_down:
+                    # Attempt to move the widget back to main window
+                    self.widget.setParent(None)
+                    if self.gui_context.reattach_tab is not None:
+                        self.gui_context.reattach_tab(self.widget, self.title)
+            except RuntimeError:
+                # This catches the case where isValid was True but the
+                # object died in the millisecond before setParent was called
+                print(f"[DetachedTabWindow] Widget for '{self.title}' already deleted. Skipping reattach.")
+
+        # Always clear the reference to allow Python GC to work
+        self.widget = None
         event.accept()
+
+    def force_destroy(self):
+        """Closes the window and prevents it from re-attaching to main window."""
+        self._force_destroy = True
+
+        # Proactively clear the central widget to stop the window from
+        # owning/touching the dying widget's memory.
+        try:
+            if isValid(self.widget):
+                self.setCentralWidget(None)
+        except RuntimeError:
+            pass
+
+        self.close()

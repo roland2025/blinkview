@@ -4,7 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from .assembler import AssemblerFactory, BaseAssembler
 from ..core.base_configurable import configuration_property
 from ..core.device_identity import DeviceIdentity
 from ..core.id_registry import IDRegistry
@@ -12,21 +11,51 @@ from ..core.log_row import LogRow
 from ..core.system_context import SystemContext
 from ..utils.level_map import LogLevel
 from ..utils.settings_updater import update_object_from_config
+from .assembler import AssemblerFactory, BaseAssembler
 
 
 @AssemblerFactory.register("default")
-@configuration_property("time_index", title="Time Index", type="integer", minimum=0, ui_order=1, description="Index of the timestamp in the log line (0-based). If not set, the timestamp from the reader will be used.")
-@configuration_property("level_index", title="Level Index", type="integer", minimum=0, ui_order=2, description="Index of the log level in the log line (0-based). If not set, INFO level will be used.")
-@configuration_property("module_index", title="Module Index", type="integer", minimum=0, ui_order=3, description="Index of the module name in the log line (0-based). If not set, module will be set to 'unknown'.")
-@configuration_property("message_index", title="Message Index", type="integer", minimum=0, ui_order=4, default=0, description="Index of the log message in the log line (0-based). This is required.")
+@configuration_property(
+    "time_index",
+    title="Time Index",
+    type="integer",
+    minimum=0,
+    ui_order=1,
+    description="Index of the timestamp in the log line (0-based). If not set, the timestamp from the reader will be used.",
+)
+@configuration_property(
+    "level_index",
+    title="Level Index",
+    type="integer",
+    minimum=0,
+    ui_order=2,
+    description="Index of the log level in the log line (0-based). If not set, INFO level will be used.",
+)
+@configuration_property(
+    "module_index",
+    title="Module Index",
+    type="integer",
+    minimum=0,
+    ui_order=3,
+    description="Index of the module name in the log line (0-based). If not set, module will be set to 'unknown'.",
+)
+@configuration_property(
+    "message_index",
+    title="Message Index",
+    type="integer",
+    minimum=0,
+    ui_order=4,
+    default=0,
+    description="Index of the log message in the log line (0-based). This is required.",
+)
 @configuration_property(
     "level_map",
     type="object",
     ui_order=5,
     title="Level Mapping Strategy",
-    _factory="log_level_map",         # Points to your new factory category
-    _factory_default="default",      # Default to your standard char-map
-    required=True
+    _factory="log_level_map",  # Points to your new factory category
+    _factory_default="default",  # Default to your standard char-map
+    required=True,
 )
 class LineParser(BaseAssembler):
     def __init__(self):
@@ -38,7 +67,7 @@ class LineParser(BaseAssembler):
         self.message_idx = 0
 
     def apply_config(self, config: dict):
-        super().apply_config(config)
+        changed = super().apply_config(config)
         self.time_idx = config.get("time_index")
         self.level_idx = config.get("level_index")
         self.module_idx = config.get("module_index")
@@ -46,16 +75,24 @@ class LineParser(BaseAssembler):
 
         level_map_config = config.get("level_map")
         if level_map_config:
-            self.local_level_map = self.shared.factories.build("log_level_map", level_map_config, self.shared)
+            self.local_level_map = self.shared.factories.build(
+                "log_level_map", level_map_config, self.shared
+            )
         else:
             self.local_level_map = None
 
         self._bake()
 
+        return changed
+
     def _bake(self):
 
         # Cache frequently used objects locally
-        get_level_obj = self.local_level_map.get_level if self.local_level_map else self.shared.id_registry.level_map.get_level
+        get_level_obj = (
+            self.local_level_map.get_level
+            if self.local_level_map
+            else self.shared.id_registry.level_map.get_level
+        )
         LogRowCtor = LogRow
 
         m_idx = self.module_idx
@@ -78,7 +115,7 @@ class LineParser(BaseAssembler):
 
             # module
             if m_idx is not None:
-                mod_id = dev_id.get_module(parts[m_idx].rstrip(':'))
+                mod_id = dev_id.get_module(parts[m_idx].rstrip(":"))
             else:
                 mod_id = dev_id.get_module("_unknown")
 

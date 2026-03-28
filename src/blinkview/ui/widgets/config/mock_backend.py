@@ -5,7 +5,6 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import json
-import jsonpatch
 from PySide6.QtCore import QObject, Signal, QTimer
 
 
@@ -66,6 +65,7 @@ class MockConfigNode(QObject):
         def simulate_backend_response():
             print("[MockNode] Simulating backend broadcast back to UI...")
             if patch:
+                import jsonpatch
                 self.current_config = jsonpatch.apply_patch(self.current_config, patch)
             self.signal_received.emit(self.current_config, self.current_schema)
 

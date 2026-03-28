@@ -8,7 +8,6 @@ import json
 import sys
 from copy import deepcopy
 
-import jsonpatch
 from PySide6.QtCore import QObject, Signal, QTimer
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton, QMainWindow, QApplication
 
@@ -77,6 +76,7 @@ class MockConfigNode(QObject):
             print("[MockNode] Simulating backend broadcast back to UI...")
             # Apply the patch to our mock state to simulate a real backend
             if patch:
+                import jsonpatch
                 self.current_config = jsonpatch.apply_patch(self.current_config, patch)
             self.signal_received.emit(self.current_config, self.current_schema)
 

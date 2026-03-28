@@ -4,14 +4,13 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import msgpack
-
 from blinkview.parsers.assembler import AssemblerFactory, BaseAssembler
-from .parser import ParserFactory, ParserThread
-from ..core.base_configurable import override_property, configuration_property
+
+from ..core.base_configurable import configuration_property, override_property
 from ..core.device_identity import DeviceIdentity
 from ..core.log_row import LogRow
 from ..utils.level_map import LogLevel
+from .parser import ParserFactory, ParserThread
 
 
 @AssemblerFactory.register("msgpack")
@@ -22,10 +21,12 @@ class MsgPackToLogRow(BaseAssembler):
         super().__init__()
 
     def apply_config(self, config: dict):
-        super().apply_config(config)
+        changed = super().apply_config(config)
         self._bake()
+        return changed
 
     def _bake(self):
+        import msgpack
 
         # Cache frequently used objects locally
         level_from_int = LogLevel.from_value
@@ -35,7 +36,9 @@ class MsgPackToLogRow(BaseAssembler):
         def fast_parse(_: int, dev_id: DeviceIdentity, line: bytes):
             created, levelno, name, msg = unpackb(line, use_list=False)
 
-            return LogRowCtor(created, level_from_int(levelno), dev_id.get_module(name), msg)
+            return LogRowCtor(
+                created, level_from_int(levelno), dev_id.get_module(name), msg
+            )
 
         self.process = fast_parse
 
@@ -49,6 +52,8 @@ class MsgPackToLogRow(BaseAssembler):
 @override_property("decode", hidden=True, default={"type": "cobs_decode"})
 @override_property("transform", hidden=True)
 @override_property("assembler", hidden=True, default={"type": "msgpack"})
-@configuration_property("sources_", title="Source", type="string", required=True, _reference="/sources")
+@configuration_property(
+    "sources_", title="Source", type="string", required=True, _reference="/sources"
+)
 class MsgPackParser(ParserThread):
     __doc__ = "A parser that converts msgpack-encoded log lines into LogRow objects."

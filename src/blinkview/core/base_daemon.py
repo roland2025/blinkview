@@ -4,31 +4,48 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from threading import Thread, Event, Lock
-from typing import List, Iterable
+from threading import Event, Lock, Thread
 from types import SimpleNamespace
+from typing import Iterable, List
 
-from blinkview.core.BaseBindableConfigurable import BaseBindableConfigurable
 from blinkview.core.base_configurable import configuration_property
+from blinkview.core.BaseBindableConfigurable import BaseBindableConfigurable
 from blinkview.core.constants import SysCat
 from blinkview.utils.generate_id import generate_id
 from blinkview.utils.settings_updater import update_object_from_config
 
 
-@configuration_property("enabled", type="boolean", default=False, required=True, description="Whether this daemon is enabled and should run.")
-@configuration_property("logging", title="Log incoming data", type="object", hidden=True, _factory="file_logging", _factory_default="default",)
+@configuration_property(
+    "enabled",
+    type="boolean",
+    default=False,
+    required=True,
+    description="Whether this daemon is enabled and should run.",
+)
+@configuration_property(
+    "logging",
+    title="Log incoming data",
+    type="object",
+    hidden=True,
+    _factory="file_logging",
+    _factory_default="default",
+)
 class BaseDaemon(BaseBindableConfigurable):
     def __init__(self):
         super().__init__()
 
         self.enabled = False
-        self._configured = False  # Tracks if initial config has been applied at least once
+        self._configured = (
+            False  # Tracks if initial config has been applied at least once
+        )
 
         # New Thread Lifecycle properties
         self._thread = None
         self._stop_event = Event()
 
-        self.thread_needs_restart = False  # Flag to indicate if a restart is needed after config changes
+        self.thread_needs_restart = (
+            False  # Flag to indicate if a restart is needed after config changes
+        )
 
         self._subscribers_lock = Lock()
         self.subscribers: list = []
@@ -60,13 +77,22 @@ class BaseDaemon(BaseBindableConfigurable):
                     self.logger.info(f"Logging conf: {logging_cfg}")
                 if logging_cfg.get("enabled"):
                     if self.file_logger is None:
-                        ns = SimpleNamespace(get_logger=self.shared.registry.logger_creator("file_logging", self.local.logging_id), logging_id=self.local.logging_id)
-                        self.file_logger = self.shared.factories.build("file_logging", logging_cfg, self.shared, ns)
+                        ns = SimpleNamespace(
+                            get_logger=self.shared.registry.logger_creator(
+                                "file_logging", self.local.logging_id
+                            ),
+                            logging_id=self.local.logging_id,
+                        )
+                        self.file_logger = self.shared.factories.build(
+                            "file_logging", logging_cfg, self.shared, ns
+                        )
                         self.file_logger.start()
                     self.subscribe(self.file_logger)
         except Exception as e:
             if self.logger:
-                self.logger.error(f"{self.__class__.__name__}: Failed to apply logging.", e)
+                self.logger.error(
+                    f"{self.__class__.__name__}: Failed to apply logging.", e
+                )
 
         if changed and self._configured:
             self.thread_needs_restart = True
@@ -77,14 +103,17 @@ class BaseDaemon(BaseBindableConfigurable):
 
     def start(self):
         if not self.enabled:
-            if self.logger: self.logger.info("[DAEMON] Not enabled, skipping start.")
+            if self.logger:
+                self.logger.info("[DAEMON] Not enabled, skipping start.")
             return
 
         if self.is_running:
-            if self.logger: self.logger.info("[DAEMON] Already running, skipping start.")
+            if self.logger:
+                self.logger.info("[DAEMON] Already running, skipping start.")
             return
 
-        if self.logger: self.logger.info("[DAEMON] Starting...")
+        if self.logger:
+            self.logger.info("[DAEMON] Starting...")
 
         self._stop_event.clear()
         self._thread = Thread(target=self._run_wrapper, daemon=True)
@@ -94,20 +123,24 @@ class BaseDaemon(BaseBindableConfigurable):
         if not self.is_running:
             return
 
-        if self.logger: self.logger.info("[DAEMON] Stopping...")
+        if self.logger:
+            self.logger.info("[DAEMON] Stopping...")
         self._stop_event.set()  # Signals the loop to exit
 
         if self._thread:
             self._thread.join(timeout)
             if self._thread.is_alive():
-                if self.logger: self.logger.warn(f"[DAEMON] Did not stop within {timeout} seconds.")
+                if self.logger:
+                    self.logger.warn(f"[DAEMON] Did not stop within {timeout} seconds.")
             else:
-                if self.logger: self.logger.info("[DAEMON] Stopped cleanly.")
+                if self.logger:
+                    self.logger.info("[DAEMON] Stopped cleanly.")
             self._thread = None  # Clean up the reference
 
     def restart(self):
         self.thread_needs_restart = False
-        if self.logger: self.logger.info("[DAEMON] Restarting...")
+        if self.logger:
+            self.logger.info("[DAEMON] Restarting...")
         if self.is_running:
             self.stop()
         self.start()
@@ -117,7 +150,8 @@ class BaseDaemon(BaseBindableConfigurable):
         try:
             self.run()
         except Exception as e:
-            if self.logger: self.logger.exception(f"[DAEMON] Crashed during run.", e)
+            if self.logger:
+                self.logger.exception(f"[DAEMON] Crashed during run.", e)
 
     def run(self):
         """Override this in subclasses. Use `while not self._stop_event.is_set():`"""
@@ -175,10 +209,5 @@ class BaseDaemon(BaseBindableConfigurable):
     def new_daemon(cls, name, kind, enabled=True, prefix=None, parent: dict = None):
         parent = parent or {}
         id_ = generate_id(prefix, list(parent.keys()))
-        conf = {
-            "id": id_,
-            "enabled": True,
-            "type": kind,
-            "name": name
-        }
+        conf = {"id": id_, "enabled": True, "type": kind, "name": name}
         return id_, conf

@@ -4,13 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtWidgets import QMessageBox, QStyle
-
-from PySide6.QtWidgets import QMessageBox, QPushButton
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtCore import QUrl
-
-
 GITHUB_PROJECT = "https://github.com/roland2025/blinkview"
 
 
@@ -34,6 +27,12 @@ def set_as_in_development(target, parent_widget, feature_name=None, issue_no=Non
 
 
 def show_feature_teaser(parent, feature_name, issue_no=None):
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+    from PySide6.QtWidgets import QMessageBox, QStyle
+
+    from blinkview.ui.native_dark_mode import set_native_dark_mode
+
     msg = QMessageBox(parent)
 
     # Shorten the window title (keeps the OS taskbar/header clean)
@@ -43,8 +42,10 @@ def show_feature_teaser(parent, feature_name, issue_no=None):
     msg.setStyleSheet("QLabel{min-width: 450px;}")
 
     # HTML automatically handles word-wrapping much better than raw strings.
-    msg.setText(f"<h3 style='margin-bottom: 0px;'>{feature_name}</h3>"
-                f"<p>This feature is currently in the lab! 🧪</p>")
+    msg.setText(
+        f"<h3 style='margin-bottom: 0px;'>{feature_name}</h3>"
+        f"<p>This feature is currently in the lab! 🧪</p>"
+    )
 
     msg.setInformativeText(
         "It's not quite ready for prime time yet.\n\n"
@@ -66,6 +67,8 @@ def show_feature_teaser(parent, feature_name, issue_no=None):
     # Use a network/web icon for the GitHub button
     icon = parent.style().standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon)
     github_button.setIcon(icon)
+
+    set_native_dark_mode(msg)
 
     msg.exec_()
 

@@ -4,23 +4,31 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from datetime import date, datetime
 from pathlib import Path
-from time import time, strftime, localtime
+from time import time
+
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QListWidget, QLabel, QMessageBox, QProgressBar, QFileDialog
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import QObject, Signal, QTimer
 
 from blinkview import __version__
 from blinkview.ui.gui_context import GUIContext
-from blinkview.utils.updater import Updater, UpdateError
-
-from datetime import datetime, date
+from blinkview.ui.widgets.message_box import MessageBox
+from blinkview.utils.updater import UpdateError, Updater
 
 
 class TaskSignals(QObject):
     """Bridge to relay fetch results from TaskManager to the Qt UI Thread."""
+
     fetch_completed = Signal(list)
     error_occurred = Signal(str)
 
@@ -124,11 +132,15 @@ class UpdateWidget(QWidget):
             self.updater = Updater(self.gui_context.settings)
             self.status_label.setText(f"<b>Current Version:</b> v{__version__}")
             self.fetch_btn.setEnabled(True)
-            self.config_btn.setVisible(False)  # Hide the config button if the updater initializes successfully
+            self.config_btn.setVisible(
+                False
+            )  # Hide the config button if the updater initializes successfully
             return True
         except UpdateError:
             # This happens if update.path is not set
-            self.status_label.setText("<b>Status:</b> <span style='color:red;'>Update path not configured.</span>")
+            self.status_label.setText(
+                "<b>Status:</b> <span style='color:red;'>Update path not configured.</span>"
+            )
             self.fetch_btn.setEnabled(False)
             return self.prompt_for_path()
 
@@ -146,11 +158,11 @@ class UpdateWidget(QWidget):
 
         # Use the STATIC method to validate before doing anything else
         if not Updater.is_valid_repo(selected_path):
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "Invalid Repository",
                 "The selected folder is not a valid BlinkView source tree.\n"
-                "Expected to find .git, pyproject.toml, and the blinkview source."
+                "Expected to find .git, pyproject.toml, and the blinkview source.",
             )
             return False
 
@@ -164,7 +176,7 @@ class UpdateWidget(QWidget):
             self.request_fetch()  # Automatically fetch after setting a valid path
             return True
         except UpdateError as e:
-            QMessageBox.critical(self, "Initialization Error", str(e))
+            MessageBox.critical(self, "Initialization Error", str(e))
             return False
 
     def request_fetch(self, is_auto=False):
@@ -211,12 +223,13 @@ class UpdateWidget(QWidget):
             "Do you want to proceed?"
         )
 
-        confirm = QMessageBox.question(
-            self, "Confirm Update", msg,
-            QMessageBox.Yes | QMessageBox.No
+        confirm = MessageBox.question(
+            self,
+            "Confirm Update",
+            msg,
         )
 
-        if confirm == QMessageBox.Yes:
+        if confirm == MessageBox.Btn.Yes:
             try:
                 # 1. Execute the registration callback (e.g., writing to a config or starting a shim)
                 self.gui_context.set_update_version(version)
@@ -224,7 +237,9 @@ class UpdateWidget(QWidget):
                 # 2. Hard exit to release file locks for the installer
                 print(f"Update registered for {version}. Shutting down.")
             except Exception as e:
-                QMessageBox.critical(self, "Registration Error", f"Failed to register update: {e}")
+                MessageBox.critical(
+                    self, "Registration Error", f"Failed to register update: {e}"
+                )
 
     def update_status(self):
         last_time = self.gui_context.settings.get("update.last_fetch_time", 0)
@@ -239,16 +254,16 @@ class UpdateWidget(QWidget):
 
             if delta.days == 0:
                 # It was today
-                display_time = dt.strftime('%H:%M')
+                display_time = dt.strftime("%H:%M")
             elif delta.days == 1:
                 # It was yesterday
                 display_time = f"Yesterday {dt.strftime('%H:%M')}"
             elif delta.days < 7:
                 # Within the last week: "Mon 14:30"
-                display_time = dt.strftime('%a %H:%M')
+                display_time = dt.strftime("%a %H:%M")
             else:
                 # Further back: "Mar 25"
-                display_time = dt.strftime('%b %d')
+                display_time = dt.strftime("%b %d")
 
         self.status_label.setText(
             f"<b>Version:</b> v{__version__} <small>(Checked: {display_time})</small>"
@@ -272,4 +287,4 @@ class UpdateWidget(QWidget):
 
     def _on_error(self, error_msg):
         self._set_loading(False)
-        QMessageBox.critical(self, "Update Error", error_msg)
+        MessageBox.critical(self, "Update Error", error_msg)

@@ -5,18 +5,27 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import weakref
-from typing import Any
-import json
-import jsonpatch
-from PySide6.QtCore import QObject, Signal
 from copy import deepcopy
+from typing import Any
+
+from PySide6.QtCore import QObject, Signal
 
 
 class ConfigNode(QObject):
     signal_received = Signal(Any, Any)
     signal_unregister = Signal(object)
+    signal_deleted = Signal()  # Widgets will connect to this to close themselves
 
-    def __init__(self, manager, active_path: str, name: str = None, drop_keys: list = None, depth: int = None, on_update=None, parent=None):
+    def __init__(
+        self,
+        manager,
+        active_path: str,
+        name: str = None,
+        drop_keys: list = None,
+        depth: int = None,
+        on_update=None,
+        parent=None,
+    ):
         super().__init__(parent)
 
         # Safely hold a reference back to the ConfigManager
@@ -44,31 +53,47 @@ class ConfigNode(QObject):
         """Registers a callback to be called whenever this node receives new config/schema data."""
         self.signal_received.connect(callback)
 
-    def create_child(self, relative_path: str, name: str = None, drop_keys: list = None, editable: bool = True, depth: int = None) -> 'ConfigNode':
+    def create_child(
+        self,
+        relative_path: str,
+        name: str = None,
+        drop_keys: list = None,
+        editable: bool = True,
+        depth: int = None,
+    ) -> "ConfigNode":
         """
         Creates a new ConfigNode branching off this node's path.
         Example: If this node is "/devices", create_child("ABC") creates "/devices/ABC"
         """
         # Safely join the paths (prevents double slashes like //devices//ABC)
-        clean_base = self.active_path.rstrip('/')
-        clean_rel = relative_path.lstrip('/')
+        clean_base = self.active_path.rstrip("/")
+        clean_rel = relative_path.lstrip("/")
         full_path = f"{clean_base}/{clean_rel}" if clean_base else f"/{clean_rel}"
 
         # Ask the manager to construct and wire up the new node
         return self.manager.create_node(full_path, name, drop_keys, editable, depth)
 
-    def create_absolute(self, absolute_path: str, name: str = None, drop_keys: list = None, editable: bool = True, depth: int = None):
+    def create_absolute(
+        self,
+        absolute_path: str,
+        name: str = None,
+        drop_keys: list = None,
+        editable: bool = True,
+        depth: int = None,
+    ):
         """Creates a new ConfigNode anywhere in the global tree."""
         return self.manager.create_node(absolute_path, name, drop_keys, editable, depth)
 
     def recv_config_schema(self, path: str, config: Any, schema: dict):
         """
-                Receives broadcasted config/schema data.
-                If exact match: updates immediately.
-                If parent or child match: triggers a fresh fetch to stay in sync.
+        Receives broadcasted config/schema data.
+        If exact match: updates immediately.
+        If parent or child match: triggers a fresh fetch to stay in sync.
         """
         if path == self.active_path:
-            from blinkview.utils.dict_utils import get_by_path  # Adjust your import path!
+            from blinkview.utils.dict_utils import (
+                get_by_path,  # Adjust your import path!
+            )
 
             # 1. Prune the DATA using your awesome utility function!
             # We pass path="/" because we are already at the exact node data.
@@ -77,7 +102,7 @@ class ConfigNode(QObject):
                 path="/",
                 drop_keys=self.drop_keys,
                 depth=self.depth,
-                make_deep_copy=True
+                make_deep_copy=True,
             )
 
             # 2. Prune the SCHEMA using custom JSON-Schema-aware logic
@@ -102,11 +127,11 @@ class ConfigNode(QObject):
         # 2. Check for Parent or Child overlaps
         # Ensure trailing slashes to prevent substring false-positives
         # (e.g., "/devices/A" vs "/devices/ABC")
-        my_path_slashed = self.active_path if self.active_path.endswith('/') else self.active_path + '/'
-        incoming_slashed = path if path.endswith('/') else path + '/'
+        my_path_slashed = self.active_path if self.active_path.endswith("/") else self.active_path + "/"
+        incoming_slashed = path if path.endswith("/") else path + "/"
 
-        is_root = (self.active_path == "/")
-        incoming_is_root = (path == "/")
+        is_root = self.active_path == "/"
+        incoming_is_root = path == "/"
 
         # Did a child of this node change? (e.g., I am /devices/ABC, update is /devices/ABC/port)
         is_child_updated = path.startswith(my_path_slashed) or is_root
@@ -192,9 +217,37 @@ class ConfigNode(QObject):
 
     def send_config(self, config: dict):
         """Sends the entire config dictionary back to the main application."""
+
+        import jsonpatch
+
         self.send(jsonpatch.make_patch(self.config, config).patch)
         self.config = config
 
     def get_copy(self):
         """Returns a deep copy of the current config."""
         return deepcopy(self.config)
+
+    def delete(self):
+        """
+        Triggers the removal of this node from the backend JSON configuration.
+        """
+        if not self.active_path or self.active_path == "/":
+            print("[ConfigNode] Warning: Attempted to delete the root configuration node. Operation aborted.")
+            return
+
+        # Construct the RFC 6902 JSON patch to remove this specific path
+        patch = [{"op": "remove", "path": self.active_path}]
+
+        # Send the patch to the root ("/") so the active_path resolves correctly
+        if self.send_fn is not None:
+            self.send_fn("/", patch)
+
+        # Clean up the node locally since it will no longer exist in the backend
+        self.manager.broadcast_deletion(self.active_path)
+
+    def handle_deletion(self):
+        """
+        Called by the manager when this node's path (or a parent path) is deleted.
+        """
+        self.signal_deleted.emit()
+        self.deregister()

@@ -4,20 +4,26 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import List
 import re
+from typing import List
 
-from .transformer import TransformStep, PipelinePrintableFactory, PipelineDecodeFactory, PipelineTransformFactory, TransformerFactory
 from ..core.base_configurable import configuration_property
 from ..core.system_context import SystemContext
+from .transformer import (
+    PipelineDecodeFactory,
+    PipelinePrintableFactory,
+    PipelineTransformFactory,
+    TransformerFactory,
+    TransformStep,
+)
 
 
 @TransformerFactory.register("ansi_filter")
 @TransformerFactory.register("regex_replace")
 class RegexMagic(TransformStep):
     # __slots__ = ('pattern', 'replacement', 'process', 'compiled')
-    input_type = 'str'
-    output_type = 'str'
+    input_type = "str"
+    output_type = "str"
 
     def __init__(self):
         super().__init__()
@@ -29,8 +35,8 @@ class RegexMagic(TransformStep):
 
     def apply_config(self, config: dict):
         # Allow dynamic updates to the pattern and replacement if needed
-        self.pattern = config.get("pattern", r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        self.replacement = config.get("replace", '')
+        self.pattern = config.get("pattern", r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+        self.replacement = config.get("replace", "")
 
         self.compiled = re.compile(self.pattern)
         fast_sub = self.compiled.sub
@@ -44,7 +50,9 @@ class RegexMagic(TransformStep):
 
 @PipelineDecodeFactory.register("bytes_decode")
 @configuration_property("encoding", type="string", default="ascii")
-@configuration_property("errors", type="string", enum=["strict", "ignore", "replace"], default="replace")
+@configuration_property(
+    "errors", type="string", enum=["strict", "ignore", "replace"], default="replace"
+)
 class DecoderStep(TransformStep):
     # __slots__ = ('encoding',)
     __doc__ = "A simple bytes to string decoder step that uses the specified encoding and error handling strategy."
@@ -52,8 +60,8 @@ class DecoderStep(TransformStep):
     encoding: str
     errors: str
 
-    input_type = 'bytes'
-    output_type = 'str'
+    input_type = "bytes"
+    output_type = "str"
 
     def process(self, data: bytes) -> str:
         return data.decode(self.encoding, errors=self.errors)
@@ -65,16 +73,16 @@ class DecoderStep(TransformStep):
     type="boolean",
     default=True,
     title="Allow Escape (ESC)",
-    description="If enabled, the ASCII Escape character (decimal 27) will be preserved in the output."
+    description="If enabled, the ASCII Escape character (decimal 27) will be preserved in the output.",
 )
 class BytesTranslateStep(TransformStep):
     __doc__ = "A bytes transformation step that removes all non-printable ASCII characters(except Escape byte) from the input bytes. It uses a pre-computed translation table for maximum performance."
-    __slots__ = ('table', 'delete', 'process')
+    __slots__ = ("table", "delete", "process")
 
     allow_escape: bool
 
-    input_type = 'bytes'
-    output_type = 'bytes'
+    input_type = "bytes"
+    output_type = "bytes"
 
     def __init__(self):
         super().__init__()
@@ -100,16 +108,30 @@ class BytesTranslateStep(TransformStep):
 
 
 @TransformerFactory.register("string_replace")
-@configuration_property("search", type="string", default="", required=True, ui_order=1, description="The substring to search for in the input string.")
-@configuration_property("replace", type="string", default="", required=True, ui_order=2, description="The substring to replace each occurrence of the search string with.")
+@configuration_property(
+    "search",
+    type="string",
+    default="",
+    required=True,
+    ui_order=1,
+    description="The substring to search for in the input string.",
+)
+@configuration_property(
+    "replace",
+    type="string",
+    default="",
+    required=True,
+    ui_order=2,
+    description="The substring to replace each occurrence of the search string with.",
+)
 class StringReplaceStep(TransformStep):
     # __slots__ = ('search', 'replace', 'process')
     __doc__ = "A simple string replacement step that replaces all occurrences of 'search' with 'replace'."
     search: str
     replace: str
 
-    input_type = 'str'
-    output_type = 'str'
+    input_type = "str"
+    output_type = "str"
 
     def __init__(self):
         super().__init__()
@@ -134,16 +156,17 @@ class StringReplaceStep(TransformStep):
     items={
         "type": "object",
         "_factory": "pipeline_transformer",
-        "title": "Processing Step"
-    }
+        "title": "Processing Step",
+    },
 )
 @PipelineTransformFactory.register("default")
 class ConfigurableParser(TransformStep):
-
     def __init__(self):
         super().__init__()
         self.pipeline: List[TransformStep] = []
-        self.process = str  # Default to simple string conversion if no steps are configured
+        self.process = (
+            str  # Default to simple string conversion if no steps are configured
+        )
         self._shared: SystemContext = None
 
     def bind_system(self, shared, _):
@@ -162,13 +185,17 @@ class ConfigurableParser(TransformStep):
         pipeline: List[TransformStep] = []
 
         for step_cfg in config.get("steps", []):
-            if True: #step_cfg.get("enabled", True):
-                step = self._shared.factories.build("pipeline_transformer", config=step_cfg, system_ctx=self._shared)
+            if True:  # step_cfg.get("enabled", True):
+                step = self._shared.factories.build(
+                    "pipeline_transformer", config=step_cfg, system_ctx=self._shared
+                )
 
                 # Validation: If the last step output 'str' and this one needs 'bytes',
                 # we can catch the error before the app even starts.
                 if pipeline and pipeline[-1].output_type != step.input_type:
-                    print(f"ConfigurableParser: Warning: Type mismatch between {pipeline[-1]} and {step}")
+                    print(
+                        f"ConfigurableParser: Warning: Type mismatch between {pipeline[-1]} and {step}"
+                    )
 
                 pipeline.append(step)
 

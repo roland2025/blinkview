@@ -6,7 +6,7 @@
 
 from typing import Any
 
-from PySide6.QtCore import QObject, Slot, Signal, QTimer
+from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from blinkview.core.config_manager import ConfigManager
 from blinkview.ui.gui_context import GUIContext
@@ -29,11 +29,21 @@ class ConfigNodeManager(QObject):
 
         self.signal_received_config_schema.connect(self._broadcast)
 
-        self.manager.config_changed_cb = self.signal_received_config_schema.emit  # Redirect backend updates to the signal
+        self.manager.config_changed_cb = (
+            self.signal_received_config_schema.emit
+        )  # Redirect backend updates to the signal
 
         self.nodes = []
 
-    def create_node(self, path: str, name: str = None, drop_keys: list = None, editable: bool = True, depth: int = None, on_update=None) -> ConfigNode:
+    def create_node(
+        self,
+        path: str,
+        name: str = None,
+        drop_keys: list = None,
+        editable: bool = True,
+        depth: int = None,
+        on_update=None,
+    ) -> ConfigNode:
         """Creates a ConfigNode and wires it securely to the backend registry."""
         print(f"[ConfigManager] Creating node for {path}")
         node = ConfigNode(self, path, name, drop_keys=drop_keys, depth=depth, on_update=on_update)
@@ -88,9 +98,16 @@ class ConfigNodeManager(QObject):
                 print(f"[ConfigManager] Broadcasting '{path}' failed: {e}")
 
     def show(self, path: str, child_name=None, drop_keys: list = None, editable: bool = True):
-        print(f"[ConfigManager] Request to show config for '{path}' with name='{child_name}', drop_keys={drop_keys}, editable={editable}")
+        print(
+            f"[ConfigManager] Request to show config for '{path}' with name='{child_name}', drop_keys={drop_keys}, editable={editable}"
+        )
         print(f"context: {self.gui_context}, create_widget: {self.gui_context.create_widget}")
-        self.gui_context.create_widget("DynamicConfigWidget", f"Settings: {child_name or path}", False,params={"drop_keys": drop_keys, "editable": editable, "path": path})
+        self.gui_context.create_widget(
+            "DynamicConfigWidget",
+            f"Settings: {child_name or path}",
+            False,
+            params={"drop_keys": drop_keys, "editable": editable, "path": path},
+        )
 
     def get_factory_types(self, category: str) -> list[tuple[str, str]]:
         return self.gui_context.registry.system_ctx.factories.get_category_types(category)
@@ -100,3 +117,20 @@ class ConfigNodeManager(QObject):
 
     def get_reference_values(self, ref_name: str) -> list:
         return self.gui_context.registry.get_reference_values(ref_name)
+
+    def broadcast_deletion(self, deleted_path: str):
+        """Notifies all nodes on this path (or its children) that the config was deleted."""
+        print(f"[ConfigManager] Broadcasting deletion for '{deleted_path}'")
+
+        # Ensure trailing slash to prevent substring false-positives (e.g., "/dev/A" vs "/dev/ABC")
+        deleted_slashed = deleted_path if deleted_path.endswith("/") else deleted_path + "/"
+
+        # IMPORTANT: Iterate over a copy of the list (list(self.nodes))
+        # because nodes will call deregister() and remove themselves during the loop!
+        for node in list(self.nodes):
+            is_exact_match = node.active_path == deleted_path
+            is_child = node.active_path.startswith(deleted_slashed)
+
+            if is_exact_match or is_child:
+                print(f"[ConfigManager] Triggering deletion lifecycle for node '{node.active_path}'")
+                node.handle_deletion()

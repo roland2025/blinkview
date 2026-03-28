@@ -4,18 +4,24 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import jsonpatch
 from copy import deepcopy
 
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QFormLayout,
+    QFrame,
+    QGraphicsOpacityEffect,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
     QScrollArea,
-    QGroupBox, QCheckBox,
-    QLineEdit, QGraphicsOpacityEffect, QFrame, QSizePolicy, QLabel
-)
-from PySide6.QtCore import Signal, Qt, QTimer
-
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QFormLayout, QPushButton, QHBoxLayout, QMessageBox
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
 from blinkview.ui.utils.config_node import ConfigNode
@@ -23,10 +29,8 @@ from blinkview.ui.widgets.config_widget_factory import WidgetFactory
 
 
 class DynamicConfigWidget(QWidget):
-    # 1. Define the signal that will broadcast the final JSON dictionary
-    # config_applied = Signal(dict)
-
     signal_unregister = Signal(object)
+    signal_destroy = Signal(QWidget)
 
     def __init__(self, gui_context, state=None, parent=None):
         super().__init__(parent)
@@ -43,7 +47,11 @@ class DynamicConfigWidget(QWidget):
         if state:
             self.restore(state)
 
-        self.node = self.gui_context.config_manager.create_node(self.path, self.child_name, self.drop_keys, self.editable, on_update=self.update_config_schema)
+        self.node = self.gui_context.config_manager.create_node(
+            self.path, self.child_name, self.drop_keys, self.editable, on_update=self.update_config_schema
+        )
+
+        self.node.signal_deleted.connect(lambda: self.signal_destroy.emit(self))
 
         self.original_schema = {}
         self.schema = {}
@@ -132,14 +140,17 @@ class DynamicConfigWidget(QWidget):
 
         if False:
             # Using Object Names prevents the red border from cascading to every child widget!
-            self.setStyleSheet(self.styleSheet() + """
+            self.setStyleSheet(
+                self.styleSheet()
+                + """
                         QWidget#ScrollContent { background-color: #88fafa88; border: 2px solid red; }
                         QWidget#FormContainer { background-color: #fafffa; border: 2px dashed green; }
                         QGroupBox { border: 2px solid purple; margin-top: 10px; padding-top: 10px; }
                         QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QListWidget {
                             border: 1px solid blue;
                         }
-                    """)
+                    """
+            )
 
         # Add them in order: Revert on the left, Apply on the right
         self.button_layout.addWidget(self.btn_revert)
@@ -167,7 +178,7 @@ class DynamicConfigWidget(QWidget):
             "path": self.path,
             "drop_keys": self.drop_keys,
             "editable": self.editable,
-            "child_name": self.child_name
+            "child_name": self.child_name,
         }
 
     def closeEvent(self, event):
@@ -189,7 +200,7 @@ class DynamicConfigWidget(QWidget):
             return
 
         current_ui_state = self.get_config()
-        is_changed = (current_ui_state != self.current_config)
+        is_changed = current_ui_state != self.current_config
 
         # Toggle both buttons together
         self.btn_apply.setEnabled(is_changed)
@@ -212,6 +223,9 @@ class DynamicConfigWidget(QWidget):
         current_config = self.get_config()
 
         # --- NEW: Generate RFC 6902 JSON Patch ---
+
+        import jsonpatch
+
         patch = jsonpatch.make_patch(previous_config, current_config).patch
 
         if not patch:
@@ -305,7 +319,7 @@ class DynamicConfigWidget(QWidget):
 
             prop_type = prop_schema.get("type", "string")
             is_complex_array = prop_type == "array" and (
-                    prop_schema.get("items", {}).get("type") == "object" or "_factory" in prop_schema.get("items", {})
+                prop_schema.get("items", {}).get("type") == "object" or "_factory" in prop_schema.get("items", {})
             )
 
             # Route to the correct builder method!
@@ -347,11 +361,12 @@ class DynamicConfigWidget(QWidget):
             data["type"] = selected_type
         else:
             type_prop = {
-                "type": "string", "title": "Type",
+                "type": "string",
+                "title": "Type",
                 "enum": [choice[0] for choice in factory_choices],
                 "enum_descriptions": [choice[0].replace("_", " ").title() for choice in factory_choices],
                 "enum_tooltips": [choice[1] for choice in factory_choices],
-                "_is_factory_trigger": True
+                "_is_factory_trigger": True,
             }
 
             if default_type:
@@ -401,7 +416,7 @@ class DynamicConfigWidget(QWidget):
             "type": "object",
             "registry": child_registry,
             "container": group_box,
-            "is_required": is_required
+            "is_required": is_required,
         }
 
         child_data = value if isinstance(value, dict) else {}
@@ -429,7 +444,7 @@ class DynamicConfigWidget(QWidget):
                 "type": "object",
                 "registry": child_registry,
                 "container": None,  # No widget
-                "is_required": is_required
+                "is_required": is_required,
             }
             return
 
@@ -441,7 +456,7 @@ class DynamicConfigWidget(QWidget):
             "type": "object",
             "registry": child_registry,
             "container": group_box,
-            "is_required": is_required
+            "is_required": is_required,
         }
 
         child_data = value if isinstance(value, dict) else {}
@@ -470,7 +485,7 @@ class DynamicConfigWidget(QWidget):
             "type": "object",
             "registry": child_registry,
             "container": group_box,
-            "is_required": is_required
+            "is_required": is_required,
         }
 
         child_data = value if isinstance(value, dict) else {}
@@ -507,7 +522,7 @@ class DynamicConfigWidget(QWidget):
                     "type": "dynamic_pair",
                     "key_widget": key_editor,
                     "val_type": "object",
-                    "registry": val_registry
+                    "registry": val_registry,
                 }
                 # Recurse to build the inner properties (like "enabled")
                 self._build_ui(sub_schema, dyn_val or {}, group_layout, val_registry, node_path + [dyn_key])
@@ -520,14 +535,15 @@ class DynamicConfigWidget(QWidget):
                     "type": "dynamic_pair",
                     "key_widget": key_editor,
                     "val_type": "primitive",
-                    "widget": val_widget
+                    "widget": val_widget,
                 }
                 group_layout.addRow("Value:", val_widget)
 
             def on_delete(_=False, k=dyn_key):
                 state = self.get_config()
                 target = state
-                for p in node_path: target = target.get(p, {})
+                for p in node_path:
+                    target = target.get(p, {})
                 if k in target:
                     del target[k]
                     self.schema = deepcopy(self.original_schema)
@@ -588,7 +604,7 @@ class DynamicConfigWidget(QWidget):
             "type": "complex_array",
             "registry": child_registry,
             "container": group_box,
-            "is_required": is_required
+            "is_required": is_required,
         }
 
         items_schema = prop_schema.get("items", {})
@@ -761,10 +777,7 @@ class DynamicConfigWidget(QWidget):
         has_value = key in data
 
         widget = WidgetFactory.build_widget(
-            schema=prop_schema,
-            value=value,
-            node_context=self.node,
-            factory_callback=self._on_factory_type_changed
+            schema=prop_schema, value=value, node_context=self.node, factory_callback=self._on_factory_type_changed
         )
         if not widget:
             return
@@ -814,12 +827,7 @@ class DynamicConfigWidget(QWidget):
             toggle_cb.toggled.connect(update_visuals)
             update_visuals(has_value)
 
-            registry[key] = {
-                "type": "primitive",
-                "widget": widget,
-                "is_required": False,
-                "toggle": toggle_cb
-            }
+            registry[key] = {"type": "primitive", "widget": widget, "is_required": False, "toggle": toggle_cb}
             layout.addRow(title, opt_layout)
 
     def _apply_timeout(self):
@@ -888,9 +896,10 @@ class DynamicConfigWidget(QWidget):
 
     def validate_current(self) -> tuple[bool, str]:
         """Validates the current UI state against the JSON Schema."""
+        from copy import deepcopy
+
         from jsonschema import validate
         from jsonschema.exceptions import ValidationError
-        from copy import deepcopy
 
         data = self.get_config()
 

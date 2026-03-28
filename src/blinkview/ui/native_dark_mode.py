@@ -5,15 +5,37 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 def set_native_dark_mode(window):
-    import sys
-    if sys.platform != "win32":
-        return  # Dark mode attribute is only supported on Windows 10 and later
-
-    # This specifically tells Windows to use the Dark mode attribute for the title bar
-    # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE
-    hwnd = window.winId()
     import ctypes
+    import sys
+    from ctypes import wintypes
+
+    if sys.platform != "win32":
+        return
+
+    # Get the HWND from the Qt window
+    # Cast to int to ensure it's a clean Python integer
+    hwnd = int(window.winId())
+
+    # Define the function signature properly
+    # This tells ctypes exactly how to handle 64-bit pointers
+    dwmapi = ctypes.windll.dwmapi
+    dwmapi.DwmSetWindowAttribute.argtypes = [
+        wintypes.HWND,  # hwnd
+        wintypes.DWORD,  # dwAttribute
+        wintypes.LPCVOID,  # pvAttribute
+        wintypes.DWORD,  # cbAttribute
+    ]
+    dwmapi.DwmSetWindowAttribute.restype = ctypes.HRESULT
+
+    # Call the function
+    # DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+    # Note: On some older Win10 builds, the attribute was 19
+    attr = 20
     value = ctypes.c_int(1)
-    ctypes.windll.dwmapi.DwmSetWindowAttribute(
-        hwnd, 20, ctypes.byref(value), ctypes.sizeof(value)
-    )
+
+    try:
+        dwmapi.DwmSetWindowAttribute(
+            hwnd, attr, ctypes.byref(value), ctypes.sizeof(value)
+        )
+    except Exception as e:
+        print(f"Failed to set dark mode: {e}")

@@ -5,14 +5,17 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from time import perf_counter, sleep
+from typing import Any, Callable, List
 
-from ..core.base_configurable import configuration_factory, configuration_property, on_config_change, override_property
+from ..core.base_configurable import (
+    configuration_factory,
+    configuration_property,
+    on_config_change,
+    override_property,
+)
 from ..core.base_daemon import BaseDaemon
 from ..core.batch_queue import BatchQueue
 from ..core.constants import SysCat
-
-from typing import Any, Callable, List
-
 from ..core.device_identity import DeviceIdentity
 from ..core.factory import BaseFactory
 from ..core.log_row import LogRow
@@ -23,19 +26,42 @@ TransformFunc = Callable[[Any], Any]
 
 
 @configuration_factory("parser")
-@configuration_property("max_batch", type="integer", default=200, description="Maximum number of log entries to buffer before flushing", ui_order=1)
-@configuration_property("delay", type="integer", default=30, description="Maximum time (in milliseconds) to hold a batch before flushing", ui_order=2)
+@configuration_property(
+    "max_batch",
+    type="integer",
+    default=200,
+    description="Maximum number of log entries to buffer before flushing",
+    ui_order=1,
+)
+@configuration_property(
+    "delay",
+    type="integer",
+    default=30,
+    description="Maximum time (in milliseconds) to hold a batch before flushing",
+    ui_order=2,
+)
 @configuration_property(
     "sources_",
     type="array",
     required=True,
     items={"type": "string", "_reference": "/sources"},
-    default=[]
+    default=[],
 )
-@configuration_property("name", type="string", default="pipeline", required=True, description="Name of the source device (for logging purposes)")
-@configuration_property("_note", title="Note", type="string", ui_order=-1, description="Add a not for your own reference.")
+@configuration_property(
+    "name",
+    type="string",
+    default="pipeline",
+    required=True,
+    description="Name of the source device (for logging purposes)",
+)
+@configuration_property(
+    "_note",
+    title="Note",
+    type="string",
+    ui_order=-1,
+    description="Add a not for your own reference.",
+)
 class BaseParser(BaseDaemon):
-
     max_batch: int
     delay: int
     name: str
@@ -66,7 +92,7 @@ class ParserFactory(BaseFactory[BaseParser]):
             "default": 10,  # Default to newline character
         }
     },
-    description="Settings for splitting raw byte streams into packets."
+    description="Settings for splitting raw byte streams into packets.",
 )
 @configuration_property(
     "printable",
@@ -90,22 +116,23 @@ class ParserFactory(BaseFactory[BaseParser]):
     ui_order=40,
     _factory="pipeline_transform",
     _factory_default="default",
-    description="Data transformation steps to apply to each log entry after decoding."
+    description="Data transformation steps to apply to each log entry after decoding.",
 )
 @configuration_property(
-    "assembler", title="Line parser",
+    "assembler",
+    title="Line parser",
     type="object",
     ui_order=50,
     _factory="pipeline_assembler",
     _factory_default="default",
-    description="Assembles transformed log entries into final LogRow objects, potentially using timestamp and device identity."
+    description="Assembles transformed log entries into final LogRow objects, potentially using timestamp and device identity.",
 )
 @configuration_property(
     "ignore_invalid",
     description="On error, ignore the line instead of writing an error. This can be useful for noisy logs with occasional malformed lines.",
     type="boolean",
     default=False,
-    ui_order=5
+    ui_order=5,
 )
 @ParserFactory.register("default")
 class ParserThread(BaseParser):
@@ -120,6 +147,11 @@ class ParserThread(BaseParser):
 Each stage is configurable via the factory system, allowing users to mix and match different implementations or skip stages entirely for maximum performance when certain features are not needed."""
 
     ignore_invalid: bool
+    split: dict
+    printable: dict
+    decoder: dict
+    transformer: dict
+    assembler: dict
 
     def __init__(self):
         super().__init__()
@@ -142,17 +174,17 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         self._assemble = None
 
     def apply_config(self, config: dict):
-        super().apply_config(config)
+        changed = super().apply_config(config)
 
         factory_build = self.shared.factories.build
 
-        split_cfg = config.get("split")
+        split_cfg = getattr(self, "split", None)
         if split_cfg is not None:
             self._split_char = bytes([int(split_cfg.get("char", 10))])
         else:
             self._split_char = None
 
-        printable_cfg = config.get("printable")
+        printable_cfg = getattr(self, "printable", None)
         if printable_cfg:
             self._printable = factory_build("pipeline_printable", printable_cfg, self.shared)
             self._print = self._printable.process
@@ -160,7 +192,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             self._print = None
             self._printable = None
 
-        decoder_cfg = config.get("decode")
+        decoder_cfg = getattr(self, "decode", None)
         if decoder_cfg:
             self._decoder = factory_build("pipeline_decode", decoder_cfg, self.shared)
             self._decode = self._decoder.process
@@ -168,7 +200,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             self._decode = None
             self._decoder = None
 
-        transformer_cfg = config.get("transform", {})
+        transformer_cfg = getattr(self, "transform", None)
         if transformer_cfg:
             self.logger.debug(f"transform config: {transformer_cfg}")
             self._transformer = factory_build("pipeline_transform", transformer_cfg, system_ctx=self.shared)
@@ -177,7 +209,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             self._transform = None
             self._transformer = None
 
-        assembler_cfg = config.get("assembler", {})
+        assembler_cfg = getattr(self, "assembler", {})
         if assembler_cfg:
             self._assembler = factory_build("pipeline_assembler", assembler_cfg, system_ctx=self.shared)
             self._assemble = self._assembler.process
@@ -186,6 +218,8 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             self._assemble = None
 
         self.thread_needs_restart = True
+
+        return changed
 
     @on_config_change("name")
     def name_changed(self, name, old):
@@ -208,7 +242,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         last_flush_time = perf_counter()
 
         if self._assemble is None:
-            module_log = device_identity.get_module('log')
+            module_log = device_identity.get_module("log")
 
         module_unknown = None
 
@@ -251,7 +285,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                             if split_index == -1:
                                 break
                             line_bytes = buffer[:split_index]
-                            del buffer[:split_index + 1]
+                            del buffer[: split_index + 1]
                             if line_bytes:
                                 lines.append((timestamp_ns, line_bytes))
                             # self.logger.info(f"Split line: {line_bytes}")
@@ -260,9 +294,15 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                         self.logger.error(f"Error during splitting.", e)
 
                         if module_unknown is None:
-                            module_unknown = device_identity.get_module('_unknown')
+                            module_unknown = device_identity.get_module("_unknown")
                         parsed_batch.append(
-                            LogRow(timestamp_ns, LogLevel.ERROR, module_unknown, str(raw_data)))
+                            LogRow(
+                                timestamp_ns,
+                                LogLevel.ERROR,
+                                module_unknown,
+                                str(raw_data),
+                            )
+                        )
                 else:
                     lines.append((timestamp_ns, raw_data))
 
@@ -271,7 +311,6 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                     # self.logger.trace(f"Processing {ts}: '{line}'")
 
                     try:
-
                         if self._print is not None:
                             line = self._print(line)
                             if not line:
@@ -301,8 +340,15 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                         if log_error_row_on_invalid:
                             # print(f"[ParserThread] {device_identity.name} ... Error processing line. Error: {e}")
                             if module_unknown is None:
-                                module_unknown = device_identity.get_module('_unknown')
-                            parsed_batch.append(LogRow(timestamp_ns, LogLevel.ERROR, module_unknown, str(line)))
+                                module_unknown = device_identity.get_module("_unknown")
+                            parsed_batch.append(
+                                LogRow(
+                                    timestamp_ns,
+                                    LogLevel.ERROR,
+                                    module_unknown,
+                                    str(line),
+                                )
+                            )
 
                     if len(parsed_batch) >= max_batch:
                         flush()

@@ -10,6 +10,7 @@ from typing import Callable, TYPE_CHECKING
 from PySide6.QtCore import QObject
 
 from blinkview.ui.log_filter_index_manager import LogFilterIndexManager
+from blinkview.ui.native_dark_mode import set_native_dark_mode
 
 if TYPE_CHECKING:
     from blinkview.ui.utils.config_node_manager import ConfigNodeManager

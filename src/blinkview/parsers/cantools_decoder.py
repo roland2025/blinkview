@@ -4,19 +4,21 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from cantools import database
-from can import Message
+from typing import TYPE_CHECKING
 
-from .can_bus import CanDecoderFactory
-from .transformer import TransformStep
+if TYPE_CHECKING:
+    from can import Message
+    from cantools import database
+
 from ..core.base_configurable import configuration_property
 from ..utils.paths import resolve_config_path
-
+from .can_bus import CanDecoderFactory
+from .transformer import TransformStep
 
 # Assuming you have a generic factory for pipeline stages, similar to ParserFactory
 
 
-def can_msg_to_str(msg_: Message):
+def can_msg_to_str(msg_: "Message"):
     return f"{msg_.arbitration_id:04X} | {msg_.dlc} | {msg_.data.hex()}"
 
 
@@ -27,7 +29,7 @@ def can_msg_to_str(msg_: Message):
     required=True,
     ui_type="file",
     ui_file_filter="DBC Files (*.dbc);;All Files (*)",
-    description="Absolute or relative path to the .dbc database file."
+    description="Absolute or relative path to the .dbc database file.",
 )
 @configuration_property(
     "strict",
@@ -35,14 +37,14 @@ def can_msg_to_str(msg_: Message):
     default=False,
     required=True,
     ui_order=10,
-    description="If true, raises an error for unknown CAN IDs. Overrides ignore_unknown."
+    description="If true, raises an error for unknown CAN IDs. Overrides ignore_unknown.",
 )
 @configuration_property(
     "ignore_unknown",
     type="boolean",
     default=False,
     required=True,
-    description="If true, silently ignores messages not defined in the DBC file by returning an empty dictionary."
+    description="If true, silently ignores messages not defined in the DBC file by returning an empty dictionary.",
 )
 class CantoolsDecoder(TransformStep):
     __doc__ = """Decodes raw CAN frames into physical values using a DBC file.
@@ -56,17 +58,19 @@ class CantoolsDecoder(TransformStep):
     ignore_unknown: bool
 
     def __init__(self):
+        super().__init__()
         self.db = None
+        self.process = None
 
     def apply_config(self, config: dict):
-        """Loads or reloads the DBC file and bakes the optimized process function."""
-        self.dbc_file = config.get("dbc_file")
-        self.strict = config.get("strict", False)
-        self.ignore_unknown = config.get("ignore_unknown", False)
+        changed = super().apply_config(config)
 
         if self.dbc_file:
             try:
                 print(f"Loading DBC file: {self.dbc_file}")
+
+                from cantools import database
+
                 self.db = database.load_file(resolve_config_path(self.dbc_file))
             except Exception as e:
                 print(f"Failed to load DBC file: {self.dbc_file}", e)
@@ -82,7 +86,7 @@ class CantoolsDecoder(TransformStep):
         ignore_unknown = self.ignore_unknown
 
         # 3. Define the baked function
-        def fast_process(can_msg: Message) -> tuple[int, str, dict]:
+        def fast_process(can_msg: "Message") -> tuple[int, str, dict]:
             can_id = can_msg.arbitration_id
 
             # O(1) Dictionary lookup
@@ -93,7 +97,13 @@ class CantoolsDecoder(TransformStep):
                     # Use the message object's internal decoder directly
                     return can_id, msg_def.name, msg_def.decode(can_msg.data)
                 except Exception as e:
-                    return can_id, "ERROR", {"error": f"{can_msg_to_str(can_msg)} | Decoding error: {str(e)}"}
+                    return (
+                        can_id,
+                        "ERROR",
+                        {
+                            "error": f"{can_msg_to_str(can_msg)} | Decoding error: {str(e)}"
+                        },
+                    )
 
             # --- Handle Unknown IDs ---
             if strict:
@@ -107,3 +117,4 @@ class CantoolsDecoder(TransformStep):
         # Bind the baked function
         self.process = fast_process
 
+        return changed

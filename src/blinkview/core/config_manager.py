@@ -5,12 +5,10 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import json
-import os
 import threading
-import jsonpatch  # <-- New Import
-from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable
 from copy import deepcopy
+from pathlib import Path
+from typing import Any, Dict, List
 
 from blinkview.utils.atomic_json_dump import atomic_json_dump
 
@@ -20,7 +18,9 @@ class ConfigManager:
         self.filepath = filepath
         self.autosave_path = autosave_path
 
-        print(f"[ConfigManager] Initialized with filepath: {self.filepath}, autosave_path: {self.autosave_path}")
+        print(
+            f"[ConfigManager] Initialized with filepath: {self.filepath}, autosave_path: {self.autosave_path}"
+        )
 
         self._lock = threading.RLock()
 
@@ -85,20 +85,30 @@ class ConfigManager:
 
     def get_reorder_config(self):
         with self._lock:
-            return self._data.get("reorder", {'enabled': True})
+            return self._data.get("reorder", {"enabled": True})
 
     def get_central_storage_config(self):
         with self._lock:
-            return self._data.get("central", {'enabled': True})
+            return self._data.get("central", {"enabled": True})
 
     def get_full_config(self) -> dict:
         with self._lock:
             return deepcopy(self._data)
 
-    def get_by_path(self, path: str, default=None, drop_keys: list = None, make_deep_copy: bool = False, depth: int = None):
+    def get_by_path(
+        self,
+        path: str,
+        default=None,
+        drop_keys: list = None,
+        make_deep_copy: bool = False,
+        depth: int = None,
+    ):
         from blinkview.utils.dict_utils import get_by_path
+
         with self._lock:
-            return get_by_path(self._data, path, default, drop_keys, make_deep_copy, depth)
+            return get_by_path(
+                self._data, path, default, drop_keys, make_deep_copy, depth
+            )
 
     # ==========================================
     # PUBLIC API: Write Operations
@@ -119,15 +129,22 @@ class ConfigManager:
         with self._lock:
             try:
                 # 1. Promote relative paths to absolute paths for the global data
-                base_path = "" if path == "/" else path.rstrip('/')
+                base_path = "" if path == "/" else path.rstrip("/")
                 global_patch = []
                 for op in patch:
                     new_op = op.copy()
                     rel_path = new_op["path"]
-                    new_op["path"] = f"{base_path}{rel_path}" if rel_path.startswith('/') else f"{base_path}/{rel_path}"
+                    new_op["path"] = (
+                        f"{base_path}{rel_path}"
+                        if rel_path.startswith("/")
+                        else f"{base_path}/{rel_path}"
+                    )
                     global_patch.append(new_op)
 
                 # 2. Apply the patch
+
+                import jsonpatch
+
                 self._data = jsonpatch.apply_patch(self._data, global_patch)
                 self.save_full_config()
 
@@ -142,7 +159,11 @@ class ConfigManager:
                 if self.config_changed_cb is not None:
                     new_config = self.get_by_path(path, make_deep_copy=True)
                     # print(f"[Registry] Calling config_changed_cb for {path} with new_config: {new_config}")
-                    schema = self.get_schema_by_path(path) if self.get_schema_by_path else None
+                    schema = (
+                        self.get_schema_by_path(path)
+                        if self.get_schema_by_path
+                        else None
+                    )
                     self.config_changed_cb(path, new_config, schema)
 
             except Exception as e:
@@ -151,20 +172,24 @@ class ConfigManager:
     def _notify_subscribers(self, global_patch: list):
         """Checks which subscribed paths were touched by the patch operations."""
         from blinkview.utils.dict_utils import get_by_path
+
         # Get all paths affected by this patch
         affected_paths = {op["path"] for op in global_patch}
 
-        current_subscriptions = list(self._subscriptions.items())  # Snapshot to avoid issues if subscriptions change during iteration
+        current_subscriptions = list(
+            self._subscriptions.items()
+        )  # Snapshot to avoid issues if subscriptions change during iteration
 
         for sub_path, callbacks in current_subscriptions:
-
             # Enforce trailing slashes to prevent substring false-positives
             # e.g., "/devices/A" vs "/devices/ABC"
-            sub_slashed = sub_path if sub_path.endswith('/') else sub_path + '/'
+            sub_slashed = sub_path if sub_path.endswith("/") else sub_path + "/"
 
             should_notify = False
             for patch_path in affected_paths:
-                patch_slashed = patch_path if patch_path.endswith('/') else patch_path + '/'
+                patch_slashed = (
+                    patch_path if patch_path.endswith("/") else patch_path + "/"
+                )
 
                 # 1. Did a child of the subscribed path change?
                 is_child = patch_slashed.startswith(sub_slashed)
@@ -194,7 +219,9 @@ class ConfigManager:
 
                         needs_restart = getattr(cb, "thread_needs_restart", False)
                         if needs_restart:
-                            print(f"[ConfigManager] Note: '{cb.__class__.__name__}' indicated it needs a thread restart after config change.")
+                            print(
+                                f"[ConfigManager] Note: '{cb.__class__.__name__}' indicated it needs a thread restart after config change."
+                            )
                             cb.restart()
 
                     except Exception as e:
@@ -206,9 +233,21 @@ class ConfigManager:
         new_name = f"{base_name}_{sub}.json"  # e.g., 'blink_config_devices.json'
         return self.filepath.parent / new_name
 
-    def get_config_schema(self, path: str, drop_keys: list = None, editable: bool = True, depth: int = None):
-        config = self.get_by_path(path, drop_keys=drop_keys, make_deep_copy=editable, depth=depth)
-        schema = self.get_schema_by_path(path, drop_keys=drop_keys) if self.get_schema_by_path else None
+    def get_config_schema(
+        self,
+        path: str,
+        drop_keys: list = None,
+        editable: bool = True,
+        depth: int = None,
+    ):
+        config = self.get_by_path(
+            path, drop_keys=drop_keys, make_deep_copy=editable, depth=depth
+        )
+        schema = (
+            self.get_schema_by_path(path, drop_keys=drop_keys)
+            if self.get_schema_by_path
+            else None
+        )
         return config, schema
 
     def get_data(self):

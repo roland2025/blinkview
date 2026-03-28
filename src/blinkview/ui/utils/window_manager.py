@@ -4,14 +4,11 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QMainWindow
+from base64 import b64decode, b64encode
 
-from base64 import b64encode
-
-from base64 import b64decode
 from PySide6.QtCore import QByteArray, QPoint, QTimer
 from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import QMainWindow
 
 
 def get_window_geometry_data(window, threshold=15) -> dict:
@@ -21,9 +18,9 @@ def get_window_geometry_data(window, threshold=15) -> dict:
     new_w, new_h = window.width(), window.height()
 
     new_dict = {
-        "geometry": b64encode(window.saveGeometry().data()).decode('utf-8'),
+        "geometry": b64encode(window.saveGeometry().data()).decode("utf-8"),
         "frame_pos": [new_x, new_y],
-        "client_size": [new_w, new_h]
+        "client_size": [new_w, new_h],
     }
 
     # -- THE DEADZONE FILTER --
@@ -55,6 +52,7 @@ def restore_window_geometry_safe(window, geo_dict: dict):
         return
 
     from base64 import b64decode
+
     from PySide6.QtCore import QByteArray, QRect
     from PySide6.QtGui import QGuiApplication
 
@@ -77,12 +75,7 @@ def restore_window_geometry_safe(window, geo_dict: dict):
         title_bar_height = window.frameGeometry().top() - window.geometry().top()
 
         # Set the EXACT rectangle for the internal part of the window
-        window.setGeometry(
-            frame_pos[0],
-            frame_pos[1] - title_bar_height,
-            client_size[0],
-            client_size[1]
-        )
+        window.setGeometry(frame_pos[0], frame_pos[1] - title_bar_height, client_size[0], client_size[1])
 
     # 3. Off-screen check (unchanged)
     frame = window.frameGeometry()
@@ -125,11 +118,14 @@ class WindowManager:
         """
         self._windows[window] = content_widget
 
-        print(f"[WindowManager] Registered {content_widget.__class__.__name__} "
-              f"in {hex(id(window))}. Total: {len(self._windows)}")
+        print(
+            f"[WindowManager] Registered {content_widget.__class__.__name__} "
+            f"in {hex(id(window))}. Total: {len(self._windows)}"
+        )
 
         # Clean up when the window is closed/destroyed
         window.destroyed.connect(lambda: self.deregister(window))
+        content_widget.destroyed.connect(window.close)
 
     def deregister(self, window):
         """Removes a window from tracking."""
@@ -152,16 +148,16 @@ class WindowManager:
                 else:
                     params = getattr(content, "tab_params", {})
 
-                states.append({
-                    "class": content.__class__.__name__,
-                    "name": getattr(content, "tab_name", "Window"),
-
-                    # --- UPDATED: Use the unified helper with the Deadzone fix ---
-                    "window_geometry": get_window_geometry_data(window),
-
-                    # Grab the parameters we defined earlier for restoration
-                    "params": params
-                })
+                states.append(
+                    {
+                        "class": content.__class__.__name__,
+                        "name": getattr(content, "tab_name", "Window"),
+                        # --- UPDATED: Use the unified helper with the Deadzone fix ---
+                        "window_geometry": get_window_geometry_data(window),
+                        # Grab the parameters we defined earlier for restoration
+                        "params": params,
+                    }
+                )
             except RuntimeError:
                 continue
         return states

@@ -4,11 +4,18 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from blinkview.core.base_configurable import BaseConfigurable, configuration_property
 import importlib
 
+from blinkview.core.base_configurable import BaseConfigurable, configuration_property
 
-@configuration_property("enabled", type="boolean", default=False, required=True, description="Global plugin system toggle")
+
+@configuration_property(
+    "enabled",
+    type="boolean",
+    default=False,
+    required=True,
+    description="Global plugin system toggle",
+)
 @configuration_property(
     "modules",
     type="object",
@@ -19,10 +26,8 @@ import importlib
         "type": "object",
         "default": {"enabled": True},  # What it defaults to when clicked
         "required": ["enabled"],
-        "properties": {
-            "enabled": {"type": "boolean", "title": "Enable Module"}
-        }
-    }
+        "properties": {"enabled": {"type": "boolean", "title": "Enable Module"}},
+    },
 )
 class PluginManager(BaseConfigurable):
     __doc__ = "Manages the lifecycle of dynamic plugin modules. Matches the 'plugins' key in the master configuration."
@@ -41,17 +46,14 @@ class PluginManager(BaseConfigurable):
 
     def apply_config(self, config: dict) -> bool:
 
-        super().apply_config(config)
-
-        if not self.enabled:
-            return False
+        changed = super().apply_config(config)
 
         # 2. Start modules that are newly enabled
         for path, mod_cfg in self.modules.items():
             if mod_cfg.get("enabled") and path not in self.active_plugins:
                 self._start_plugin(path)
 
-        return True
+        return changed
 
     def _start_plugin(self, module_path: str):
         """Dynamically imports and instantiates a plugin."""
@@ -67,4 +69,6 @@ class PluginManager(BaseConfigurable):
             self.logger.error(f"Plugin Load Error.", e)
 
         except Exception as e:
-            self.logger.error(f"Unexpected error while loading plugin '{module_path}'.", e)
+            self.logger.error(
+                f"Unexpected error while loading plugin '{module_path}'.", e
+            )

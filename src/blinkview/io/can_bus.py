@@ -5,7 +5,11 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from time import sleep
-from can import Bus, CanError
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from can import Bus, CanError
 
 from .BaseReader import DeviceFactory, BaseReader
 from ..core.base_configurable import configuration_property
@@ -47,7 +51,11 @@ class CANReader(BaseReader):
     def __init__(self):
         super().__init__()
 
+        self.bus: 'Bus' = None
+
     def run(self):
+        from can import Bus, CanError
+
         # Localize method lookups for the tight loop
         stop_is_set = self._stop_event.is_set
         time_ns = self.shared.time_ns

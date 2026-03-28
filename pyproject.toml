@@ -41,6 +41,7 @@ dependencies = [
     "requests",
     "pylink-square",
     "packaging",
+    "ruff>=0.15.8",
 ]
 
 # --- Optional GUI Dependencies (GIL-dependent) ---
@@ -87,3 +88,12 @@ features = []
 
 [tool.hatch.version]
 path = "src/blinkview/__init__.py"
+
+[tool.ruff]
+# Select the 'I' (isort) rules for sorting
+select = ["I"]
+line-length = 120
+
+[tool.ruff.lint]
+# Explicitly ignore 'F401' (the rule that finds unused imports)
+ignore = ["F401"]

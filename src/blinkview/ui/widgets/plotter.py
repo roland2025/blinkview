@@ -6,14 +6,16 @@
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional
 
-import pyqtgraph as pg
+from typing import List, Optional, TYPE_CHECKING, Union
+
+if TYPE_CHECKING:
+    import numpy as np
+    import pyqtgraph as pg
+
 from PySide6.QtGui import QAction, QColor
-from pyqtgraph import GraphicsLayoutWidget, LinearRegionItem
-import numpy as np
+
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QToolBar, QMenu, QLabel, QComboBox
-from PySide6.QtCore import QTimer
 
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.core.log_row import LogRow
@@ -24,8 +26,8 @@ from blinkview.utils.log_filter import LogFilter
 @dataclass
 class ModuleBuffer:
     """Holds the rolling buffers for a specific module."""
-    x_data: np.ndarray
-    y_data: Optional[np.ndarray] = None
+    x_data: 'np.ndarray'
+    y_data: Optional['np.ndarray'] = None
     ptr: int = 0
     num_channels: int = 0
 
@@ -38,14 +40,22 @@ class SeriesContainer:
     name: str
     color: str
     visible: bool = True
-    curve: Optional[pg.PlotDataItem] = None
-    overview_curve: Optional[pg.PlotDataItem] = None
-    plot_item: Optional[pg.PlotItem] = None
+    curve: Optional['pg.PlotDataItem'] = None
+    overview_curve: Optional['pg.PlotDataItem'] = None
+    plot_item: Optional['pg.PlotItem'] = None
 
 
 class TelemetryPlotter(QWidget):
     def __init__(self, gui_context, state=None, parent=None):
         super().__init__(parent)
+
+        import numpy as np
+        import pyqtgraph as pg
+
+        # Store references so other methods can use them easily
+        self._np = np
+        self._pg = pg
+
         self.gui_context: GUIContext = gui_context
         self.max_points = self.gui_context.settings.get('plot.max_points', 10000)
 
@@ -60,8 +70,8 @@ class TelemetryPlotter(QWidget):
         # New Single Source of Truth for Series
         self.series_list: List[SeriesContainer] = []
 
-        self.overview_plot: Optional[pg.PlotItem] = None
-        self.region: Optional[LinearRegionItem] = None
+        self.overview_plot: Optional['pg.PlotItem'] = None
+        self.region: Optional['pg.LinearRegionItem'] = None
         self.is_auto_scroll = True  # Keep window on the "last 10 mins"
         self._is_system_updating = False
 
@@ -118,6 +128,7 @@ class TelemetryPlotter(QWidget):
         self.toolbar.addWidget(self.duration_combo)
 
         self.graph_view = pg.GraphicsLayoutWidget()
+
         self.layout.addWidget(self.graph_view)
 
         self.setAcceptDrops(True)
@@ -194,6 +205,8 @@ class TelemetryPlotter(QWidget):
 
     def _init_module_channels(self, module: ModuleIdentity, num_channels: int):
         """Called exactly once per module when data first arrives."""
+        np = self._np
+
         buf = self.buffers[module]
         buf.y_data = np.zeros((self.max_points, num_channels))
         buf.num_channels = num_channels
@@ -223,6 +236,8 @@ class TelemetryPlotter(QWidget):
 
     def process_log_batch(self, batch: list[LogRow], load_history=False):
         updated = False
+
+        np = self._np
 
         for module in self.modules:
             # Extraction per module
@@ -301,6 +316,8 @@ class TelemetryPlotter(QWidget):
         }
 
     def set_split_mode(self, split: bool):
+        pg = self._pg
+
         self.is_split = split
         if not self.series_list:
             return
@@ -348,7 +365,7 @@ class TelemetryPlotter(QWidget):
         latest_now = self._get_latest_timestamp()
         current_now = latest_now if latest_now > 0 else 60
         start_region = current_now - self.view_duration
-        self.region = LinearRegionItem([start_region, current_now])
+        self.region = pg.LinearRegionItem([start_region, current_now])
 
         self.region.setZValue(10)
         self.overview_plot.addItem(self.region)

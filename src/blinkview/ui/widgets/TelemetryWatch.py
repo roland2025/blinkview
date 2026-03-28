@@ -4,20 +4,32 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from builtins import print as builtin_print
 from dataclasses import dataclass, field
 from typing import List, Optional, Union
 
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QFormLayout, QHBoxLayout,
-                               QLabel, QFrame, QScrollArea, QPushButton, QInputDialog, QSizePolicy, QToolBar, QLineEdit,
-                               QGridLayout)
-from PySide6.QtCore import Qt, QMimeData
+from PySide6.QtCore import QMimeData, Qt, Signal
+from PySide6.QtGui import QAction, QDrag, QFont, QPixmap
+from PySide6.QtWidgets import (
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
 
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.core.log_row import LogRow
 from blinkview.ui.gui_context import GUIContext
-from builtins import print as builtin_print
-from PySide6.QtGui import QDrag, QAction, QFont, QPixmap
-
+from blinkview.ui.widgets.message_box import MessageBox
 from blinkview.utils.generate_id import generate_id
 
 
@@ -108,12 +120,14 @@ class RowEntry(TelemetryEntry):
             "type": self.type,
             "key": self.key,
             "label": self.label,
-            "modules": [m.name_with_device() for m in self.modules]
+            "modules": [m.name_with_device() for m in self.modules],
         }
 
 
 @add_custom_print
 class TelemetryWatch(QScrollArea):
+    signal_destroy = Signal(QWidget)
+
     def __init__(self, gui_context, state=None, parent=None):
         super().__init__(parent)
         self.setWidgetResizable(True)
@@ -146,6 +160,15 @@ class TelemetryWatch(QScrollArea):
         self.edit_action.setCheckable(True)
         self.edit_action.triggered.connect(self.toggle_edit_mode)
         self.toolbar.addAction(self.edit_action)
+
+        self.delete_watch_action = QAction("🗑 Delete Watch", self)
+        self.delete_watch_action.triggered.connect(self.prompt_delete_watch)
+        self.delete_watch_action.setVisible(False)
+        # Optional: Make it look destructive
+        self.delete_watch_action.setToolTip("Permanently delete this entire watch tab")
+
+        # Add it to the toolbar
+        self.toolbar.addAction(self.delete_watch_action)
 
         # Spacer to push "Add" buttons to the right
         spacer = QWidget()
@@ -188,9 +211,12 @@ class TelemetryWatch(QScrollArea):
         if state:
             self.restore(state)
         else:
-            self.node = self.gui_context.gui_config_manager.create_node("watches", self.watch_id,
-                                                                        on_update=self.update_config_schema)
+            self.node = self.gui_context.gui_config_manager.create_node(
+                "watches", self.watch_id, on_update=self.update_config_schema
+            )
             self.rebuild_ui()
+
+        self.node.signal_deleted.connect(lambda: self.signal_destroy.emit(self))
 
         self.gui_context.add_updatable(self)
 
@@ -243,10 +269,7 @@ class TelemetryWatch(QScrollArea):
                 return
 
         # Fallback: Create new row
-        new_row = RowEntry(
-            label=module.name,
-            modules=[module]
-        )
+        new_row = RowEntry(label=module.name, modules=[module])
         self.entries.insert(target_index, new_row)
         # self.rebuild_ui()
 
@@ -270,6 +293,7 @@ class TelemetryWatch(QScrollArea):
         self.edit_action.setText("✓ Done Editing" if self.edit_mode else "✎ Edit Layout")
         self.add_section_action.setVisible(self.edit_mode)
         self.add_row_action.setVisible(self.edit_mode)
+        self.delete_watch_action.setVisible(self.edit_mode)
         if not self.edit_mode:
             self.save_config()
         self.rebuild_ui()
@@ -280,7 +304,6 @@ class TelemetryWatch(QScrollArea):
 
         # 2. Populate the Grid
         for row, entry in enumerate(self.entries):
-
             # Col 0: Drag Handle
             if self.edit_mode:
                 handle = DragHandle(row, self)
@@ -289,7 +312,7 @@ class TelemetryWatch(QScrollArea):
             # Col 1: Label or Editor
             if self.edit_mode:
                 lbl = QLineEdit(entry.label)
-                lbl.textEdited.connect(lambda text, e=entry: setattr(e, 'label', text))
+                lbl.textEdited.connect(lambda text, e=entry: setattr(e, "label", text))
             else:
                 txt = entry.label.upper() if isinstance(entry, SectionEntry) else entry.label
                 lbl = QLabel(txt)
@@ -331,17 +354,16 @@ class TelemetryWatch(QScrollArea):
     # --- State ---
 
     def get_state(self) -> dict:
-        return {
-            "tab_name": self.tab_name,
-            "id": self.watch_id
-        }
+        return {"tab_name": self.tab_name, "id": self.watch_id}
 
     def restore(self, state: dict):
         self.print(f"restore: {state}")
         self.tab_name = state.get("tab_name", self.tab_name)
         self.watch_id = state.get("id") or self.watch_id
 
-        self.node = self.gui_context.gui_config_manager.create_node(f"/watches/{self.watch_id}", on_update=self.update_config_schema)
+        self.node = self.gui_context.gui_config_manager.create_node(
+            f"/watches/{self.watch_id}", on_update=self.update_config_schema
+        )
 
         self.rebuild_ui()
 
@@ -356,22 +378,21 @@ class TelemetryWatch(QScrollArea):
                 self.entries.append(SectionEntry(e["label"]))
             else:
                 mods = self.gui_context.id_registry.resolve_modules(e.get("modules", []))
-                self.entries.append(RowEntry(
-                    key=e["key"],
-                    label=e["label"],
-                    modules=mods
-                ))
+                self.entries.append(RowEntry(key=e["key"], label=e["label"], modules=mods))
 
         self.rebuild_ui()
+
     # --- Prompts ---
 
     def save_config(self):
-        self.node.send_config({
-            "name": self.name,
-            "tab_name": self.tab_name,
-            "id": self.watch_id,
-            "entries": [e.to_dict() for e in self.entries]
-        })
+        self.node.send_config(
+            {
+                "name": self.name,
+                "tab_name": self.tab_name,
+                "id": self.watch_id,
+                "entries": [e.to_dict() for e in self.entries],
+            }
+        )
 
     def prompt_add_row(self):
         # We don't even need a dialog anymore if we don't want to!
@@ -398,3 +419,15 @@ class TelemetryWatch(QScrollArea):
             "name": name,
         }
         return id_, conf
+
+    def prompt_delete_watch(self):
+        """Confirm and delete the entire watch node."""
+        watch_name = self.name or "this watch"
+        reply = MessageBox.question(
+            self,
+            "Delete Watch?",
+            f"Are you sure you want to permanently delete '{watch_name}'?\nThis cannot be undone.",
+        )
+
+        if reply == MessageBox.Btn.Yes:
+            self.node.delete()

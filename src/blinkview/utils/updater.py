@@ -5,7 +5,6 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import sys
-import subprocess
 from pathlib import Path
 from packaging.version import parse as parse_version
 
@@ -60,6 +59,7 @@ class Updater:
         return main_py.is_file()
 
     def fetch(self) -> None:
+        import subprocess
         try:
             subprocess.run(
                 ["git", "-C", str(self.repo_path), "fetch", "--tags"],
@@ -69,6 +69,7 @@ class Updater:
             raise UpdateError(f"Fetch failed: {e.stderr or e.stdout or str(e)}")
 
     def get_versions(self, remote: bool = False) -> list[str]:
+        import subprocess
         cmd = ["git", "-C", str(self.repo_path), "tag", "-l"]
         if remote:
             cmd = ["git", "-C", str(self.repo_path), "ls-remote", "--tags", "origin"]
@@ -90,6 +91,7 @@ class Updater:
         return versions[0] if versions else None
 
     def install(self, version: str) -> bool:
+        import subprocess
         try:
             subprocess.run(
                 ["git", "-C", str(self.repo_path), "checkout", version],

@@ -4,8 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from cobs import cobs
-
 from .transformer import PipelineDecodeFactory, TransformStep
 # from .BaseTransformStep import TransformStep, PipelineDecodeFactory
 from ..core.base_configurable import configuration_property
@@ -22,19 +20,30 @@ class CobsDecodeStep(TransformStep):
 
     on_error: str
 
-    def process(self, data: bytes) -> bytes:
-        # Handle empty frames (e.g., back-to-back 0x00 bytes in the raw stream)
-        if not data:
-            return b''
+    def __init__(self):
+        super().__init__()
 
-        try:
-            return cobs.decode(data)
+        self.process = None
 
-        except cobs.DecodeError as e:
-            # A DecodeError is highly likely on the very first frame when connecting
-            # to an active socket:// stream. We safely absorb and drop it by default.
-            if self.on_error == "raise":
-                raise ValueError(f"Corrupted COBS frame: {e}")
+        from cobs.cobs import decode, DecodeError
 
-            # self.logger.debug(f"Dropped malformed COBS frame: {e}")
-            return b''
+        _raise_on_error = self.on_error == "raise"
+
+        def fast_process(data: bytes) -> bytes:
+            # Handle empty frames (e.g., back-to-back 0x00 bytes in the raw stream)
+            if not data:
+                return b''
+
+            try:
+                return decode(data)
+
+            except DecodeError as e:
+                # A DecodeError is highly likely on the very first frame when connecting
+                # to an active socket:// stream. We safely absorb and drop it by default.
+                if _raise_on_error:
+                    raise ValueError(f"Corrupted COBS frame: {e}")
+
+                # self.logger.debug(f"Dropped malformed COBS frame: {e}")
+                return b''
+
+        self.process = fast_process

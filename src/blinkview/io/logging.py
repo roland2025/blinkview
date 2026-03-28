@@ -4,30 +4,38 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import logging
 import queue
-from logging import LogRecord
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    import logging
+    from logging import LogRecord
 
 from .BaseReader import DeviceFactory, BaseReader
 from ..core.base_configurable import configuration_property
 
 
-class LoggerHandler(logging.Handler):
-    """
-    A high-performance in-memory logging handler.
-    Intercepts LogRecords and places them directly into a thread-safe Queue.
-    """
+def _get_logger_handler_class():
+    import logging
 
-    def __init__(self, output_queue: queue.Queue):
-        super().__init__()
-        self.output_queue = output_queue
+    class LoggerHandler(logging.Handler):
+        """
+        A high-performance in-memory logging handler.
+        Intercepts LogRecords and places them directly into a thread-safe Queue.
+        """
 
-    def emit(self, record: LogRecord):
-        try:
-            # Pass the raw (fake_timestamp, record) tuple
-            self.output_queue.put((int(record.created * 1_000_000_000), record))
-        except Exception:
-            self.handleError(record)
+        def __init__(self, output_queue: queue.Queue):
+            super().__init__()
+            self.output_queue = output_queue
+
+        def emit(self, record: LogRecord):
+            try:
+                # Pass the raw (fake_timestamp, record) tuple
+                self.output_queue.put((int(record.created * 1_000_000_000), record))
+            except Exception:
+                self.handleError(record)
+
+    return LoggerHandler
 
 
 @DeviceFactory.register("logging")
@@ -51,7 +59,7 @@ objects downstream based on count or time.
     def __init__(self):
         super().__init__()
         self._queue = queue.Queue()
-        self.handler = LoggerHandler(self._queue)
+        self.handler = _get_logger_handler_class(self._queue)
 
     def run(self):
         stop_is_set = self._stop_event.is_set
@@ -60,6 +68,8 @@ objects downstream based on count or time.
 
         delay_ns = int(self.delay * 1_000_000)
         maxlen = self.maxlen
+
+        import logging
 
         # 1. Attach to the global Root Logger
         root_logger = logging.getLogger()

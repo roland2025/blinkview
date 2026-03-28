@@ -4,7 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import requests
 import threading
 from datetime import datetime, timedelta, timezone
 from packaging import version
@@ -40,6 +39,8 @@ class GitHubUpdate:
 
     @classmethod
     def check(cls, force=False, include_pre=True):
+        import requests
+
         """
         include_pre: If True, looks at the very latest tag (stable or dev).
                      If False, finds the latest stable release in the list.

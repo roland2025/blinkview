@@ -4,17 +4,21 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from can import Message
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from can import Message
 
 from blinkview.core.device_identity import DeviceIdentity
 from blinkview.core.log_row import LogRow
 from blinkview.parsers.assembler import BaseAssembler
 from blinkview.parsers.can_bus import CanAssemblerFactory, CanParserFactory
 from blinkview.utils.level_map import LogLevel
+
+from ..core.base_configurable import configuration_property
+from ..io.BaseReader import DeviceFactory
 from .cantools_decoder import can_msg_to_str
 from .parser import BaseParser, ParserFactory
-from ..io.BaseReader import DeviceFactory
-from ..core.base_configurable import configuration_property
 
 
 @CanAssemblerFactory.register("cantools")
@@ -22,7 +26,7 @@ from ..core.base_configurable import configuration_property
     "prepend_msg_name",
     type="boolean",
     default=False,
-    description="If enabled, groups signals under their DBC message name (e.g., 'BMS_Status_1.voltage'). If disabled, signals are flat (e.g., 'voltage')."
+    description="If enabled, groups signals under their DBC message name (e.g., 'BMS_Status_1.voltage'). If disabled, signals are flat (e.g., 'voltage').",
 )
 class CantoolsToLogRow(BaseAssembler):
     __doc__ = "Converts msgpack-encoded log lines into LogRow objects. Expects the msgpack format to be: (created, levelno, name, msg)."
@@ -31,8 +35,9 @@ class CantoolsToLogRow(BaseAssembler):
         super().__init__()
 
     def apply_config(self, config: dict):
-        super().apply_config(config)
+        changed = super().apply_config(config)
         self._bake()
+        return changed
 
     def _bake(self):
         # Cache frequently used objects locally
@@ -63,11 +68,14 @@ class CantoolsToLogRow(BaseAssembler):
         raise RuntimeError("ID Registry must be set before parsing.")
 
 
-
 from time import perf_counter
 from typing import Any
 
-from ..core.base_configurable import configuration_property, on_config_change, override_property
+from ..core.base_configurable import (
+    configuration_property,
+    on_config_change,
+    override_property,
+)
 from ..core.log_row import LogRow
 from ..utils.level_map import LogLevel
 
@@ -78,7 +86,7 @@ from ..utils.level_map import LogLevel
     ui_order=10,
     _factory="can_decode",
     _factory_default="cantools",
-    description="Decodes raw can.Message objects into structured data (e.g., via Cantools/DBC or struct unpack)."
+    description="Decodes raw can.Message objects into structured data (e.g., via Cantools/DBC or struct unpack).",
 )
 @configuration_property(
     "transform",
@@ -86,7 +94,7 @@ from ..utils.level_map import LogLevel
     ui_order=11,
     _factory="can_transform",
     _factory_default="default",
-    description="Data transformation steps to apply to the decoded CAN payload."
+    description="Data transformation steps to apply to the decoded CAN payload.",
 )
 @configuration_property(
     "assembler",
@@ -95,14 +103,10 @@ from ..utils.level_map import LogLevel
     ui_order=12,
     _factory="can_assembler",
     _factory_default="cantools",
-    description="Assembles transformed CAN data into final LogRow objects, automatically routing to the correct module based on CAN ID."
+    description="Assembles transformed CAN data into final LogRow objects, automatically routing to the correct module based on CAN ID.",
 )
 @configuration_property(
-    "sources_",
-    type="string",
-    required=True,
-    _reference="/sources",
-    default=""
+    "sources_", type="string", required=True, _reference="/sources", default=""
 )
 @ParserFactory.register("can")
 class CANparser(BaseParser):
@@ -128,7 +132,7 @@ Because CAN frames are already discrete packets, this parser avoids the overhead
         self._assemble = None
 
     def apply_config(self, config: dict):
-        super().apply_config(config)
+        changed = super().apply_config(config)
         self.logger.info(f"Applying CAN parser config: {config}")
         factory_build = self.shared.factories.build
 
@@ -142,7 +146,9 @@ Because CAN frames are already discrete packets, this parser avoids the overhead
 
         transformer_cfg = config.get("transform", {})
         if transformer_cfg:
-            self._transformer = factory_build("can_transform", transformer_cfg, system_ctx=self.shared)
+            self._transformer = factory_build(
+                "can_transform", transformer_cfg, system_ctx=self.shared
+            )
             self._transform = self._transformer.process
         else:
             self._transform = None
@@ -150,13 +156,16 @@ Because CAN frames are already discrete packets, this parser avoids the overhead
 
         assembler_cfg = config.get("assembler", {})
         if assembler_cfg:
-            self._assembler = factory_build("can_assembler", assembler_cfg, system_ctx=self.shared)
+            self._assembler = factory_build(
+                "can_assembler", assembler_cfg, system_ctx=self.shared
+            )
             self._assemble = self._assembler.process
         else:
             self._assembler = None
             self._assemble = None
 
         self.thread_needs_restart = True
+        return changed
 
     @on_config_change("name")
     def name_changed(self, name, old):
@@ -178,7 +187,7 @@ Because CAN frames are already discrete packets, this parser avoids the overhead
         last_flush_time = perf_counter()
 
         # Fallback modules if no assembler is defined
-        module_can = device_identity.get_module('bus')
+        module_can = device_identity.get_module("bus")
         module_unknown = None
 
         can_msg_to_str_ = can_msg_to_str
@@ -207,7 +216,9 @@ Because CAN frames are already discrete packets, this parser avoids the overhead
                 continue
 
             for timestamp_ns, can_msg in batch:
-                can_msg_original: Message = can_msg  # Keep the original message for error reporting
+                can_msg_original: "Message" = (
+                    can_msg  # Keep the original message for error reporting
+                )
                 # print(f"Received CAN message: {can_msg} at {timestamp_ns}")
 
                 try:
@@ -218,14 +229,21 @@ Because CAN frames are already discrete packets, this parser avoids the overhead
 
                     # 2. Transform (e.g., math operations on specific fields)
                     if self._transform is not None:
-                        can_msg = self._transform(timestamp_ns, can_msg_original.arbitration_id, can_msg)
+                        can_msg = self._transform(
+                            timestamp_ns, can_msg_original.arbitration_id, can_msg
+                        )
 
                     # 3. Assemble (Map to LogRow and specific ModuleIdentity)
                     if self._assemble is not None:
                         can_msg = self._assemble(timestamp_ns, device_identity, can_msg)
                         # self.logger.trace(f"assembled: {timestamp_ns}: {can_msg}")
                     else:
-                        can_msg = LogRow(timestamp_ns, LogLevel.INFO, module_can, can_msg_to_str_(can_msg_original))
+                        can_msg = LogRow(
+                            timestamp_ns,
+                            LogLevel.INFO,
+                            module_can,
+                            can_msg_to_str_(can_msg_original),
+                        )
 
                     if isinstance(can_msg, list):
                         parsed_batch.extend(can_msg)
@@ -234,11 +252,20 @@ Because CAN frames are already discrete packets, this parser avoids the overhead
 
                 except Exception as e:
                     if module_unknown is None:
-                        module_unknown = device_identity.get_module('_unknown')
-                    parsed_batch.append(LogRow(timestamp_ns, LogLevel.ERROR, module_unknown, can_msg_to_str_(can_msg_original)))
+                        module_unknown = device_identity.get_module("_unknown")
+                    parsed_batch.append(
+                        LogRow(
+                            timestamp_ns,
+                            LogLevel.ERROR,
+                            module_unknown,
+                            can_msg_to_str_(can_msg_original),
+                        )
+                    )
 
             # Time or Size-based flush check
-            if len(parsed_batch) >= max_batch or (perf_counter() - last_flush_time >= max_timeout):
+            if len(parsed_batch) >= max_batch or (
+                perf_counter() - last_flush_time >= max_timeout
+            ):
                 flush()
 
         # Flush any remaining batch on exit

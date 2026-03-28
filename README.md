@@ -207,7 +207,7 @@ git clone https://github.com/roland2025/blinkview.git
 cd blinkview
 
 # install the tool to system
-uv tool install ".[gui]" --python 3.13
+uv tool install ".[all]" --python 3.14
 ```
 
 #### Upgrading
