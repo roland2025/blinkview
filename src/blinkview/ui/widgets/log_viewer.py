@@ -282,6 +282,12 @@ QToolButton[filterEnabled="true"] {
         self.show_lvl = view_state.get("show_lvl", self.show_lvl)
         self.show_mod = view_state.get("show_mod", self.show_mod)
 
+        if self.allowed_device is not None:
+            self.show_dev = False
+        if self.filtered_module is not None:
+            self.show_mod = False
+            self.show_dev = False
+
         self.show_telemetry = view_state.get("show_telemetry", self.show_telemetry)
         self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
         self.filter_sidebar_state = state.get("filter_sidebar", self.filter_sidebar_state)

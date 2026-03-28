@@ -226,7 +226,6 @@ class BlinkMainWindow(QMainWindow):
         self.last_poll_time = perf_counter()
 
         # UI Poller (Runs here, updates the log window)
-        # 60FPS Data Poller
         self.gui_context.set_theme(StyleConfig())
 
         self.fps_slow = 1
@@ -274,10 +273,10 @@ class BlinkMainWindow(QMainWindow):
     def load_ui_state(self):
         self.gui_context.gui_state.load_ui_state(self.gui_context.registry.file_manager.get_config_path("gui_state"))
 
-        QTimer.singleShot(0, lambda: ToastManager.show("Something happened...", ToastType.INFO))
-        QTimer.singleShot(333, lambda: ToastManager.show("WAARNING...", ToastType.WARNING))
-        QTimer.singleShot(666, lambda: ToastManager.show("WHoop success...", ToastType.SUCCESS))
-        QTimer.singleShot(999, lambda: ToastManager.show("Attention error...", ToastType.ERROR))
+        # QTimer.singleShot(0, lambda: ToastManager.show("Something happened...", ToastType.INFO))
+        # QTimer.singleShot(333, lambda: ToastManager.show("WAARNING...", ToastType.WARNING))
+        # QTimer.singleShot(666, lambda: ToastManager.show("WHoop success...", ToastType.SUCCESS))
+        # QTimer.singleShot(999, lambda: ToastManager.show("Attention error...", ToastType.ERROR))
 
     def register_log_target(self, target):
         """Adds a target that expects a 'process_log_batch(list)' method."""

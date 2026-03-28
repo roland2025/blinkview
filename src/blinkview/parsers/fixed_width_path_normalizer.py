@@ -60,8 +60,11 @@ class FixedWidthPathNormalizer(TransformStep):
                 # for long strings or multiple occurrences.
                 clean_module = "_".join(filter(None, tmp.split("_")))
 
+                # Add colon only if missing and module exists
+                colon = ":" if clean_module and not clean_module.endswith(":") else ""
+
                 # Final Assembly
-                return f"{clean_module} {message_body}"
+                return f"{clean_module}{colon} {message_body}"
         else:
 
             def fast_call(data: str):
@@ -90,10 +93,12 @@ class FixedWidthPathNormalizer(TransformStep):
 
                 clean_module = clean_module.strip("_")
 
+                colon = ":" if clean_module and not clean_module.endswith(":") else ""
+
                 # Assembly
                 pre_part = " ".join(parts[:idx])
                 sep = " " if pre_part else ""
 
-                return f"{pre_part}{sep}{clean_module} {message_body}".strip()
+                return f"{pre_part}{sep}{clean_module}{colon} {message_body}".strip()
 
         self.process = fast_call

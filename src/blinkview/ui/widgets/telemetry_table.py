@@ -542,13 +542,17 @@ class TelemetryTable(QWidget):
                 if module.latest_row:
                     QApplication.clipboard().setText(module.latest_row.message)
 
-            case "view_graph":
+            case "view_graph" | "view_graph_with_children":
                 # Future home of your PyQtGraph widget
                 self.gui_context.create_widget(
                     "TelemetryPlotter",
                     f"Graph: {module.name}",
                     as_window=True,
-                    params={"modules": [module.name_with_device()]},
+                    params={
+                        "modules": [module.name_with_device()]
+                        if action_id == "view_graph"
+                        else [m.name_with_device() for m in module.get_all_descendants()]
+                    },
                 )
 
             case _:
@@ -580,7 +584,8 @@ class TelemetryTable(QWidget):
             ("View Logs", "view_logs", False, None),
             ("View Logs with Children", "view_logs_children", False, None),
             (None, None, False, None),  # A None entry acts as a separator
-            ("View Real-time Graph", "view_graph", False, None),
+            ("View Graph", "view_graph", False, None),
+            ("View Graph with Children", "view_graph_with_children", False, None),
             (None, None, False, None),  # A None entry acts as a separator
             # ("Export Statistics", "export_stats", True, None),
             ("Copy Module Name", "copy_name", False, None),

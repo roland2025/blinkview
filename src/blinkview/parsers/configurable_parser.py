@@ -50,9 +50,7 @@ class RegexMagic(TransformStep):
 
 @PipelineDecodeFactory.register("bytes_decode")
 @configuration_property("encoding", type="string", default="ascii")
-@configuration_property(
-    "errors", type="string", enum=["strict", "ignore", "replace"], default="replace"
-)
+@configuration_property("errors", type="string", enum=["strict", "ignore", "replace"], default="replace")
 class DecoderStep(TransformStep):
     # __slots__ = ('encoding',)
     __doc__ = "A simple bytes to string decoder step that uses the specified encoding and error handling strategy."
@@ -164,9 +162,7 @@ class ConfigurableParser(TransformStep):
     def __init__(self):
         super().__init__()
         self.pipeline: List[TransformStep] = []
-        self.process = (
-            str  # Default to simple string conversion if no steps are configured
-        )
+        self.process = str  # Default to simple string conversion if no steps are configured
         self._shared: SystemContext = None
 
     def bind_system(self, shared, _):
@@ -186,16 +182,12 @@ class ConfigurableParser(TransformStep):
 
         for step_cfg in config.get("steps", []):
             if True:  # step_cfg.get("enabled", True):
-                step = self._shared.factories.build(
-                    "pipeline_transformer", config=step_cfg, system_ctx=self._shared
-                )
+                step = self._shared.factories.build("pipeline_transformer", config=step_cfg, system_ctx=self._shared)
 
                 # Validation: If the last step output 'str' and this one needs 'bytes',
                 # we can catch the error before the app even starts.
                 if pipeline and pipeline[-1].output_type != step.input_type:
-                    print(
-                        f"ConfigurableParser: Warning: Type mismatch between {pipeline[-1]} and {step}"
-                    )
+                    print(f"ConfigurableParser: Warning: Type mismatch between {pipeline[-1]} and {step}")
 
                 pipeline.append(step)
 
@@ -226,3 +218,21 @@ class ConfigurableParser(TransformStep):
             return data
 
         self.process = baked_runner
+
+
+@TransformerFactory.register("whitespace_normalizer")
+class WhitespaceNormalizerStep(TransformStep):
+    """
+    Collapses all contiguous whitespace (spaces, tabs, newlines) into
+    single spaces and trims leading/trailing whitespace.
+    """
+
+    __doc__ = "A high-performance whitespace normalizer using str.split and str.join."
+
+    input_type = "str"
+    output_type = "str"
+
+    def process(self, data: str) -> str:
+        # data.split() without arguments splits on any whitespace run
+        # " ".join(...) puts a single space between the resulting words
+        return " ".join(data.split())

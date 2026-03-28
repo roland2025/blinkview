@@ -27,6 +27,8 @@ class PipelineListItemWidget(BaseListItemWidget):
         self.btn_log.customContextMenuRequested.connect(self._show_log_context_menu)
         self.layout.addWidget(self.btn_log)
 
+        # Telemetry button
+
     def _on_log_clicked(self):
         name = self.config_node.get("name")
         if not name:

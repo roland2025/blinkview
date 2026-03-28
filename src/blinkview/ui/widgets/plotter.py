@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     import pyqtgraph as pg
 
 from PySide6.QtGui import QAction, QColor
-from PySide6.QtWidgets import QComboBox, QLabel, QMenu, QToolBar, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QLabel, QMenu, QSizePolicy, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.core.log_row import LogRow
@@ -63,6 +63,9 @@ class TelemetryPlotter(QWidget):
         self.is_split: bool = False
         self.module: Optional[ModuleIdentity] = None
 
+        self.log_seq = -1
+        self.latest_seq = -1
+
         # Buffers
         self.modules: List[ModuleIdentity] = []
         self.buffers: dict[ModuleIdentity, ModuleBuffer] = {}
@@ -100,7 +103,10 @@ class TelemetryPlotter(QWidget):
         self.channel_btn.triggered.connect(self._show_channel_menu)
 
         self.toolbar.addSeparator()
-        self.toolbar.addWidget(QLabel("Window:"))
+        self.toolbar.addAction("Reset view", self.reset_view)
+
+        self.toolbar.addSeparator()
+
         self.duration_combo = QComboBox()
         self.duration_combo.setMinimumWidth(60)
         self.duration_combo.setEditable(True)
@@ -115,8 +121,6 @@ class TelemetryPlotter(QWidget):
 
         self.duration_combo.currentTextChanged.connect(self._on_duration_changed)
 
-        self.toolbar.addAction("Clear", self.clear)
-
         self.toolbar.addSeparator()
 
         # Add an Auto-Scroll toggle to the toolbar
@@ -125,7 +129,16 @@ class TelemetryPlotter(QWidget):
         self.autoscroll_action.setChecked(True)
         self.autoscroll_action.triggered.connect(self.set_autoscroll)
 
+        self.toolbar.addWidget(QLabel("Window:"))
         self.toolbar.addWidget(self.duration_combo)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.toolbar.addWidget(spacer)
+
+        self.toolbar.addSeparator()
+
+        self.toolbar.addAction("Clear", self.clear)
 
         self.graph_view = pg.GraphicsLayoutWidget()
 
@@ -134,6 +147,7 @@ class TelemetryPlotter(QWidget):
         self.setAcceptDrops(True)
 
         self.gui_context.register_log_target(self)
+
         self.load_history()
 
     def _set_defaults(self):
@@ -169,6 +183,10 @@ class TelemetryPlotter(QWidget):
                         visible=s["visible"],
                     )
                 )
+
+    def reset_view(self):
+        self.set_autoscroll(True)
+        self.set_split_mode(self.is_split)
 
     def _parse_duration(self, text: str) -> Optional[int]:
         """Parses strings like '10s', '5m', '2h' into total seconds."""
@@ -241,6 +259,8 @@ class TelemetryPlotter(QWidget):
     def process_log_batch(self, batch: list[LogRow], load_history=False):
         updated = False
 
+        self.latest_seq = batch[-1].seq
+
         np = self._np
 
         for module in self.modules:
@@ -288,7 +308,7 @@ class TelemetryPlotter(QWidget):
         """Helper to load history for a single module (used during drop)."""
         print(f"Loading history for newly dropped module: '{module}'")
         log_filter = LogFilter(self.gui_context.id_registry, filtered_module=module)
-        history = self.gui_context.registry.central.get_rows(log_filter, total=self.max_points)
+        history = self.gui_context.registry.central.get_rows(log_filter, total=self.max_points, after_seq=self.log_seq)
         if history:
             self.process_log_batch(history, load_history=True)
 
@@ -333,6 +353,7 @@ class TelemetryPlotter(QWidget):
             axisItems={"bottom": pg.DateAxisItem(orientation="bottom")},
         )
         self.overview_plot.setMaximumHeight(120)
+        self.overview_plot.enableAutoRange(axis="y", enable=True)
 
         # Setup Main Plots
         shared_plot = None
@@ -342,6 +363,9 @@ class TelemetryPlotter(QWidget):
                 row=1, col=0, axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
             )
             shared_plot.setTitle(None)
+            shared_plot.enableAutoRange(axis="y", enable=True)
+            shared_plot.setAutoVisible(y=True)
+
             if self.total_series_count > 1:
                 legend = shared_plot.addLegend()
 
@@ -351,6 +375,8 @@ class TelemetryPlotter(QWidget):
                     row=i + 1, col=0, axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
                 )
                 p.setTitle(f'<span style="color: {s.color}; font-weight: bold;">{s.name}</span>')
+                p.enableAutoRange(axis="y", enable=True)
+                p.setAutoVisible(y=True)
                 # p.setTitle(s.name)
                 if i > 0:
                     p.setXLink(self.series_list[0].plot_item)
@@ -385,6 +411,8 @@ class TelemetryPlotter(QWidget):
             if self._is_system_updating:
                 return
 
+            self.set_autoscroll(False)
+
             minX, maxX = self.region.getRegion()
 
             # Apply the range to all main plots
@@ -396,6 +424,8 @@ class TelemetryPlotter(QWidget):
             # Break the infinite feedback loop
             if self._is_system_updating:
                 return
+
+            self.set_autoscroll(False)
 
             rlow, rhigh = viewRange[0]
 
@@ -437,6 +467,8 @@ class TelemetryPlotter(QWidget):
             self._apply_view_range(latest_time - self.view_duration, latest_time)
 
     def clear(self):
+        self.log_seq = self.latest_seq
+
         for buf in self.buffers.values():
             buf.x_data.fill(0)
             if buf.y_data is not None:
@@ -516,12 +548,16 @@ class TelemetryPlotter(QWidget):
 
     def set_autoscroll(self, enabled: bool):
         """Updates the auto-scroll state and UI."""
+        # Optional optimization: only update if state actually changed
+        if self.is_auto_scroll == enabled:
+            return
+
         self.is_auto_scroll = enabled
         self.autoscroll_action.setChecked(enabled)
         self.autoscroll_action.setText(f"Auto-Scroll: {'ON' if enabled else 'OFF'}")
 
-        # If turned back on, force a snap to the present immediately
         if enabled:
+            # When re-enabling, jump to the live edge immediately
             self._update_plots()
 
     def _apply_view_range(self, start_time: float, end_time: float):

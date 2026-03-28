@@ -41,10 +41,14 @@ def run(cmd, capture=False):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: uv run scripts/release.py [patch|minor|major|x.y.z]")
+        print("Usage: uv run scripts/release.py [patch|minor|major|standard|x.y.z]")
         return
 
     increment = sys.argv[1]
+
+    # Map 'release' or 'final' to 'standard' for easier typing
+    if increment in ["release", "final"]:
+        increment = "standard"
 
     # Bump version
     try:

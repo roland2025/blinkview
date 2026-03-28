@@ -24,7 +24,7 @@ def check_for_updates_silently(gui_context, parent=None):
             updater.fetch(force=False)
             latest = updater.get_latest_version()
 
-            if True:  # latest and parse_version(latest) > parse_version(__version__):
+            if latest and parse_version(latest) > parse_version(__version__):
                 print(f"{latest} is available")
                 toast_dispatcher.notify(
                     message=f"BlinkView <b>{latest}</b> is available.",

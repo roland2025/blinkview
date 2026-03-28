@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStackedWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -74,6 +75,10 @@ class TelemetryEntry:
     def to_dict(self) -> dict:
         raise NotImplementedError
 
+    def clear_widgets(self):
+        """Reset UI references to prevent updating deleted widgets."""
+        pass
+
 
 @dataclass
 class SectionEntry(TelemetryEntry):
@@ -84,6 +89,11 @@ class SectionEntry(TelemetryEntry):
         return {"type": self.type, "label": self.label}
 
     def update(self):
+        pass
+
+    def clear_widgets(self):
+        # Sections currently don't hold runtime widget refs,
+        # but we implement it for consistency.
         pass
 
 
@@ -123,6 +133,10 @@ class RowEntry(TelemetryEntry):
             "modules": [m.name_with_device() for m in self.modules],
         }
 
+    def clear_widgets(self):
+        """Release the reference to the QLabel."""
+        self.value_label = None
+
 
 @add_custom_print
 class TelemetryWatch(QScrollArea):
@@ -155,11 +169,29 @@ class TelemetryWatch(QScrollArea):
         self.toolbar = QToolBar()
         self.toolbar.setMovable(False)
 
-        # Edit Toggle Action
-        self.edit_action = QAction("✎ Edit Layout", self)
-        self.edit_action.setCheckable(True)
-        self.edit_action.triggered.connect(self.toggle_edit_mode)
-        self.toolbar.addAction(self.edit_action)
+        # Create a Stacked Widget to hold the Name Label and Name Edit
+        self.name_stack = QStackedWidget()
+
+        self.name_stack.setMaximumWidth(300)  # Prevent it from growing too large
+
+        # Normal Mode Label
+        self.name_label = QLabel("WATCH")
+        self.name_label.setStyleSheet("font-weight: bold; color: #55aaff; margin-left: 5px; font-size: 14px;")
+        self.name_stack.addWidget(self.name_label)
+
+        # Edit Mode LineEdit
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Watch Name...")
+        self.name_edit.setMinimumWidth(200)  # Minimum instead of Fixed
+        self.name_edit.textEdited.connect(self._handle_rename)
+        self.name_stack.addWidget(self.name_edit)
+
+        # Add the STACK to the toolbar instead of the individual widgets
+        self.toolbar.addWidget(self.name_stack)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.toolbar.addWidget(spacer)
 
         self.delete_watch_action = QAction("🗑 Delete Watch", self)
         self.delete_watch_action.triggered.connect(self.prompt_delete_watch)
@@ -171,9 +203,9 @@ class TelemetryWatch(QScrollArea):
         self.toolbar.addAction(self.delete_watch_action)
 
         # Spacer to push "Add" buttons to the right
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.toolbar.addWidget(spacer)
+        spacer_2 = QWidget()
+        spacer_2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.toolbar.addWidget(spacer_2)
 
         # Add Actions (Hidden by default)
         self.add_section_action = QAction("+ Section", self)
@@ -186,6 +218,12 @@ class TelemetryWatch(QScrollArea):
 
         self.toolbar.addAction(self.add_section_action)
         self.toolbar.addAction(self.add_row_action)
+
+        # Edit Toggle Action
+        self.edit_action = QAction("✎ Edit Layout", self)
+        self.edit_action.setCheckable(True)
+        self.edit_action.triggered.connect(self.toggle_edit_mode)
+        self.toolbar.addAction(self.edit_action)
 
         self.outer_layout = QVBoxLayout()
         self.outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -220,8 +258,9 @@ class TelemetryWatch(QScrollArea):
 
         self.gui_context.add_updatable(self)
 
-    def __del__(self):
+    def closeEvent(self, event):
         self.gui_context.remove_updatable(self)
+        super().closeEvent(event)
 
     def _set_defaults(self):
         self.tab_name = self.__class__.__name__
@@ -288,9 +327,26 @@ class TelemetryWatch(QScrollArea):
                     return i
         return len(self.entries)
 
+    def _handle_rename(self, new_name):
+        """Update local state and sync to config."""
+        self.name = new_name
+        # Optional: update tab_name if you want them linked
+        # self.tab_name = new_name
+        self.save_config()
+
     def toggle_edit_mode(self):
         self.edit_mode = self.edit_action.isChecked()
         self.edit_action.setText("✓ Done Editing" if self.edit_mode else "✎ Edit Layout")
+
+        self.name_stack.setCurrentIndex(1 if self.edit_mode else 0)
+
+        if self.edit_mode:
+            self.name_edit.setText(self.name or "")
+            self.name_edit.setFocus()
+            self.name_edit.selectAll()
+        else:
+            self.name_label.setText(self.name.upper() if self.name else "UNNAMED WATCH")
+
         self.add_section_action.setVisible(self.edit_mode)
         self.add_row_action.setVisible(self.edit_mode)
         self.delete_watch_action.setVisible(self.edit_mode)
@@ -342,6 +398,9 @@ class TelemetryWatch(QScrollArea):
                 self.layout.addWidget(btn, row, 3)
 
     def _clear_layout(self):
+        for entry in self.entries:
+            entry.clear_widgets()
+
         while self.layout.count() > 0:
             item = self.layout.takeAt(0)
             if item.widget():
@@ -372,6 +431,13 @@ class TelemetryWatch(QScrollArea):
         raw_entries = config_.get("entries", [])
         self.print(f"id: {self.watch_id}")
         self.name = config_.get("name")
+
+        display_name = self.name.upper() if self.name else "UNNAMED WATCH"
+        self.name_label.setText(display_name)
+
+        if not self.name_edit.hasFocus():
+            self.name_edit.setText(self.name or "")
+
         self.entries = []
         for e in raw_entries:
             if e.get("type") == "section":
