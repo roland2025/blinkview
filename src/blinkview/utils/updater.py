@@ -6,6 +6,7 @@
 
 import sys
 from pathlib import Path
+from time import time
 
 from packaging.version import parse as parse_version
 
@@ -19,6 +20,8 @@ class UpdateError(Exception):
 
 
 class Updater:
+    COOLDOWN = 3600
+
     def __init__(self, settings: SettingsManager | None = None):
         self.settings = settings or SettingsManager()
 
@@ -60,13 +63,36 @@ class Updater:
         main_py = p / "src" / "blinkview" / "__main__.py"
         return main_py.is_file()
 
-    def fetch(self) -> None:
+    def fetch(self, force: bool = False) -> bool:
+        """
+        Runs git fetch if the cooldown has expired or if force is True.
+        Returns True if a network fetch was performed, False otherwise.
+        """
         import subprocess
 
+        # Check Cooldown
+        last_fetch = self.settings.get("update.last_fetch_time", 0)
+        elapsed = time() - last_fetch
+
+        custom_cooldown = self.settings.get("update.cooldown_seconds", self.COOLDOWN)
+        if not force and elapsed < custom_cooldown:
+            return False
+
+        if not force and elapsed < custom_cooldown:
+            print(f"[Updater] Fetch skipped. Last check was {int(elapsed)}s ago.")
+            return False
+
+        # Execute Network Call
         try:
+            print("[Updater] Contacting remote for updates...")
             subprocess.run(
                 ["git", "-C", str(self.repo_path), "fetch", "--tags"], check=True, capture_output=True, text=True
             )
+
+            # Success! Update timestamp
+            self.settings.set("update.last_fetch_time", time(), scope="global")
+            return True
+
         except subprocess.CalledProcessError as e:
             raise UpdateError(f"Fetch failed: {e.stderr or e.stdout or str(e)}")
 

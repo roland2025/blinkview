@@ -6,7 +6,6 @@
 
 from datetime import date, datetime
 from pathlib import Path
-from time import time
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -34,14 +33,11 @@ class TaskSignals(QObject):
 
 
 class UpdateWidget(QWidget):
-    # Set a default cooldown (e.g., 1 hour = 3600 seconds)
-    FETCH_COOLDOWN = 3600
-
-    def __init__(self, gui_context, state=None, parent=None):
+    def __init__(self, gui_context, _=None, parent=None):
         super().__init__(parent)
         self.gui_context: GUIContext = gui_context
         self.task_manager = gui_context.registry.system_ctx.tasks
-        self.updater = None  # Initialized in self.ensure_updater()
+        self.updater = None
 
         self.signals = TaskSignals()
         self.signals.fetch_completed.connect(self._on_fetch_finished)
@@ -50,16 +46,14 @@ class UpdateWidget(QWidget):
         self.tab_name = "Updater"
         self._setup_ui()
 
-        # Initial check/load
         if self.ensure_updater():
-            # Populate local list immediately after rendering
+            # Show local cache immediately
             QTimer.singleShot(0, self.list_local_versions)
+            self.update_status()
 
-            # Start the background fetch shortly after
-            if self._should_auto_fetch():
-                QTimer.singleShot(100, lambda: self.request_fetch(is_auto=True))
-            else:
-                self.update_status()
+            # Always attempt an auto-fetch; the Updater will skip it if
+            # the cooldown hasn't expired internally.
+            QTimer.singleShot(100, lambda: self.request_fetch(is_auto=True))
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -93,12 +87,6 @@ class UpdateWidget(QWidget):
         btn_layout.addWidget(self.config_btn)
         layout.addLayout(btn_layout)
 
-    def _should_auto_fetch(self) -> bool:
-        """Returns True if the time since the last fetch exceeds the cooldown."""
-        last_fetch = self.gui_context.settings.get("update.last_fetch_time", 0)
-        elapsed = time() - last_fetch
-        return elapsed > self.FETCH_COOLDOWN
-
     def list_local_versions(self):
         """Populates the list with tags already present in the local repository."""
         if not self.updater:
@@ -106,7 +94,6 @@ class UpdateWidget(QWidget):
 
         self.version_list.clear()
         try:
-            # remote=False just runs 'git tag -l'
             versions = self.updater.get_versions(remote=False)
             if not versions:
                 self.version_list.addItem("No local versions found. Please 'Fetch'.")
@@ -114,7 +101,6 @@ class UpdateWidget(QWidget):
                 return
 
             for i, v in enumerate(versions):
-                # Note: 'Latest' here refers to the highest local tag
                 item_text = f"{v} (Local)" if i == 0 else v
                 self.version_list.addItem(item_text)
 
@@ -174,23 +160,19 @@ class UpdateWidget(QWidget):
             return False
 
     def request_fetch(self, is_auto=False):
-        """Background task to get tags. is_auto=False bypasses time checks (button click)."""
+        """Background task to get tags. Updater handles internal cooldowns."""
         if not self.updater:
             if not self.ensure_updater():
                 return
-
-        # If it's an auto-call but we just fetched recently, abort.
-        # (This protects against multiple triggers in quick succession)
-        if is_auto and not self._should_auto_fetch():
-            return
 
         self._set_loading(True)
 
         def _fetch_logic():
             try:
-                self.updater.fetch()
+                # The 'force' parameter is determined by whether the user
+                # manually clicked the button (not auto)
+                self.updater.fetch(force=not is_auto)
                 versions = self.updater.get_versions()
-                # Pass the timestamp update to the main thread
                 self.signals.fetch_completed.emit(versions)
             except UpdateError as e:
                 self.signals.error_occurred.emit(str(e))
@@ -260,7 +242,6 @@ class UpdateWidget(QWidget):
         self.status_label.setText(f"<b>Version:</b> v{__version__} <small>(Checked: {display_time})</small>")
 
     def _on_fetch_finished(self, versions):
-        self.gui_context.settings.set("update.last_fetch_time", time(), scope="global")
         self.update_status()
         self._set_loading(False)
         self.version_list.clear()

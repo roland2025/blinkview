@@ -39,6 +39,7 @@ from blinkview.ui.native_dark_mode import set_native_dark_mode
 from blinkview.ui.utils.config_node_manager import ConfigNodeManager
 from blinkview.ui.utils.in_development import set_as_in_development
 from blinkview.ui.utils.ui_state_handler import UIStateHandler
+from blinkview.ui.utils.update_checker import check_for_updates_silently
 from blinkview.ui.utils.window_manager import WindowManager
 from blinkview.ui.widgets.config.dynamic_config import DynamicConfigWidget
 from blinkview.ui.widgets.config.style_config import StyleConfig
@@ -51,6 +52,7 @@ from blinkview.ui.widgets.telemetry_model import TelemetryModel
 from blinkview.ui.widgets.telemetry_table import TelemetryTable
 from blinkview.ui.widgets.TelemetryWatch import TelemetryWatch
 from blinkview.ui.widgets.title_bar import TitleBar
+from blinkview.ui.widgets.toast import ToastManager, ToastType
 from blinkview.ui.widgets.update_widget import UpdateWidget
 from blinkview.ui.windows.detached_tab_window import DetachedTabWindow
 from blinkview.utils.used_modules import print_used_modules
@@ -267,8 +269,15 @@ class BlinkMainWindow(QMainWindow):
 
         print("[BlinkMainWindow] Initialization complete.")
 
+        QTimer.singleShot(1000, lambda: check_for_updates_silently(self.gui_context))
+
     def load_ui_state(self):
         self.gui_context.gui_state.load_ui_state(self.gui_context.registry.file_manager.get_config_path("gui_state"))
+
+        # QTimer.singleShot(0, lambda: ToastManager.show("Something happened...", ToastType.INFO))
+        # QTimer.singleShot(333, lambda: ToastManager.show("WAARNING...", ToastType.WARNING))
+        # QTimer.singleShot(666, lambda: ToastManager.show("WHoop success...", ToastType.SUCCESS))
+        # QTimer.singleShot(999, lambda: ToastManager.show("Attention error...", ToastType.ERROR))
 
     def register_log_target(self, target):
         """Adds a target that expects a 'process_log_batch(list)' method."""
