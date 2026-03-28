@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+
 def setup_update_parser(parser):
     """Sets up the 'blink update' subparser."""
     subparsers = parser.add_subparsers(dest="update_command", help="Update sub-commands")
@@ -25,16 +26,13 @@ def setup_update_parser(parser):
 
 def handle_update(args):
     import sys
+
     from blinkview import __version__
-    from blinkview.utils.updater import Updater, UpdateError
+    from blinkview.utils.updater import UpdateError, Updater
 
     try:
         # Updater handles all settings resolution internally now!
         updater = Updater()
-
-        if not updater.is_valid_repo():
-            print(f"Error: {updater.repo_path} does not look like a BlinkView source tree.")
-            return
 
         if args.update_command == "fetch":
             print(f"Fetching updates in {updater.repo_path}...")
