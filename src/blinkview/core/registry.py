@@ -4,44 +4,43 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import json
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Optional
 
-from .central_storage import CentralStorage, CentralFactory, BaseCentralStorage
+from ..io import *
+from ..io.BaseReader import DeviceFactory
+from ..parsers import *
+from ..storage import *
+from ..storage.file_logger import FileLogger, LogRowBatchProcessor
+from ..storage.file_manager import FileManager
+from ..subscribers.subscriber import SubscriberFactory
+from ..utils import level_map
+from ..utils.time_utils import TimeUtils
+from .bisect_reorder import Reorder
+from .central_storage import BaseCentralStorage, CentralFactory, CentralStorage
 from .config_manager import ConfigManager
 from .factory_registry import FactoryRegistry
 from .id_registry import IDRegistry
 from .log_row import LogRow
-from .logger import SystemLogger, PrintLogger
+from .logger import PrintLogger, SystemLogger
 from .plugin_manager import PluginManager
-from .bisect_reorder import Reorder
 from .reorder_buffer import ReorderBuffer, ReorderFactory
 from .settings_manager import SettingsManager
 from .sources import SourcesManager
 from .system_context import SystemContext
 from .task_manager import TaskManager
-from ..io.BaseReader import DeviceFactory
-
-from ..storage.file_logger import FileLogger, LogRowBatchProcessor
-
-from ..storage.file_manager import FileManager
-from ..subscribers.subscriber import SubscriberFactory
-from ..utils import level_map
-from ..utils.time_utils import TimeUtils
-
-from ..storage import *
-from ..io import *
-from ..parsers import *
-import json
 
 if TYPE_CHECKING:
     from .pipeline_manager import PipelineManager
 
 
 class Registry:
-    def __init__(self, session_name: str, config_path: str = None, profile_name: str = None, log_dir: str | Path = None):
+    def __init__(
+        self, session_name: str, config_path: str = None, profile_name: str = None, log_dir: str | Path = None
+    ):
         # ==========================================
         # LAYER 1: Core Services
         # ==========================================
@@ -73,7 +72,9 @@ class Registry:
         factories.register("logging_processor", file_logger.BatchProcessorFactory)
         factories.register("file_logging", file_logger.FileLoggerFactory)
 
-        self.file_manager = FileManager(session_name=session_name, profile_name=profile_name, log_dir=log_dir, config_path=config_path)
+        self.file_manager = FileManager(
+            session_name=session_name, profile_name=profile_name, log_dir=log_dir, config_path=config_path
+        )
 
         default_config = {
             "version": "0.2",
@@ -81,9 +82,11 @@ class Registry:
             "pipelines": {},
             "plugins": {},
             "reorder": {"enabled": True, "type": "default"},
-            "central": {"enabled": True, "type": "default"}
+            "central": {"enabled": True, "type": "default"},
         }
-        self.config = ConfigManager(self.file_manager.get_config_path(), self.file_manager.get_session_path(suffix="autosave"), default_config)
+        self.config = ConfigManager(
+            self.file_manager.get_config_path(), self.file_manager.get_session_path(suffix="autosave"), default_config
+        )
         self.config.save_full_config(self.file_manager.get_session_path(suffix="start"))
         self.config.get_schema_by_path = self.get_schema_by_path
 
@@ -115,7 +118,14 @@ class Registry:
 
         self.id_registry = IDRegistry()
 
-        self.system_ctx = SystemContext(time_ns=self.now_ns, registry=self, id_registry=self.id_registry, factories=factories, tasks=TaskManager(), settings=SettingsManager())
+        self.system_ctx = SystemContext(
+            time_ns=self.now_ns,
+            registry=self,
+            id_registry=self.id_registry,
+            factories=factories,
+            tasks=TaskManager(),
+            settings=SettingsManager(),
+        )
         self.file_manager.set_context(self.system_ctx)
 
         self.sources = None
@@ -123,7 +133,7 @@ class Registry:
         # ==========================================
         # LAYER 4: Hardware Pipelines
         # ==========================================
-        self.pipelines: 'PipelineManager' = None
+        self.pipelines: "PipelineManager" = None
 
         self._is_running = False
 
@@ -131,9 +141,7 @@ class Registry:
         self.reorder = None
 
     def _create_and_bind(self, cls, name, config):
-        local_ctx = SimpleNamespace(
-            get_logger=self.logger_creator(name)
-        )
+        local_ctx = SimpleNamespace(get_logger=self.logger_creator(name))
         instance = cls()
         if hasattr(instance, "bind_system"):
             instance.bind_system(self.system_ctx, local_ctx)
@@ -176,13 +184,7 @@ class Registry:
         schema = {}
 
         if path == "/":
-            schema = {
-                "type": "object",
-                "title": "Configuration",
-                "description": "",
-                "properties": {
-                }
-            }
+            schema = {"type": "object", "title": "Configuration", "description": "", "properties": {}}
             # drop keys
             if drop_keys is not None:
                 root_keys = [k for k in root_keys if k not in drop_keys]
@@ -263,9 +265,7 @@ class Registry:
                     if reorder_config.get("type") is None:
                         reorder_config["type"] = "default"
 
-                    local_ctx = SimpleNamespace(
-                        get_logger=self.logger_creator("reorder")
-                    )
+                    local_ctx = SimpleNamespace(get_logger=self.logger_creator("reorder"))
 
                     self.reorder = factories.build("reorder", reorder_config, system_ctx, local_ctx)
             except Exception as e:
@@ -311,7 +311,10 @@ class Registry:
                 self.logger.error(f"Error during sources configuration", e)
             try:
                 from blinkview.core.pipeline_manager import PipelineManager
-                self.pipelines = self._create_and_bind(PipelineManager, "pipelines", self.config.get_by_path("/pipelines"))
+
+                self.pipelines = self._create_and_bind(
+                    PipelineManager, "pipelines", self.config.get_by_path("/pipelines")
+                )
                 self.pipelines.apply_targets()
             except Exception as e:
                 print(f"[Registry] Error during pipelines configuration: {e}")
@@ -360,7 +363,7 @@ class Registry:
             print("[Registry] Starting reorder buffer...")
             self.reorder.start()
         # self.parser_thread.start()
-        # 3. Start Hardware Pipelines (Readers + Parsers)
+        # Start Hardware Pipelines (Readers + Parsers)
 
         if self.pipelines is not None:
             self.pipelines.start()
@@ -370,6 +373,7 @@ class Registry:
 
         self._is_running = True
         self.logger.warn("BlinkView is now live.")
+
     #
     # def add_parser_consumer(self, consumer):
     #     self.parser_thread.add_consumer(consumer.put_many)
@@ -381,9 +385,7 @@ class Registry:
         if config is None:
             config = {"type": subscriber_type}
 
-        local_ctx = SimpleNamespace(
-            get_logger=self.logger_creator(subscriber_type)
-        )
+        local_ctx = SimpleNamespace(get_logger=self.logger_creator(subscriber_type))
         subscriber = SubscriberFactory.build(config, self.system_ctx, local_ctx, **kwargs)
         self.pipelines.subscribe(name, subscriber)
         return subscriber

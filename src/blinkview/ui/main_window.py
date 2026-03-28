@@ -98,7 +98,7 @@ class BlinkMainWindow(QMainWindow):
 
         self.gui_context.set_widget_factory(self.create_widget)
 
-        # 2. Setup the Toolbar and Button
+        # Setup the Toolbar and Button
         self.toolbar = QToolBar("Main Toolbar")
 
         self.main_menu_btn = QToolButton()
@@ -129,16 +129,6 @@ class BlinkMainWindow(QMainWindow):
 
         self.toolbar.addSeparator()
 
-        # self.btn_show_settings = QAction("Settings", self)
-        # self.btn_show_settings.triggered.connect(
-        #     lambda: self.gui_context.config_manager.show("/", "System", drop_keys=["plugins", "version", "pipelines", "sources"]))
-        # self.toolbar.addAction(self.btn_show_settings)
-        #
-        # self.btn_show_plugins = QAction("Plugins", self)
-        # self.btn_show_plugins.triggered.connect(
-        #     lambda: self.gui_context.config_manager.show("/plugins", "Plugins"))
-        # self.toolbar.addAction(self.btn_show_plugins)
-
         self.watch_button = QToolButton()
         self.watch_button.setText("Watch")
         self.watch_button.clicked.connect(self.show_watch_menu)
@@ -168,7 +158,7 @@ class BlinkMainWindow(QMainWindow):
         self.action_view_pipelines.setText("Pipelines")
         self.toolbar.addAction(self.action_view_pipelines)
 
-        # --- NEW: Set up the Central Tabbed Workspace ---
+        # --- Set up the Central Tabbed Workspace ---
         self.central_tabs = QTabWidget()
         self.central_tabs.setTabsClosable(True)  # Allow users to close config tabs
         self.central_tabs.tabCloseRequested.connect(self.close_tab)
@@ -197,13 +187,13 @@ class BlinkMainWindow(QMainWindow):
             self.main_layout.setContentsMargins(0, 0, 0, 0)
             self.main_layout.setSpacing(0)
 
-            # 3. Add Custom Title Bar
+            # Add Custom Title Bar
             self.title_bar = TitleBar(self)
             self.main_layout.addWidget(self.title_bar)
 
-            # 5. Set the container as the actual central widget
+            # Set the container as the actual central widget
 
-            # 6. Wire the Hamburger Menu
+            # Wire the Hamburger Menu
             self.title_bar.menu_btn.clicked.connect(self.show_main_menu)
 
             self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
@@ -218,7 +208,7 @@ class BlinkMainWindow(QMainWindow):
 
             self.setCentralWidget(self.central_tabs)
 
-        # 3. Backend Integration
+        # Backend Integration
         self.input_queue = BatchQueue()
         self.put = self.input_queue.put
         # self.timestamp_formatter = ConsoleTimestampFormatter()
@@ -227,14 +217,14 @@ class BlinkMainWindow(QMainWindow):
 
         self.gui_context.registry.subscribe(self)
 
-        # 4. Signal Handlers
+        # Signal Handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
         self.last_poll_time = perf_counter()
 
-        # 5. UI Poller (Runs here, updates the log window)
-        # 60FPS Data Poller (Existing)
+        # UI Poller (Runs here, updates the log window)
+        # 60FPS Data Poller
         self.gui_context.set_theme(StyleConfig())
 
         self.fps_slow = 1
@@ -248,7 +238,7 @@ class BlinkMainWindow(QMainWindow):
 
         self.gui_context.set_module_filter_model(ModuleFilterModel(gui_context=self.gui_context))
 
-        # 1FPS Structure Syncer (New)
+        # 1FPS Structure Syncer
         self.timer_slow = QTimer(self)
         self.timer_slow.timeout.connect(self.gui_context.on_heartbeat)
         self.timer_slow.start(self.timeout_slow)  # 1 second
@@ -264,6 +254,8 @@ class BlinkMainWindow(QMainWindow):
 
         self.gui_context.set_gui_state_handler(UIStateHandler(self))
         self.gui_context.registry.file_manager.set_gui_context(self.gui_context)
+
+        self.gui_context.set_reattach_tab(self.reattach_tab)
 
         self.device_toolbars = {}
         self.sources_node = self.gui_context.config_manager.create_node("/sources")
@@ -314,7 +306,7 @@ class BlinkMainWindow(QMainWindow):
 
         system_ctx.tasks.run_task(fetch)
 
-    # --- 1. Core Tab Management Helpers ---
+    # --- Core Tab Management Helpers ---
 
     def focus_tab_if_exists(self, tab_name):
         """Checks if a tab exists, focuses it if it does, and returns True."""
@@ -377,7 +369,7 @@ class BlinkMainWindow(QMainWindow):
     def create_widget(self, cls_name, name, as_window=False, show=True, params=None):
         """Routes a string class name to the correct factory method."""
 
-        # 1. Prevent duplicate tabs using the helper
+        # Prevent duplicate tabs using the helper
         if params is None:
             params = {}
 
@@ -399,12 +391,12 @@ class BlinkMainWindow(QMainWindow):
             print(f"Warning: Unknown widget class '{cls_name}'.")
             return None
 
-        # 2. Instantiate core widget
+        # Instantiate core widget
         widget = factory(self.gui_context, params)
 
         signal_destroy = getattr(widget, "signal_destroy", None)
 
-        # 3. Route to correct container
+        # Route to correct container
         if as_window:
             floating_win = DetachedTabWindow(self.gui_context, widget, name)
 
@@ -596,7 +588,7 @@ class BlinkMainWindow(QMainWindow):
         menu = QMenu(self)
         menu.setAttribute(Qt.WA_DeleteOnClose)
 
-        # 1. Necessary only now: Create the node
+        # Necessary only now: Create the node
         node_didnt_exist = self.watches_node is None
         if node_didnt_exist:
             self.watches_node = self.gui_context.gui_config_manager.create_node(
@@ -772,7 +764,7 @@ def run(args):
             # Materialize the window in its perfect location
             viewer.setWindowOpacity(1.0)
 
-        # 4. Schedule the restoration to happen on the very first frame of the Event Loop
+        # Schedule the restoration to happen on the very first frame of the Event Loop
         QTimer.singleShot(50, finalize_ui_restore)
         exit_code = app.exec()
 

@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from dataclasses import dataclass
 from time import perf_counter
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
@@ -11,16 +12,14 @@ from PySide6.QtGui import QColor
 
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.core.log_row import LogRow
-from dataclasses import dataclass
-
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.action_button_delegate import TelemetryCol
 
 
 @dataclass(slots=True)
 class TelemetryRowState:
-    module: 'ModuleIdentity'
-    last_painted_row: 'LogRow | None' = None
+    module: "ModuleIdentity"
+    last_painted_row: "LogRow | None" = None
     last_change_time: float = 0.0
     last_arrival_time: float = 0.0
 
@@ -68,26 +67,24 @@ class TelemetryModel(QAbstractTableModel):
         VAL_COL = TelemetryCol.VALUE
         # Pre-map the integers to the actual RowState objects for the 30fps loop
         self._active_cache = [
-            (self._row_states[i], self.index(i, VAL_COL))
-            for i in sorted(all_indices)
-            if i < len(self._row_states)
+            (self._row_states[i], self.index(i, VAL_COL)) for i in sorted(all_indices) if i < len(self._row_states)
         ]
 
     def sync_registry(self):
         current_modules = self.context.id_registry.module_list
 
-        # 1. Fast-path exit if nothing changed
+        # Fast-path exit if nothing changed
         if len(current_modules) == len(self._row_states):
             return
 
-        # 2. Identify newly discovered modules
+        # Identify newly discovered modules
         new_states = []
         for m in current_modules:
             if m.id not in self._known_module_ids:
                 new_states.append(TelemetryRowState(module=m))
                 self._known_module_ids.add(m.id)
 
-        # 3. Surgically insert them into the Qt View
+        # Surgically insert them into the Qt View
         if new_states:
             first_new_idx = len(self._row_states)
             last_new_idx = first_new_idx + len(new_states) - 1
@@ -122,15 +119,16 @@ class TelemetryModel(QAbstractTableModel):
 
             # --- ARRIVAL CHECK ---
             # Did a new object arrive, regardless of content?
-            is_new_arrival = (state.last_painted_row is not current_row)
+            is_new_arrival = state.last_painted_row is not current_row
 
             if is_new_arrival:
-                # 1. Update arrival time to prevent 'Stale' color
+                # Update arrival time to prevent 'Stale' color
                 state.last_arrival_time = now
 
-                # 2. Check for CONTENT change to trigger 'Flash'
-                content_changed = (state.last_painted_row is None or
-                                   current_row.message != state.last_painted_row.message)
+                # Check for CONTENT change to trigger 'Flash'
+                content_changed = (
+                    state.last_painted_row is None or current_row.message != state.last_painted_row.message
+                )
 
                 if content_changed:
                     state.last_change_time = now  # This triggers the Delegate flash

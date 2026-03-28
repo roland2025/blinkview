@@ -202,7 +202,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 ### Install from source
 
 ```bash
-# 1. Clone the repo
+#Clone the repo
 git clone https://github.com/roland2025/blinkview.git
 cd blinkview
 

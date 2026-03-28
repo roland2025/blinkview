@@ -6,8 +6,9 @@
 
 import threading
 from datetime import datetime, timedelta, timezone
-from packaging import version
 from pathlib import Path
+
+from packaging import version
 
 # Dynamic version import
 from blinkview import __version__ as CURRENT_VERSION
@@ -24,11 +25,7 @@ class GitHubUpdate:
         Fire-and-forget background check.
         Optional callback: func(has_update, latest_version)
         """
-        thread = threading.Thread(
-            target=cls._threaded_check,
-            args=(force, callback),
-            daemon=True
-        )
+        thread = threading.Thread(target=cls._threaded_check, args=(force, callback), daemon=True)
         thread.start()
 
     @classmethod
@@ -53,7 +50,7 @@ class GitHubUpdate:
             return cls._is_newer(cached_v), cached_v
 
         try:
-            # 1. Fetch the list of releases (GitHub returns them sorted by date)
+            # Fetch the list of releases (GitHub returns them sorted by date)
             response = requests.get(cls.REPO_API_URL, timeout=5)
             response.raise_for_status()
             releases = response.json()
@@ -61,7 +58,7 @@ class GitHubUpdate:
             if not releases:
                 return False, None
 
-            # 2. Pick the target release
+            # Pick the target release
             if include_pre:
                 # The first one in the list is always the newest tag
                 target_release = releases[0]
@@ -69,13 +66,13 @@ class GitHubUpdate:
                 # Find the first release that ISN'T a pre-release
                 target_release = next((r for r in releases if not r.get("prerelease")), releases[0])
 
-            latest_v = target_release.get("tag_name", "v0.0.0").strip('v')
+            latest_v = target_release.get("tag_name", "v0.0.0").strip("v")
 
-            # 3. Update Global Settings
+            # Update Global Settings
             settings["update_check"] = {
                 "last_checked": datetime.now(timezone.utc).isoformat() + "Z",
                 "latest_version": latest_v,
-                "is_prerelease": target_release.get("prerelease", False)
+                "is_prerelease": target_release.get("prerelease", False),
             }
             settings.save()
 
@@ -108,9 +105,10 @@ class GitHubUpdate:
     @classmethod
     def get_update_message(cls):
         """Returns a string if an update is available, else None."""
+        from packaging import version
+
         from blinkview import __version__
         from blinkview.utils.global_settings import GlobalSettings
-        from packaging import version
 
         upd = GlobalSettings().get("update_check", {})
         latest = upd.get("latest_version")

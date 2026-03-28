@@ -34,12 +34,12 @@ class BaseListItemWidget(QWidget):
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(5, 5, 5, 5)
 
-        # 1. Info Label (Name & Type)
+        # Info Label (Name & Type)
         self.lbl_info = QLabel()
         self.update_label_info()
         self.layout.addWidget(self.lbl_info, stretch=1)
 
-        # 2. Active Checkbox
+        # Active Checkbox
         self.chk_enable = QCheckBox()
         self.chk_enable.setChecked(True)
         self.chk_enable.toggled.connect(self._enable_clicked)
@@ -48,7 +48,7 @@ class BaseListItemWidget(QWidget):
         # --- Hook for Subclasses ---
         self._setup_custom_controls()
 
-        # 3. Config Button (Common to all)
+        # Config Button (Common to all)
         self.btn_config = QPushButton("⚙️")
         self.btn_config.setFixedSize(28, 28)
         self.btn_config.setToolTip("Open Configuration")
@@ -77,9 +77,7 @@ class BaseListItemWidget(QWidget):
 
         device_name = self.config_node.get("name", "Unknown")
         dev_type = self.config_node.get("type", "Unknown")
-        self.lbl_info.setText(
-            f"<b>{device_name}</b><br><small style='color: gray;'>{dev_type}</small>"
-        )
+        self.lbl_info.setText(f"<b>{device_name}</b><br><small style='color: gray;'>{dev_type}</small>")
 
     def _on_config_update(self, device: dict, schema: dict):
         """Standardized UI refresh logic."""

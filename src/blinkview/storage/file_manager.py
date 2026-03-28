@@ -4,14 +4,14 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import re
+import hashlib
 import json
 import platform
+import re
 import sys
-from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, Any
-import hashlib
+from pathlib import Path
+from typing import Any, Dict
 
 from blinkview import __version__ as blinkview_version
 from blinkview.core.settings_manager import SettingsManager
@@ -19,11 +19,12 @@ from blinkview.core.system_context import SystemContext
 from blinkview.storage.file_logger import FileLogger
 from blinkview.utils.atomic_json_dump import atomic_json_dump
 from blinkview.utils.global_settings import get_blink_home
-from blinkview.utils.project_settings import get_workspace_dir, get_project_root
+from blinkview.utils.project_settings import get_project_root, get_workspace_dir
 
 
 def _get_file_hash(path: Path) -> str:
-    if not path.exists(): return "unknown"
+    if not path.exists():
+        return "unknown"
     return hashlib.md5(path.read_bytes()).hexdigest()
 
 
@@ -32,7 +33,7 @@ def get_session_identity(config_path) -> str:
     if workspace:
         try:
             rel = config_path.resolve().relative_to(workspace.resolve())
-            return "_".join(rel.with_suffix('').parts)
+            return "_".join(rel.with_suffix("").parts)
         except ValueError:
             pass
     return config_path.stem
@@ -72,7 +73,13 @@ class FileManager:
         self.project_name = self._sanitize(project_name)
         print(f"[FileManager] project_name={self.project_name}")
 
-        self.profile_name = self._sanitize(self.session_identity or profile_name or settings.get("active_profile") or settings.get("default_profile") or (self.project_name if self.standalone_mode else "default"))
+        self.profile_name = self._sanitize(
+            self.session_identity
+            or profile_name
+            or settings.get("active_profile")
+            or settings.get("default_profile")
+            or (self.project_name if self.standalone_mode else "default")
+        )
         if self.standalone_mode and self.provided_config_path:
             self.profile_name = self._sanitize(f"{self.project_name} {self.provided_config_path.stem}")
 
@@ -108,19 +115,17 @@ class FileManager:
         self.session_dir = self._create_session_dir()
         print(f"[FileManager] session_dir={self.session_dir}")
 
-        # 2. Write initial metadata
+        # Write initial metadata
         self.metadata = {
             "session_id": self.session_dir.name,  # Unique ID based on timestamp
             "status": "active",
             "created_at": datetime.now(timezone.utc).isoformat() + "Z",
             "version": blinkview_version,
-
             "project": {
                 "name": self.project_name,
                 "display_name": self.session_display_name,
                 "mode": "standalone" if self.standalone_mode else "project",
             },
-
             "config": {
                 "profile": self.profile_name,
                 "workspace": str(self._workspace_dir.resolve()),
@@ -128,7 +133,6 @@ class FileManager:
                 "source_hash": _get_file_hash(self.get_config_path()),
                 "log_dir": str(self.log_dir.resolve()),
             },
-
             "environment": {
                 "cwd": str(Path.cwd().resolve()),
                 "argv": sys.argv,
@@ -137,7 +141,6 @@ class FileManager:
                 "node": platform.node(),
                 # "git": self._get_git_info()
             },
-
             "loggers": {},
         }
 
@@ -148,10 +151,10 @@ class FileManager:
     def _sanitize(self, name: str) -> str:
         # Allow alphanumeric and underscores, replace everything else with '_'
         # Then squeeze multiple underscores into one
-        clean = re.sub(r'[^A-Za-z0-9_]', '_', name)
-        clean = re.sub(r'_+', '_', clean)
+        clean = re.sub(r"[^A-Za-z0-9_]", "_", name)
+        clean = re.sub(r"_+", "_", clean)
         # Strip leading/trailing underscores and return
-        return clean.strip('_') or "Unnamed"
+        return clean.strip("_") or "Unnamed"
 
     def set_context(self, system_context, gui_context=None):
         self.system_context = system_context
@@ -179,12 +182,16 @@ class FileManager:
     def _get_git_info(self) -> Dict[str, Any]:
         """Captures basic git metadata."""
         import subprocess
+
         try:
             # Short hash
-            sha = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'],
-                                          stderr=subprocess.STDOUT).decode().strip()
+            sha = (
+                subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.STDOUT)
+                .decode()
+                .strip()
+            )
             # Check for uncommitted changes
-            status = subprocess.call(['git', 'diff', '--quiet'])
+            status = subprocess.call(["git", "diff", "--quiet"])
             return {"hash": sha, "dirty": status != 0}
         except Exception:
             return {"hash": "unknown", "dirty": False}
@@ -193,7 +200,7 @@ class FileManager:
         """Writes or updates the metadata.json file in the session folder."""
         meta_file = self.session_dir / "metadata.json"
 
-        with meta_file.open('w') as f:
+        with meta_file.open("w") as f:
             json.dump(self.metadata, f, indent=4)
 
     def get_path(self, filename: str) -> Path:
@@ -265,32 +272,30 @@ class FileManager:
 
     def stop(self):
         """The 'Closer' - Saves final state and stops loggers."""
-        # 1. Save Final Daemon Config
+        # Save Final Daemon Config
         if self.system_context:
             # Save final snapshots using the central path logic
-            self.system_context.registry.config.save_full_config(
-                self.get_session_path('final')
-            )
+            self.system_context.registry.config.save_full_config(self.get_session_path("final"))
 
-        self.save_gui_config(suffix='final')
-        self.save_gui_state(suffix='final')
+        self.save_gui_config(suffix="final")
+        self.save_gui_state(suffix="final")
 
-        # 2. Stop Threaded Loggers
+        # Stop Threaded Loggers
         for logger in self._file_loggers:
             logger.stop()
 
-        # 3. Finalize Manifest
+        # Finalize Manifest
         finished_time = datetime.now(timezone.utc)
 
-        # 2. Calculate duration
+        # Calculate duration
         # We parse the 'created_at' string back into a datetime object
         try:
-            start_time = datetime.fromisoformat(self.metadata["created_at"].rstrip('Z')).replace(tzinfo=timezone.utc)
+            start_time = datetime.fromisoformat(self.metadata["created_at"].rstrip("Z")).replace(tzinfo=timezone.utc)
             duration = (finished_time - start_time).total_seconds()
         except Exception:
             duration = 0
 
-        # 3. Update the metadata dictionary
+        # Update the metadata dictionary
         self.metadata["status"] = "finished"
         self.metadata["finished_at"] = finished_time.isoformat() + "Z"
         self.metadata["duration_seconds"] = round(duration, 3)
@@ -304,7 +309,7 @@ class FileManager:
         self.metadata["loggers"][file_logger.local.logging_id] = {
             "processor": file_logger.batch_processor.__class__.__name__,
             "extension": file_logger.batch_processor.extension,
-            "last_part": 0
+            "last_part": 0,
         }
 
         self.write_metadata()
@@ -336,11 +341,11 @@ class FileManager:
 
         data = self.gui_context.gui_config.get_data()
 
-        # 1. Workspace (Live Master) - Skip if session_only is requested
+        # Workspace (Live Master) - Skip if session_only is requested
         if not session_only:
             atomic_json_dump(data, self.get_config_path("gui_config"))
 
-        # 2. Session (Historical Archive) - Always save
+        # Session (Historical Archive) - Always save
         atomic_json_dump(data, self.get_session_path("gui_config", suffix))
 
     def save_gui_state(self, suffix: str = "autosave", session_only: bool = False):
@@ -350,11 +355,11 @@ class FileManager:
 
         data = self.gui_context.gui_state.get_data()
 
-        # 1. Workspace (Live Master) - Skip if session_only is requested
+        # Workspace (Live Master) - Skip if session_only is requested
         if not session_only:
             atomic_json_dump(data, self.get_config_path("gui_state"))
 
-        # 2. Session (Historical Archive) - Always save
+        # Session (Historical Archive) - Always save
         atomic_json_dump(data, self.get_session_path("gui_state", suffix))
 
     def save_gui(self):

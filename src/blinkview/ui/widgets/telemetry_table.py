@@ -6,15 +6,25 @@
 
 from typing import Optional
 
-from PySide6.QtGui import QAction, QFont, QPixmap, QPainter, QColor, QDrag
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableView,
-                               QHeaderView, QLineEdit, QPushButton, QToolBar, QMenu, QApplication)
-from PySide6.QtCore import Qt, QSortFilterProxyModel, QEvent, QSize, QTimer, QMimeData
+from PySide6.QtCore import QEvent, QMimeData, QSize, QSortFilterProxyModel, Qt, QTimer
+from PySide6.QtGui import QAction, QColor, QDrag, QFont, QPainter, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QHeaderView,
+    QLineEdit,
+    QMenu,
+    QPushButton,
+    QTableView,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
 
 from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.in_development import set_as_in_development
-from blinkview.ui.widgets.action_button_delegate import TelemetryDelegate, TelemetryCol
+from blinkview.ui.widgets.action_button_delegate import TelemetryCol, TelemetryDelegate
 from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.telemetry_model import TelemetryModel, TelemetryRowState
 
@@ -39,9 +49,9 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
             return
 
         chunks = clean_text.split()
-        self._global_negatives = [c[1:] for c in chunks if c.startswith('-') and len(c) > 1]
-        pos_chunks = [c for c in chunks if not c.startswith('-')]
-        self._positive_groups = [c.split('+') for c in pos_chunks if c]
+        self._global_negatives = [c[1:] for c in chunks if c.startswith("-") and len(c) > 1]
+        pos_chunks = [c for c in chunks if not c.startswith("-")]
+        self._positive_groups = [c.split("+") for c in pos_chunks if c]
 
         self.invalidateFilter()
 
@@ -62,7 +72,7 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
 
     def filterAcceptsRow(self, source_row, source_parent):
         # --- DIRECT MODEL ACCESS (High Performance) ---
-        model: 'TelemetryModel' = self.sourceModel()
+        model: "TelemetryModel" = self.sourceModel()
         state = model._row_states[source_row]
 
         module = state.module
@@ -70,7 +80,7 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
         # if state.module.latest_row is None:
         #     return False
 
-        # 1. Strict Device Filter Check
+        # Strict Device Filter Check
         # If a device is specified, reject anything that doesn't match immediately
         if self.allowed_device is not None and module.device != self.allowed_device:
             return False
@@ -106,7 +116,7 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
                     if not found:
                         return False
 
-        # 2. Empty Search Filter = Show everything (that passed the device check)
+        # Empty Search Filter = Show everything (that passed the device check)
         if not self._positive_groups and not self._global_negatives:
             return True
 
@@ -114,12 +124,12 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
         # Accessing state.module directly avoids QModelIndex and QVariant overhead.
         row_content = f"{module.name} {module.device.name}".lower()
 
-        # 3. Check Global Negatives (NOT)
+        # Check Global Negatives (NOT)
         if self._global_negatives:
             if any(neg in row_content for neg in self._global_negatives):
                 return False
 
-        # 4. Check Positive Groups (OR / AND)
+        # Check Positive Groups (OR / AND)
         if not self._positive_groups:
             return True
 
@@ -219,7 +229,9 @@ class TelemetryTable(QWidget):
         # ENABLE SORTING
         self.view.setSortingEnabled(True)
 
-        self.view.clicked.connect(lambda index: self._trigger_module_action("view_logs", self._get_module_at_index(index)))
+        self.view.clicked.connect(
+            lambda index: self._trigger_module_action("view_logs", self._get_module_at_index(index))
+        )
         self.view.doubleClicked.connect(self._on_double_clicked)
 
         # Performance & Appearance
@@ -278,11 +290,17 @@ class TelemetryTable(QWidget):
 
         self.show_device_column = state.get("show_device_column", self.show_device_column)
 
-        self.filtered_device = self.gui_context.id_registry.resolve_device(state.get("filtered_device", self.filtered_device))
+        self.filtered_device = self.gui_context.id_registry.resolve_device(
+            state.get("filtered_device", self.filtered_device)
+        )
         self.proxy_model.setAllowedDevice(self.filtered_device)
-        self.show_device_column = self.filtered_device is not None  # If we're filtering by device, we can hide the device column for cleaner UI
+        self.show_device_column = (
+            self.filtered_device is not None
+        )  # If we're filtering by device, we can hide the device column for cleaner UI
 
-        self.filtered_module = self.gui_context.id_registry.resolve_module(state.get("filtered_module", self.filtered_module))
+        self.filtered_module = self.gui_context.id_registry.resolve_module(
+            state.get("filtered_module", self.filtered_module)
+        )
         self.proxy_model.setAllowedModule(self.filtered_module)
         if self.filtered_module is not None:
             self.show_device_column = False  # If we're filtering by module, the device column is redundant since the module name includes the device
@@ -318,7 +336,7 @@ class TelemetryTable(QWidget):
             "filtered_module": self.filtered_module.name_with_device() if self.filtered_module else None,
             "filtered_module_children": self.filtered_module_children,
             "sort_column": self.sort_column,
-            "sort_order": self.sort_order
+            "sort_order": self.sort_order,
         }
 
     def auto_size_columns_delayed(self):
@@ -407,15 +425,15 @@ class TelemetryTable(QWidget):
                         return True
 
             case QEvent.MouseMove:
-                # 1. Ensure left button is held and we have a valid start position
+                # Ensure left button is held and we have a valid start position
                 if not (event.buttons() & Qt.LeftButton) or self.drag_start_pos is None:
                     return False
 
-                # 2. Check if moved beyond the system drag threshold (usually ~4-10px)
+                # Check if moved beyond the system drag threshold (usually ~4-10px)
                 if (event.pos() - self.drag_start_pos).manhattanLength() < QApplication.startDragDistance():
                     return False
 
-                # 3. Resolve the module under the start position
+                # Resolve the module under the start position
                 index = self.view.indexAt(self.drag_start_pos)
                 if index.isValid() and index.column() == TelemetryCol.NAME:
                     self._perform_drag(index)
@@ -477,9 +495,7 @@ class TelemetryTable(QWidget):
             "LogViewerWidget",
             title,
             as_window=True,
-            params={
-                "filtered_module": module,
-                "include_children": include_children}  # Pass the flag to your widget
+            params={"filtered_module": module, "include_children": include_children},  # Pass the flag to your widget
         )
 
     def sort_by_device(self):
@@ -507,7 +523,7 @@ class TelemetryTable(QWidget):
         match action_id:
             case "view_logs" | "view_logs_children":
                 # Combine logic for both log views
-                with_children = (action_id == "view_logs_children")
+                with_children = action_id == "view_logs_children"
                 title = f"Logs: {module.name_with_device()}"
                 if with_children:
                     title += " (+Children)"
@@ -516,10 +532,7 @@ class TelemetryTable(QWidget):
                     "LogViewerWidget",
                     title,
                     as_window=True,
-                    params={
-                        "filtered_module": module.name_with_device(),
-                        "filtered_module_children": with_children
-                    }
+                    params={"filtered_module": module.name_with_device(), "filtered_module_children": with_children},
                 )
 
             case "copy_name":
@@ -535,7 +548,7 @@ class TelemetryTable(QWidget):
                     "TelemetryPlotter",
                     f"Graph: {module.name}",
                     as_window=True,
-                    params={"modules": [module.name_with_device()]}
+                    params={"modules": [module.name_with_device()]},
                 )
 
             case _:
@@ -587,8 +600,7 @@ class TelemetryTable(QWidget):
                 set_as_in_development(action, self, feature_name=label, issue_no=issue_no)
             else:
                 # Use the universal dispatcher for working features
-                action.triggered.connect(lambda checked=False, aid=action_id:
-                                         self._trigger_module_action(aid, module))
+                action.triggered.connect(lambda checked=False, aid=action_id: self._trigger_module_action(aid, module))
 
             menu.addAction(action)
 
@@ -605,12 +617,12 @@ class TelemetryTable(QWidget):
         if not module:
             return
 
-        # 1. Package the data
+        # Package the data
         mime_data = QMimeData()
         # This matches the 'mod_identifier' your Plotter is looking for
         mime_data.setText(module.name_with_device())
 
-        # 2. Create a "Ghost" Pixmap for the cursor
+        # Create a "Ghost" Pixmap for the cursor
         # We'll draw a small themed badge for the module
         padding = 10
         font_metrics = self.view.fontMetrics()
@@ -631,7 +643,7 @@ class TelemetryTable(QWidget):
         painter.drawText(pixmap.rect(), Qt.AlignCenter, module.name)
         painter.end()
 
-        # 3. Start the Drag
+        # Start the Drag
         drag = QDrag(self)
         drag.setMimeData(mime_data)
         drag.setPixmap(pixmap)

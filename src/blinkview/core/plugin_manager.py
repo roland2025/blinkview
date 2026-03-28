@@ -48,7 +48,7 @@ class PluginManager(BaseConfigurable):
 
         changed = super().apply_config(config)
 
-        # 2. Start modules that are newly enabled
+        # Start modules that are newly enabled
         for path, mod_cfg in self.modules.items():
             if mod_cfg.get("enabled") and path not in self.active_plugins:
                 self._start_plugin(path)
@@ -69,6 +69,4 @@ class PluginManager(BaseConfigurable):
             self.logger.error(f"Plugin Load Error.", e)
 
         except Exception as e:
-            self.logger.error(
-                f"Unexpected error while loading plugin '{module_path}'.", e
-            )
+            self.logger.error(f"Unexpected error while loading plugin '{module_path}'.", e)

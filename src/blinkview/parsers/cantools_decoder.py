@@ -77,15 +77,15 @@ class CantoolsDecoder(TransformStep):
                 self.db = None
 
         # --- Pre-bake Logic ---
-        # 1. Create a raw mapping of ID -> Message Object
+        # Create a raw mapping of ID -> Message Object
         # This bypasses the overhead of the cantools database lookup methods.
         msg_map = {msg.frame_id: msg for msg in self.db.messages} if self.db else {}
 
-        # 2. Localize variables to the closure to avoid 'self' attribute lookups
+        # Localize variables to the closure to avoid 'self' attribute lookups
         strict = self.strict
         ignore_unknown = self.ignore_unknown
 
-        # 3. Define the baked function
+        # Define the baked function
         def fast_process(can_msg: "Message") -> tuple[int, str, dict]:
             can_id = can_msg.arbitration_id
 
@@ -100,9 +100,7 @@ class CantoolsDecoder(TransformStep):
                     return (
                         can_id,
                         "ERROR",
-                        {
-                            "error": f"{can_msg_to_str(can_msg)} | Decoding error: {str(e)}"
-                        },
+                        {"error": f"{can_msg_to_str(can_msg)} | Decoding error: {str(e)}"},
                     )
 
             # --- Handle Unknown IDs ---

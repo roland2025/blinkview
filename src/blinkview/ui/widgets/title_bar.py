@@ -4,24 +4,24 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QPlainTextEdit, QVBoxLayout, QWidget
-from PySide6.QtCore import QTimer, Slot, Signal
-from PySide6.QtGui import QFont
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtGui import QAction, QCloseEvent, QFont, QIcon
 from PySide6.QtWidgets import (
-    QMainWindow, QPlainTextEdit, QVBoxLayout, QWidget, QToolBar
+    QApplication,
+    QDockWidget,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QListWidget,
+    QMainWindow,
+    QMenu,
+    QPlainTextEdit,
+    QPushButton,
+    QTabWidget,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtGui import QFont, QAction, QCloseEvent
-
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QListWidget, QToolBar, QDockWidget, QInputDialog
-)
-from PySide6.QtGui import QAction
-from PySide6.QtCore import Qt
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QTabWidget
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QListWidget, QToolBar, QMenu, QInputDialog)
 
 
 class TitleBar(QWidget):
@@ -34,16 +34,16 @@ class TitleBar(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 0, 10, 0)
 
-        # 1. Menu Button (The "Hamburger")
+        # Menu Button (The "Hamburger")
         self.menu_btn = QPushButton("☰")
         self.menu_btn.setFlat(True)
         self.menu_btn.setFixedSize(30, 30)
 
-        # 2. Window Title
+        # Window Title
         self.title_label = QLabel("BlinkView")
         self.title_label.setStyleSheet("font-weight: bold; margin-left: 10px;")
 
-        # 3. Window Controls (Min/Max/Close)
+        # Window Controls (Min/Max/Close)
         self.btn_min = QPushButton("─")
         self.btn_max = QPushButton("▢")
         self.btn_close = QPushButton("✕")

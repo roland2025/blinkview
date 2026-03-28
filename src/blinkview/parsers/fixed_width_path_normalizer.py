@@ -9,14 +9,27 @@ from blinkview.parsers.transformer import TransformerFactory, TransformStep
 
 
 @TransformerFactory.register("fixed_width_normalizer")
-@configuration_property("module_index", title="Module Index", type="integer", minimum=0, ui_order=1,
-                        description="Word index where the module name field begins.")
-@configuration_property("max_chars", title="Max Characters", type="integer", minimum=1, default=25, ui_order=2,
-                        description="Number of characters to consume for the module name.")
+@configuration_property(
+    "module_index",
+    title="Module Index",
+    type="integer",
+    minimum=0,
+    ui_order=1,
+    description="Word index where the module name field begins.",
+)
+@configuration_property(
+    "max_chars",
+    title="Max Characters",
+    type="integer",
+    minimum=1,
+    default=25,
+    ui_order=2,
+    description="Number of characters to consume for the module name.",
+)
 class FixedWidthPathNormalizer(TransformStep):
     __doc__ = "A transformer that normalizes fixed-width module name fields in log lines. It extracts a substring from a specified word index and character length, then normalizes it by lowercasing, stripping whitespace, and replacing non-alphanumeric characters with underscores. This is useful for standardizing module names that may contain variable formatting (e.g., '3V3 / 5V' becomes '3v3_5v')."
-    input_type = 'str'
-    output_type = 'str'
+    input_type = "str"
+    output_type = "str"
 
     def __init__(self):
         super().__init__()
@@ -32,25 +45,27 @@ class FixedWidthPathNormalizer(TransformStep):
         trans_table = self._trans_table
 
         if idx == 0:
+
             def fast_call(data: str):
-                # 1. Direct Slicing (No split/join overhead)
+                # Direct Slicing (No split/join overhead)
                 raw_module = data[:length]
                 message_body = data[length:].lstrip()
 
-                # 2. Fast Normalize
+                # Fast Normalize
                 # Lower, strip, and translate in one chain
                 tmp = raw_module.lower().strip().translate(trans_table)
 
-                # 3. Collapse multiple underscores efficiently
+                # Collapse multiple underscores efficiently
                 # split("_") + filter(None) + join is faster than a 'while' loop
                 # for long strings or multiple occurrences.
                 clean_module = "_".join(filter(None, tmp.split("_")))
 
-                # 4. Final Assembly
+                # Final Assembly
                 return f"{clean_module} {message_body}"
         else:
+
             def fast_call(data: str):
-                # 1. Pivot split to find the start of our target field
+                # Pivot split to find the start of our target field
                 parts = data.split(None, idx)
                 if len(parts) <= idx:
                     return data
@@ -58,11 +73,11 @@ class FixedWidthPathNormalizer(TransformStep):
                 # Everything after the split point is our work area
                 remainder = parts[idx]
 
-                # 2. Extract the fixed-width field
+                # Extract the fixed-width field
                 raw_module = remainder[:length]
                 message_body = remainder[length:].lstrip()
 
-                # 3. Normalize the module name:
+                # Normalize the module name:
                 # - Lowercase
                 # - Strip whitespace
                 # - Replace non-alphanumeric chars (like / and spaces) with underscores
@@ -75,7 +90,7 @@ class FixedWidthPathNormalizer(TransformStep):
 
                 clean_module = clean_module.strip("_")
 
-                # 4. Assembly
+                # Assembly
                 pre_part = " ".join(parts[:idx])
                 sep = " " if pre_part else ""
 

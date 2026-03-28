@@ -299,10 +299,10 @@ class TelemetryWatch(QScrollArea):
         self.rebuild_ui()
 
     def rebuild_ui(self):
-        # 1. Clear the layout completely
+        # Clear the layout completely
         self._clear_layout()
 
-        # 2. Populate the Grid
+        # Populate the Grid
         for row, entry in enumerate(self.entries):
             # Col 0: Drag Handle
             if self.edit_mode:

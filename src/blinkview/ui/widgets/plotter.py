@@ -6,16 +6,14 @@
 
 import re
 from dataclasses import dataclass
-
-from typing import List, Optional, TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, List, Optional, Union
 
 if TYPE_CHECKING:
     import numpy as np
     import pyqtgraph as pg
 
 from PySide6.QtGui import QAction, QColor
-
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QToolBar, QMenu, QLabel, QComboBox
+from PySide6.QtWidgets import QComboBox, QLabel, QMenu, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.core.log_row import LogRow
@@ -26,8 +24,9 @@ from blinkview.utils.log_filter import LogFilter
 @dataclass
 class ModuleBuffer:
     """Holds the rolling buffers for a specific module."""
-    x_data: 'np.ndarray'
-    y_data: Optional['np.ndarray'] = None
+
+    x_data: "np.ndarray"
+    y_data: Optional["np.ndarray"] = None
     ptr: int = 0
     num_channels: int = 0
 
@@ -35,14 +34,15 @@ class ModuleBuffer:
 @dataclass
 class SeriesContainer:
     """The permanent record of a data channel."""
+
     module: ModuleIdentity  # NEW: Track which module this series belongs to
     index: int
     name: str
     color: str
     visible: bool = True
-    curve: Optional['pg.PlotDataItem'] = None
-    overview_curve: Optional['pg.PlotDataItem'] = None
-    plot_item: Optional['pg.PlotItem'] = None
+    curve: Optional["pg.PlotDataItem"] = None
+    overview_curve: Optional["pg.PlotDataItem"] = None
+    plot_item: Optional["pg.PlotItem"] = None
 
 
 class TelemetryPlotter(QWidget):
@@ -57,7 +57,7 @@ class TelemetryPlotter(QWidget):
         self._pg = pg
 
         self.gui_context: GUIContext = gui_context
-        self.max_points = self.gui_context.settings.get('plot.max_points', 10000)
+        self.max_points = self.gui_context.settings.get("plot.max_points", 10000)
 
         self.tab_name: str = ""
         self.is_split: bool = False
@@ -70,8 +70,8 @@ class TelemetryPlotter(QWidget):
         # New Single Source of Truth for Series
         self.series_list: List[SeriesContainer] = []
 
-        self.overview_plot: Optional['pg.PlotItem'] = None
-        self.region: Optional['pg.LinearRegionItem'] = None
+        self.overview_plot: Optional["pg.PlotItem"] = None
+        self.region: Optional["pg.LinearRegionItem"] = None
         self.is_auto_scroll = True  # Keep window on the "last 10 mins"
         self._is_system_updating = False
 
@@ -160,13 +160,15 @@ class TelemetryPlotter(QWidget):
         for i, s in enumerate(series):
             mod = self.gui_context.id_registry.resolve_module(s.get("module"))
             if mod:
-                self.series_list.append(SeriesContainer(
-                    module=mod,
-                    index=s["index"],
-                    name=s["name"],
-                    color=self.get_color(i).name(),
-                    visible=s["visible"]
-                ))
+                self.series_list.append(
+                    SeriesContainer(
+                        module=mod,
+                        index=s["index"],
+                        name=s["name"],
+                        color=self.get_color(i).name(),
+                        visible=s["visible"],
+                    )
+                )
 
     def _parse_duration(self, text: str) -> Optional[int]:
         """Parses strings like '10s', '5m', '2h' into total seconds."""
@@ -179,9 +181,9 @@ class TelemetryPlotter(QWidget):
         value = float(match.group(1))
         unit = match.group(2)
 
-        if unit == 'm':
+        if unit == "m":
             return int(value * 60)
-        elif unit == 'h':
+        elif unit == "h":
             return int(value * 3600)
         else:  # Default to seconds if 's' or no unit provided
             return int(value)
@@ -216,13 +218,15 @@ class TelemetryPlotter(QWidget):
             # Calculate a global offset for colors so modules don't look identical
             existing_series_count = len(self.series_list)
             for i in range(num_channels):
-                self.series_list.append(SeriesContainer(
-                    module=module,
-                    index=i,
-                    name=f"{module.short_name} {i}" if num_channels > 1 else module.short_name,
-                    color=self.get_color(existing_series_count + i).name(),
-                    visible=True
-                ))
+                self.series_list.append(
+                    SeriesContainer(
+                        module=module,
+                        index=i,
+                        name=f"{module.short_name} {i}" if num_channels > 1 else module.short_name,
+                        color=self.get_color(existing_series_count + i).name(),
+                        visible=True,
+                    )
+                )
 
         # Re-trigger UI building
         self.set_split_mode(self.is_split)
@@ -242,9 +246,7 @@ class TelemetryPlotter(QWidget):
         for module in self.modules:
             # Extraction per module
             extracted = [
-                (row.timestamp, row.get_values())
-                for row in batch
-                if row.module == module and row.get_values()
+                (row.timestamp, row.get_values()) for row in batch if row.module == module and row.get_values()
             ]
 
             if not extracted:
@@ -259,13 +261,13 @@ class TelemetryPlotter(QWidget):
 
             # Convert to numpy
             new_times = np.array([t for t, v in extracted], dtype=float)
-            new_values = np.array([v[:buf.num_channels] for t, v in extracted], dtype=float)
+            new_values = np.array([v[: buf.num_channels] for t, v in extracted], dtype=float)
             num_new = new_times.size
 
             # Buffer Management (2D Rolling)
             if buf.ptr + num_new <= self.max_points:
-                buf.x_data[buf.ptr: buf.ptr + num_new] = new_times
-                buf.y_data[buf.ptr: buf.ptr + num_new, :] = new_values
+                buf.x_data[buf.ptr : buf.ptr + num_new] = new_times
+                buf.y_data[buf.ptr : buf.ptr + num_new, :] = new_values
                 buf.ptr += num_new
             else:
                 shift = (buf.ptr + num_new) - self.max_points
@@ -286,10 +288,7 @@ class TelemetryPlotter(QWidget):
         """Helper to load history for a single module (used during drop)."""
         print(f"Loading history for newly dropped module: '{module}'")
         log_filter = LogFilter(self.gui_context.id_registry, filtered_module=module)
-        history = self.gui_context.registry.central.get_rows(
-            log_filter,
-            total=self.max_points
-        )
+        history = self.gui_context.registry.central.get_rows(log_filter, total=self.max_points)
         if history:
             self.process_log_batch(history, load_history=True)
 
@@ -301,13 +300,15 @@ class TelemetryPlotter(QWidget):
     def get_state(self):
         series = []
         for s in self.series_list:
-            series.append({
-                "module": s.module.name_with_device(),
-                "index": s.index,
-                "name": s.name,
-                "color": s.color,
-                "visible": s.visible,
-            })
+            series.append(
+                {
+                    "module": s.module.name_with_device(),
+                    "index": s.index,
+                    "name": s.name,
+                    "color": s.color,
+                    "visible": s.visible,
+                }
+            )
         return {
             "modules": [m.name_with_device() for m in self.modules],
             "is_split": self.is_split,
@@ -329,7 +330,7 @@ class TelemetryPlotter(QWidget):
             row=0,
             col=0,
             # title="History Overview",
-            axisItems={'bottom': pg.DateAxisItem(orientation='bottom')}
+            axisItems={"bottom": pg.DateAxisItem(orientation="bottom")},
         )
         self.overview_plot.setMaximumHeight(120)
 
@@ -337,14 +338,18 @@ class TelemetryPlotter(QWidget):
         shared_plot = None
         legend = None
         if not self.is_split:
-            shared_plot = self.graph_view.addPlot(row=1, col=0, axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
+            shared_plot = self.graph_view.addPlot(
+                row=1, col=0, axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
+            )
             shared_plot.setTitle(None)
             if self.total_series_count > 1:
                 legend = shared_plot.addLegend()
 
         for i, s in enumerate(self.series_list):
             if self.is_split:
-                p = self.graph_view.addPlot(row=i+1, col=0, axisItems={'bottom': pg.DateAxisItem(orientation='bottom')})
+                p = self.graph_view.addPlot(
+                    row=i + 1, col=0, axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
+                )
                 p.setTitle(f'<span style="color: {s.color}; font-weight: bold;">{s.name}</span>')
                 # p.setTitle(s.name)
                 if i > 0:
@@ -376,19 +381,19 @@ class TelemetryPlotter(QWidget):
 
         # --- SYNC LOGIC ---
         def update_main_from_region():
-            # 1. Break the infinite feedback loop
+            # Break the infinite feedback loop
             if self._is_system_updating:
                 return
 
             minX, maxX = self.region.getRegion()
 
-            # 3. Apply the range to all main plots
+            # Apply the range to all main plots
             for s in self.series_list:
                 if s.plot_item:
                     s.plot_item.setXRange(minX, maxX, padding=0)
 
         def update_region_from_main(window, viewRange):
-            # 1. Break the infinite feedback loop
+            # Break the infinite feedback loop
             if self._is_system_updating:
                 return
 
@@ -416,8 +421,8 @@ class TelemetryPlotter(QWidget):
             if not buf or buf.ptr == 0:
                 continue
 
-            x_slice = buf.x_data[:buf.ptr]
-            y_slice = buf.y_data[:buf.ptr]
+            x_slice = buf.x_data[: buf.ptr]
+            y_slice = buf.y_data[: buf.ptr]
 
             # Track the absolute latest time across all modules for auto-scrolling
             if x_slice[-1] > latest_time:
@@ -476,19 +481,19 @@ class TelemetryPlotter(QWidget):
         """The single source of truth for toggling visibility."""
         series.visible = visible
 
-        # 1. Toggle main curve visibility
+        # Toggle main curve visibility
         if series.curve:
             series.curve.setVisible(visible)
 
-        # 2. Toggle overview curve visibility (The small history lines)
+        # Toggle overview curve visibility (The small history lines)
         if series.overview_curve:
             series.overview_curve.setVisible(visible)
 
-        # 3. Handle Split View Layout
+        # Handle Split View Layout
         if self.is_split and series.plot_item:
             series.plot_item.setVisible(visible)
 
-        # 4. Trigger a Y-axis rescale
+        # Trigger a Y-axis rescale
         # If unhiding, we want the plot to jump to the data's scale immediately
         if visible and series.plot_item:
             series.plot_item.autoRange()
@@ -506,7 +511,7 @@ class TelemetryPlotter(QWidget):
             s.name = new_name
             # If the UI exists, update the legend/label immediately
             if s.curve:
-                s.curve.opts['name'] = new_name
+                s.curve.opts["name"] = new_name
                 # Note: pyqtgraph legends might need a refresh call here
 
     def set_autoscroll(self, enabled: bool):
@@ -526,10 +531,10 @@ class TelemetryPlotter(QWidget):
 
         self._is_system_updating = True
         try:
-            # 1. Update the overview slider
+            # Update the overview slider
             self.region.setRegion([start_time, end_time])
 
-            # 2. Update the main plots (the bottom views)
+            # Update the main plots (the bottom views)
             for s in self.series_list:
                 if s.plot_item:
                     s.plot_item.setXRange(start_time, end_time, padding=0)
@@ -564,11 +569,11 @@ class TelemetryPlotter(QWidget):
             print(f"Module {module.short_name} already in plot.")
             return
 
-        # 1. Add to our tracking list
+        # Add to our tracking list
         self.modules.append(module)
 
-        # 2. Immediately try to load existing history for just this module
+        # Immediately try to load existing history for just this module
         self._load_module_history(module)
 
-        # 3. Accept the action
+        # Accept the action
         event.acceptProposedAction()

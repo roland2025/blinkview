@@ -4,13 +4,23 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtWidgets import (
-    QWidget, QLineEdit, QComboBox, QListWidget, QListWidgetItem,
-    QPlainTextEdit, QSpinBox, QDoubleSpinBox, QHBoxLayout, QPushButton, QFileDialog, QCheckBox
-)
-from PySide6.QtCore import Qt, QRegularExpression
-
 from pathlib import Path
+
+from PySide6.QtCore import QRegularExpression, Qt
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QPlainTextEdit,
+    QPushButton,
+    QSpinBox,
+    QWidget,
+)
 
 
 def get_portable_path(absolute_path: str, max_up_levels: int = 2) -> str:
@@ -26,6 +36,7 @@ def get_portable_path(absolute_path: str, max_up_levels: int = 2) -> str:
         # On Python 3.12+ you can use target.relative_to(anchor, walk_up=True)
         # For older versions, we use os.path.relpath which is very robust
         import os
+
         rel_path_str = os.path.relpath(target, anchor)
 
         # Count how many times we go 'up' (..)
@@ -48,11 +59,11 @@ class WidgetFactory:
     def build_widget(schema: dict, value, node_context=None, factory_callback=None) -> QWidget:
         """Main dispatcher: Routes to specialized static builders."""
 
-        # 1. Handle Constants first
+        # Handle Constants first
         if "const" in schema:
             return WidgetFactory.build_const_widget(schema)
 
-        # 2. Pre-process Single String References
+        # Pre-process Single String References
         # This converts a reference into an 'enum' so the next block can handle it
         if "_reference" in schema and schema.get("type", "string") == "string" and node_context:
             try:
@@ -66,11 +77,11 @@ class WidgetFactory:
             except Exception as e:
                 print(f"[UI Warning] Could not fetch keys for reference {schema.get('_reference')}: {e}")
 
-        # 3. Handle Enums (This now catches both manual enums like 'url' AND converted references)
+        # Handle Enums (This now catches both manual enums like 'url' AND converted references)
         if "enum" in schema:
             return WidgetFactory.build_enum_widget(schema, value, factory_callback)
 
-        # 4. Standard Type Routing
+        # Standard Type Routing
         match schema.get("type", "string"):
             case "string" if schema.get("ui_type") == "file":
                 return WidgetFactory.build_file_selector(schema, value)
@@ -279,7 +290,7 @@ class WidgetFactory:
 
         elif isinstance(widget, QPlainTextEdit):
             raw_text = widget.toPlainText()
-            return [line.strip() for line in raw_text.split('\n') if line.strip()]
+            return [line.strip() for line in raw_text.split("\n") if line.strip()]
 
         return None
 
@@ -331,7 +342,7 @@ class WidgetFactory:
             abs_path, _ = QFileDialog.getOpenFileName(container, title, line_edit.text(), file_filter)
 
             if abs_path:
-                # 2. Use pathlib to make it portable before showing it in the UI
+                # Use pathlib to make it portable before showing it in the UI
                 portable_path = get_portable_path(abs_path)
                 line_edit.setText(portable_path)
 

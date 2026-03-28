@@ -5,10 +5,9 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-
-from datetime import datetime, timezone
 
 from blinkview.utils.atomic_json_dump import atomic_json_dump
 from blinkview.utils.global_settings import get_blink_home
@@ -56,12 +55,12 @@ def get_workspace_dir() -> Path:
     """
     The Master Resolver: Project wins, User is the fallback.
     """
-    # 1. Check if we are inside a project
+    # Check if we are inside a project
     project_root = get_project_root()
     if project_root:
         return project_root / ".blinkview"
 
-    # 2. Otherwise, we are in 'Standalone Mode', use Global Home
+    # Otherwise, we are in 'Standalone Mode', use Global Home
     return get_blink_home()
 
 
@@ -88,12 +87,12 @@ class ProjectSettings(Settings):
         project_folder = Path(path) / ".blinkview"
         project_file = project_folder / "project.json"
 
-        # 1. Prepare Project Data
+        # Prepare Project Data
         data = {
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        # 2. Write the marker file
+        # Write the marker file
         atomic_json_dump(data, project_file)
 
         print(f"Initialized BlinkView project in '{project_folder.resolve()}'")
@@ -126,21 +125,12 @@ def switch_profile(name, create=False):
 def setup_project_parser(parser):
     """Adds profile-related arguments to the command-line parser."""
     # We use nargs="?" so --list can work without providing a name
+    parser.add_argument("profile", nargs="?", type=str, help="The name of the profile to switch to.")
     parser.add_argument(
-        "profile",
-        nargs="?",
-        type=str,
-        help="The name of the profile to switch to."
+        "-l", "--list", action="store_true", help="List all available profiles in the current workspace."
     )
     parser.add_argument(
-        "-l", "--list",
-        action="store_true",
-        help="List all available profiles in the current workspace."
-    )
-    parser.add_argument(
-        "-c", "--create",
-        action="store_true",
-        help="Create the profile if it doesn't exist (used with profile name)."
+        "-c", "--create", action="store_true", help="Create the profile if it doesn't exist (used with profile name)."
     )
 
 
@@ -149,7 +139,7 @@ def handle_profile_args(args):
     workspace = get_workspace_dir()
     profiles_path = workspace / "profiles"
 
-    # 1. Handle --list
+    # Handle --list
     if args.list:
         if not profiles_path.exists():
             print("No profiles directory found.")
@@ -169,10 +159,9 @@ def handle_profile_args(args):
             print(f"{indicator} {p}")
         return
 
-    # 2. Handle Switch/Create
+    # Handle Switch/Create
     if args.profile:
         switch_profile(args.profile, create=args.create)
     else:
         # If no profile name and no --list, show help
         print("Error: Please specify a profile name or use --list.")
-

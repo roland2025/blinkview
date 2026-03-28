@@ -6,6 +6,7 @@
 
 import sys
 from pathlib import Path
+
 from packaging.version import parse as parse_version
 
 from blinkview.core.settings_manager import SettingsManager
@@ -13,6 +14,7 @@ from blinkview.core.settings_manager import SettingsManager
 
 class UpdateError(Exception):
     """Custom exception for update-related failures."""
+
     pass
 
 
@@ -46,30 +48,31 @@ class Updater:
         Can be called without instantiating the class.
         """
         p = Path(path)
-        # 1. Basic Git check
+        # Basic Git check
         if not (p / ".git").is_dir():
             return False
 
-        # 2. Identity check via pyproject.toml
+        # Identity check via pyproject.toml
         if not (p / "pyproject.toml").exists():
             return False
 
-        # 3. Source check
+        # Source check
         main_py = p / "src" / "blinkview" / "__main__.py"
         return main_py.is_file()
 
     def fetch(self) -> None:
         import subprocess
+
         try:
             subprocess.run(
-                ["git", "-C", str(self.repo_path), "fetch", "--tags"],
-                check=True, capture_output=True, text=True
+                ["git", "-C", str(self.repo_path), "fetch", "--tags"], check=True, capture_output=True, text=True
             )
         except subprocess.CalledProcessError as e:
             raise UpdateError(f"Fetch failed: {e.stderr or e.stdout or str(e)}")
 
     def get_versions(self, remote: bool = False) -> list[str]:
         import subprocess
+
         cmd = ["git", "-C", str(self.repo_path), "tag", "-l"]
         if remote:
             cmd = ["git", "-C", str(self.repo_path), "ls-remote", "--tags", "origin"]
@@ -92,20 +95,16 @@ class Updater:
 
     def install(self, version: str) -> bool:
         import subprocess
+
         try:
             subprocess.run(
-                ["git", "-C", str(self.repo_path), "checkout", version],
-                check=True, capture_output=True, text=True
+                ["git", "-C", str(self.repo_path), "checkout", version], check=True, capture_output=True, text=True
             )
         except subprocess.CalledProcessError as e:
             raise UpdateError(f"Failed to checkout {version}: {e.stderr or str(e)}")
 
         install_target = f"{self.repo_path}{self.features_suffix}"
-        cmd = [
-            "uv", "tool", "install", install_target,
-            "--python", sys.executable,
-            "--force", "--refresh"
-        ]
+        cmd = ["uv", "tool", "install", install_target, "--python", sys.executable, "--force", "--refresh"]
 
         if self.editable:
             cmd.append("--editable")
@@ -114,8 +113,9 @@ class Updater:
             cmd_str = " ".join(cmd)
             detached_cmd = f'cmd /c "timeout /t 2 > nul && {cmd_str}"'
             subprocess.Popen(
-                detached_cmd, shell=True,
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                detached_cmd,
+                shell=True,
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
             )
             return True
         else:

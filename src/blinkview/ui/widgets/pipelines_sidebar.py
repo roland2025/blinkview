@@ -18,7 +18,7 @@ from blinkview.ui.widgets.base_sidebar_widget import BaseSidebarWidget
 
 class PipelineListItemWidget(BaseListItemWidget):
     def _setup_custom_controls(self):
-        # 1. Log Button
+        # Log Button
         self.btn_log = QPushButton("📄")
         self.btn_log.setFixedSize(28, 28)
         self.btn_log.setToolTip("Open Log")

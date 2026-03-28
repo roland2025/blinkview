@@ -6,19 +6,51 @@
 
 from time import sleep
 
-from .BaseReader import DeviceFactory, BaseReader
 from ..core.base_configurable import configuration_property, override_property
 from ..core.log_row import LogRow
 from ..utils.level_map import LogLevel
+from .BaseReader import BaseReader, DeviceFactory
 
 
 @DeviceFactory.register("serial")
-@configuration_property("url", type="string", default="", required=True, description="The device path or PySerial URL to connect to (e.g., 'COM3', '/dev/ttyUSB0', or 'socket://192.168.1.5:8080').")
-@configuration_property("baudrate", type="integer", default=115200, description="The communication speed in bits per second. Typically ignored for pure socket connections.")
-@configuration_property("maxlen", type="integer", default=1_000_000, description="The maximum internal byte buffer size. Prevents memory exhaustion during massive data spikes or downstream pipeline stalls.")
-@configuration_property("delay", type="integer", default=100, description="The maximum time (in milliseconds) to hold incoming bytes before flushing a batch downstream. Balances latency against throughput efficiency.")
-@configuration_property("log_rx_tx", type="boolean", default=False, description="When enabled, dumps raw RX/TX hex data to the system log for low-level protocol debugging (WARNING: significantly impacts performance).")
-@override_property("logging", hidden=False, required=True, default={"enabled": True, "processor": {"type": "binary"}}, description="Enable logging of raw byte data. Uses a custom 'binary' processor that formats bytes as hex strings for readability.")
+@configuration_property(
+    "url",
+    type="string",
+    default="",
+    required=True,
+    description="The device path or PySerial URL to connect to (e.g., 'COM3', '/dev/ttyUSB0', or 'socket://192.168.1.5:8080').",
+)
+@configuration_property(
+    "baudrate",
+    type="integer",
+    default=115200,
+    description="The communication speed in bits per second. Typically ignored for pure socket connections.",
+)
+@configuration_property(
+    "maxlen",
+    type="integer",
+    default=1_000_000,
+    description="The maximum internal byte buffer size. Prevents memory exhaustion during massive data spikes or downstream pipeline stalls.",
+)
+@configuration_property(
+    "delay",
+    type="integer",
+    default=100,
+    description="The maximum time (in milliseconds) to hold incoming bytes before flushing a batch downstream. Balances latency against throughput efficiency.",
+)
+@configuration_property(
+    "log_rx_tx",
+    type="boolean",
+    default=False,
+    description="When enabled, dumps raw RX/TX hex data to the system log for low-level protocol debugging (WARNING: significantly impacts performance).",
+)
+@override_property(
+    "logging",
+    hidden=False,
+    required=True,
+    default={"enabled": True, "processor": {"type": "binary"}},
+    description="Enable logging of raw byte data. Uses a custom 'binary' processor that formats bytes as hex strings for readability.",
+)
 class UARTReader(BaseReader):
     __doc__ = """The primary data ingestion source for serial and UART communication.
 
@@ -46,13 +78,14 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
     @classmethod
     def get_config_schema(cls) -> dict:
-        # 1. Grab the static, merged schema from BaseConfigurable
+        # Grab the static, merged schema from BaseConfigurable
         schema = super().get_config_schema()
         from serial.tools.list_ports import comports
-        # 2. Dynamically fetch available hardware ports right now
+
+        # Dynamically fetch available hardware ports right now
         live_ports = comports()
 
-        # 3. Create arrays for your UI dropdown (enum and descriptions)
+        # Create arrays for your UI dropdown (enum and descriptions)
         port_names = [p.device for p in live_ports]
         port_descriptions = [p.description for p in live_ports]
 
@@ -60,14 +93,14 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         port_names.append("socket://localhost:1234")
         port_descriptions.append("TCP Socket Connection")
 
-        # 4. Inject the dynamic data into the 'url' property
+        # Inject the dynamic data into the 'url' property
         if "url" in schema["properties"]:
             url = schema["properties"]["url"]
             url["enum"] = port_names
             url["enum_tooltips"] = port_descriptions
             url["_allow_custom"] = True
 
-        # 5. Return the newly enriched schema to your UI generator!
+        # Return the newly enriched schema to your UI generator!
         return schema
 
     def run(self):
@@ -88,7 +121,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         last_flush_time = time_ns()
 
         if log_rx_tx:
-            mod_rx = self.local.device_id.get_module('_reader.rx')
+            mod_rx = self.local.device_id.get_module("_reader.rx")
             batch_rx_log = []
 
         batch_bytes = 0
@@ -161,13 +194,9 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             self.logger.info(f"Opening '{self.url}' at {self.baudrate} baud")
 
             from serial import serial_for_url
+
             # Use PySerial's URL handler (handles socket://, rfc2217://, hwgrep://, etc.)
-            ser = serial_for_url(
-                self.url,
-                baudrate=self.baudrate,
-                timeout=0.01,
-                inter_byte_timeout=0.01
-            )
+            ser = serial_for_url(self.url, baudrate=self.baudrate, timeout=0.01, inter_byte_timeout=0.01)
             self.serial = ser
             try:
                 ser.set_buffer_size(rx_size=BUF_SIZE)

@@ -8,8 +8,8 @@ import json
 import sys
 from copy import deepcopy
 
-from PySide6.QtCore import QObject, Signal, QTimer
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton, QMainWindow, QApplication
+from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget
 
 from blinkview.ui.widgets.config.dynamic_config import DynamicConfigWidget
 
@@ -22,13 +22,14 @@ class MockManager:
             return [
                 ("src_cam_1", "Main Camera (1080p)"),
                 ("src_lidar", "Roof LiDAR Array"),
-                ("src_gps", "RTK GPS Module")
+                ("src_gps", "RTK GPS Module"),
             ]
         return [("default_1", "Default item")]
 
 
 class MockConfigNode(QObject):
     """Simulates the backend connection for the UI without needing the Registry."""
+
     signal_received = Signal(dict, dict)
 
     def __init__(self, active_path: str):
@@ -55,14 +56,12 @@ class MockConfigNode(QObject):
                 "properties": {
                     "threshold": {"type": "integer", "default": 50, "description": "Minimum acceptable value."}
                 },
-                "required": ["threshold"]
+                "required": ["threshold"],
             }
         if current_type == "transform":
             return {
                 "description": "Multiplies incoming numerical data by a scale factor.",
-                "properties": {
-                    "scale": {"type": "number", "default": 1.5, "description": "Multiplier factor."}
-                }
+                "properties": {"scale": {"type": "number", "default": 1.5, "description": "Multiplier factor."}},
             }
         return {}
 
@@ -77,6 +76,7 @@ class MockConfigNode(QObject):
             # Apply the patch to our mock state to simulate a real backend
             if patch:
                 import jsonpatch
+
                 self.current_config = jsonpatch.apply_patch(self.current_config, patch)
             self.signal_received.emit(self.current_config, self.current_schema)
 
@@ -91,65 +91,43 @@ TEST_SCHEMA = {
     "title": "Advanced Sensor Configuration",
     "description": "Main configuration for the sensor array. Use this menu to bind data sources, set metadata, and define the processing pipeline.",
     "properties": {
-        "enabled": {
-            "type": "boolean",
-            "title": "Device Enabled",
-            "default": True
-        },
+        "enabled": {"type": "boolean", "title": "Device Enabled", "default": True},
         "port": {
             "type": "string",
             "title": "Connection String",
             "enum": ["COM1", "COM2", "COM3"],
             "_allow_custom": True,  # Enables custom typing!
-            "description": "Select a detected COM port, or type a custom Socket URL."
+            "description": "Select a detected COM port, or type a custom Socket URL.",
         },
         "sources_": {
             "type": "array",
             "title": "Bound Data Sources",
             "description": "Select which hardware sources this module should read from.",
             "items": {"type": "string", "_reference": "/sources"},
-            "default": []
+            "default": [],
         },
         "metadata": {
             "type": "object",
             "title": "Custom Metadata",
             "description": "Dynamically add custom key-value tags to attach to this sensor.",
-            "additionalProperties": {
-                "type": "string",
-                "default": ""
-            }
+            "additionalProperties": {"type": "string", "default": ""},
         },
         "steps": {
             "type": "array",
             "title": "Processing Steps",
             "description": "An ordered, sequential list of transformations to apply to the incoming data.",
-            "items": {
-                "type": "object",
-                "_factory": "processor"
-            }
-        }
+            "items": {"type": "object", "_factory": "processor"},
+        },
     },
-    "required": ["enabled", "port"]
+    "required": ["enabled", "port"],
 }
 
 TEST_CONFIG = {
     "enabled": True,
     "port": "socket://192.168.1.50:9000",  # Custom typed URL!
     "sources_": ["src_lidar", "src_gps"],  # References!
-    "metadata": {
-        "location": "Front Bumper",
-        "technician": "Alice"
-    },
-    "steps": [
-        {
-            "type": "filter",
-            "threshold": 80
-        },
-        {
-            "type": "transform",
-            "scale": 2.5
-        }
-    ]
+    "metadata": {"location": "Front Bumper", "technician": "Alice"},
+    "steps": [{"type": "filter", "threshold": 80}, {"type": "transform", "scale": 2.5}],
 }
 
 
@@ -159,12 +137,12 @@ class DemoWindow(QMainWindow):
         self.setWindowTitle("DynamicConfigWidget Standalone Test")
         self.resize(700, 900)
 
-        # 1. Create the Mock Node
+        # Create the Mock Node
         self.mock_node = MockConfigNode("/devices/test_device")
         self.mock_node.current_schema = deepcopy(TEST_SCHEMA)
         self.mock_node.current_config = deepcopy(TEST_CONFIG)
 
-        # 2. Create the UI
+        # Create the UI
         self.central_widget = QWidget()
         self.layout = QVBoxLayout(self.central_widget)
 
@@ -172,7 +150,7 @@ class DemoWindow(QMainWindow):
         self.config_widget = DynamicConfigWidget(self.mock_node, TEST_SCHEMA, TEST_CONFIG)
         self.layout.addWidget(self.config_widget)
 
-        # 3. Add a debug button to simulate an external update
+        # Add a debug button to simulate an external update
         self.btn_simulate_external = QPushButton("Simulate Update from Another User/Backend")
         self.btn_simulate_external.clicked.connect(self.simulate_external_update)
         self.layout.addWidget(self.btn_simulate_external)

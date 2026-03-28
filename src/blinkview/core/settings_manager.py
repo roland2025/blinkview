@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import Any, Optional, Dict
+from typing import Any, Dict, Optional
 
 from blinkview.utils.global_settings import GlobalSettings
 from blinkview.utils.project_settings import ProjectSettings, get_project_root
@@ -18,10 +18,10 @@ class SettingsManager:
 
     def get(self, key: str, default: Any = None) -> Any:
         """
-        Retrieves a setting with cascading fallback:
-        1. Project Settings (if available)
-        2. Global Settings
-        3. Default value
+         Retrieves a setting with cascading fallback:
+        Project Settings (if available)
+        Global Settings
+        Default value
         """
         # Check Project scope first
         if self.is_project:

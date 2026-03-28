@@ -6,14 +6,13 @@
 
 import importlib
 import inspect
-from typing import TypeVar, Generic, Dict, Callable, get_args, get_origin
 from types import SimpleNamespace
+from typing import Callable, Dict, Generic, TypeVar, get_args, get_origin
 
 from blinkview.core.system_context import SystemContext
 
-
 # Define a generic type variable so the IDE knows what this factory produces
-T = TypeVar('T')
+T = TypeVar("T")
 
 
 class BaseFactory(Generic[T]):
@@ -21,7 +20,8 @@ class BaseFactory(Generic[T]):
     A generic base class for all component factories.
     Automatically provisions an isolated registry for every subclass.
     """
-    # 1. Define a class attribute to hold the resolved type (T)
+
+    # Define a class attribute to hold the resolved type (T)
     produces_type: type = None
     # We don't define _registry here, because subclasses would share it.
 
@@ -32,8 +32,8 @@ class BaseFactory(Generic[T]):
         # Give every new subclass its own isolated dictionary
         cls._registry: Dict[str, Callable[[], T]] = {}
 
-        # 2. Extract the generic type argument from __orig_bases__
-        if hasattr(cls, '__orig_bases__'):
+        # Extract the generic type argument from __orig_bases__
+        if hasattr(cls, "__orig_bases__"):
             for base in cls.__orig_bases__:
                 # Check if this base is BaseFactory[...]
                 if get_origin(base) is BaseFactory:
@@ -70,58 +70,51 @@ class BaseFactory(Generic[T]):
             raise ImportError(f"Failed to load plugin '{module_name}': {e}")
 
     @classmethod
-    def build(cls, config: dict = None, system_ctx: SystemContext = None, instance_ctx: SimpleNamespace = None, **kwargs) -> T:
+    def build(
+        cls, config: dict = None, system_ctx: SystemContext = None, instance_ctx: SimpleNamespace = None, **kwargs
+    ) -> T:
         """
         Builds a component directly from its configuration dictionary.
         Expects a 'type' key to exist within the config.
         """
-        # 1. Extract the name from config
+        # Extract the name from config
         name = config.get("type")
 
         if not name:
-            raise ValueError(
-                f"Config for {cls.__name__} is missing a 'type'"
-                f"Received: {config}"
-            )
+            raise ValueError(f"Config for {cls.__name__} is missing a 'type'Received: {config}")
         name = name.lower()  # Normalize to lowercase for consistent lookups
 
         builder = cls._registry.get(name)
         if not builder:
             raise ValueError(f"Unknown component '{name}'. Available: {list(cls._registry.keys())}")
 
-        # 1. SMART INJECTION: Introspect what the plugin actually wants
+        # SMART INJECTION: Introspect what the plugin actually wants
         sig = inspect.signature(builder)
 
         # Check if the plugin has a catch-all **kwargs
-        has_catch_all = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD
-            for p in sig.parameters.values()
-        )
+        has_catch_all = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
 
         if has_catch_all:
             # If they have **kwargs, they can take everything
             safe_kwargs = kwargs
         else:
             # Otherwise, strictly filter the dictionary to match their __init__
-            safe_kwargs = {
-                k: v for k, v in kwargs.items()
-                if k in sig.parameters
-            }
+            safe_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
 
-        # 2. INSTANTIATION: Perfectly safe, no TypeErrors
+        # INSTANTIATION: Perfectly safe, no TypeErrors
         instance = builder(**safe_kwargs)
 
-        if hasattr(instance, 'bind_system'):
+        if hasattr(instance, "bind_system"):
             instance.bind_system(system_ctx, instance_ctx)
 
-        # 3. APPLY RULES
-        if config is not None and hasattr(instance, 'apply_config'):
-            if hasattr(instance, 'hydrate_config'):
+        # APPLY RULES
+        if config is not None and hasattr(instance, "apply_config"):
+            if hasattr(instance, "hydrate_config"):
                 config = instance.hydrate_config(config)
             instance.apply_config(config)
 
-        # 4. FINALIZE / BAKE
-        if hasattr(instance, 'bake'):
+        # FINALIZE / BAKE
+        if hasattr(instance, "bake"):
             instance.bake()
 
         return instance
@@ -146,7 +139,7 @@ class BaseFactory(Generic[T]):
         if not builder:
             raise ValueError(f"Unknown component '{type_name}'.")
 
-        if hasattr(builder, 'get_config_schema'):
+        if hasattr(builder, "get_config_schema"):
             return builder.get_config_schema()
         else:
             return {}  # Return an empty schema if not defined

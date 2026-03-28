@@ -95,7 +95,7 @@ class ConfigNode(QObject):
                 get_by_path,  # Adjust your import path!
             )
 
-            # 1. Prune the DATA using your awesome utility function!
+            # Prune the DATA using your awesome utility function!
             # We pass path="/" because we are already at the exact node data.
             pruned_config = get_by_path(
                 data=config if config else {},
@@ -105,7 +105,7 @@ class ConfigNode(QObject):
                 make_deep_copy=True,
             )
 
-            # 2. Prune the SCHEMA using custom JSON-Schema-aware logic
+            # Prune the SCHEMA using custom JSON-Schema-aware logic
             pruned_schema = deepcopy(schema) if schema else {}
 
             if self.drop_keys and isinstance(pruned_schema, dict) and "properties" in pruned_schema:
@@ -124,7 +124,7 @@ class ConfigNode(QObject):
             self.signal_received.emit(self.config, self.schema)
             return
 
-        # 2. Check for Parent or Child overlaps
+        # Check for Parent or Child overlaps
         # Ensure trailing slashes to prevent substring false-positives
         # (e.g., "/devices/A" vs "/devices/ABC")
         my_path_slashed = self.active_path if self.active_path.endswith("/") else self.active_path + "/"
@@ -139,7 +139,7 @@ class ConfigNode(QObject):
         # Did a parent of this node change? (e.g., I am /devices/ABC, update is /devices)
         is_parent_updated = self.active_path.startswith(incoming_slashed) or incoming_is_root
 
-        # 3. If overlapping, our local state is stale. Re-fetch!
+        # If overlapping, our local state is stale. Re-fetch!
         if is_child_updated or is_parent_updated:
             print(f"[ConfigNode] Overlapping change detected at '{path}'. Re-fetching '{self.active_path}'...")
             self.fetch()
@@ -189,7 +189,7 @@ class ConfigNode(QObject):
     def deregister(self):
         """Cleanly disconnects this node from the backend data supplier."""
 
-        # 1. Tell the manager to drop this node from its list
+        # Tell the manager to drop this node from its list
         self.signal_unregister.emit(self)
 
     def get(self, key=None, default=None):

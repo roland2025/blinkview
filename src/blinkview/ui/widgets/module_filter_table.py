@@ -4,10 +4,13 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import weakref
 from dataclasses import dataclass, field
+from typing import List, Optional, Set
 
-from PySide6.QtCore import Qt, QModelIndex, QObject
-from PySide6.QtWidgets import QStyledItemDelegate, QComboBox, QTableView, QHeaderView
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QSortFilterProxyModel, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import QComboBox, QHeaderView, QStyledItemDelegate, QTableView
 
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.ui.gui_context import GUIContext
@@ -15,18 +18,12 @@ from blinkview.ui.widgets.module_filter_model import ModuleFilterModel
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal, QTimer, QSortFilterProxyModel
-from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QTableView, QHeaderView, QStyledItemDelegate, QComboBox
-from typing import List, Set, Optional
-import weakref
-
 
 @dataclass(slots=True)
 class ModuleFilterState:
     module: ModuleIdentity
     enabled: bool
-    level: 'LevelIdentity'
+    level: "LevelIdentity"
     override: bool = False
 
 
@@ -52,7 +49,7 @@ class TempLogFilter(QObject):
     def __del__(self):
         # This ensures that if the log tab is closed, we don't
         # keep the background sync running forever.
-        if hasattr(self, 'gui_context'):
+        if hasattr(self, "gui_context"):
             print("[TempLogFilter] __del__ called, unregistering from module filter model.")
             self.gui_context.module_filter_model.unregister_consumer()
 
@@ -61,7 +58,7 @@ class TempLogFilter(QObject):
         for module in modules:
             self.get_module(module)
 
-    def get_module(self, module: 'ModuleIdentity') -> ModuleFilterState:
+    def get_module(self, module: "ModuleIdentity") -> ModuleFilterState:
         mod = self._states.get(module)
         if mod is not None:
             return mod
@@ -73,26 +70,36 @@ class TempLogFilter(QObject):
             parent_log_level = parent_state.level
             parent_enabled = parent_state.enabled
         if module.device.name == "abc_key":
-            print(f"[TempLogFilter] get_module={module.name} parent={parent_mod is not None} log_level={parent_log_level} enabled={parent_enabled}")
+            print(
+                f"[TempLogFilter] get_module={module.name} parent={parent_mod is not None} log_level={parent_log_level} enabled={parent_enabled}"
+            )
         mod = ModuleFilterState(module, parent_enabled, parent_log_level)
         self._states[module] = mod
-        self.gui_context.index_manager.set_log_level(module, self.log_filter.filter_index, mod.level if mod.enabled else LogLevel.OFF)
+        self.gui_context.index_manager.set_log_level(
+            module, self.log_filter.filter_index, mod.level if mod.enabled else LogLevel.OFF
+        )
         return mod
 
-    def set_module_enabled(self, module: 'ModuleIdentity', enabled):
+    def set_module_enabled(self, module: "ModuleIdentity", enabled):
         mod = self.get_module(module)
         mod.enabled = enabled
         mod.override = True
-        self.gui_context.index_manager.set_log_level(module, self.log_filter.filter_index, mod.level if mod.enabled else LogLevel.OFF)
+        self.gui_context.index_manager.set_log_level(
+            module, self.log_filter.filter_index, mod.level if mod.enabled else LogLevel.OFF
+        )
 
         self.filter_changed.emit()
 
-    def set_module_level(self, module: 'ModuleIdentity', level):
+    def set_module_level(self, module: "ModuleIdentity", level):
         mod = self.get_module(module)
         mod.level = level
         mod.override = True
-        print(f"[TempLogFilter] set_module_level {module.name} to {level.name_conf}, enabled={mod.enabled} index={self.log_filter.filter_index}")
-        self.gui_context.index_manager.set_log_level(module, self.log_filter.filter_index, mod.level if mod.enabled else LogLevel.OFF)
+        print(
+            f"[TempLogFilter] set_module_level {module.name} to {level.name_conf}, enabled={mod.enabled} index={self.log_filter.filter_index}"
+        )
+        self.gui_context.index_manager.set_log_level(
+            module, self.log_filter.filter_index, mod.level if mod.enabled else LogLevel.OFF
+        )
 
         self.filter_changed.emit()
 
@@ -102,7 +109,9 @@ class TempLogFilter(QObject):
             self.log_filter.set_filter_index(self.gui_context.index_manager.checkout())
             # restore any existing state for this filter index
             for mod in self._states.values():
-                self.gui_context.index_manager.set_log_level(mod.module, self.log_filter.filter_index, mod.level if mod.enabled else LogLevel.OFF)
+                self.gui_context.index_manager.set_log_level(
+                    mod.module, self.log_filter.filter_index, mod.level if mod.enabled else LogLevel.OFF
+                )
         else:
             filter_index = self.log_filter.filter_index
             self.log_filter.set_filter_index(None)
@@ -113,18 +122,23 @@ class TempLogFilter(QObject):
         # self._bake()
         self.filter_changed.emit()
 
-    def set_level(self, level: 'LevelIdentity'):
+    def set_level(self, level: "LevelIdentity"):
         for module in self._states.keys():
             mod = self.get_module(module)
             mod.level = level
 
-            self.gui_context.index_manager.set_log_level(module, self.log_filter.filter_index,
-                                                         mod.level if mod.enabled else LogLevel.OFF)
+            self.gui_context.index_manager.set_log_level(
+                module, self.log_filter.filter_index, mod.level if mod.enabled else LogLevel.OFF
+            )
 
         self.filter_changed.emit()
 
     def get_state(self):
-        return {f"{mod.module.device.name}.{mod.module.name}": {"enabled": mod.enabled, "level": mod.level.name_conf} for mod in self._states.values() if mod.override}
+        return {
+            f"{mod.module.device.name}.{mod.module.name}": {"enabled": mod.enabled, "level": mod.level.name_conf}
+            for mod in self._states.values()
+            if mod.override
+        }
 
     def restore_state(self, state):
         if state is None:
@@ -141,8 +155,9 @@ class TempLogFilter(QObject):
             mod.level = LogLevel.from_string(mod_state.get("level"), default=LogLevel.ALL)
             mod.override = True
 
-            self.gui_context.index_manager.set_log_level(module, self.log_filter.filter_index,
-                                                         mod.level if mod.enabled else LogLevel.OFF)
+            self.gui_context.index_manager.set_log_level(
+                module, self.log_filter.filter_index, mod.level if mod.enabled else LogLevel.OFF
+            )
 
 
 class ModuleFilterProxyModel(QSortFilterProxyModel):
@@ -199,7 +214,7 @@ class ModuleFilterProxyModel(QSortFilterProxyModel):
 
         if role == Qt.CheckStateRole and col == 0:
             # value is an integer (Qt.Checked/Unchecked), convert to bool
-            is_checked = (value == Qt.Checked or value == 2)
+            is_checked = value == Qt.Checked or value == 2
             self.log_filter.set_module_enabled(module, is_checked)
             changed = True
 
@@ -218,17 +233,17 @@ class ModuleFilterProxyModel(QSortFilterProxyModel):
         return False
 
     def filterAcceptsRow(self, source_row, source_parent):
-        # 1. Get the source index for the row (assuming module data is in column 0)
+        # Get the source index for the row (assuming module data is in column 0)
         source_index = self.sourceModel().index(source_row, 0, source_parent)
 
-        # 2. Extract the module object using your UserRole
+        # Extract the module object using your UserRole
         module = self.sourceModel().data(source_index, Qt.UserRole)
 
         if not module:
             # Fallback to default behavior if data is missing
             return super().filterAcceptsRow(source_row, source_parent)
 
-        # 3. Filter by device (using the allowed_device from your LogFilter)
+        # Filter by device (using the allowed_device from your LogFilter)
         allowed_dev = self.log_filter.log_filter.allowed_device
         if allowed_dev is not None and module.device != allowed_dev:
             return False
@@ -237,8 +252,7 @@ class ModuleFilterProxyModel(QSortFilterProxyModel):
         if filtered_module is not None and module != filtered_module:
             return False
 
-
-        # 4. Optional: If you also use Qt's built-in text filtering (setFilterRegExp),
+        # Optional: If you also use Qt's built-in text filtering (setFilterRegExp),
         # keep this call at the end so text searches still work on the remaining rows.
         return super().filterAcceptsRow(source_row, source_parent)
 
@@ -296,13 +310,13 @@ class ModuleFilterTable(QTableView):
         font.setBold(True)
         self.setFont(font)
 
-        # 1. Setup the Proxy specific to this Table instance
+        # Setup the Proxy specific to this Table instance
         self.proxy = ModuleFilterProxyModel(self.log_filter, self)
         # Point to the global shared model in the context
         self.proxy.setSourceModel(self.gui_context.module_filter_model)
         self.setModel(self.proxy)
 
-        # 2. View Styling
+        # View Styling
         self.setShowGrid(False)
         self.setFrameShape(QTableView.NoFrame)
         self.setSelectionMode(QTableView.NoSelection)
@@ -322,7 +336,7 @@ class ModuleFilterTable(QTableView):
         v_header.hide()
         v_header.setDefaultSectionSize(22)
 
-        # 3. Setup Delegate for the Level Column
+        # Setup Delegate for the Level Column
         self.setItemDelegateForColumn(1, LevelDelegate(self))
 
     def showEvent(self, event):

@@ -61,7 +61,7 @@ class DynamicConfigWidget(QWidget):
 
         self.main_layout = QVBoxLayout(self)
 
-        # 2. Add a Scroll Area to handle overflowing content
+        # Add a Scroll Area to handle overflowing content
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)  # Allows the inner widget to expand
         self.scroll_area.setFrameShape(QFrame.NoFrame)  # Removes the ugly default border
@@ -83,7 +83,7 @@ class DynamicConfigWidget(QWidget):
         # Optional: Add a little extra spacing between the labels and the inputs
         self.form_layout.setHorizontalSpacing(20)
 
-        # 2. CRITICAL FIX: Bind the alignment directly to the widget as it gets added
+        # CRITICAL FIX: Bind the alignment directly to the widget as it gets added
         self.scroll_layout.addWidget(self.form_container)
         # self.scroll_layout.addStretch(1)  # This pushes the form_container to the top
 
@@ -94,7 +94,7 @@ class DynamicConfigWidget(QWidget):
         # Build the dynamic UI
         self._build_ui(self.schema, self.current_config, self.form_layout, self._widget_registry)
 
-        # 3. Add the button row at the bottom
+        # Add the button row at the bottom
         self.button_layout = QHBoxLayout()
         self.button_layout.addStretch()  # Pushes the button to the right
 
@@ -157,7 +157,7 @@ class DynamicConfigWidget(QWidget):
         self.button_layout.addWidget(self.btn_apply)
         self.main_layout.addLayout(self.button_layout)
 
-        # 4. Connect the click events
+        # Connect the click events
         self.applying_config = False
         self.btn_apply.clicked.connect(self._on_apply_clicked)
         self.btn_revert.clicked.connect(self._on_revert_clicked)
@@ -185,13 +185,13 @@ class DynamicConfigWidget(QWidget):
         """Called automatically when the widget is instructed to close."""
         print(f"[Widget] Closing. Deregistering node for {self.node.active_path}")
 
-        # 1. Clean up the backend connection
+        # Clean up the backend connection
         self.node.signal_received.disconnect(self.update_config_schema)
         self.node.deregister()
 
         self.signal_unregister.emit(self)  # Notify any listeners that this widget is closing
 
-        # 2. Accept the event so Qt proceeds with destroying the widget
+        # Accept the event so Qt proceeds with destroying the widget
         event.accept()
 
     def _check_for_changes(self, *_):
@@ -245,17 +245,17 @@ class DynamicConfigWidget(QWidget):
     def _on_revert_clicked(self):
         """Discards UI changes and restores the baseline backend configuration."""
 
-        # 1. Restore the schema to its pristine original state
+        # Restore the schema to its pristine original state
         self.schema = deepcopy(self.original_schema)
 
-        # 2. Clear the UI completely
+        # Clear the UI completely
         self._clear_layout(self.form_layout)
         self._widget_registry.clear()
 
-        # 3. Rebuild the UI using the unmodified baseline config
+        # Rebuild the UI using the unmodified baseline config
         self._build_ui(self.schema, self.current_config, self.form_layout, self._widget_registry)
 
-        # 4. Disable both buttons since we are back to neutral
+        # Disable both buttons since we are back to neutral
         self.btn_apply.setEnabled(False)
         self.btn_revert.setEnabled(False)
 
@@ -276,7 +276,7 @@ class DynamicConfigWidget(QWidget):
                 # addRow with one widget spans the entire top of the form
                 layout.addRow(desc_label)
 
-        # 1. Prepare the schema (Inject factory types if necessary)
+        # Prepare the schema (Inject factory types if necessary)
         self._inject_factory_schema(schema_node, data, registry)
 
         properties = schema_node.get("properties", {})
@@ -285,17 +285,17 @@ class DynamicConfigWidget(QWidget):
         def get_sort_priority(k):
             item_schema = properties.get(k, {})
 
-            # 1. Hardcoded essentials always go to the very top
+            # Hardcoded essentials always go to the very top
             if k == "enabled":
                 return -100
             if k == "type":
                 return -99
 
-            # 2. Explicit Override (User-defined order)
+            # Explicit Override (User-defined order)
             if "ui_order" in item_schema:
                 return item_schema["ui_order"]
 
-            # 3. Default fallback logic
+            # Default fallback logic
             if k in required_keys:
                 return 0
 
@@ -303,7 +303,7 @@ class DynamicConfigWidget(QWidget):
 
         sorted_keys = sorted(properties.keys(), key=lambda k: (get_sort_priority(k), k))
 
-        # 2. Dispatch each property to its specific builder
+        # Dispatch each property to its specific builder
         for key in sorted_keys:
             prop_schema = properties[key]
             value = data.get(key)
@@ -492,7 +492,7 @@ class DynamicConfigWidget(QWidget):
         sub_schema = prop_schema["additionalProperties"]
         node_path = current_path + [key]
 
-        # 1. Render all existing dynamic keys
+        # Render all existing dynamic keys
         for dyn_key, dyn_val in child_data.items():
             # Create a header row for the editable key + delete button
             header_widget = QWidget()
@@ -560,7 +560,7 @@ class DynamicConfigWidget(QWidget):
             line.setStyleSheet("color: #444;")
             group_layout.addRow(line)
 
-        # 2. Add the "New Key" input row
+        # Add the "New Key" input row
         add_layout = QHBoxLayout()
         new_key_input = QLineEdit()
         new_key_input.setPlaceholderText("Enter new item name...")
@@ -611,7 +611,7 @@ class DynamicConfigWidget(QWidget):
         child_data = value if isinstance(value, list) else []
         node_path = current_path + [key]
 
-        # 1. Render all existing array items
+        # Render all existing array items
         for idx, item_val in enumerate(child_data):
             idx_str = str(idx)
             item_schema = deepcopy(items_schema)
@@ -719,7 +719,7 @@ class DynamicConfigWidget(QWidget):
             group_layout.addRow("", control_layout)
             # ==========================================================
 
-        # 2. Add "Add Item" button
+        # Add "Add Item" button
         btn_add = QPushButton("Add Item")
 
         def on_add_arr(_=False, path=node_path, schema_template=items_schema):
@@ -846,20 +846,20 @@ class DynamicConfigWidget(QWidget):
         """
         result = {}
         for key, node in registry.items():
-            # 1. Handle Hidden Fields (Factory types, etc.)
+            # Handle Hidden Fields (Factory types, etc.)
             if node["type"] == "hidden":
                 if node["value"] is not None:
                     result[key] = node["value"]
                 continue
 
-            # 2. Handle Optional Fields (Skips if the user unchecked the 'Override' or 'GroupBox')
+            # Handle Optional Fields (Skips if the user unchecked the 'Override' or 'GroupBox')
             if not node.get("is_required", True):
                 if node["type"] == "object" and not node["container"].isChecked():
                     continue
                 elif node["type"] == "primitive" and not node["toggle"].isChecked():
                     continue
 
-            # 3. CASE: Editable Dynamic Pairs (Dictionaries with user-defined keys)
+            # CASE: Editable Dynamic Pairs (Dictionaries with user-defined keys)
             if node["type"] == "dynamic_pair":
                 # Extract the actual key from the QLineEdit
                 actual_key = node["key_widget"].text().strip()
@@ -875,11 +875,11 @@ class DynamicConfigWidget(QWidget):
                     val_widget = node.get("val_widget") or node.get("widget")
                     result[actual_key] = WidgetFactory.extract_value(val_widget)
 
-            # 4. CASE: Static Nested Objects
+            # CASE: Static Nested Objects
             elif node["type"] == "object":
                 result[key] = self._extract_data(node["registry"])
 
-            # 5. CASE: Complex Arrays (Lists of objects/factories)
+            # CASE: Complex Arrays (Lists of objects/factories)
             elif node["type"] == "complex_array":
                 extracted_dict = self._extract_data(node["registry"])
                 # Sort keys numerically (0, 1, 2...) to preserve order, then cast to list
@@ -903,10 +903,10 @@ class DynamicConfigWidget(QWidget):
 
         data = self.get_config()
 
-        # 1. Create a temporary schema for validation
+        # Create a temporary schema for validation
         validation_schema = deepcopy(self.schema)
 
-        # 2. Strip 'enum' constraints from any field that allows custom typing
+        # Strip 'enum' constraints from any field that allows custom typing
         def sanitize_schema(node):
             if isinstance(node, dict):
                 if node.get("_allow_custom", False) and "enum" in node:
@@ -920,7 +920,7 @@ class DynamicConfigWidget(QWidget):
         sanitize_schema(validation_schema)
 
         try:
-            # 3. Validate against the sanitized schema
+            # Validate against the sanitized schema
             validate(instance=data, schema=validation_schema)
             return True, "Configuration is valid."
         except ValidationError as e:
@@ -963,20 +963,20 @@ class DynamicConfigWidget(QWidget):
 
     def _on_factory_type_changed(self):
         """Called immediately when ANY factory 'type' dropdown changes."""
-        # 1. Grab the entire current state exactly as it is right now
+        # Grab the entire current state exactly as it is right now
         current_state = self.get_config()
 
-        # 2. Reset the schema to the pristine baseline so all factories re-evaluate
+        # Reset the schema to the pristine baseline so all factories re-evaluate
         self.schema = deepcopy(self.original_schema)
 
-        # 3. Nuke the UI
+        # Nuke the UI
         self._clear_layout(self.form_layout)
         self._widget_registry.clear()
 
-        # 4. Rebuild. The _build_ui method will naturally ignore any orphaned data
+        # Rebuild. The _build_ui method will naturally ignore any orphaned data
         # (like old properties from the previous factory type) because they won't
         # exist in the freshly injected sub-schema!
         self._build_ui(self.schema, current_state, self.form_layout, self._widget_registry)
 
-        # 5. Check if the Apply button needs to light up
+        # Check if the Apply button needs to light up
         self._check_for_changes()

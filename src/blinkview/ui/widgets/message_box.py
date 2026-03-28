@@ -16,7 +16,7 @@ class MessageBox:
     Keeps the 'MessageBox.Btn.Yes' syntax without the startup cost.
     """
 
-    # 1. The Proxy: This intercepts access to MessageBox.Btn
+    # The Proxy: This intercepts access to MessageBox.Btn
     class _BtnProxy:
         def __getattr__(self, name):
             from PySide6.QtWidgets import QMessageBox
@@ -51,7 +51,7 @@ class MessageBox:
     def question(parent, title, text, buttons=None, default_btn=None):
         from PySide6.QtWidgets import QMessageBox
 
-        # 2. Handle Defaults inside the method to avoid definition-time imports
+        # Handle Defaults inside the method to avoid definition-time imports
         if buttons is None:
             buttons = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         if default_btn is None:

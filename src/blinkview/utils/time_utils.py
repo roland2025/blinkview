@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from time import time_ns, perf_counter_ns, strftime, localtime
+from time import localtime, perf_counter_ns, strftime, time_ns
 from typing import Callable
 
 
@@ -23,12 +23,12 @@ class TimeUtils:
         self.bake()
 
     def bake(self):
-        """ bake the time functions using nanosecond integer math """
+        """bake the time functions using nanosecond integer math"""
         # Capture the list reference and function into the closure
         anchors = self._anchors
         perf_fn = perf_counter_ns
 
-        # --- 1. Ultra-High Speed 'now' ---
+        # ---Ultra-High Speed 'now' ---
         def fast_now() -> float:
             # (CurrentPerf - StartPerf) + StartWall = CurrentWall (in ns)
             # Dividing by 1e9 at the VERY end preserves max precision
@@ -57,7 +57,7 @@ class TimeUtils:
 
 
 class ConsoleTimestampFormatter:
-    __slots__ = 'format'
+    __slots__ = "format"
 
     def __init__(self):
         # Cache for the "HH:MM:SS" part
@@ -71,17 +71,17 @@ class ConsoleTimestampFormatter:
         def fast_fmt(ts_ns: int) -> str:
             nonlocal last_sec, last_sec_str
 
-            # 1. Extract seconds and sub-seconds using integer math
+            # Extract seconds and sub-seconds using integer math
             # // is integer floor division; % is modulo
             current_sec, nsec = _divmod(ts_ns, 1_000_000_000)
 
-            # 2. Update string cache only once per second
+            # Update string cache only once per second
             if current_sec != last_sec:
                 last_sec = current_sec
                 # We only convert to float here because localtime requires it
-                last_sec_str = _strftime('%H:%M:%S', _localtime(current_sec))
+                last_sec_str = _strftime("%H:%M:%S", _localtime(current_sec))
 
-            # 3. Extract milliseconds from the remaining nanoseconds
+            # Extract milliseconds from the remaining nanoseconds
             # 1,000,000 nanoseconds = 1 millisecond
             ms = nsec // 1_000_000
 
@@ -95,7 +95,8 @@ class ConsoleTimestampFormatter:
 
 class ISO8601TimestampFormatter:
     """Prints full ISO 8601 timestamps (μs precision) with tiered caching."""
-    __slots__ = ('format',)
+
+    __slots__ = ("format",)
 
     def __init__(self):
         # Tier 1 Cache: Date (YYYY-MM-DD)
@@ -113,27 +114,27 @@ class ISO8601TimestampFormatter:
         def fast_fmt(ts_ns: int) -> str:
             nonlocal last_day, date_str, last_sec, time_str
 
-            # 1. Total seconds and the ns remainder
+            # Total seconds and the ns remainder
             total_sec, nsec = _divmod(ts_ns, 1_000_000_000)
 
-            # 2. Update Date Cache (Tier 1) - Every 86400 seconds
+            # Update Date Cache (Tier 1) - Every 86400 seconds
             # total_sec // 86400 gives days since epoch
             current_day = total_sec // 86400
             if current_day != last_day:
                 last_day = current_day
                 # Full date prefix with the 'T' separator
-                date_str = _strftime('%Y-%m-%dT', _localtime(total_sec))
+                date_str = _strftime("%Y-%m-%dT", _localtime(total_sec))
 
-            # 3. Update Time Cache (Tier 2) - Every 1 second
+            # Update Time Cache (Tier 2) - Every 1 second
             if total_sec != last_sec:
                 last_sec = total_sec
-                time_str = _strftime('%H:%M:%S', _localtime(total_sec))
+                time_str = _strftime("%H:%M:%S", _localtime(total_sec))
 
-            # 4. Extract Microseconds (us)
+            # Extract Microseconds (us)
             # 1,000 nanoseconds = 1 microsecond
             us = nsec // 1_000
 
-            # 5. Fast string assembly with Zulu suffix
+            # Fast string assembly with Zulu suffix
             # Result: 2026-02-21T14:02:01.000123Z
             return f"{date_str}{time_str}.{us:06d}Z"
 

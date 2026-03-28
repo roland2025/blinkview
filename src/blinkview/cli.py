@@ -4,14 +4,15 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import sys
 import os
 import signal
-import readchar
-from queue import Queue, Empty
+import sys
+from queue import Empty, Queue
 from threading import Thread
 
-# 1. Inject CWD before importing local blinkview modules
+import readchar
+
+# Inject CWD before importing local blinkview modules
 cwd = os.getcwd()
 if cwd not in sys.path:
     sys.path.insert(0, cwd)
@@ -20,13 +21,12 @@ from rich.console import Console
 
 # Internal BlinkView imports
 from .core.registry import Registry
-from .utils.level_map import LogLevel
-
-from .storage.file_logger import FileLogger, LogRowBatchProcessor, BinaryBatchProcessor
-from .parsers.text_filter import TextFilter
-from .parsers.line_parser import LineParser
 from .io.uart import UARTReader
+from .parsers.line_parser import LineParser
+from .parsers.text_filter import TextFilter
+from .storage.file_logger import BinaryBatchProcessor, FileLogger, LogRowBatchProcessor
 from .subscribers.console import ConsoleSubscriber
+from .utils.level_map import LogLevel
 
 
 class BlinkViewApp:
@@ -41,7 +41,6 @@ class BlinkViewApp:
     def init_console(self, level=LogLevel.ALL):
         """Lazy-loads and configures the console subscriber."""
         if self.console_sub is None:
-
             self.console_sub = self.registry.build_subscriber("CLI", "Console", console=self.console)
             # self.console_sub = ConsoleSubscriber(self.console, self.registry)
             self.console_sub.start()
@@ -50,7 +49,7 @@ class BlinkViewApp:
 
     def _signal_handler(self, signum, frame):
         """Catches OS signals to shut down cleanly."""
-        self.input_queue.put('q')
+        self.input_queue.put("q")
 
     def _keyboard_listener(self):
         """Background thread to catch raw keystrokes."""
@@ -58,28 +57,31 @@ class BlinkViewApp:
             try:
                 key = readchar.readkey().lower()
                 self.input_queue.put(key)
-                if key == 'q':
+                if key == "q":
                     break
             except KeyboardInterrupt:
-                self.input_queue.put('q')
+                self.input_queue.put("q")
                 break
 
     def handle_input(self, key: str):
         """Routes the parsed keystrokes to the correct actions."""
-        if key == 'q':
+        if key == "q":
             self.console.print("\n[bold yellow]Quit signal received...[/bold yellow]")
             self.running = False
 
-        elif key in ('i', 'a', 'd', 'e', 'w'):
+        elif key in ("i", "a", "d", "e", "w"):
             # Map keys directly to LogLevels
             level_map = {
-                'a': LogLevel.ALL, 'd': LogLevel.DEBUG,
-                'i': LogLevel.INFO, 'w': LogLevel.WARN, 'e': LogLevel.ERROR
+                "a": LogLevel.ALL,
+                "d": LogLevel.DEBUG,
+                "i": LogLevel.INFO,
+                "w": LogLevel.WARN,
+                "e": LogLevel.ERROR,
             }
             if self.console_sub:
                 self.console_sub.set_level(level_map[key])
 
-        elif key == 'r':
+        elif key == "r":
             # destroy and recreate registry
             is_console_enabled = self.console_sub is not None
             if is_console_enabled:
@@ -93,12 +95,12 @@ class BlinkViewApp:
             if is_console_enabled:
                 self.init_console(log_level)
 
-        elif key == 's':
+        elif key == "s":
             if self.console_sub is None:
                 self.init_console()
             else:
                 self.console_sub.streaming = not self.console_sub.streaming
-                state = 'resumed' if self.console_sub.streaming else 'paused'
+                state = "resumed" if self.console_sub.streaming else "paused"
                 self.console.print(f"Streaming {state}. Press 's' to toggle.")
 
     def run(self):
@@ -129,11 +131,11 @@ class BlinkViewApp:
                     pass
 
         finally:
-            self.console.print('Exiting...')
+            self.console.print("Exiting...")
             if self.console_sub:
                 self.console_sub.stop()
             self.registry.stop()
-            self.console.print('[grey50]BlinkView session ended.[/grey50]')
+            self.console.print("[grey50]BlinkView session ended.[/grey50]")
 
 
 def main():

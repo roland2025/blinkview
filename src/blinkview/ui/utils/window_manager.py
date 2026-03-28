@@ -58,12 +58,12 @@ def restore_window_geometry_safe(window, geo_dict: dict):
 
     window._last_saved_geo = geo_dict
 
-    # 1. Restore Native Geometry (This handles Maximize/Minimize/Fullscreen states)
+    # Restore Native Geometry (This handles Maximize/Minimize/Fullscreen states)
     geometry_b64 = geo_dict.get("geometry")
     if geometry_b64:
         window.restoreGeometry(QByteArray(b64decode(geometry_b64)))
 
-    # 2. ATOMIC OVERRIDE:
+    # ATOMIC OVERRIDE:
     # Instead of move() then resize(), we use setGeometry() which defines the
     # exact inner rectangle of the window.
     frame_pos = geo_dict.get("frame_pos")
@@ -77,7 +77,7 @@ def restore_window_geometry_safe(window, geo_dict: dict):
         # Set the EXACT rectangle for the internal part of the window
         window.setGeometry(frame_pos[0], frame_pos[1] - title_bar_height, client_size[0], client_size[1])
 
-    # 3. Off-screen check (unchanged)
+    # Off-screen check (unchanged)
     frame = window.frameGeometry()
     if QGuiApplication.screenAt(frame.center()) is None:
         reattach_func = getattr(window, "reattach_to_main", None)
@@ -142,7 +142,7 @@ class WindowManager:
         for window, content in self._windows.items():
             # Basic validation to ensure the C++ object still exists
             try:
-                # 1. Use get_params() if it exists; fallback to tab_params; then empty dict
+                # Use get_params() if it exists; fallback to tab_params; then empty dict
                 if hasattr(content, "get_state"):
                     params = content.get_state()
                 else:

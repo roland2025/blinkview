@@ -7,8 +7,8 @@
 from collections import deque
 from typing import Iterable
 
-from PySide6.QtWidgets import QSplitter, QSizePolicy, QComboBox, QWidget, QVBoxLayout, QToolBar
-from PySide6.QtGui import Qt, QAction
+from PySide6.QtGui import QAction, Qt
+from PySide6.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
@@ -88,7 +88,9 @@ QToolButton[filterEnabled="true"] {
         self.toolbar.setMovable(False)
         self.layout.addWidget(self.toolbar)
 
-        print(f"[LogViewer] Initializing allowed_device={self.allowed_device} filtered_module={self.filtered_module} children={self.filtered_module_children} log_level={self.log_level}")
+        print(
+            f"[LogViewer] Initializing allowed_device={self.allowed_device} filtered_module={self.filtered_module} children={self.filtered_module_children} log_level={self.log_level}"
+        )
         self.action_toggle_filter = QAction("Filter", self)
         self.action_toggle_filter.setCheckable(True)
         self.action_toggle_filter.setChecked(self.show_module_filter)
@@ -108,17 +110,25 @@ QToolButton[filterEnabled="true"] {
         # --- SHIFT TOGGLES ---
         self.column_actions = {}
 
-        # 1. Add the Master "ALL" Toggle
+        # Add the Master "ALL" Toggle
         self.action_all = QAction("ALL", self)
         self.action_all.setCheckable(True)
         self.action_all.setChecked(True)
         self.action_all.toggled.connect(self._toggle_all_columns)
         self.toolbar.addAction(self.action_all)
 
-        self.column_actions['show_ts'] = self._add_toggle("Time", self.show_ts, lambda c: self._toggle_col('show_ts', c))
-        self.column_actions['show_dev'] = self._add_toggle("Device", self.show_dev, lambda c: self._toggle_col('show_dev', c))
-        self.column_actions['show_lvl'] = self._add_toggle("Level", self.show_lvl, lambda c: self._toggle_col('show_lvl', c))
-        self.column_actions['show_mod'] = self._add_toggle("Module", self.show_mod, lambda c: self._toggle_col('show_mod', c))
+        self.column_actions["show_ts"] = self._add_toggle(
+            "Time", self.show_ts, lambda c: self._toggle_col("show_ts", c)
+        )
+        self.column_actions["show_dev"] = self._add_toggle(
+            "Device", self.show_dev, lambda c: self._toggle_col("show_dev", c)
+        )
+        self.column_actions["show_lvl"] = self._add_toggle(
+            "Level", self.show_lvl, lambda c: self._toggle_col("show_lvl", c)
+        )
+        self.column_actions["show_mod"] = self._add_toggle(
+            "Module", self.show_mod, lambda c: self._toggle_col("show_mod", c)
+        )
 
         self.toolbar.addSeparator()
 
@@ -146,7 +156,7 @@ QToolButton[filterEnabled="true"] {
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-        # 2. Add it to the toolbar (this pushes everything following it to the right)
+        # Add it to the toolbar (this pushes everything following it to the right)
         self.toolbar.addWidget(spacer)
 
         self.action_telemetry = QAction("Telemetry Table", self)
@@ -158,12 +168,16 @@ QToolButton[filterEnabled="true"] {
         self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self.layout.addWidget(self.splitter)
 
-        self.log_filter = LogFilter(self.gui_context.id_registry, self.allowed_device, self.filtered_module, log_level=self.log_level, filtered_module_children=self.filtered_module_children)
+        self.log_filter = LogFilter(
+            self.gui_context.id_registry,
+            self.allowed_device,
+            self.filtered_module,
+            log_level=self.log_level,
+            filtered_module_children=self.filtered_module_children,
+        )
 
         self.filter_sidebar = ModuleFilterSidebar(
-            gui_context=self.gui_context,
-            target_filter=self.log_filter,
-            parent=self
+            gui_context=self.gui_context, target_filter=self.log_filter, parent=self
         )
 
         self.filter_sidebar.restore_state(self.filter_sidebar_state)
@@ -200,7 +214,7 @@ QToolButton[filterEnabled="true"] {
                 "filtered_module": self.filtered_module,
                 "filtered_module_children": self.filtered_module_children,
             },
-            parent=self
+            parent=self,
         )
 
         self.telemetry_sidebar.setMinimumWidth(250)
@@ -228,8 +242,8 @@ QToolButton[filterEnabled="true"] {
             show_mod_btn = False  # If we're filtering to a specific module, the module column is redundant
             show_dev_btn = False
 
-        self.column_actions['show_dev'].setVisible(show_dev_btn)
-        self.column_actions['show_mod'].setVisible(show_mod_btn)
+        self.column_actions["show_dev"].setVisible(show_dev_btn)
+        self.column_actions["show_mod"].setVisible(show_mod_btn)
 
         self.action_toggle_filter.setVisible(self.filtered_module is None)
 
@@ -251,9 +265,13 @@ QToolButton[filterEnabled="true"] {
     def restore(self, state: dict):
         self.tab_name = state.get("tab_name", self.tab_name)
 
-        self.allowed_device = self.gui_context.id_registry.resolve_device(state.get("allowed_device", self.allowed_device))
+        self.allowed_device = self.gui_context.id_registry.resolve_device(
+            state.get("allowed_device", self.allowed_device)
+        )
 
-        self.filtered_module = self.gui_context.id_registry.resolve_module(state.get("filtered_module", self.filtered_module))
+        self.filtered_module = self.gui_context.id_registry.resolve_module(
+            state.get("filtered_module", self.filtered_module)
+        )
 
         self.filtered_module_children = state.get("filtered_module_children", self.filtered_module_children)
         self.log_level = state.get("log_level", self.log_level)
@@ -282,10 +300,10 @@ QToolButton[filterEnabled="true"] {
                 "show_mod": self.show_mod,
                 "show_module_filter": self.show_module_filter,
                 "show_telemetry": self.show_telemetry,
-                "splitter_sizes": self.splitter.sizes()
+                "splitter_sizes": self.splitter.sizes(),
             },
             "log_level": self.log_filter.log_level.name_conf,
-            "filter_sidebar": self.filter_sidebar.get_state()
+            "filter_sidebar": self.filter_sidebar.get_state(),
         }
 
     def _handle_level_change(self, index):
@@ -471,9 +489,7 @@ QToolButton[filterEnabled="true"] {
         """Special one-time call for the initial historical load."""
         try:
             history = self.gui_context.registry.central.get_rows(
-                self.log_filter,
-                total=self.max_rows,
-                after_seq=self.latest_seq_seen
+                self.log_filter, total=self.max_rows, after_seq=self.latest_seq_seen
             )
 
             self.process_log_batch(history, load_history=True)

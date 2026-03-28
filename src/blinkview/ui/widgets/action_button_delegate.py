@@ -6,8 +6,8 @@
 
 from time import perf_counter
 
-from PySide6.QtGui import QColor, QBrush, QFont
-from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QStyleOptionButton, QApplication
+from PySide6.QtGui import QBrush, QColor, QFont
+from PySide6.QtWidgets import QApplication, QStyle, QStyledItemDelegate, QStyleOptionButton
 
 from blinkview.ui.widgets.config.style_config import StyleConfig
 
@@ -37,13 +37,12 @@ class ActionButtonDelegate(QStyledItemDelegate):
         return False
 
 
-from time import perf_counter
-from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QApplication
-from PySide6.QtGui import QColor, QBrush, QPalette
-from PySide6.QtCore import Qt
-
-
 from enum import IntEnum, auto
+from time import perf_counter
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor, QPalette
+from PySide6.QtWidgets import QApplication, QStyle, QStyledItemDelegate
 
 
 class TelemetryCol(IntEnum):
@@ -80,10 +79,10 @@ class TelemetryDelegate(QStyledItemDelegate):
             self._flash_brushes.append(QBrush(c))
 
     def paint(self, painter, option, index):
-        # 1. Setup Source Model Access
+        # Setup Source Model Access
         theme = self.theme
         model = index.model()
-        if hasattr(model, 'mapToSource'):
+        if hasattr(model, "mapToSource"):
             source_index = model.mapToSource(index)
             actual_model = model.sourceModel()
         else:
@@ -96,7 +95,7 @@ class TelemetryDelegate(QStyledItemDelegate):
         elapsed_since_arrival = now - state.last_arrival_time
         is_stale = state.last_painted_row and (elapsed_since_arrival > theme.stale_threshold)
 
-        # 2. Use change time for the flash
+        # Use change time for the flash
         elapsed_since_change = now - state.last_change_time
 
         painter.save()
@@ -124,7 +123,7 @@ class TelemetryDelegate(QStyledItemDelegate):
 
         elif col == TelemetryCol.VALUE:
             # Safe access to the level color
-            color = getattr(state.last_painted_row.level, 'color', theme.color_text_default)
+            color = getattr(state.last_painted_row.level, "color", theme.color_text_default)
 
         else:
             color = self.theme.color_text_default

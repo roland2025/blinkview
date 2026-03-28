@@ -4,9 +4,9 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import re
 from threading import Lock
 from typing import TYPE_CHECKING
-import re
 
 if TYPE_CHECKING:
     from blinkview.core.id_registry import IDRegistry
@@ -14,29 +14,38 @@ if TYPE_CHECKING:
 
 class ModuleIdentity:
     __slots__ = (
-        'id', 'name', 'short_name', 'depth', 'device', 'parent',
-        'submodules', 'submodule_list', 'latest_row',
-        '_descendant_cache', "meta"
+        "id",
+        "name",
+        "short_name",
+        "depth",
+        "device",
+        "parent",
+        "submodules",
+        "submodule_list",
+        "latest_row",
+        "_descendant_cache",
+        "meta",
     )
 
-    def __init__(self, module_id: int, name: str, full_path: str, depth: int, device_identity: 'DeviceIdentity',
-                 parent=None):
+    def __init__(
+        self, module_id: int, name: str, full_path: str, depth: int, device_identity: "DeviceIdentity", parent=None
+    ):
         self.id = module_id
         self.name = full_path
         self.short_name = name
         self.depth = depth
         self.device = device_identity
-        self.parent: 'ModuleIdentity' = parent
+        self.parent: "ModuleIdentity" = parent
 
-        self.submodules: dict[str, 'ModuleIdentity'] = {}
-        self.submodule_list: list['ModuleIdentity'] = []
+        self.submodules: dict[str, "ModuleIdentity"] = {}
+        self.submodule_list: list["ModuleIdentity"] = []
 
         self.latest_row = None
-        self._descendant_cache: list['ModuleIdentity'] = []
+        self._descendant_cache: list["ModuleIdentity"] = []
 
         self.meta = None
 
-    def _bubble_up_new_child(self, new_module: 'ModuleIdentity'):
+    def _bubble_up_new_child(self, new_module: "ModuleIdentity"):
         """Appends the new module to this node's cache and continues up."""
         self._descendant_cache = self._descendant_cache + [new_module]  # noqa
 
@@ -44,7 +53,7 @@ class ModuleIdentity:
             self.parent._bubble_up_new_child(new_module)
         # If no parent, we are the Device Root; bubbling stops here.
 
-    def get_all_descendants(self) -> list['ModuleIdentity']:
+    def get_all_descendants(self) -> list["ModuleIdentity"]:
         """Returns all descendants in the subtree rooted at this module, excluding itself."""
         return self._descendant_cache
 
@@ -65,14 +74,11 @@ def print_tree_recursive(node: ModuleIdentity, indent=0):
 
 
 class DeviceIdentity:
-    __slots__ = (
-        'id', 'name', 'root', 'modules', 'path_lookup',
-        '_id_registry', 'module_list', 'device_ref', '_lock'
-    )
+    __slots__ = ("id", "name", "root", "modules", "path_lookup", "_id_registry", "module_list", "device_ref", "_lock")
 
-    _VALID_NAME_REGEX = re.compile(r'^[a-z0-9_.]+$')
+    _VALID_NAME_REGEX = re.compile(r"^[a-z0-9_.]+$")
 
-    def __init__(self, device_id: int, name: str, id_registry: 'IDRegistry', device_ref=None):
+    def __init__(self, device_id: int, name: str, id_registry: "IDRegistry", device_ref=None):
         self.id = device_id
         self.name = name
         self.device_ref = device_ref
@@ -80,7 +86,7 @@ class DeviceIdentity:
 
         self._lock = Lock()
 
-        # 1. Create the Super Root
+        # Create the Super Root
         # This module represents the device itself in the tree.
         root_id = self._id_registry._generate_module_id()
         self.root = ModuleIdentity(
@@ -88,10 +94,10 @@ class DeviceIdentity:
             name=self.name.lower(),
             full_path="",  # Root has no path prefix
             depth=0,
-            device_identity=self
+            device_identity=self,
         )
 
-        # 2. Registries
+        # Registries
         self.path_lookup: dict[str, ModuleIdentity] = {}
         self.modules: dict[int, ModuleIdentity] = {root_id: self.root}
         self.module_list: list[ModuleIdentity] = [self.root]
@@ -114,7 +120,7 @@ class DeviceIdentity:
         if not self._VALID_NAME_REGEX.match(path):
             raise ValueError(f"Invalid path: '{path}'")
 
-        parts = path.split('.')
+        parts = path.split(".")
 
         # Start the traversal from the Super Root
         parent_node = self.root
@@ -146,7 +152,7 @@ class DeviceIdentity:
                         full_path=current_full_path,
                         depth=parent_node.depth + 1,
                         device_identity=self,
-                        parent=parent_node
+                        parent=parent_node,
                     )
 
                     # Global Registrations

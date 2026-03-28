@@ -105,9 +105,7 @@ from ..utils.level_map import LogLevel
     _factory_default="cantools",
     description="Assembles transformed CAN data into final LogRow objects, automatically routing to the correct module based on CAN ID.",
 )
-@configuration_property(
-    "sources_", type="string", required=True, _reference="/sources", default=""
-)
+@configuration_property("sources_", type="string", required=True, _reference="/sources", default="")
 @ParserFactory.register("can")
 class CANparser(BaseParser):
     __doc__ = """The specialized pipeline for processing discrete CAN bus frames.
@@ -146,9 +144,7 @@ Because CAN frames are already discrete packets, this parser avoids the overhead
 
         transformer_cfg = config.get("transform", {})
         if transformer_cfg:
-            self._transformer = factory_build(
-                "can_transform", transformer_cfg, system_ctx=self.shared
-            )
+            self._transformer = factory_build("can_transform", transformer_cfg, system_ctx=self.shared)
             self._transform = self._transformer.process
         else:
             self._transform = None
@@ -156,9 +152,7 @@ Because CAN frames are already discrete packets, this parser avoids the overhead
 
         assembler_cfg = config.get("assembler", {})
         if assembler_cfg:
-            self._assembler = factory_build(
-                "can_assembler", assembler_cfg, system_ctx=self.shared
-            )
+            self._assembler = factory_build("can_assembler", assembler_cfg, system_ctx=self.shared)
             self._assemble = self._assembler.process
         else:
             self._assembler = None
@@ -216,24 +210,20 @@ Because CAN frames are already discrete packets, this parser avoids the overhead
                 continue
 
             for timestamp_ns, can_msg in batch:
-                can_msg_original: "Message" = (
-                    can_msg  # Keep the original message for error reporting
-                )
+                can_msg_original: "Message" = can_msg  # Keep the original message for error reporting
                 # print(f"Received CAN message: {can_msg} at {timestamp_ns}")
 
                 try:
-                    # 1. Decode (e.g., apply cantools DBC mapping to dict)
+                    # Decode (e.g., apply cantools DBC mapping to dict)
                     if self._decode is not None:
                         can_msg = self._decode(can_msg)
                         # self.logger.trace(f"decoded: {timestamp_ns}: {can_msg}")
 
-                    # 2. Transform (e.g., math operations on specific fields)
+                    # Transform (e.g., math operations on specific fields)
                     if self._transform is not None:
-                        can_msg = self._transform(
-                            timestamp_ns, can_msg_original.arbitration_id, can_msg
-                        )
+                        can_msg = self._transform(timestamp_ns, can_msg_original.arbitration_id, can_msg)
 
-                    # 3. Assemble (Map to LogRow and specific ModuleIdentity)
+                    # Assemble (Map to LogRow and specific ModuleIdentity)
                     if self._assemble is not None:
                         can_msg = self._assemble(timestamp_ns, device_identity, can_msg)
                         # self.logger.trace(f"assembled: {timestamp_ns}: {can_msg}")
@@ -263,9 +253,7 @@ Because CAN frames are already discrete packets, this parser avoids the overhead
                     )
 
             # Time or Size-based flush check
-            if len(parsed_batch) >= max_batch or (
-                perf_counter() - last_flush_time >= max_timeout
-            ):
+            if len(parsed_batch) >= max_batch or (perf_counter() - last_flush_time >= max_timeout):
                 flush()
 
         # Flush any remaining batch on exit

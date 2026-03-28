@@ -7,19 +7,34 @@
 import socket
 from time import sleep
 
-from .BaseReader import DeviceFactory, BaseReader
 from ..core.base_configurable import configuration_property
+from .BaseReader import BaseReader, DeviceFactory
 
 
 @DeviceFactory.register("tcp_server")
-@configuration_property("host", type="string", default="0.0.0.0", required=True,
-                        description="The IP interface to bind to ('0.0.0.0' for all interfaces, 'localhost' for local only).")
-@configuration_property("port", type="integer", default=9000, required=True,
-                        description="The TCP port to listen on for incoming connections.")
-@configuration_property("maxlen", type="integer", default=1_000_000,
-                        description="The maximum internal byte buffer size before flushing.")
-@configuration_property("delay", type="integer", default=100,
-                        description="The maximum time (in milliseconds) to hold incoming bytes before flushing a batch downstream.")
+@configuration_property(
+    "host",
+    type="string",
+    default="0.0.0.0",
+    required=True,
+    description="The IP interface to bind to ('0.0.0.0' for all interfaces, 'localhost' for local only).",
+)
+@configuration_property(
+    "port",
+    type="integer",
+    default=9000,
+    required=True,
+    description="The TCP port to listen on for incoming connections.",
+)
+@configuration_property(
+    "maxlen", type="integer", default=1_000_000, description="The maximum internal byte buffer size before flushing."
+)
+@configuration_property(
+    "delay",
+    type="integer",
+    default=100,
+    description="The maximum time (in milliseconds) to hold incoming bytes before flushing a batch downstream.",
+)
 class TcpServerSource(BaseReader):
     __doc__ = """A TCP Server ingestion source for networked telemetry.
 
@@ -64,7 +79,7 @@ class TcpServerSource(BaseReader):
                 batch_bytes = 0
 
         while not stop_is_set():
-            # 1. Start the Server Socket if it isn't running
+            # Start the Server Socket if it isn't running
             if server_sock is None:
                 try:
                     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -86,7 +101,7 @@ class TcpServerSource(BaseReader):
 
             conn = None
             try:
-                # 2. Wait for a client (sender) to connect
+                # Wait for a client (sender) to connect
                 try:
                     conn, addr = server_sock.accept()
                     logger.info(f"✅ Client connected from {addr}")
@@ -97,7 +112,7 @@ class TcpServerSource(BaseReader):
                     # No client connected yet; loop around and check stop_is_set()
                     continue
 
-                # 3. Read loop for the active connection
+                # Read loop for the active connection
                 while not stop_is_set():
                     try:
                         bytes_to_read = max(4096, maxlen - batch_bytes)

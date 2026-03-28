@@ -33,9 +33,7 @@ class PipelineManager(BaseBindableConfigurable):
         # Maps device_name -> DevicePipeline
         self.pipelines: Dict[str, BaseParser] = {}
 
-        self.needs_delayed_init = (
-            True  # Flag to indicate if delayed initialization is needed
-        )
+        self.needs_delayed_init = True  # Flag to indicate if delayed initialization is needed
 
     # ==========================================
     # PIPELINE CONSTRUCTION
@@ -80,9 +78,7 @@ class PipelineManager(BaseBindableConfigurable):
                         device_id=device_id,
                     )
 
-                    item = factories.build(
-                        "parser", item_config, self.shared, local_ctx
-                    )
+                    item = factories.build("parser", item_config, self.shared, local_ctx)
                     self.pipelines[item_id] = item
 
                     # Register for individual config updates
@@ -96,9 +92,7 @@ class PipelineManager(BaseBindableConfigurable):
                     config_changed = item.apply_config(item_config)
 
                     if config_changed:
-                        self.logger.info(
-                            f"Pipeline '{item_id}' config changed; rebuilding topology."
-                        )
+                        self.logger.info(f"Pipeline '{item_id}' config changed; rebuilding topology.")
 
                         # Sever old links so we don't double-subscribe or leak data
                         if hasattr(item, "clear_all_links"):
@@ -115,7 +109,7 @@ class PipelineManager(BaseBindableConfigurable):
             except Exception as e:
                 self.logger.error(f"Failed to process pipeline '{item_id}'", e)
 
-        # --- 3. FINALIZATION ---
+        # ---FINALIZATION ---
         if not self.needs_delayed_init:
             # Ensure any new or updated items that should be running are started
             self.start()
@@ -133,21 +127,15 @@ class PipelineManager(BaseBindableConfigurable):
             print(f"Pipeline '{item_id}' has sources: {item.sources_}")
             # check if its a list or a single string
             self.logger.warn(f"Source '{item_id}' has sources: {item.sources_}")
-            sources = (
-                [item.sources_] if isinstance(item.sources_, str) else item.sources_
-            )
+            sources = [item.sources_] if isinstance(item.sources_, str) else item.sources_
             for source in sources:
                 print(f"Source '{item_id}' has source: {source}")
                 self.logger.debug(f"Source '{item_id}' has source: {source}")
                 self.shared.registry.get_reference_target(source).subscribe(item)
 
         if hasattr(item, "targets_"):
-            self.logger.warn(
-                f"Applying targets for source '{item_id}': {item.targets_}"
-            )
-            targets = (
-                [item.targets_] if isinstance(item.targets_, str) else item.targets_
-            )
+            self.logger.warn(f"Applying targets for source '{item_id}': {item.targets_}")
+            targets = [item.targets_] if isinstance(item.targets_, str) else item.targets_
 
             for target in targets:
                 target_ref = self.shared.registry.get_reference_target(target)
@@ -158,7 +146,7 @@ class PipelineManager(BaseBindableConfigurable):
         if ref is None:
             return
 
-        # 1. Map the fixed infrastructure
+        # Map the fixed infrastructure
         mapped_targets = {
             SysCat.REORDER: self.shared.registry.reorder,
             SysCat.STORAGE: self.shared.registry.central,
@@ -169,7 +157,7 @@ class PipelineManager(BaseBindableConfigurable):
         }
 
         if pipeline is not None:
-            # 2. Map the device-specific pipeline dynamically
+            # Map the device-specific pipeline dynamically
             # Check Reader capabilities
             if pipeline.reader is not None:
                 if hasattr(pipeline.reader, "put"):
@@ -184,7 +172,7 @@ class PipelineManager(BaseBindableConfigurable):
                 if hasattr(pipeline.parser, "subscribe"):
                     mapped_sources[SysCat.PARSER] = pipeline.parser
 
-        # 3. Connect Targets (Where 'ref' sends data TO)
+        # Connect Targets (Where 'ref' sends data TO)
         for target_key in getattr(ref, "targets", []):
             target_obj = mapped_targets.get(target_key)
             if target_obj:
@@ -197,7 +185,7 @@ class PipelineManager(BaseBindableConfigurable):
                     )
                     break
 
-        # 4. Connect Sources (Where 'ref' gets data FROM)
+        # Connect Sources (Where 'ref' gets data FROM)
         for source_key in getattr(ref, "sources", []):
             source_obj = mapped_sources.get(source_key)
             if source_obj and hasattr(source_obj, "subscribe"):
@@ -224,7 +212,5 @@ class PipelineManager(BaseBindableConfigurable):
             return self.shared.factories.get_base_schema("parser")
 
     def get(self, id_: str):
-        print(
-            f"PipelineManager: Retrieving pipeline with ID '{id_}' all: {list(self.pipelines.keys())}"
-        )
+        print(f"PipelineManager: Retrieving pipeline with ID '{id_}' all: {list(self.pipelines.keys())}")
         return self.pipelines.get(id_)

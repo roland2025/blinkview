@@ -7,9 +7,9 @@
 from pathlib import Path
 from time import sleep
 
-from .BaseReader import DeviceFactory, BaseReader
 from ..core.base_configurable import configuration_property
 from ..utils.paths import resolve_config_path
+from .BaseReader import BaseReader, DeviceFactory
 
 
 @DeviceFactory.register("binary_file")
@@ -19,25 +19,16 @@ from ..utils.paths import resolve_config_path
     required=True,
     ui_type="file",
     ui_file_filter="Binary Files (*.bin *.dat *.raw);;All Files (*)",
-    description="Path to the binary file to stream. Supports relative paths via resolve_config_path."
+    description="Path to the binary file to stream. Supports relative paths via resolve_config_path.",
 )
 @configuration_property(
-    "chunk_size",
-    type="integer",
-    default=8,
-    description="Number of bytes to read per injection 'tick'."
+    "chunk_size", type="integer", default=8, description="Number of bytes to read per injection 'tick'."
 )
 @configuration_property(
-    "frequency",
-    type="integer",
-    default=100,
-    description="Injection rate in Hz (times per second)."
+    "frequency", type="integer", default=100, description="Injection rate in Hz (times per second)."
 )
 @configuration_property(
-    "loop",
-    type="boolean",
-    default=True,
-    description="Restart from the beginning of the file when EOF is reached."
+    "loop", type="boolean", default=True, description="Restart from the beginning of the file when EOF is reached."
 )
 class BinaryFileReader(BaseReader):
     __doc__ = """A development replay tool for streaming raw binary data.
@@ -56,7 +47,7 @@ class BinaryFileReader(BaseReader):
         super().__init__()
 
     def run(self):
-        # 1. Setup and Path Resolution
+        # Setup and Path Resolution
         stop_is_set = self._stop_event.is_set
         time_ns = self.shared.time_ns
         logger = self.logger
@@ -73,7 +64,7 @@ class BinaryFileReader(BaseReader):
             logger.error(f"Binary file not found: {path}")
             return
 
-        # 2. Main Ingestion Loop
+        # Main Ingestion Loop
         f = None
         try:
             # open() accepts Path objects directly

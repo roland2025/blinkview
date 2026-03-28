@@ -18,9 +18,7 @@ class ConfigManager:
         self.filepath = filepath
         self.autosave_path = autosave_path
 
-        print(
-            f"[ConfigManager] Initialized with filepath: {self.filepath}, autosave_path: {self.autosave_path}"
-        )
+        print(f"[ConfigManager] Initialized with filepath: {self.filepath}, autosave_path: {self.autosave_path}")
 
         self._lock = threading.RLock()
 
@@ -106,9 +104,7 @@ class ConfigManager:
         from blinkview.utils.dict_utils import get_by_path
 
         with self._lock:
-            return get_by_path(
-                self._data, path, default, drop_keys, make_deep_copy, depth
-            )
+            return get_by_path(self._data, path, default, drop_keys, make_deep_copy, depth)
 
     # ==========================================
     # PUBLIC API: Write Operations
@@ -128,20 +124,16 @@ class ConfigManager:
 
         with self._lock:
             try:
-                # 1. Promote relative paths to absolute paths for the global data
+                # Promote relative paths to absolute paths for the global data
                 base_path = "" if path == "/" else path.rstrip("/")
                 global_patch = []
                 for op in patch:
                     new_op = op.copy()
                     rel_path = new_op["path"]
-                    new_op["path"] = (
-                        f"{base_path}{rel_path}"
-                        if rel_path.startswith("/")
-                        else f"{base_path}/{rel_path}"
-                    )
+                    new_op["path"] = f"{base_path}{rel_path}" if rel_path.startswith("/") else f"{base_path}/{rel_path}"
                     global_patch.append(new_op)
 
-                # 2. Apply the patch
+                # Apply the patch
 
                 import jsonpatch
 
@@ -153,17 +145,13 @@ class ConfigManager:
                 # Persistent Mirroring to Session
                 self.session_autosave()
 
-                # 3. Notify Subscribers
+                # Notify Subscribers
                 self._notify_subscribers(global_patch)
 
                 if self.config_changed_cb is not None:
                     new_config = self.get_by_path(path, make_deep_copy=True)
                     # print(f"[Registry] Calling config_changed_cb for {path} with new_config: {new_config}")
-                    schema = (
-                        self.get_schema_by_path(path)
-                        if self.get_schema_by_path
-                        else None
-                    )
+                    schema = self.get_schema_by_path(path) if self.get_schema_by_path else None
                     self.config_changed_cb(path, new_config, schema)
 
             except Exception as e:
@@ -187,13 +175,11 @@ class ConfigManager:
 
             should_notify = False
             for patch_path in affected_paths:
-                patch_slashed = (
-                    patch_path if patch_path.endswith("/") else patch_path + "/"
-                )
+                patch_slashed = patch_path if patch_path.endswith("/") else patch_path + "/"
 
-                # 1. Did a child of the subscribed path change?
+                # Did a child of the subscribed path change?
                 is_child = patch_slashed.startswith(sub_slashed)
-                # 2. Did a parent of the subscribed path change?
+                # Did a parent of the subscribed path change?
                 is_parent = sub_slashed.startswith(patch_slashed)
 
                 if is_child or is_parent or sub_path == "/":
@@ -240,14 +226,8 @@ class ConfigManager:
         editable: bool = True,
         depth: int = None,
     ):
-        config = self.get_by_path(
-            path, drop_keys=drop_keys, make_deep_copy=editable, depth=depth
-        )
-        schema = (
-            self.get_schema_by_path(path, drop_keys=drop_keys)
-            if self.get_schema_by_path
-            else None
-        )
+        config = self.get_by_path(path, drop_keys=drop_keys, make_deep_copy=editable, depth=depth)
+        schema = self.get_schema_by_path(path, drop_keys=drop_keys) if self.get_schema_by_path else None
         return config, schema
 
     def get_data(self):

@@ -132,24 +132,18 @@ class UpdateWidget(QWidget):
             self.updater = Updater(self.gui_context.settings)
             self.status_label.setText(f"<b>Current Version:</b> v{__version__}")
             self.fetch_btn.setEnabled(True)
-            self.config_btn.setVisible(
-                False
-            )  # Hide the config button if the updater initializes successfully
+            self.config_btn.setVisible(False)  # Hide the config button if the updater initializes successfully
             return True
         except UpdateError:
             # This happens if update.path is not set
-            self.status_label.setText(
-                "<b>Status:</b> <span style='color:red;'>Update path not configured.</span>"
-            )
+            self.status_label.setText("<b>Status:</b> <span style='color:red;'>Update path not configured.</span>")
             self.fetch_btn.setEnabled(False)
             return self.prompt_for_path()
 
     def prompt_for_path(self) -> bool:
         """Opens a folder dialog and validates the selection using the static method."""
         current_path = self.gui_context.settings.get("update.path", "")
-        selected_path = QFileDialog.getExistingDirectory(
-            self, "Select BlinkView Source Repository", current_path
-        )
+        selected_path = QFileDialog.getExistingDirectory(self, "Select BlinkView Source Repository", current_path)
 
         if not selected_path:
             return False
@@ -231,15 +225,13 @@ class UpdateWidget(QWidget):
 
         if confirm == MessageBox.Btn.Yes:
             try:
-                # 1. Execute the registration callback (e.g., writing to a config or starting a shim)
+                # Execute the registration callback (e.g., writing to a config or starting a shim)
                 self.gui_context.set_update_version(version)
 
-                # 2. Hard exit to release file locks for the installer
+                # Hard exit to release file locks for the installer
                 print(f"Update registered for {version}. Shutting down.")
             except Exception as e:
-                MessageBox.critical(
-                    self, "Registration Error", f"Failed to register update: {e}"
-                )
+                MessageBox.critical(self, "Registration Error", f"Failed to register update: {e}")
 
     def update_status(self):
         last_time = self.gui_context.settings.get("update.last_fetch_time", 0)
@@ -265,9 +257,7 @@ class UpdateWidget(QWidget):
                 # Further back: "Mar 25"
                 display_time = dt.strftime("%b %d")
 
-        self.status_label.setText(
-            f"<b>Version:</b> v{__version__} <small>(Checked: {display_time})</small>"
-        )
+        self.status_label.setText(f"<b>Version:</b> v{__version__} <small>(Checked: {display_time})</small>")
 
     def _on_fetch_finished(self, versions):
         self.gui_context.settings.set("update.last_fetch_time", time(), scope="global")

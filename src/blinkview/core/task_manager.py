@@ -7,16 +7,17 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from concurrent.futures import ThreadPoolExecutor, Future
+    from concurrent.futures import Future, ThreadPoolExecutor
 
-import time
 import threading
+import time
 from typing import Callable
 
 
 class TaskManager:
     def __init__(self, max_workers: int = 5):
         from concurrent.futures import ThreadPoolExecutor
+
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
 
         self._periodic_tasks: dict[str, dict] = {}
@@ -28,7 +29,7 @@ class TaskManager:
         self._scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
         self._scheduler_thread.start()
 
-    def run_task(self, func: Callable, *args, **kwargs) -> 'Future':
+    def run_task(self, func: Callable, *args, **kwargs) -> "Future":
         """Runs a one-off task immediately in the thread pool."""
         return self.executor.submit(func, *args, **kwargs)
 
@@ -36,6 +37,7 @@ class TaskManager:
         """Registers a task and wakes the scheduler to recalculate its sleep time."""
 
         import uuid
+
         task_id = str(uuid.uuid4())
 
         with self._condition:
@@ -44,7 +46,7 @@ class TaskManager:
                 "func": func,
                 "args": args,
                 "kwargs": kwargs,
-                "next_run": time.time() + interval_seconds
+                "next_run": time.time() + interval_seconds,
             }
             # Interrupt the scheduler's sleep so it knows about the new task
             self._condition.notify()
@@ -68,20 +70,20 @@ class TaskManager:
                 now = time.time()
                 next_wakeup = None
 
-                # 1. Dispatch due tasks and update their next run times
+                # Dispatch due tasks and update their next run times
                 for task in self._periodic_tasks.values():
                     if now >= task["next_run"]:
                         self.executor.submit(task["func"], *task["args"], **task["kwargs"])
                         task["next_run"] = now + task["interval"]
 
-                # 2. Find the earliest upcoming task
+                # Find the earliest upcoming task
                 if self._periodic_tasks:
                     next_wakeup = min(task["next_run"] for task in self._periodic_tasks.values())
 
                 if not self._running:
                     break
 
-                # 3. Sleep until the next task is due, or until interrupted
+                # Sleep until the next task is due, or until interrupted
                 if next_wakeup is None:
                     # No tasks registered. Sleep indefinitely until .notify() is called
                     self._condition.wait()

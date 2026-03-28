@@ -4,15 +4,14 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from heapq import heappush, heappop
+from heapq import heappop, heappush
 
-from blinkview.core.base_reorder import ReorderFactory, BaseReorder
+from blinkview.core.base_reorder import BaseReorder, ReorderFactory
 from blinkview.core.batch_queue import BatchQueue
 
 
 # @ReorderFactory.register("heapq")
 class ReorderBuffer(BaseReorder):
-
     def __init__(self):
         super().__init__()
 
@@ -36,7 +35,7 @@ class ReorderBuffer(BaseReorder):
 
         stop_is_set = self._stop_event.is_set
         while not stop_is_set():
-            # 1. Peek at the heap to see how long we CAN wait
+            # Peek at the heap to see how long we CAN wait
             # We use a fresh time here just for the timeout calculation
             loop_start = time_ns()
 
@@ -47,10 +46,10 @@ class ReorderBuffer(BaseReorder):
             else:
                 timeout_sec = 0.1
 
-            # 2. Block for new data
+            # Block for new data
             in_batch = get(timeout=timeout_sec)
 
-            # 3. CRITICAL: Update 'now' AFTER the block
+            # CRITICAL: Update 'now' AFTER the block
             # This is the real "current time" for the popping logic
             now = time_ns()
 
@@ -59,7 +58,7 @@ class ReorderBuffer(BaseReorder):
                 for item in in_batch:
                     push(heap, item)
 
-            # 4. Drain the "Mature" items
+            # Drain the "Mature" items
             # An item is mature if it has lived in our buffer for at least delay_ns
             out_batch = []
             append = out_batch.append

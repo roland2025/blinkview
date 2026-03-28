@@ -4,8 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QToolBar, QComboBox, QLabel, QHeaderView, QTableView
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtWidgets import QComboBox, QHeaderView, QLabel, QTableView, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.module_filter_table import ModuleFilterTable, TempLogFilter
@@ -23,18 +23,18 @@ class ModuleFilterSidebar(QWidget):
         self.gui_context = gui_context
         self.log_filter = TempLogFilter(gui_context, target_filter)
 
-        # 1. Main Layout
+        # Main Layout
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(0)
 
-        # 2. Setup Toolbar
+        # Setup Toolbar
         self.toolbar = QToolBar(self)
         self.toolbar.setMovable(False)
         self.toolbar.setIconSize(QSize(16, 16))
         self.layout.addWidget(self.toolbar)
 
-        # 2. Add the Master "Enable" Toggle
+        # Add the Master "Enable" Toggle
         # We use a checkable action for that 'pushed-in' look
         self.action_enable = self.toolbar.addAction("Enable Filter")
         self.action_enable.setCheckable(True)
@@ -44,7 +44,7 @@ class ModuleFilterSidebar(QWidget):
 
         self.toolbar.addSeparator()
 
-        # 3. Add the Global Level Selector to the Toolbar
+        # Add the Global Level Selector to the Toolbar
         self.toolbar.addWidget(QLabel(" Min: "))
         self.level_combo = QComboBox()
         for lvl in LogLevel.LIST:
@@ -55,7 +55,7 @@ class ModuleFilterSidebar(QWidget):
 
         self.toolbar.addSeparator()
 
-        # 5. Add Pause Indicator
+        # Add Pause Indicator
         self.pause_label = QLabel(" ⏸ Sync Paused ")
         # self.pause_label.setStyleSheet("color: #888; font-style: italic; font-size: 10px;")
         # self.pause_label.setVisible(True)ÄÖÖ
@@ -63,13 +63,11 @@ class ModuleFilterSidebar(QWidget):
         self.pause_action.setVisible(False)
 
         # Connect to the shared model signal
-        self.gui_context.module_filter_model.sync_paused_changed.connect(
-            self.pause_action.setVisible
-        )
+        self.gui_context.module_filter_model.sync_paused_changed.connect(self.pause_action.setVisible)
 
         self.gui_context.module_filter_model.sync_paused_changed.connect(self.print_visible)
 
-        # 4. Add the Table (The existing logic)
+        # Add the Table (The existing logic)
         self.table = ModuleFilterTable(gui_context, self.log_filter, self)
         self.table.setEnabled(self.action_enable.isChecked())
         self.layout.addWidget(self.table)
@@ -109,7 +107,7 @@ class ModuleFilterSidebar(QWidget):
         return {
             "enabled": self.log_filter.enabled,
             "global_level": self.level_combo.itemData(self.level_combo.currentIndex()).name_conf,
-            "module_filters": self.log_filter.get_state()
+            "module_filters": self.log_filter.get_state(),
         }
 
     def restore_state(self, state):

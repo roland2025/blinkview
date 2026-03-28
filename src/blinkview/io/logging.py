@@ -5,14 +5,14 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import queue
-
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     import logging
     from logging import LogRecord
 
-from .BaseReader import DeviceFactory, BaseReader
 from ..core.base_configurable import configuration_property
+from .BaseReader import BaseReader, DeviceFactory
 
 
 def _get_logger_handler_class():
@@ -39,11 +39,22 @@ def _get_logger_handler_class():
 
 
 @DeviceFactory.register("logging")
-@configuration_property("level", type="string", default="INFO", enum=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], description="Sets the global root logger level.")
-@configuration_property("maxlen", type="integer", default=1000,
-                        description="The maximum number of LogRecords to batch before flushing.")
-@configuration_property("delay", type="integer", default=100,
-                        description="The maximum time (in milliseconds) to hold records before flushing a batch.")
+@configuration_property(
+    "level",
+    type="string",
+    default="INFO",
+    enum=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+    description="Sets the global root logger level.",
+)
+@configuration_property(
+    "maxlen", type="integer", default=1000, description="The maximum number of LogRecords to batch before flushing."
+)
+@configuration_property(
+    "delay",
+    type="integer",
+    default=100,
+    description="The maximum time (in milliseconds) to hold records before flushing a batch.",
+)
 class LoggerReader(BaseReader):
     __doc__ = """Universal in-memory ingestion source.
 
@@ -71,7 +82,7 @@ objects downstream based on count or time.
 
         import logging
 
-        # 1. Attach to the global Root Logger
+        # Attach to the global Root Logger
         root_logger = logging.getLogger()
         root_logger.addHandler(self.handler)
 
@@ -112,7 +123,7 @@ objects downstream based on count or time.
                     flush()
 
         finally:
-            # 2. Crucial Cleanup: Detach from the Root Logger on exit
+            # Crucial Cleanup: Detach from the Root Logger on exit
             flush()
             root_logger.removeHandler(self.handler)
             logger.info("Global Logger Reader Thread stopped and detached.")

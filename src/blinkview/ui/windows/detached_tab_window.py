@@ -68,14 +68,14 @@ class DetachedTabWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window closing, ensuring we don't touch deleted C++ objects."""
 
-        # 1. If we are force-destroying, just clear references and exit
+        # If we are force-destroying, just clear references and exit
         if self._force_destroy:
             self.setCentralWidget(None)
             self.widget = None
             event.accept()
             return
 
-        # 2. Re-attach logic (Standard close)
+        # Re-attach logic (Standard close)
         # Check if the python reference exists AND the C++ object is still alive
         if self.widget is not None and isValid(self.widget):
             try:

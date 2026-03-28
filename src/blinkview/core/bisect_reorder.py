@@ -7,7 +7,7 @@
 from bisect import bisect_right
 from operator import attrgetter
 
-from blinkview.core.base_reorder import ReorderFactory, BaseReorder
+from blinkview.core.base_reorder import BaseReorder, ReorderFactory
 from blinkview.core.batch_queue import BatchQueue
 
 
@@ -31,13 +31,13 @@ class Reorder(BaseReorder):
 
         # Fast C-level attribute lookup for the sort and bisect
         # Replace 'timestamp_ns' with the exact name of the attribute on your LogRow
-        get_ts = attrgetter('timestamp_ns')
+        get_ts = attrgetter("timestamp_ns")
 
         stop_is_set = self._stop_event.is_set
         while not stop_is_set():
             now = time_ns()
 
-            # 1. DYNAMIC TIMEOUT
+            # DYNAMIC TIMEOUT
             if buffer:
                 # buffer[0] is guaranteed to be the oldest item because we sort it
                 wait_ns = (buffer[0].timestamp_ns + delay_ns) - now
@@ -46,7 +46,7 @@ class Reorder(BaseReorder):
                 # Idle state: sleep until data arrives or 100ms passes
                 timeout_sec = 0.1
 
-            # 2. GREEDY FETCH
+            # GREEDY FETCH
             # The OS blocks this thread perfectly based on the oldest item's needs
 
             batches = []
@@ -56,11 +56,10 @@ class Reorder(BaseReorder):
             # batches = get_many(timeout=timeout_sec)
 
             if batches:
-                # 3. FAST C-LEVEL EXTEND
                 for in_batch in batches:
                     buffer.extend(in_batch)
 
-                # 4. TIMSORT
+                # TIMSORT
                 # We only sort if new data arrived.
                 # Timsort is brutally fast here because the list is already 99% sorted.
                 buffer.sort(key=get_ts)
@@ -68,16 +67,16 @@ class Reorder(BaseReorder):
             if not buffer:
                 continue
 
-            # 5. RECALCULATE TIME
+            # RECALCULATE TIME
             # We must check the clock again because get_many() might have blocked
             now = time_ns()
             cutoff = now - delay_ns
 
-            # 6. C-LEVEL BINARY SEARCH (Python 3.10+)
+            # C-LEVEL BINARY SEARCH (Python 3.10+)
             # Finds exactly where the mature items end and the delayed items begin
             split_idx = bisect_right_(buffer, cutoff, key=get_ts)
 
-            # 7. SLICE AND DISTRIBUTE
+            # SLICE AND DISTRIBUTE
             if split_idx > 0:
                 out_batch = buffer[:split_idx]
                 buffer = buffer[split_idx:]  # Slice off the processed items
