@@ -273,6 +273,8 @@ class Registry:
 
                     self.reorder = factories.build("reorder", reorder_config, system_ctx, local_ctx)
 
+                    self.reorder.subscribe("reorder", self.reorder)
+
                     self.reorder.reference_id = "reorder"
             except Exception as e:
                 print(f"[Registry] Error configuring reorder buffer: {e}")
@@ -293,6 +295,8 @@ class Registry:
                     self.central = factories.build("central", central_storage_config, system_ctx, local_ctx)
                     if self.reorder is not None:
                         self.reorder.subscribe(self.central)
+
+                    self.config.subscribe("central", self.central)
 
                     self.central.reference_id = "central"
             except Exception as e:
