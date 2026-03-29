@@ -125,7 +125,7 @@ class WidgetFactory:
         enums = schema.get("enum", [])
         descriptions = schema.get("enum_descriptions", enums)
 
-        # --- NEW: Grab the tooltips array (if it exists) ---
+        # --- Grab the tooltips array (if it exists) ---
         tooltips = schema.get("enum_tooltips", [])
 
         is_custom_allowed = schema.get("_allow_custom", False)
@@ -134,7 +134,7 @@ class WidgetFactory:
             desc = descriptions[i] if i < len(descriptions) else str(item)
             widget.addItem(str(desc), userData=item)
 
-            # --- FIX: Apply the rich tooltip if available, otherwise fallback to the value ---
+            # --- Apply the rich tooltip if available, otherwise fallback to the value ---
             if i < len(tooltips) and tooltips[i]:
                 widget.setItemData(i, str(tooltips[i]), Qt.ToolTipRole)
             else:
@@ -170,14 +170,14 @@ class WidgetFactory:
             try:
                 available_key_values = node_context.manager.get_reference_values(ref_path)
 
-                # --- NEW: Iterate over both key (k) and value (v) ---
+                # --- Iterate over both key (k) and value (v) ---
                 for k, v in available_key_values:
                     # Show the value if it exists, otherwise fallback to showing the key
                     display_text = str(v) if v else str(k)
 
                     item = QListWidgetItem(display_text)
 
-                    # --- NEW: Hide the actual key inside the item ---
+                    # --- Hide the actual key inside the item ---
                     item.setData(Qt.UserRole, k)
 
                     item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
@@ -251,7 +251,7 @@ class WidgetFactory:
 
         if isinstance(widget, QComboBox):
             # ==========================================================
-            # --- FIX: Safely extract custom text from editable boxes ---
+            # --- Safely extract custom text from editable boxes ---
             # ==========================================================
             if widget.isEditable():
                 current_text = widget.currentText()
@@ -301,7 +301,7 @@ class WidgetFactory:
 
         if isinstance(widget, QComboBox):
             widget.currentIndexChanged.connect(callback)
-            # --- BONUS FIX: Also listen for typing in editable combo boxes! ---
+            # --- Also listen for typing in editable combo boxes! ---
             if widget.isEditable():
                 widget.editTextChanged.connect(callback)
 

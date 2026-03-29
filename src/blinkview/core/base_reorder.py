@@ -6,7 +6,7 @@
 
 from typing import List
 
-from .base_configurable import configuration_property, configuration_factory, override_property
+from .configurable import configuration_property, configuration_factory, override_property
 from .base_daemon import BaseDaemon
 from .constants import SysCat
 from .factory import BaseFactory

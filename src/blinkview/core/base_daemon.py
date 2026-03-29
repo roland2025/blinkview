@@ -8,8 +8,8 @@ from threading import Event, Lock, Thread
 from types import SimpleNamespace
 from typing import Iterable, List
 
-from blinkview.core.base_configurable import configuration_property
-from blinkview.core.BaseBindableConfigurable import BaseBindableConfigurable
+from blinkview.core.bindable import bindable
+from blinkview.core.configurable import configurable, configuration_property
 from blinkview.core.constants import SysCat
 from blinkview.utils.generate_id import generate_id
 from blinkview.utils.settings_updater import update_object_from_config
@@ -30,22 +30,19 @@ from blinkview.utils.settings_updater import update_object_from_config
     _factory="file_logging",
     _factory_default="default",
 )
-class BaseDaemon(BaseBindableConfigurable):
+@configurable
+@bindable
+class BaseDaemon:
     def __init__(self):
-        super().__init__()
 
         self.enabled = False
-        self._configured = (
-            False  # Tracks if initial config has been applied at least once
-        )
+        self._configured = False  # Tracks if initial config has been applied at least once
 
         # New Thread Lifecycle properties
         self._thread = None
         self._stop_event = Event()
 
-        self.thread_needs_restart = (
-            False  # Flag to indicate if a restart is needed after config changes
-        )
+        self.thread_needs_restart = False  # Flag to indicate if a restart is needed after config changes
 
         self._subscribers_lock = Lock()
         self.subscribers: list = []
@@ -65,7 +62,7 @@ class BaseDaemon(BaseBindableConfigurable):
         if self.logger:
             self.logger.info(f"{self.__class__.__name__}: Applying config: {config}")
 
-        changed = super().apply_config(config)
+        changed = self.apply_base_config(config)
 
         try:
             logging_cfg = config.get("logging")
@@ -78,21 +75,15 @@ class BaseDaemon(BaseBindableConfigurable):
                 if logging_cfg.get("enabled"):
                     if self.file_logger is None:
                         ns = SimpleNamespace(
-                            get_logger=self.shared.registry.logger_creator(
-                                "file_logging", self.local.logging_id
-                            ),
+                            get_logger=self.shared.registry.logger_creator("file_logging", self.local.logging_id),
                             logging_id=self.local.logging_id,
                         )
-                        self.file_logger = self.shared.factories.build(
-                            "file_logging", logging_cfg, self.shared, ns
-                        )
+                        self.file_logger = self.shared.factories.build("file_logging", logging_cfg, self.shared, ns)
                         self.file_logger.start()
                     self.subscribe(self.file_logger)
         except Exception as e:
             if self.logger:
-                self.logger.error(
-                    f"{self.__class__.__name__}: Failed to apply logging.", e
-                )
+                self.logger.error(f"{self.__class__.__name__}: Failed to apply logging.", e)
 
         if changed and self._configured:
             self.thread_needs_restart = True
@@ -160,6 +151,9 @@ class BaseDaemon(BaseBindableConfigurable):
     def subscribe(self, subscriber):
         with self._subscribers_lock:
             if subscriber not in self.subscribers:
+                reference_id = getattr(subscriber, "reference_id", subscriber.__class__.__name__)
+                if self.logger:
+                    self.logger.info(f"Subscriber: '{reference_id}' added")
                 self.subscribers.append(subscriber)
                 if hasattr(subscriber, "track_subscription"):
                     subscriber.track_subscription(self)  # Track the source for cleanup
@@ -167,10 +161,13 @@ class BaseDaemon(BaseBindableConfigurable):
     def unsubscribe(self, subscriber):
         with self._subscribers_lock:
             if subscriber in self.subscribers:
+                reference_id = getattr(subscriber, "reference_id", subscriber.__class__.__name__)
+                if self.logger:
+                    self.logger.info(f"Subscriber: '{reference_id}' removed")
                 self.subscribers.remove(subscriber)
 
     def distribute(self, batch: list):
-        # FIX: Copy the list while locked, then release the lock immediately!
+        # Copy the list while locked, then release the lock immediately!
         with self._subscribers_lock:
             subs_copy = list(self.subscribers)
 

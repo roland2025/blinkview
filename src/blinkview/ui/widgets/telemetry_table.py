@@ -532,7 +532,7 @@ class TelemetryTable(QWidget):
                     "LogViewerWidget",
                     title,
                     as_window=True,
-                    params={"filtered_module": module.name_with_device(), "filtered_module_children": with_children},
+                    params={"filtered_module": module, "filtered_module_children": with_children},
                 )
 
             case "copy_name":
@@ -548,11 +548,7 @@ class TelemetryTable(QWidget):
                     "TelemetryPlotter",
                     f"Graph: {module.name}",
                     as_window=True,
-                    params={
-                        "modules": [module.name_with_device()]
-                        if action_id == "view_graph"
-                        else [m.name_with_device() for m in module.get_all_descendants()]
-                    },
+                    params={"modules": [module] if action_id == "view_graph" else module.get_all_descendants()},
                 )
 
             case _:

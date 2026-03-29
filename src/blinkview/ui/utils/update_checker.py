@@ -47,15 +47,18 @@ def check_for_updates_silently(gui_context, parent=None):
 
 def check_post_update(updater, parent=None):
     from blinkview import __version__
-    from blinkview.ui.widgets.message_box import MessageBox
+    from blinkview.ui.widgets.toast import ToastType
+    from blinkview.ui.widgets.toast_dispatcher import toast_dispatcher
 
     success, target_version = updater.check_version_status(__version__)
 
     if success is True:
-        MessageBox.info(parent, "Update Successful", f"BlinkView was successfully updated to <b>{__version__}</b>.")
+        toast_dispatcher.notify(
+            f"BlinkView was successfully updated to <b>{__version__}</b>.", ToastType.SUCCESS, parent=parent
+        )
     elif success is False:
-        MessageBox.critical(
-            parent,
-            "Update Failed",
-            f"The attempt to upgrade to {target_version} failed.\nYou are still running v{__version__}.",
+        toast_dispatcher.notify(
+            f"Upgrade to {target_version} failed.\nYou are still running v{__version__}.",
+            ToastType.ERROR,
+            parent=parent,
         )

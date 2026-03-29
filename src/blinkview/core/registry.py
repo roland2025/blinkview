@@ -141,13 +141,17 @@ class Registry:
         self.reorder = None
 
     def _create_and_bind(self, cls, name, config):
+        print(f"[Registry] _create_and_bind name={name} cls={cls.__name__}  config={config}")
         local_ctx = SimpleNamespace(get_logger=self.logger_creator(name))
         instance = cls()
         if hasattr(instance, "bind_system"):
             instance.bind_system(self.system_ctx, local_ctx)
+        else:
+            print(f"[Registry] _create_and_bind name={name} cls={cls.__name__} does not have bind_system method.")
         if hasattr(instance, "apply_config"):
             instance.apply_config(config)
-        self.config.subscribe(f"/{name}", instance)
+        else:
+            print(f"[Registry] _create_and_bind name={name} cls={cls.__name__} does not have apply_config method.")
         return instance
 
     def reinit_logger(self, target):
@@ -268,6 +272,8 @@ class Registry:
                     local_ctx = SimpleNamespace(get_logger=self.logger_creator("reorder"))
 
                     self.reorder = factories.build("reorder", reorder_config, system_ctx, local_ctx)
+
+                    self.reorder.reference_id = "reorder"
             except Exception as e:
                 print(f"[Registry] Error configuring reorder buffer: {e}")
                 self.logger.error(f"Error configuring reorder buffer:", e)
@@ -287,6 +293,8 @@ class Registry:
                     self.central = factories.build("central", central_storage_config, system_ctx, local_ctx)
                     if self.reorder is not None:
                         self.reorder.subscribe(self.central)
+
+                    self.central.reference_id = "central"
             except Exception as e:
                 print(f"[Registry] Error configuring central storage: {e}")
                 self.logger.error(f"Error configuring central storage", e)
@@ -305,7 +313,9 @@ class Registry:
             self.reinit_logger(self.central)
 
             try:
+                print(f"[Registry] Configuring sources")
                 self.sources = self._create_and_bind(SourcesManager, "sources", self.config.get_by_path("/sources"))
+                self.config.subscribe("/sources", self.sources)
             except Exception as e:
                 print(f"[Registry] Error during sources configuration: {e}")
                 self.logger.error(f"Error during sources configuration", e)
@@ -315,6 +325,8 @@ class Registry:
                 self.pipelines = self._create_and_bind(
                     PipelineManager, "pipelines", self.config.get_by_path("/pipelines")
                 )
+
+                self.config.subscribe("/pipelines", self.pipelines)
                 self.pipelines.apply_targets()
             except Exception as e:
                 print(f"[Registry] Error during pipelines configuration: {e}")
@@ -416,6 +428,7 @@ class Registry:
                 for item_id, item in self.pipelines.pipelines.items():
                     values.append((item_id, item.name))
 
+        print(f"[Registry] get_reference_values '{name}': {values}")
         return values
 
     def get_source(self, source_id: str):

@@ -15,7 +15,7 @@ from blinkview.parsers.assembler import BaseAssembler
 from blinkview.parsers.can_bus import CanAssemblerFactory, CanParserFactory
 from blinkview.utils.level_map import LogLevel
 
-from ..core.base_configurable import configuration_property
+from ..core.configurable import configuration_property
 from ..io.BaseReader import DeviceFactory
 from .cantools_decoder import can_msg_to_str
 from .parser import BaseParser, ParserFactory
@@ -71,7 +71,7 @@ class CantoolsToLogRow(BaseAssembler):
 from time import perf_counter
 from typing import Any
 
-from ..core.base_configurable import (
+from ..core.configurable import (
     configuration_property,
     on_config_change,
     override_property,
@@ -103,10 +103,11 @@ from ..utils.level_map import LogLevel
     ui_order=12,
     _factory="can_assembler",
     _factory_default="cantools",
+    default={"type": "cantools"},
     description="Assembles transformed CAN data into final LogRow objects, automatically routing to the correct module based on CAN ID.",
 )
 @configuration_property("sources_", type="string", required=True, _reference="/sources", default="")
-@ParserFactory.register("can")
+@ParserFactory.register("cantools")
 class CANparser(BaseParser):
     __doc__ = """The specialized pipeline for processing discrete CAN bus frames.
 

@@ -7,7 +7,7 @@
 import socket
 from time import sleep
 
-from ..core.base_configurable import configuration_property
+from ..core.configurable import configuration_property
 from .BaseReader import BaseReader, DeviceFactory
 
 

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from can import Bus, CanError
 
 from .BaseReader import DeviceFactory, BaseReader
-from ..core.base_configurable import configuration_property
+from ..core.configurable import configuration_property
 from ..core.log_row import LogRow
 from ..utils.level_map import LogLevel
 

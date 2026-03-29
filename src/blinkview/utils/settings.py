@@ -77,7 +77,7 @@ class Settings:
         return []
 
     def _split_key(self, key_string):
-        return key_string.split('.') if key_string else []
+        return key_string.split(".") if key_string else []
 
     def get(self, key_string, default=None):
         keys = self._split_key(key_string)
@@ -93,7 +93,7 @@ class Settings:
         keys = self._split_key(key_string)
         target = self._data
         for k in keys[:-1]:
-            # FIX: If it's not a dict, overwrite it with one to allow nesting
+            # If it's not a dict, overwrite it with one to allow nesting
             if k not in target or not isinstance(target[k], dict):
                 target[k] = {}
             target = target[k]
@@ -127,5 +127,5 @@ class Settings:
     @classmethod
     def supported_key(cls, key_string):
         """Checks if a primary key is supported."""
-        primary_key = key_string.split('.')[0]
+        primary_key = key_string.split(".")[0]
         return primary_key in cls.supported_keys()

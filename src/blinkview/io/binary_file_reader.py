@@ -7,7 +7,7 @@
 from pathlib import Path
 from time import sleep
 
-from ..core.base_configurable import configuration_property
+from ..core.configurable import configuration_property
 from ..utils.paths import resolve_config_path
 from .BaseReader import BaseReader, DeviceFactory
 

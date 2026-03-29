@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from ..core.base_configurable import configuration_property
+from ..core.configurable import configuration_property
 from ..core.device_identity import DeviceIdentity
 from ..core.id_registry import IDRegistry
 from ..core.log_row import LogRow

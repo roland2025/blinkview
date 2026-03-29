@@ -8,7 +8,7 @@ from threading import Thread, Lock
 from time import perf_counter
 from typing import Callable, Iterable
 
-from ..core.base_configurable import configuration_factory, configuration_property
+from ..core.configurable import configuration_factory, configuration_property
 from ..core.base_daemon import BaseDaemon
 from ..core.constants import SysCat
 from ..core.device_identity import DeviceIdentity

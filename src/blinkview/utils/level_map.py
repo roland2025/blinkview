@@ -4,14 +4,24 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from blinkview.core.base_configurable import configuration_property, BaseConfigurable, on_config_change, \
-    override_property
-from blinkview.core.factory import BaseFactory
-from blinkview.utils.log_level import LogLevel
 from typing import Callable
 
+from blinkview.core.configurable import (
+    configurable,
+    configuration_property,
+    on_config_change,
+    override_property,
+)
+from blinkview.core.factory import BaseFactory
+from blinkview.utils.log_level import LogLevel
 
-class LogLevelMapFactory(BaseFactory[BaseConfigurable]):
+
+@configurable
+class BaseLogLevelMap:
+    pass
+
+
+class LogLevelMapFactory(BaseFactory[BaseLogLevelMap]):
     pass
 
 
@@ -27,19 +37,19 @@ class LogLevelMapFactory(BaseFactory[BaseConfigurable]):
         "type": "integer",
         "enum": [lvl.value for lvl in LogLevel.LIST_CONF],
         "enum_descriptions": [lvl.name_conf for lvl in LogLevel.LIST_CONF],
-        "default": LogLevel.INFO.value
+        "default": LogLevel.INFO.value,
     },
     default={
-        'T': LogLevel.TRACE.value,
-        'D': LogLevel.DEBUG.value,
-        'I': LogLevel.INFO.value,
-        'W': LogLevel.WARN.value,
-        'E': LogLevel.ERROR.value,
-        'F': LogLevel.FATAL.value,
-        'C': LogLevel.CRITICAL.value
-    }
+        "T": LogLevel.TRACE.value,
+        "D": LogLevel.DEBUG.value,
+        "I": LogLevel.INFO.value,
+        "W": LogLevel.WARN.value,
+        "E": LogLevel.ERROR.value,
+        "F": LogLevel.FATAL.value,
+        "C": LogLevel.CRITICAL.value,
+    },
 )
-class LevelMap(BaseConfigurable):
+class LevelMap(BaseLogLevelMap):
     mapping: dict
 
     def __init__(self):
@@ -54,10 +64,7 @@ class LevelMap(BaseConfigurable):
 
     def _bake_internal(self):
         """Converts integer values from config into LogLevel objects for fast lookup."""
-        self._lookup = {
-            text: LogLevel.from_value(val, LogLevel.INFO)
-            for text, val in self.mapping.items()
-        }
+        self._lookup = {text: LogLevel.from_value(val, LogLevel.INFO) for text, val in self.mapping.items()}
 
     def get_level(self, text: str, default: LogLevel = None) -> LogLevel:
         """Returns the LogLevel object for the given text string."""
@@ -75,15 +82,15 @@ class LevelMap(BaseConfigurable):
     title="NRF Level Mappings",
     description="Predefined mapping for Nordic NRF logs.",
     default={
-        '<trace>': LogLevel.TRACE.value,
-        '<debug>': LogLevel.DEBUG.value,
-        '<info>': LogLevel.INFO.value,
-        '<warn>': LogLevel.WARN.value,
-        '<warning>': LogLevel.WARN.value,
-        '<error>': LogLevel.ERROR.value,
-        '<fatal>': LogLevel.FATAL.value,
-        '<critical>': LogLevel.CRITICAL.value
-    }
+        "<trace>": LogLevel.TRACE.value,
+        "<debug>": LogLevel.DEBUG.value,
+        "<info>": LogLevel.INFO.value,
+        "<warn>": LogLevel.WARN.value,
+        "<warning>": LogLevel.WARN.value,
+        "<error>": LogLevel.ERROR.value,
+        "<fatal>": LogLevel.FATAL.value,
+        "<critical>": LogLevel.CRITICAL.value,
+    },
 )
 class NrfLevelMap(LevelMap):
     pass
@@ -96,23 +103,17 @@ class NrfLevelMap(LevelMap):
     title="NRF Level Mappings",
     description="Predefined mapping for Nordic NRF logs.",
     default={
-        '<dbg>': LogLevel.DEBUG.value,
-        '<inf>': LogLevel.INFO.value,
-        '<wrn>': LogLevel.WARN.value,
-        '<err>': LogLevel.ERROR.value,
-    }
+        "<dbg>": LogLevel.DEBUG.value,
+        "<inf>": LogLevel.INFO.value,
+        "<wrn>": LogLevel.WARN.value,
+        "<err>": LogLevel.ERROR.value,
+    },
 )
 class NrfLevelMap(LevelMap):
     pass
 
 
-
 @LogLevelMapFactory.register("custom")
-@override_property(
-    "mapping",
-    title="Custom level Mappings",
-    description="Custom mapping for logs.",
-    default={}
-)
+@override_property("mapping", title="Custom level Mappings", description="Custom mapping for logs.", default={})
 class CustomLevelMap(LevelMap):
     pass

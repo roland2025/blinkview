@@ -6,15 +6,20 @@
 
 from time import perf_counter
 
-from blinkview.core.base_configurable import override_property
+from blinkview.core.configurable import override_property
 from blinkview.core.device_identity import DeviceIdentity
 from blinkview.core.log_row import LogRow
-from blinkview.parsers.parser import ParserFactory, BaseParser
+from blinkview.parsers.parser import BaseParser, ParserFactory
 
 
 @ParserFactory.register("key_value")
-@override_property("sources_", items={"type": "string", "_reference": "/pipelines"},)
+@override_property(
+    "sources_",
+    items={"type": "string", "_reference": "/pipelines"},
+)
 class KeyValueParser(BaseParser):
+    def __init__(self):
+        super().__init__()
 
     def run(self):
         self.logger.info("Starting key-value extractor thread")

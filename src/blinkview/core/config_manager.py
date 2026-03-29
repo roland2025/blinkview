@@ -119,6 +119,7 @@ class ConfigManager:
 
     def apply_patch(self, path: str, patch: list):
         """Applies patch and notifies affected subscribers."""
+        print(f"[ConfigManager] Patching {path} with {len(patch)}")
         if not patch:
             return
 

@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from blinkview.core.base_configurable import configuration_property
+from blinkview.core.configurable import configuration_property
 from blinkview.parsers.transformer import TransformerFactory, TransformStep
 
 

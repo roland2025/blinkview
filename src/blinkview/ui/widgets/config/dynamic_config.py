@@ -83,7 +83,7 @@ class DynamicConfigWidget(QWidget):
         # Optional: Add a little extra spacing between the labels and the inputs
         self.form_layout.setHorizontalSpacing(20)
 
-        # CRITICAL FIX: Bind the alignment directly to the widget as it gets added
+        # Bind the alignment directly to the widget as it gets added
         self.scroll_layout.addWidget(self.form_container)
         # self.scroll_layout.addStretch(1)  # This pushes the form_container to the top
 
@@ -222,7 +222,7 @@ class DynamicConfigWidget(QWidget):
         previous_config = self.current_config
         current_config = self.get_config()
 
-        # --- NEW: Generate RFC 6902 JSON Patch ---
+        # --- Generate RFC 6902 JSON Patch ---
 
         import jsonpatch
 
@@ -350,7 +350,7 @@ class DynamicConfigWidget(QWidget):
         if not factory_choices:
             return
 
-        # --- NEW: Extract our custom default flag ---
+        # --- Extract our custom default flag ---
         default_type = schema_node.get("_factory_default")
         is_hidden = schema_node.get("_factory_dropdown_hidden", False)
 
@@ -379,7 +379,7 @@ class DynamicConfigWidget(QWidget):
             if "type" not in schema_node["required"]:
                 schema_node["required"].append("type")
 
-        # --- NEW: Smart fallback for loading the sub-schema ---
+        # --- Smart fallback for loading the sub-schema ---
         current_type = data.get("type")
         if not current_type:
             current_type = default_type
@@ -432,7 +432,7 @@ class DynamicConfigWidget(QWidget):
         description = prop_schema.get("description", "")
         has_value = value is not None
 
-        # --- NEW: Check if there is actually anything to render ---
+        # --- Check if there is actually anything to render ---
         # We check 'properties' and also consider if the factory might have injected any
         has_children = bool(prop_schema.get("properties"))
 
@@ -622,7 +622,7 @@ class DynamicConfigWidget(QWidget):
             self._build_ui(dyn_schema, {idx_str: item_val}, group_layout, child_registry, node_path)
 
             # ==========================================================
-            # --- NEW: Array Reordering Controls ---
+            # --- Array Reordering Controls ---
             # ==========================================================
 
             control_layout = QHBoxLayout()
@@ -933,6 +933,8 @@ class DynamicConfigWidget(QWidget):
             if config_ == self.current_config:
                 return
 
+        # print(f"[DynamicConfigWidget] update_config_schema config_={config_}, schema_={schema_} ")
+
         self.original_schema = deepcopy(schema_)
         self.schema = deepcopy(schema_)
         self.current_config = deepcopy(config_)
@@ -942,7 +944,7 @@ class DynamicConfigWidget(QWidget):
 
         self._build_ui(self.schema, self.current_config, self.form_layout, self._widget_registry)
 
-        # --- NEW: Ensure button is disabled on fresh load ---
+        # --- Ensure button is disabled on fresh load ---
         self.btn_apply.setEnabled(False)
 
     def _clear_layout(self, _=None):

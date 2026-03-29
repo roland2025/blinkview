@@ -6,7 +6,7 @@
 
 from time import sleep
 
-from ..core.base_configurable import configuration_property, override_property
+from ..core.configurable import configuration_property, override_property
 from ..core.log_row import LogRow
 from ..utils.level_map import LogLevel
 from .BaseReader import BaseReader, DeviceFactory

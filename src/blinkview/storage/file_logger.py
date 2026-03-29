@@ -10,7 +10,7 @@ from threading import Thread
 from time import sleep, perf_counter
 from typing import Callable
 
-from ..core.base_configurable import configuration_property, override_property
+from ..core.configurable import configuration_property, override_property
 from ..core.batch_queue import BatchQueue
 from ..core.factory import BaseFactory
 from ..core.log_row import LogRow

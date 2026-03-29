@@ -4,14 +4,17 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from blinkview.core.BaseBindableConfigurable import BaseBindableConfigurable
-from blinkview.core.factory import BaseFactory
-
 from abc import ABC, abstractmethod
 from typing import Any
 
+from blinkview.core.bindable import bindable
+from blinkview.core.configurable import configurable
+from blinkview.core.factory import BaseFactory
 
-class BaseAssembler(BaseBindableConfigurable):
+
+@configurable
+@bindable
+class BaseAssembler:
     pass
 
 

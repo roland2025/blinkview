@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from can import Message
     from cantools import database
 
-from ..core.base_configurable import configuration_property
+from ..core.configurable import configuration_property
 from ..utils.paths import resolve_config_path
 from .can_bus import CanDecoderFactory
 from .transformer import TransformStep

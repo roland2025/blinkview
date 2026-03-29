@@ -6,7 +6,8 @@
 
 import importlib
 
-from blinkview.core.base_configurable import BaseConfigurable, configuration_property
+from blinkview.core.bindable import bindable
+from blinkview.core.configurable import configuration_property
 
 
 @configuration_property(
@@ -21,7 +22,7 @@ from blinkview.core.base_configurable import BaseConfigurable, configuration_pro
     type="object",
     default={},
     required=True,
-    # --- NEW: Define the blueprint for dynamic keys ---
+    # --- Define the blueprint for dynamic keys ---
     additionalProperties={
         "type": "object",
         "default": {"enabled": True},  # What it defaults to when clicked
@@ -29,14 +30,14 @@ from blinkview.core.base_configurable import BaseConfigurable, configuration_pro
         "properties": {"enabled": {"type": "boolean", "title": "Enable Module"}},
     },
 )
-class PluginManager(BaseConfigurable):
+@bindable
+class PluginManager:
     __doc__ = "Manages the lifecycle of dynamic plugin modules. Matches the 'plugins' key in the master configuration."
 
     enabled: bool
     modules: dict
 
     def __init__(self, registry, logger):
-        super().__init__()
         self.registry = registry
         self.active_plugins = {}  # { module_path: plugin_instance }
         self.logger = logger
@@ -45,8 +46,7 @@ class PluginManager(BaseConfigurable):
         self.registry.config.subscribe("/plugins", self)
 
     def apply_config(self, config: dict) -> bool:
-
-        changed = super().apply_config(config)
+        changed = self.apply_base_config(config)
 
         # Start modules that are newly enabled
         for path, mod_cfg in self.modules.items():

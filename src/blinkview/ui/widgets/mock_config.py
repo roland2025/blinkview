@@ -37,13 +37,13 @@ class MockConfigNode(QObject):
         self.active_path = active_path
         self.current_schema = {}
         self.current_config = {}
-        # --- NEW: Fake the manager so references work! ---
+        # --- Fake the manager so references work! ---
         self.manager = MockManager()
 
     def deregister(self):
         print(f"[MockNode] UI closed. Deregistering {self.active_path}...")
 
-    # --- NEW: Fake the factory methods! ---
+    # --- Fake the factory methods! ---
     def factory_types(self, category: str):
         if category == "processor":
             return [("filter", "Filter Plugin"), ("transform", "Transform Plugin")]
@@ -65,7 +65,7 @@ class MockConfigNode(QObject):
             }
         return {}
 
-    # --- FIX: Update the signature to match the JSON Patch call ---
+    # --- Update the signature to match the JSON Patch call ---
     def send(self, patch: list = None, **kwargs):
         print(f"\n[MockNode] Received update for {self.active_path}!")
         print(f"[MockNode] JSON Patch Received:\n{json.dumps(patch, indent=4)}")

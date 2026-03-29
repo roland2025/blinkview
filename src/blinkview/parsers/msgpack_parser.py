@@ -6,7 +6,7 @@
 
 from blinkview.parsers.assembler import AssemblerFactory, BaseAssembler
 
-from ..core.base_configurable import configuration_property, override_property
+from ..core.configurable import configuration_property, override_property
 from ..core.device_identity import DeviceIdentity
 from ..core.log_row import LogRow
 from ..utils.level_map import LogLevel

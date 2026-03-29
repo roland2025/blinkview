@@ -6,7 +6,7 @@
 
 from .transformer import PipelineDecodeFactory, TransformStep
 # from .BaseTransformStep import TransformStep, PipelineDecodeFactory
-from ..core.base_configurable import configuration_property
+from ..core.configurable import configuration_property
 
 
 @PipelineDecodeFactory.register("cobs_decode")

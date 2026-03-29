@@ -4,16 +4,16 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from ..core.BaseBindableConfigurable import BaseBindableConfigurable
+from ..core.bindable import bindable
+from ..core.configurable import configurable
 from ..core.factory import BaseFactory
 
 
-class TransformStep(BaseBindableConfigurable):
-    input_type: str = 'any'
-    output_type: str = 'any'
-
-    def __init(self):
-        super().__init__()
+@configurable
+@bindable
+class TransformStep:
+    input_type: str = "any"
+    output_type: str = "any"
 
 
 class TransformerFactory(BaseFactory[TransformStep]):
@@ -30,4 +30,3 @@ class PipelineDecodeFactory(BaseFactory[TransformStep]):
 
 class PipelineTransformFactory(BaseFactory[TransformStep]):
     pass
-

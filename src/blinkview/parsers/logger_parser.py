@@ -6,7 +6,7 @@
 
 from blinkview.parsers.assembler import AssemblerFactory, BaseAssembler
 
-from ..core.base_configurable import (
+from ..core.configurable import (
     configuration_factory,
     configuration_property,
     override_property,

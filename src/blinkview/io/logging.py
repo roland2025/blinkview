@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     import logging
     from logging import LogRecord
 
-from ..core.base_configurable import configuration_property
+from ..core.configurable import configuration_property
 from .BaseReader import BaseReader, DeviceFactory
 
 

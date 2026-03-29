@@ -7,7 +7,7 @@
 import re
 from typing import List
 
-from ..core.base_configurable import configuration_property
+from ..core.configurable import configuration_property
 from ..core.system_context import SystemContext
 from .transformer import (
     PipelineDecodeFactory,

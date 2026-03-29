@@ -7,7 +7,7 @@
 from time import perf_counter, sleep
 from typing import Any, Callable, List
 
-from ..core.base_configurable import (
+from ..core.configurable import (
     configuration_factory,
     configuration_property,
     on_config_change,
@@ -82,7 +82,7 @@ class ParserFactory(BaseFactory[BaseParser]):
     "split",
     type="object",
     ui_order=10,
-    # --- NEW: Explicitly define the fields inside this object ---
+    # --- Explicitly define the fields inside this object ---
     properties={
         "char": {
             "type": "integer",

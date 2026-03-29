@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDockWidget,
     QInputDialog,
     QLabel,
@@ -672,41 +673,59 @@ class BlinkMainWindow(QMainWindow):
         self.create_widget("TelemetryWatch", f"Watch {name}", params={"id": watch_id})
 
     def create_device_control_toolbar(self, source_id, device_name):
-        """Generates a dedicated toolbar for a specific device."""
+        """Generates a dedicated toolbar for a specific device with command history."""
         toolbar = QToolBar(f"Control: {device_name}")
-        toolbar.setObjectName(f"toolbar_{source_id}")  # Good for state saving
+        toolbar.setObjectName(f"toolbar_{source_id}")
 
-        # Add a label so we know which device this is
         toolbar.addWidget(QLabel(f" <b>{device_name}:</b> "))
 
-        # Create the Textbox
-        text_input = QLineEdit()
-        text_input.setPlaceholderText("Enter command...")
-        text_input.setMaximumWidth(200)
-        toolbar.addWidget(text_input)
+        # Create Editable ComboBox instead of LineEdit
+        command_input = QComboBox()
+        command_input.setEditable(True)
+        command_input.setInsertPolicy(QComboBox.NoInsert)  # We'll handle insertion manually to control duplicates
+        command_input.lineEdit().setPlaceholderText("Enter command...")
+        command_input.setMinimumWidth(200)
+        toolbar.addWidget(command_input)
 
-        # Create the Send Button
         btn_send = QPushButton("Send")
 
-        # Connect the logic
         def handle_send():
-            val = text_input.text()
-            # add newline
-            val = f"{val}\n"
+            val = command_input.currentText().strip()
+            if not val:
+                return
+
+            # Manage History Logic
+            # Remove item if it exists to move it to the top (prevent duplicates)
+            existing_index = command_input.findText(val)
+            if existing_index >= 0:
+                command_input.removeItem(existing_index)
+
+            # Insert at the top
+            command_input.insertItem(0, val)
+            command_input.setCurrentIndex(0)
+
+            # Optional: Limit history to 10 items
+            if command_input.count() > 10:
+                command_input.removeItem(10)
+
+            # Execution Logic
+            val_with_newline = f"{val}\n"
             try:
-                tasks: TaskManager = self.gui_context.registry.system_ctx.tasks
+                tasks = self.gui_context.registry.system_ctx.tasks
                 devices = self.gui_context.registry.sources
-                tasks.run_task(devices.send_command, source_id, val)
+                tasks.run_task(devices.send_command, source_id, val_with_newline)
             except Exception as e:
-                print(f"Error sending command to device '{device_name}': {e}")
+                print(f"Error sending to '{device_name}': {e}")
 
-            text_input.clear()
+            # Clear current text for next command
+            command_input.setEditText("")
 
-        text_input.returnPressed.connect(handle_send)
+            # Connect signals
+
+        command_input.lineEdit().returnPressed.connect(handle_send)
         btn_send.clicked.connect(handle_send)
         toolbar.addWidget(btn_send)
 
-        # Add to Main Window and track it
         self.addToolBar(Qt.TopToolBarArea, toolbar)
         self.device_toolbars[source_id] = toolbar
 
