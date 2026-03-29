@@ -4,23 +4,21 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from abc import ABC, abstractmethod
 from datetime import datetime
+from io import BytesIO, StringIO
 from pathlib import Path
+from struct import Struct
 from threading import Thread
-from time import sleep, perf_counter
+from time import perf_counter, sleep
 from typing import Callable
 
-from ..core.configurable import configuration_property, override_property
 from ..core.batch_queue import BatchQueue
+from ..core.configurable import configuration_property, override_property
 from ..core.factory import BaseFactory
 from ..core.log_row import LogRow
 from ..subscribers.subscriber import BaseSubscriber
-from ..utils.time_utils import TimeUtils, ISO8601TimestampFormatter
-from io import BytesIO, StringIO
-
-
-from struct import Struct
-from abc import ABC, abstractmethod
+from ..utils.time_utils import ISO8601TimestampFormatter, TimeUtils
 
 
 class BaseFileLogger(BaseSubscriber):
@@ -33,11 +31,30 @@ class FileLoggerFactory(BaseFactory[BaseFileLogger]):
 
 
 @FileLoggerFactory.register("default")
-@configuration_property("processor", required=True, type="object", _factory="logging_processor", _factory_default="log_row", _factory_dropdown_hidden=True)
-@override_property("enabled")
+@configuration_property(
+    "processor",
+    required=True,
+    type="object",
+    _factory="logging_processor",
+    _factory_default="log_row",
+    _factory_dropdown_hidden=True,
+)
+# @override_property("enabled")
 @configuration_property("name", hidden=True, type="string")
-@configuration_property("flush_interval", type="number", default=10.0, description="Maximum time (in seconds) to wait before flushing the batch to disk, even if the batch size is not reached.", title="Flush Interval (s)")
-@configuration_property("max_file_size", type="integer", default=100, description="Maximum file size in MiB before rotating to a new file. Set to 0 for unlimited.", title="Max File Size (MiB)")
+@configuration_property(
+    "flush_interval",
+    type="number",
+    default=10.0,
+    description="Maximum time (in seconds) to wait before flushing the batch to disk, even if the batch size is not reached.",
+    title="Flush Interval (s)",
+)
+@configuration_property(
+    "max_file_size",
+    type="integer",
+    default=100,
+    description="Maximum file size in MiB before rotating to a new file. Set to 0 for unlimited.",
+    title="Max File Size (MiB)",
+)
 class FileLogger(BaseFileLogger):
     __doc__ = "Logs data to a file in batches. Configurable with different batch processors for formatting."
     name: str
@@ -73,13 +90,13 @@ class FileLogger(BaseFileLogger):
             self.file_handle = None
 
         is_binary = self.batch_processor.is_binary
-        mode = 'ab' if is_binary else 'a'
+        mode = "ab" if is_binary else "a"
 
         # Text mode needs newline control, Binary mode does not.
         self.file_handle = self.file_path.open(
             mode,
             encoding="utf-8" if not is_binary else None,
-            newline='\n' if not is_binary else None  # <--- THIS FIXES IT
+            newline="\n" if not is_binary else None,  # <--- THIS FIXES IT
         )
 
         current_file_size = self.file_path.stat().st_size
@@ -107,7 +124,8 @@ class FileLogger(BaseFileLogger):
 
     def run(self):
         print(
-            f"[{self.name}] FileLogger thread started with batch processor: {self.batch_processor.__class__.__name__}")
+            f"[{self.name}] FileLogger thread started with batch processor: {self.batch_processor.__class__.__name__}"
+        )
         bytes_total = self.open_file()
 
         # Localize for performance
@@ -119,7 +137,7 @@ class FileLogger(BaseFileLogger):
         # Constants/Configuration
         max_batch = self.max_batch
         flush_interval = self.flush_interval
-        max_file_size = self.max_file_size * 1024 * 1024 if self.max_file_size > 0 else float('inf')
+        max_file_size = self.max_file_size * 1024 * 1024 if self.max_file_size > 0 else float("inf")
 
         # State tracking
         last_flush_ts = perf_counter()
@@ -202,14 +220,16 @@ class BinaryBatchProcessor(BaseBatchProcessor):
             for ts_ns, data in batch:
                 # Expecting (ts_ns, data)
 
-                write(pack_into_buffer(
-                    sync,
-                    msg_type,
-                    version,
-                    0,  # flags / reserved
-                    len(data),
-                    ts_ns
-                ))
+                write(
+                    pack_into_buffer(
+                        sync,
+                        msg_type,
+                        version,
+                        0,  # flags / reserved
+                        len(data),
+                        ts_ns,
+                    )
+                )
                 write(data)
 
         self.process = process
@@ -246,10 +266,12 @@ class LogRowBatchProcessor(BaseBatchProcessor):
     def bake(self):
         format_time = self.format_time
 
-        def fast_format(row: 'LogRow'):
+        def fast_format(row: "LogRow"):
             # 2026-03-13T12:47:01.402Z INFO C3X module_name: Message text
-            return (f"{format_time(row.timestamp_ns)} {row.level.name_log} "
-                    f"{row.module.device} {row.module.name}: {row.message}\n")
+            return (
+                f"{format_time(row.timestamp_ns)} {row.level.name_log} "
+                f"{row.module.device} {row.module.name}: {row.message}\n"
+            )
 
         self.format = fast_format
 
@@ -275,5 +297,4 @@ class LogRowBatchProcessor(BaseBatchProcessor):
         self._buffer.seek(0)
         self._buffer.truncate(0)
 
-    format: Callable[['LogRow'], str]
-
+    format: Callable[["LogRow"], str]

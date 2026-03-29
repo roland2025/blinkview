@@ -73,7 +73,7 @@ class BaseDaemon:
         try:
             logging_cfg = config.get("logging")
             if logging_cfg is not None:
-                logging_cfg["enabled"] = self.enabled
+                # logging_cfg["enabled"] = self.enabled
                 logging_cfg["name"] = self.name
 
                 if self.logger:
@@ -87,6 +87,11 @@ class BaseDaemon:
                         self.file_logger = self.shared.factories.build("file_logging", logging_cfg, self.shared, ns)
                         self.file_logger.start()
                     self.subscribe(self.file_logger)
+                else:
+                    if self.file_logger:
+                        self.unsubscribe(self.file_logger)
+                        self.file_logger.stop()
+                        self.file_logger = None
         except Exception as e:
             if self.logger:
                 self.logger.error(f"{self.__class__.__name__}: Failed to apply logging.", e)
