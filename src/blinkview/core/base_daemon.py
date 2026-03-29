@@ -11,6 +11,8 @@ from typing import Iterable, List
 from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable, configuration_property
 from blinkview.core.constants import SysCat
+from blinkview.core.logger import BaseLogger
+from blinkview.core.system_context import SystemContext
 from blinkview.utils.generate_id import generate_id
 from blinkview.utils.settings_updater import update_object_from_config
 
@@ -33,6 +35,10 @@ from blinkview.utils.settings_updater import update_object_from_config
 @configurable
 @bindable
 class BaseDaemon:
+    shared: SystemContext
+    local: SimpleNamespace
+    logger: BaseLogger
+
     def __init__(self):
 
         self.enabled = False

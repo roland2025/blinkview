@@ -263,8 +263,6 @@ class BlinkMainWindow(QMainWindow):
         self.sources_node = self.gui_context.config_manager.create_node("/sources")
         self.sources_node.on_update(self.sync_device_toolbars)
 
-        self.gui_context.registry.start()
-
         self.watches_node = None
 
         print("[BlinkMainWindow] Initialization complete.")
@@ -278,6 +276,9 @@ class BlinkMainWindow(QMainWindow):
         # QTimer.singleShot(333, lambda: ToastManager.show("WAARNING...", ToastType.WARNING))
         # QTimer.singleShot(666, lambda: ToastManager.show("WHoop success...", ToastType.SUCCESS))
         # QTimer.singleShot(999, lambda: ToastManager.show("Attention error...", ToastType.ERROR))
+
+        # delay the start of the registry, allows the windows to appear before doing anything heavy
+        QTimer.singleShot(100, self.gui_context.registry.start)
 
     def register_log_target(self, target):
         """Adds a target that expects a 'process_log_batch(list)' method."""

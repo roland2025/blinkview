@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from dataclasses import dataclass
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtCore import QObject
 
@@ -13,9 +13,9 @@ from blinkview.ui.log_filter_index_manager import LogFilterIndexManager
 from blinkview.ui.native_dark_mode import set_native_dark_mode
 
 if TYPE_CHECKING:
+    from blinkview.core.settings_manager import SettingsManager
     from blinkview.ui.utils.config_node_manager import ConfigNodeManager
     from blinkview.ui.widgets.config.style_config import StyleConfig
-    from blinkview.core.settings_manager import SettingsManager
 
 
 class GUIContext(QObject):
@@ -28,20 +28,20 @@ class GUIContext(QObject):
         super().__init__(parent)
         self.registry = None
         self.id_registry = None
-        self.settings: 'SettingsManager' = None
+        self.settings: "SettingsManager" = None
 
         self.telemetry_model = None
         self.module_filter_model = None
-        self.theme: 'StyleConfig' = None
+        self.theme: "StyleConfig" = None
 
         self.index_manager = LogFilterIndexManager(gui_context=self, parent=self)
 
         # Factory function for creating widgets with context (cls_name, name, as_window=False, **kwargs)
         self.create_widget = None
 
-        self.config_manager: 'ConfigNodeManager' = None
+        self.config_manager: "ConfigNodeManager" = None
 
-        self.gui_config_manager: 'ConfigNodeManager' = None
+        self.gui_config_manager: "ConfigNodeManager" = None
 
         self.register_log_target = None
         self.deregister_log_target = None
@@ -73,16 +73,16 @@ class GUIContext(QObject):
     def set_telemetry_model(self, telemetry_model):
         self.telemetry_model = telemetry_model
 
-    def set_theme(self, theme: 'StyleConfig'):
+    def set_theme(self, theme: "StyleConfig"):
         self.theme = theme
 
     def set_widget_factory(self, factory_func):
         self.create_widget = factory_func
 
-    def set_config_manager(self, config_manager: 'ConfigNodeManager'):
+    def set_config_manager(self, config_manager: "ConfigNodeManager"):
         self.config_manager = config_manager
 
-    def set_gui_config_manager(self, gui_config_manager: 'ConfigNodeManager'):
+    def set_gui_config_manager(self, gui_config_manager: "ConfigNodeManager"):
         self.gui_config_manager = gui_config_manager
 
     def set_register_log_target(self, log_target_fn):
@@ -117,6 +117,7 @@ class GUIContext(QObject):
         """Unregisters a view/component from receiving update signals."""
         if updatable in self.updatable:
             self.updatable.remove(updatable)
+
     #
     # def create_log_filter(self, allowed_device=None, excluded_device=None, module=None):
     #     """Factory method to create a pre-configured LogFilter."""
