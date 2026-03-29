@@ -439,7 +439,7 @@ class TelemetryPlotter(QWidget):
 
         main_p = self.series_list[0].plot_item
         if main_p:
-            main_p.sigRangeChanged.connect(update_region_from_main)
+            main_p.sigRangeChangedManually.connect(update_region_from_main)
 
         self._update_plots()
 
