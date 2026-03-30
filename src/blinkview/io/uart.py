@@ -51,10 +51,17 @@ from .BaseReader import BaseReader, DeviceFactory
     default={"enabled": True, "processor": {"type": "binary"}},
     description="Enable logging of raw byte data. Uses a custom 'binary' processor that formats bytes as hex strings for readability.",
 )
+@configuration_property(
+    "suppress_auto_reset",
+    type="boolean",
+    default=False,
+    description="Prevents the device from resetting when the port opens by pulling DTR and RTS low. Essential for ESP32 and Arduino boards.",
+)
 class UARTReader(BaseReader):
     __doc__ = """The primary data ingestion source for serial and UART communication.
 
 * Supports standard local hardware ports (e.g., COM3, /dev/ttyACM0)
+* Includes 'suppress_auto_reset' to prevent ESP32/Arduino reboots on connection.
 * Connects to raw TCP/IP sockets for network-based serial streams
 * Supports RFC2217 remote serial port protocols
 * Efficiently batches high-frequency incoming byte streams
@@ -67,6 +74,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
     maxlen: int
     delay: int
     log_rx_tx: bool
+    suppress_auto_reset: bool
 
     def __init__(self):
         super().__init__()
@@ -198,6 +206,15 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             # Use PySerial's URL handler (handles socket://, rfc2217://, hwgrep://, etc.)
             ser = serial_for_url(self.url, baudrate=self.baudrate, timeout=0.01, inter_byte_timeout=0.01)
             self.serial = ser
+
+            # --- ESP32 DTR/RTS Logic ---
+            if self.suppress_auto_reset:
+                self.logger.info("Setting DTR/RTS to 0")
+                ser.dtr = False
+                ser.rts = False
+                sleep(0.1)
+            # ---------------------------
+
             try:
                 ser.set_buffer_size(rx_size=BUF_SIZE)
             except Exception as e:
@@ -216,3 +233,30 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 self.serial.write(data)
             except Exception as e:
                 self.logger.exception("Failed to send data", e)
+
+    def reset_device(self):
+        """
+        Triggers a hardware reset by toggling the DTR/RTS lines.
+        Matches the logic used by esptool.py for ESP32 boards.
+        """
+        if not self.serial or not self.serial.is_open:
+            self.logger.warning("Cannot reset: Serial port is not open.")
+            return
+
+        try:
+            self.logger.info("Triggering hardware reset sequence...")
+
+            # 1. Pull EN (Reset) low
+            # In most ESP32 circuits: RTS high + DTR low = EN low
+            self.serial.dtr = False
+            self.serial.rts = True
+            sleep(0.1)
+
+            # 2. Bring EN (Reset) back high to let the chip boot
+            # RTS low + DTR low = EN high, GPIO0 high (Normal Run Mode)
+            self.serial.rts = False
+            self.serial.dtr = False
+
+            self.logger.info("Reset signal sent.")
+        except Exception as e:
+            self.logger.error(f"Failed to perform hardware reset: {e}")
