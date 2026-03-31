@@ -5,7 +5,9 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from dataclasses import dataclass, field
-from PySide6.QtGui import QColor
+
+from qtpy.QtGui import QColor
+
 
 @dataclass
 class StyleConfig:

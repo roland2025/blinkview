@@ -7,7 +7,7 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
-from PySide6.QtCore import QObject
+from qtpy.QtCore import QObject
 
 from blinkview.ui.log_filter_index_manager import LogFilterIndexManager
 from blinkview.ui.native_dark_mode import set_native_dark_mode

@@ -8,8 +8,8 @@ import json
 from base64 import b64decode, b64encode
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QPoint, QTimer
-from PySide6.QtGui import QGuiApplication
+from qtpy.QtCore import QByteArray, QPoint, QTimer
+from qtpy.QtGui import QGuiApplication
 
 from blinkview.ui.utils.window_manager import get_window_geometry_data, restore_window_geometry_safe
 from blinkview.ui.widgets.log_viewer import LogViewerWidget

@@ -7,8 +7,8 @@
 from datetime import date, datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtWidgets import (
+from qtpy.QtCore import QObject, QTimer, Signal
+from qtpy.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,

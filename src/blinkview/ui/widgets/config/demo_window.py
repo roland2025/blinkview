@@ -7,7 +7,7 @@
 import sys
 from copy import deepcopy
 
-from PySide6.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget
+from qtpy.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget
 
 from .dynamic_config import DynamicConfigWidget
 

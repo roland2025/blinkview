@@ -6,7 +6,7 @@
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, Signal, Slot
+from qtpy.QtCore import QObject, Signal, Slot
 
 if TYPE_CHECKING:
     from blinkview.ui.widgets.toast import ToastType

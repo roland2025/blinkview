@@ -7,7 +7,7 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from PySide6.QtWidgets import QMessageBox
+    from qtpy.QtWidgets import QMessageBox
 
 
 class MessageBox:
@@ -19,7 +19,7 @@ class MessageBox:
     # The Proxy: This intercepts access to MessageBox.Btn
     class _BtnProxy:
         def __getattr__(self, name):
-            from PySide6.QtWidgets import QMessageBox
+            from qtpy.QtWidgets import QMessageBox
 
             return getattr(QMessageBox.StandardButton, name)
 
@@ -28,7 +28,7 @@ class MessageBox:
     @staticmethod
     def _show(parent, title, text, icon_type, buttons, default_btn):
         # Local import: Only happens when a dialog is actually shown
-        from PySide6.QtWidgets import QMessageBox
+        from qtpy.QtWidgets import QMessageBox
 
         from blinkview.ui.native_dark_mode import set_native_dark_mode
 
@@ -49,7 +49,7 @@ class MessageBox:
 
     @staticmethod
     def info(parent, title, text, buttons=None):
-        from PySide6.QtWidgets import QMessageBox
+        from qtpy.QtWidgets import QMessageBox
 
         if buttons is None:
             buttons = QMessageBox.StandardButton.Ok
@@ -58,7 +58,7 @@ class MessageBox:
 
     @staticmethod
     def question(parent, title, text, buttons=None, default_btn=None):
-        from PySide6.QtWidgets import QMessageBox
+        from qtpy.QtWidgets import QMessageBox
 
         # Handle Defaults inside the method to avoid definition-time imports
         if buttons is None:
@@ -70,7 +70,7 @@ class MessageBox:
 
     @staticmethod
     def warning(parent, title, text, buttons=None):
-        from PySide6.QtWidgets import QMessageBox
+        from qtpy.QtWidgets import QMessageBox
 
         if buttons is None:
             buttons = QMessageBox.StandardButton.Ok
@@ -78,7 +78,7 @@ class MessageBox:
 
     @staticmethod
     def critical(parent, title, text, buttons=None):
-        from PySide6.QtWidgets import QMessageBox
+        from qtpy.QtWidgets import QMessageBox
 
         if buttons is None:
             buttons = QMessageBox.StandardButton.Ok

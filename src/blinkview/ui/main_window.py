@@ -3,16 +3,16 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 #
 # Copyright (c) 2026 Roland Uuesoo
-
+import os
 import signal
 import sys
 from pathlib import Path
 from time import perf_counter
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Slot
-from PySide6.QtGui import QAction, QIcon
-from PySide6.QtWidgets import (
+from qtpy.QtCore import Qt, QTimer, Signal, Slot
+from qtpy.QtGui import QAction, QIcon
+from qtpy.QtWidgets import (
     QApplication,
     QComboBox,
     QDockWidget,
@@ -732,6 +732,9 @@ class BlinkMainWindow(QMainWindow):
 
 
 def run(args):
+    if "QT_API" not in os.environ:
+        os.environ["QT_API"] = "pyside6"
+
     install_version: Optional[str] = None  # version to install when closing app
 
     def set_update_version(ver):

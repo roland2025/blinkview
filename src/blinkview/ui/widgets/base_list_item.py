@@ -6,9 +6,9 @@
 
 from copy import deepcopy
 
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (
+from qtpy.QtCore import QPoint, Qt
+from qtpy.QtGui import QAction
+from qtpy.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
     QLabel,

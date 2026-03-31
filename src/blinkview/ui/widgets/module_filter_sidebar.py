@@ -4,8 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtWidgets import QComboBox, QHeaderView, QLabel, QTableView, QToolBar, QVBoxLayout, QWidget
+from qtpy.QtCore import QSize, Qt
+from qtpy.QtWidgets import QComboBox, QHeaderView, QLabel, QTableView, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.module_filter_table import ModuleFilterTable, TempLogFilter

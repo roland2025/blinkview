@@ -46,16 +46,19 @@ dependencies = [
 
 # --- Optional GUI Dependencies (GIL-dependent) ---
 [project.optional-dependencies]
-gui = [
-    "PySide6>=6.6.0",
+gui-core = [
+    "qtpy>=2.4.0",
     "pyqtdarktheme",
     "pyqtgraph",
     "numpy",
 ]
 
+pyside6 = ["PySide6>=6.6.0", "blinkview[gui-core]"]
+pyqt6 = ["PyQt6>=6.6.0", "blinkview[gui-core]"]
+
 # --- Future-proof "All" Catch-all ---
 all = [
-    "blinkview[gui]",
+    "blinkview[pyside6]",
 ]
 
 [project.scripts]
@@ -72,7 +75,7 @@ daemon = [
 ]
 
 gui = [
-    "blinkview[gui]", # This pulls in the project dependencies + the gui extra
+    "blinkview[pyside6]", # This pulls in the project dependencies + the gui extra
 ]
 
 docs = [

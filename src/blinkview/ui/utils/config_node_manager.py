@@ -6,7 +6,7 @@
 
 from typing import Any
 
-from PySide6.QtCore import QObject, QTimer, Signal, Slot
+from qtpy.QtCore import QObject, QTimer, Signal, Slot
 
 from blinkview.core.config_manager import ConfigManager
 from blinkview.ui.gui_context import GUIContext

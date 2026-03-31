@@ -7,8 +7,8 @@
 from collections import deque
 from typing import Iterable
 
-from PySide6.QtGui import QAction, Qt
-from PySide6.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLayout, QWidget
+from qtpy.QtGui import QAction, Qt
+from qtpy.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
@@ -165,7 +165,7 @@ QToolButton[filterEnabled="true"] {
         self.action_telemetry.toggled.connect(self._toggle_telemetry_sidebar)
         self.toolbar.addAction(self.action_telemetry)
 
-        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.splitter = QSplitter(Qt.Horizontal, self)
         self.layout.addWidget(self.splitter)
 
         self.log_filter = LogFilter(

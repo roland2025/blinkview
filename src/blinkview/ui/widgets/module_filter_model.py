@@ -4,20 +4,15 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import weakref
+from dataclasses import dataclass
 from typing import List, Set
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal, QTimer
-from dataclasses import dataclass
-import weakref
-
-from PySide6.QtGui import QColor
+from qtpy.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer, Signal
+from qtpy.QtGui import QColor
 
 from blinkview.ui.gui_context import GUIContext
 from blinkview.utils.log_level import LogLevel
-
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer
-from PySide6.QtGui import QColor
-import weakref
 
 
 class ModuleFilterModel(QAbstractTableModel):
@@ -25,13 +20,14 @@ class ModuleFilterModel(QAbstractTableModel):
     SHARED Source Model: Provides the hardware module list across all devices.
     This model NO LONGER stores checkbox or level state.
     """
+
     sync_paused_changed = Signal(bool)
     registry_synced = Signal(list)  # Emits the full list of ModuleIdentity
 
     def __init__(self, gui_context, parent=None):
         super().__init__(parent)
         self.gui_context = gui_context
-        self._row_states: List['ModuleIdentity'] = [] # Just the identity objects
+        self._row_states: List["ModuleIdentity"] = []  # Just the identity objects
         self._known_ids: Set[int] = set()
         self._usage_count = 0
 
@@ -51,7 +47,9 @@ class ModuleFilterModel(QAbstractTableModel):
         if not current_pause:
             self.sync_registry()
 
-        print(f"[ModuleFilterModel] pause_sync: pause={pause}, _pause_count={self._pause_count}, active_views={self._usage_count}")
+        print(
+            f"[ModuleFilterModel] pause_sync: pause={pause}, _pause_count={self._pause_count}, active_views={self._usage_count}"
+        )
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._row_states)
@@ -124,7 +122,6 @@ class ModuleFilterModel(QAbstractTableModel):
         print(f"[ModuleFilterModel] register_consumer: _usage_count={self._usage_count}")
         self.sync_registry()
 
-
     def unregister_consumer(self):
         self._usage_count = max(0, self._usage_count - 1)
         print(f"[ModuleFilterModel] unregister_consumer: _usage_count={self._usage_count}")
@@ -137,7 +134,7 @@ class ModuleFilterModel(QAbstractTableModel):
         state = self._row_states[index.row()]
 
         if index.column() == 0 and role == Qt.CheckStateRole:
-            state.is_checked = (value == Qt.Checked)
+            state.is_checked = value == Qt.Checked
         elif index.column() == 1 and role == Qt.EditRole:
             state.min_level = value
         else:

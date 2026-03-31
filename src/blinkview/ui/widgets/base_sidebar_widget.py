@@ -4,9 +4,9 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QCursor
-from PySide6.QtWidgets import (
+from qtpy.QtCore import Qt, QTimer, Signal
+from qtpy.QtGui import QAction, QCursor
+from qtpy.QtWidgets import (
     QInputDialog,
     QListWidget,
     QListWidgetItem,
@@ -73,15 +73,11 @@ class BaseSidebarWidget(QWidget):
         loading_action.setEnabled(False)
 
         button = self.toolbar.widgetForAction(self.btn_add)
-        pos = (
-            button.mapToGlobal(button.rect().bottomLeft()) if button else QCursor.pos()
-        )
+        pos = button.mapToGlobal(button.rect().bottomLeft()) if button else QCursor.pos()
 
         QTimer.singleShot(
             0,
-            lambda: self.types_fetched.emit(
-                self.config_node.factory_types(self.factory_key)
-            ),
+            lambda: self.types_fetched.emit(self.config_node.factory_types(self.factory_key)),
         )
 
         self._active_menu.exec(pos)
@@ -109,15 +105,11 @@ class BaseSidebarWidget(QWidget):
             action = self._active_menu.addAction(dev_type)
             action.setToolTip(description)
             action.setStatusTip(description)
-            action.triggered.connect(
-                lambda checked=False, dtype=dev_type: self.add_item(dtype)
-            )
+            action.triggered.connect(lambda checked=False, dtype=dev_type: self.add_item(dtype))
 
     def add_item(self, item_type: str):
         """Prompts for a name and updates the list widget."""
-        name, ok = QInputDialog.getText(
-            self, self.input_title, f"Enter a name for the new '{item_type}':"
-        )
+        name, ok = QInputDialog.getText(self, self.input_title, f"Enter a name for the new '{item_type}':")
         name = name.strip()
 
         if not ok or not name:
@@ -132,9 +124,7 @@ class BaseSidebarWidget(QWidget):
         self.config_node.send_config(config)
         self.config_node.show(id_, name)
 
-    def generate_daemon_config(
-        self, name: str, item_type: str, parent_config: dict
-    ) -> tuple[str, dict]:
+    def generate_daemon_config(self, name: str, item_type: str, parent_config: dict) -> tuple[str, dict]:
         """Must be implemented by subclasses to define how the specific daemon is created."""
         raise NotImplementedError("Subclasses must implement generate_daemon_config")
 

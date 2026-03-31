@@ -4,9 +4,9 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QAction
+from qtpy.QtWidgets import (
     QMenu,
     QPushButton,
 )
@@ -23,7 +23,7 @@ class PipelineListItemWidget(BaseListItemWidget):
         self.btn_log.setFixedSize(28, 28)
         self.btn_log.setToolTip("Open Log")
         self.btn_log.clicked.connect(self._on_log_clicked)
-        self.btn_log.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.btn_log.setContextMenuPolicy(Qt.CustomContextMenu)
         self.btn_log.customContextMenuRequested.connect(self._show_log_context_menu)
         self.layout.addWidget(self.btn_log)
 

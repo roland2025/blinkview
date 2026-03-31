@@ -8,7 +8,7 @@ import weakref
 from copy import deepcopy
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal
+from qtpy.QtCore import QObject, Signal
 
 
 class ConfigNode(QObject):

@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtCore import QObject
+from qtpy.QtCore import QObject
 
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.ui.module_gui_meta import ModuleGUIMeta
@@ -44,7 +44,9 @@ class LogFilterIndexManager(QObject):
         return assigned_idx
 
     def log_state(self):
-        print(f"[IndexManager] capacity={self._current_capacity} next={self._next_index} recycled={self._recycled_indices}")
+        print(
+            f"[IndexManager] capacity={self._current_capacity} next={self._next_index} recycled={self._recycled_indices}"
+        )
 
     def log_module(self, module: ModuleIdentity):
         print(f"[IndexManager] module {module.name} filter_conf {module.meta.filter_conf}")
@@ -123,7 +125,6 @@ class LogFilterIndexManager(QObject):
 
         for device in self.ctx.id_registry.device_list:
             if device.root.meta is not None:
-
                 if index < len(device.root.meta.filter_conf):
                     device.root.meta.filter_conf[index] = LogLevel.ALL
                 self.log_module(device.root)

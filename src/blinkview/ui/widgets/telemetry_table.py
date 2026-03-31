@@ -6,9 +6,9 @@
 
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QMimeData, QSize, QSortFilterProxyModel, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QDrag, QFont, QPainter, QPixmap
-from PySide6.QtWidgets import (
+from qtpy.QtCore import QEvent, QMimeData, QSize, QSortFilterProxyModel, Qt, QTimer
+from qtpy.QtGui import QAction, QColor, QDrag, QFont, QPainter, QPixmap
+from qtpy.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QHeaderView,

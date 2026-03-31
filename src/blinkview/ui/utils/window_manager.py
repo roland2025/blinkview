@@ -6,9 +6,9 @@
 
 from base64 import b64decode, b64encode
 
-from PySide6.QtCore import QByteArray, QPoint, QTimer
-from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QMainWindow
+from qtpy.QtCore import QByteArray, QPoint, QTimer
+from qtpy.QtGui import QGuiApplication
+from qtpy.QtWidgets import QMainWindow
 
 
 def get_window_geometry_data(window, threshold=15) -> dict:
@@ -53,8 +53,8 @@ def restore_window_geometry_safe(window, geo_dict: dict):
 
     from base64 import b64decode
 
-    from PySide6.QtCore import QByteArray, QRect
-    from PySide6.QtGui import QGuiApplication
+    from qtpy.QtCore import QByteArray, QRect
+    from qtpy.QtGui import QGuiApplication
 
     window._last_saved_geo = geo_dict
 

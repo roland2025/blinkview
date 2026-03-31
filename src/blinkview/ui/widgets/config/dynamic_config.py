@@ -6,8 +6,8 @@
 
 from copy import deepcopy
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import (
+from qtpy.QtCore import Qt, QTimer, Signal
+from qtpy.QtWidgets import (
     QCheckBox,
     QFormLayout,
     QFrame,

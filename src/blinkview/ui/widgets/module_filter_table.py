@@ -8,9 +8,9 @@ import weakref
 from dataclasses import dataclass, field
 from typing import List, Optional, Set
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QSortFilterProxyModel, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QComboBox, QHeaderView, QStyledItemDelegate, QTableView
+from qtpy.QtCore import QAbstractTableModel, QModelIndex, QObject, QSortFilterProxyModel, Qt, QTimer, Signal
+from qtpy.QtGui import QColor, QFont
+from qtpy.QtWidgets import QComboBox, QHeaderView, QStyledItemDelegate, QTableView
 
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.ui.gui_context import GUIContext

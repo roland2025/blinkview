@@ -8,8 +8,8 @@ import json
 import sys
 from copy import deepcopy
 
-from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget
+from qtpy.QtCore import QObject, QTimer, Signal
+from qtpy.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget
 
 from blinkview.ui.widgets.config.dynamic_config import DynamicConfigWidget
 

@@ -27,9 +27,9 @@ def set_as_in_development(target, parent_widget, feature_name=None, issue_no=Non
 
 
 def show_feature_teaser(parent, feature_name, issue_no=None):
-    from PySide6.QtCore import QUrl
-    from PySide6.QtGui import QDesktopServices
-    from PySide6.QtWidgets import QMessageBox, QStyle
+    from qtpy.QtCore import QUrl
+    from qtpy.QtGui import QDesktopServices
+    from qtpy.QtWidgets import QMessageBox, QStyle
 
     from blinkview.ui.native_dark_mode import set_native_dark_mode
 
@@ -42,14 +42,10 @@ def show_feature_teaser(parent, feature_name, issue_no=None):
     msg.setStyleSheet("QLabel{min-width: 450px;}")
 
     # HTML automatically handles word-wrapping much better than raw strings.
-    msg.setText(
-        f"<h3 style='margin-bottom: 0px;'>{feature_name}</h3>"
-        f"<p>This feature is currently in the lab! 🧪</p>"
-    )
+    msg.setText(f"<h3 style='margin-bottom: 0px;'>{feature_name}</h3><p>This feature is currently in the lab! 🧪</p>")
 
     msg.setInformativeText(
-        "It's not quite ready for prime time yet.\n\n"
-        "You can write to GitHub if you have specific requirements."
+        "It's not quite ready for prime time yet.\n\nYou can write to GitHub if you have specific requirements."
     )
 
     # URL Construction

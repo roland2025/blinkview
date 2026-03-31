@@ -6,8 +6,8 @@
 
 from time import perf_counter
 
-from PySide6.QtGui import QBrush, QColor, QFont
-from PySide6.QtWidgets import QApplication, QStyle, QStyledItemDelegate, QStyleOptionButton
+from qtpy.QtGui import QBrush, QColor, QFont
+from qtpy.QtWidgets import QApplication, QStyle, QStyledItemDelegate, QStyleOptionButton
 
 from blinkview.ui.widgets.config.style_config import StyleConfig
 
@@ -40,9 +40,9 @@ class ActionButtonDelegate(QStyledItemDelegate):
 from enum import IntEnum, auto
 from time import perf_counter
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor, QPalette
-from PySide6.QtWidgets import QApplication, QStyle, QStyledItemDelegate
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QBrush, QColor, QPalette
+from qtpy.QtWidgets import QApplication, QStyle, QStyledItemDelegate
 
 
 class TelemetryCol(IntEnum):

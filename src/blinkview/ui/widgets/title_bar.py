@@ -4,9 +4,9 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QCloseEvent, QFont, QIcon
-from PySide6.QtWidgets import (
+from qtpy.QtCore import Qt, QTimer, Signal, Slot
+from qtpy.QtGui import QAction, QCloseEvent, QFont, QIcon
+from qtpy.QtWidgets import (
     QApplication,
     QDockWidget,
     QHBoxLayout,

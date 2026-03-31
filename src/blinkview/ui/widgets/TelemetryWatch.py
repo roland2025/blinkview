@@ -8,9 +8,9 @@ from builtins import print as builtin_print
 from dataclasses import dataclass, field
 from typing import List, Optional, Union
 
-from PySide6.QtCore import QMimeData, Qt, Signal
-from PySide6.QtGui import QAction, QDrag, QFont, QPixmap
-from PySide6.QtWidgets import (
+from qtpy.QtCore import QMimeData, Qt, Signal
+from qtpy.QtGui import QAction, QDrag, QFont, QPixmap
+from qtpy.QtWidgets import (
     QFormLayout,
     QFrame,
     QGridLayout,

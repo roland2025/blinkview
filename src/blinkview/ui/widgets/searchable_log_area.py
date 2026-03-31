@@ -4,12 +4,9 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtWidgets import (
-    QPlainTextEdit, QTextEdit, QWidget, QVBoxLayout,
-    QLineEdit, QHBoxLayout, QLabel, QToolButton
-)
-from PySide6.QtGui import QTextCharFormat, QColor, QTextDocument, QKeySequence, QShortcut, QFont, QTextCursor
-from PySide6.QtCore import Qt, QTimer, Slot, QPoint, QEvent
+from qtpy.QtCore import QEvent, QPoint, Qt, QTimer, Slot
+from qtpy.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor, QTextDocument
+from qtpy.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QTextEdit, QToolButton, QVBoxLayout, QWidget
 
 
 class SearchableLogArea(QWidget):
@@ -140,7 +137,8 @@ class SearchableLogArea(QWidget):
         """
         # Convert list to a single string joined by newlines if necessary
         if isinstance(data, list):
-            if not data: return
+            if not data:
+                return
             text_to_append = "\n".join(data)
         else:
             text_to_append = data
@@ -202,7 +200,8 @@ class SearchableLogArea(QWidget):
 
     def find_next(self):
         """Moves to the next occurrence of search text."""
-        if not self._find_text: return
+        if not self._find_text:
+            return
         # Search forward from current cursor
         found = self.editor.find(self._find_text)
         if not found:
@@ -219,7 +218,8 @@ class SearchableLogArea(QWidget):
 
     def find_prev(self):
         """Moves to the previous occurrence of search text."""
-        if not self._find_text: return
+        if not self._find_text:
+            return
         # Search backward
         found = self.editor.find(self._find_text, QTextDocument.FindBackward)
         if not found:
@@ -275,7 +275,8 @@ class SearchableLogArea(QWidget):
 
     def refresh_highlights(self):
         """Visually renders three layers: Global Find, Manual Selection, and Current Match."""
-        if not self.editor.viewport(): return
+        if not self.editor.viewport():
+            return
         doc = self.editor.document()
         combined_selections = []
 
@@ -283,19 +284,23 @@ class SearchableLogArea(QWidget):
         start_pos = self.editor.cursorForPosition(QPoint(0, 0)).position()
         view_rect = self.editor.viewport().rect()
         end_pos = self.editor.cursorForPosition(view_rect.bottomRight()).position()
-        if end_pos <= start_pos: end_pos = doc.characterCount()
+        if end_pos <= start_pos:
+            end_pos = doc.characterCount()
 
         # Get current cursor to highlight the "active" match differently
         current_cursor = self.editor.textCursor()
 
         def find_visible_matches(text, fmt, limit=500):
-            if not text or text.isspace(): return
+            if not text or text.isspace():
+                return
             cursor = doc.find(text, start_pos)
             count = 0
             while not cursor.isNull() and cursor.position() <= end_pos and count < limit:
                 # Determine which format to use
-                is_active = (cursor.selectionStart() == current_cursor.selectionStart() and
-                             cursor.selectionEnd() == current_cursor.selectionEnd())
+                is_active = (
+                    cursor.selectionStart() == current_cursor.selectionStart()
+                    and cursor.selectionEnd() == current_cursor.selectionEnd()
+                )
 
                 sel = QTextEdit.ExtraSelection()
                 sel.format = self._fmt_current if is_active else fmt
@@ -317,4 +322,3 @@ class SearchableLogArea(QWidget):
         scrollbar = self.editor.verticalScrollBar()
         if scrollbar.value() != scrollbar.maximum():
             scrollbar.setValue(scrollbar.maximum())
-

@@ -7,8 +7,8 @@
 from dataclasses import dataclass
 from time import perf_counter
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
-from PySide6.QtGui import QColor
+from qtpy.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
+from qtpy.QtGui import QColor
 
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.core.log_row import LogRow

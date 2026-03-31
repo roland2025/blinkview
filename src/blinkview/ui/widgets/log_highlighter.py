@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtGui import QSyntaxHighlighter, QTextCharFormat, QFont, QColor
+from qtpy.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 
 from blinkview.utils.level_map import LevelMap
 from blinkview.utils.log_level import LogLevel
@@ -45,7 +45,7 @@ class LogHighlighter(QSyntaxHighlighter):
             idx = self.level_index
             # Assuming the level is the 3rd 'word' in your string:
             # "17:28:35.459 ABC E asi: ..."
-            parts = text.split(maxsplit=idx+1)  # Split into at most idx+1 parts to avoid unnecessary splitting
+            parts = text.split(maxsplit=idx + 1)  # Split into at most idx+1 parts to avoid unnecessary splitting
             # if len(parts) > idx:
             fmt = self.formats[parts[idx]]
             self.setFormat(0, len(text), fmt)

@@ -4,9 +4,9 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtCore import QEasingCurve, QObject, QPropertyAnimation, QRectF, Qt, QVariantAnimation, Signal, Slot
-from PySide6.QtGui import QColor, QCursor, QPainter, QPen
-from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QWidget
+from qtpy.QtCore import QEasingCurve, QObject, QPropertyAnimation, QRectF, Qt, QVariantAnimation, Signal, Slot
+from qtpy.QtGui import QColor, QCursor, QPainter, QPen
+from qtpy.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QWidget
 
 
 class ToastType:

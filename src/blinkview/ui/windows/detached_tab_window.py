@@ -4,8 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QMainWindow, QMenu
+from qtpy.QtCore import Qt, QTimer
+from qtpy.QtWidgets import QMainWindow, QMenu
 from shiboken6 import isValid
 
 from blinkview.ui.gui_context import GUIContext

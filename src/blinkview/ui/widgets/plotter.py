@@ -12,8 +12,8 @@ if TYPE_CHECKING:
     import numpy as np
     import pyqtgraph as pg
 
-from PySide6.QtGui import QAction, QColor
-from PySide6.QtWidgets import QComboBox, QLabel, QMenu, QSizePolicy, QToolBar, QVBoxLayout, QWidget
+from qtpy.QtGui import QAction, QColor
+from qtpy.QtWidgets import QComboBox, QLabel, QMenu, QSizePolicy, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.core.log_row import LogRow
