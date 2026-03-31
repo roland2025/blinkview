@@ -74,15 +74,19 @@ class FileLogger(BaseFileLogger):
         self.part_index = 0  # Track current chunk
 
     def apply_config(self, config: dict):
-        super().apply_config(config)
+        changed = super().apply_config(config)
         self.batch_processor = self.shared.factories.build("logging_processor", config.get("processor"), self.shared)
         self.process_batch = self.batch_processor.process
 
         self.shared.registry.file_manager.add_file_logger(self)
+        return changed
 
     def open_file(self, increment_part_index=False):
         if increment_part_index:
             self.part_index += 1
+            # Sync the increment back to metadata immediately during rotation
+            self.shared.registry.file_manager.metadata["loggers"][self.local.logging_id]["last_part"] = self.part_index
+            self.shared.registry.file_manager.write_metadata()
 
         self.file_path = self.shared.registry.file_manager.get_path_for_log(self, self.part_index)
         if self.file_handle is not None:
@@ -96,7 +100,7 @@ class FileLogger(BaseFileLogger):
         self.file_handle = self.file_path.open(
             mode,
             encoding="utf-8" if not is_binary else None,
-            newline="\n" if not is_binary else None,  # <--- THIS FIXES IT
+            newline="\n" if not is_binary else None,
         )
 
         current_file_size = self.file_path.stat().st_size

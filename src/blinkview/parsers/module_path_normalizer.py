@@ -20,6 +20,9 @@ from blinkview.parsers.transformer import TransformerFactory, TransformStep
 class PathNormalizerStep(TransformStep):
     __doc__ = "A transformation step that normalizes module paths in log lines. It extracts the module name from the specified index, processes any tags enclosed in brackets, and constructs a normalized path. For example, given a log line with 'app: [TAG1] [TAG2] Message', it will produce 'app.tag1.tag2 Message'. This helps standardize module paths for better filtering and analysis."
 
+    input_type = "str"
+    output_type = "str"
+
     def __init__(self):
         super().__init__()
         self.module_index = 0

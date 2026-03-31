@@ -21,7 +21,6 @@ from .transformer import (
 @TransformerFactory.register("ansi_filter")
 @TransformerFactory.register("regex_replace")
 class RegexMagic(TransformStep):
-    # __slots__ = ('pattern', 'replacement', 'process', 'compiled')
     input_type = "str"
     output_type = "str"
 
@@ -52,7 +51,6 @@ class RegexMagic(TransformStep):
 @configuration_property("encoding", type="string", default="ascii")
 @configuration_property("errors", type="string", enum=["strict", "ignore", "replace"], default="replace")
 class DecoderStep(TransformStep):
-    # __slots__ = ('encoding',)
     __doc__ = "A simple bytes to string decoder step that uses the specified encoding and error handling strategy."
 
     encoding: str
@@ -123,7 +121,6 @@ class BytesTranslateStep(TransformStep):
     description="The substring to replace each occurrence of the search string with.",
 )
 class StringReplaceStep(TransformStep):
-    # __slots__ = ('search', 'replace', 'process')
     __doc__ = "A simple string replacement step that replaces all occurrences of 'search' with 'replace'."
     search: str
     replace: str

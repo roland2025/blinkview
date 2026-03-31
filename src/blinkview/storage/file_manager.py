@@ -256,10 +256,6 @@ class FileManager:
 
         filename = f"{logging_id}.{part_suffix}.{ext}"
 
-        self.metadata["loggers"][logging_id]["last_part"] = part
-
-        self.write_metadata()
-
         return self.session_dir / filename
 
     def stop(self):
@@ -295,18 +291,33 @@ class FileManager:
         self.write_metadata()
 
     def add_file_logger(self, file_logger: FileLogger):
-        if file_logger in self._file_loggers:
-            return
+        logger_id = file_logger.local.logging_id
+        if logger_id in self.metadata["loggers"]:
+            # RESTORE STATE:
+            # We increment the last_part so that re-enabling the logger
+            # always starts a fresh file part (e.g., .0000 -> .0001)
+            # instead of appending to a potentially closed/interrupted file.
+            new_part = self.metadata["loggers"][logger_id].get("last_part", 0) + 1
+            file_logger.part_index = new_part
+            self.metadata["loggers"][logger_id]["last_part"] = new_part
 
-        self.metadata["loggers"][file_logger.local.logging_id] = {
-            "processor": file_logger.batch_processor.__class__.__name__,
-            "extension": file_logger.batch_processor.extension,
-            "last_part": 0,
-        }
-
+            print(f"[FileManager] Restored logger {logger_id} to part {new_part}")
+        else:
+            # INITIALIZE NEW ENTRY:
+            self.metadata["loggers"][logger_id] = {
+                "processor": file_logger.batch_processor.__class__.__name__,
+                "extension": file_logger.batch_processor.extension,
+                "last_part": file_logger.part_index,
+                "total_bytes": 0,
+            }
         self.write_metadata()
 
-        self._file_loggers.append(file_logger)
+        if file_logger not in self._file_loggers:
+            self._file_loggers.append(file_logger)
+
+    def remove_file_logger(self, file_logger: FileLogger):
+        if file_logger in self._file_loggers:
+            self._file_loggers.remove(file_logger)
 
     def update_logger_stats(self, file_logger: FileLogger, bytes_written: int, absolute: bool = False):
         """Updates the byte tally. If absolute is True, replaces the value."""
@@ -382,6 +393,7 @@ class FileManager:
         if master_path.exists():
             try:
                 import shutil
+
                 # copy2 preserves metadata/timestamps; read_bytes does not.
                 shutil.copy2(master_path, session_start_path)
             except Exception as e:

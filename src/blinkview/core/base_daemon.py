@@ -89,8 +89,9 @@ class BaseDaemon:
                     self.subscribe(self.file_logger)
                 else:
                     if self.file_logger:
-                        self.unsubscribe(self.file_logger)
                         self.file_logger.stop()
+                        self.file_logger.clear_all_links()
+                        self.shared.registry.file_manager.remove_file_logger(self.file_logger)
                         self.file_logger = None
         except Exception as e:
             if self.logger:
