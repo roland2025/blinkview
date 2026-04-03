@@ -8,7 +8,7 @@ from typing import Callable
 
 
 class LevelIdentity:
-    __slots__ = ('value', 'name', 'color', 'name_log', 'name_conf')
+    __slots__ = ("value", "name", "color", "name_log", "name_conf")
 
     def __init__(self, value: int, name: str, name_log: str, name_conf: str, color: str):
         self.value = value
@@ -17,35 +17,43 @@ class LevelIdentity:
         self.name_conf = name_conf
         self.color = color
 
-    def __int__(self): return self.value
+    def __int__(self):
+        return self.value
 
-    def __str__(self): return self.name
+    def __str__(self):
+        return self.name
 
-    def __repr__(self): return f"LogLevel.{self.name_conf}"
+    def __repr__(self):
+        return f"LogLevel.{self.name_conf}"
 
     # These allow LogLevel.INFO > LogLevel.DEBUG to still work
-    def __gt__(self, other): return self.value > int(other)
+    def __gt__(self, other):
+        return self.value > int(other)
 
-    def __ge__(self, other): return self.value >= int(other)
+    def __ge__(self, other):
+        return self.value >= int(other)
 
-    def __lt__(self, other): return self.value < int(other)
+    def __lt__(self, other):
+        return self.value < int(other)
 
-    def __le__(self, other): return self.value <= int(other)
+    def __le__(self, other):
+        return self.value <= int(other)
 
-    def __eq__(self, other): return self.value == int(other)
+    def __eq__(self, other):
+        return self.value == int(other)
 
 
 class LogLevel:
-    ALL    = LevelIdentity(0, "ALL", "A", "ALL",    "#888888")
+    ALL = LevelIdentity(0, "ALL", "A", "ALL", "#888888")
     """For filtering, ALL is the same as TRACE, but it can be used to indicate "no filtering" in APIs. It will not be printed as "ALL" in logs."""
-    TRACE    = LevelIdentity(5, "T", "T", "TRACE",    "#888888")
-    DEBUG    = LevelIdentity(10, "D", "D", "DEBUG",    "#aaaaaa")
-    INFO     = LevelIdentity(20, "I", "I", "INFO",     "#eeeeee")
-    WARN     = LevelIdentity(30, "W", "W", "WARNING",     "#FFCC00")
-    ERROR    = LevelIdentity(40, "E", "E", "ERROR",    "#FF3333")
-    FATAL    = LevelIdentity(45, "F", "F", "FATAL",    "#ff33cc")
+    TRACE = LevelIdentity(5, "T", "T", "TRACE", "#888888")
+    DEBUG = LevelIdentity(10, "D", "D", "DEBUG", "#aaaaaa")
+    INFO = LevelIdentity(20, "I", "I", "INFO", "#eeeeee")
+    WARN = LevelIdentity(30, "W", "W", "WARNING", "#FFCC00")
+    ERROR = LevelIdentity(40, "E", "E", "ERROR", "#FF3333")
+    FATAL = LevelIdentity(45, "F", "F", "FATAL", "#ff33cc")
     CRITICAL = LevelIdentity(50, "C", "C", "CRITICAL", "#ff33cc")
-    OFF      = LevelIdentity(100, "OFF", "O", "OFF",      "#888888")
+    OFF = LevelIdentity(100, "OFF", "O", "OFF", "#888888")
     """For filtering, OFF means "no logs", but it can be used to indicate "filter out all logs" in APIs. It will not be printed as "OFF" in logs."""
 
     # For mapping numeric values (from bytes/JSON) back to objects
@@ -59,6 +67,9 @@ class LogLevel:
 
     @classmethod
     def from_string(cls, name: str, default=None) -> LevelIdentity:
+        if isinstance(name, LevelIdentity):
+            return name
+
         for level in cls.LIST:
             if level.name_conf == name:
                 return level

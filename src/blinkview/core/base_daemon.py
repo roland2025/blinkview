@@ -5,6 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from threading import Event, Lock, Thread
+from time import sleep
 from types import SimpleNamespace
 from typing import Iterable, List
 
@@ -12,6 +13,7 @@ from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable, configuration_property
 from blinkview.core.constants import SysCat
 from blinkview.core.logger import BaseLogger
+from blinkview.core.reusable_batch_pool import ReusableBatch
 from blinkview.core.system_context import SystemContext
 from blinkview.utils.generate_id import generate_id
 from blinkview.utils.settings_updater import update_object_from_config
@@ -59,6 +61,9 @@ class BaseDaemon:
 
         self.file_logger = None  # Optional file logger instance for binary logging
 
+        self.gui_mode = True
+        self._yield_msg_counter = 0  # Counter for messages distributed, used to trigger fairness yield
+
     @property
     def is_running(self) -> bool:
         """The absolute source of truth for thread state."""
@@ -95,7 +100,7 @@ class BaseDaemon:
                         self.file_logger = None
         except Exception as e:
             if self.logger:
-                self.logger.error(f"{self.__class__.__name__}: Failed to apply logging.", e)
+                self.logger.exception(f"{self.__class__.__name__}: Failed to apply logging.", e)
 
         if changed and self._configured:
             self.thread_needs_restart = True
@@ -119,7 +124,8 @@ class BaseDaemon:
             self.logger.info("[DAEMON] Starting...")
 
         self._stop_event.clear()
-        self._thread = Thread(target=self._run_wrapper, daemon=True)
+        name = getattr(self, "reference_id", None)
+        self._thread = Thread(target=self._run_wrapper, daemon=True, name=f"{self.__class__.__name__}({name})")
         self._thread.start()
 
     def stop(self, timeout=5.0):
@@ -178,18 +184,21 @@ class BaseDaemon:
                     self.logger.info(f"Subscriber: '{reference_id}' removed")
                 self.subscribers.remove(subscriber)
 
-    def distribute(self, batch: list):
-        # Copy the list while locked, then release the lock immediately!
+    def distribute(self, batch: ReusableBatch):
         with self._subscribers_lock:
-            subs_copy = list(self.subscribers)
+            subs = list(self.subscribers)
 
-        # Distribute without holding the lock
-        for subscriber in subs_copy:
-            try:
-                subscriber.put(batch)
-            except Exception as e:
-                if self.logger:
-                    self.logger.error("Queue delivery failed.", e)
+        for sub in subs:
+            sub.put(batch)
+
+        # UNIVERSAL FAIRNESS GATE
+        if self.gui_mode:
+            # Optimization: Only sleep(0.001) every ~50,000 messages.
+            # This keeps the "Liquid GUI" feel without cutting throughput by 50%.
+            self._yield_msg_counter += batch.size
+            if self._yield_msg_counter >= 50000:
+                sleep(0.001)
+                self._yield_msg_counter = 0
 
     def update_fields(self, config: dict, fields: Iterable[str]) -> bool:
         return update_object_from_config(self, config, fields)
@@ -220,3 +229,8 @@ class BaseDaemon:
         id_ = generate_id(prefix, list(parent.keys()))
         conf = {"id": id_, "enabled": True, "type": kind, "name": name}
         return id_, conf
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(reference_id={getattr(self, 'reference_id', None)}, enabled={self.enabled})"
+
+    __str__ = __repr__

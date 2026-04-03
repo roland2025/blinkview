@@ -9,6 +9,7 @@ from operator import attrgetter
 
 from blinkview.core.base_reorder import BaseReorder, ReorderFactory
 from blinkview.core.batch_queue import BatchQueue
+from blinkview.core.log_row import LogRow
 
 
 @ReorderFactory.register("default")
@@ -33,6 +34,8 @@ class Reorder(BaseReorder):
         # Replace 'timestamp_ns' with the exact name of the attribute on your LogRow
         get_ts = attrgetter("timestamp_ns")
 
+        pool_acquire = self.shared.pool.get(tag="LogRows").acquire
+
         stop_is_set = self._stop_event.is_set
         while not stop_is_set():
             now = time_ns()
@@ -49,15 +52,19 @@ class Reorder(BaseReorder):
             # GREEDY FETCH
             # The OS blocks this thread perfectly based on the oldest item's needs
 
-            batches = []
+            # batches = []
             batch = get(timeout=timeout_sec)
+            # print(f"[Reorder] got batch: {batch} with timeout: {timeout_sec:.3f}s")
             if batch is not None:
-                batches.append(batch)
-            # batches = get_many(timeout=timeout_sec)
+                with batch:
+                    buffer.extend(batch)
+                # batches.append(batch)
+                # batches = get_many(timeout=timeout_sec)
 
-            if batches:
-                for in_batch in batches:
-                    buffer.extend(in_batch)
+                # if batches:
+                #     for in_batch in batches:
+                #         buffer.extend(in_batch)
+                #         in_batch.release()
 
                 # TIMSORT
                 # We only sort if new data arrived.
@@ -78,10 +85,24 @@ class Reorder(BaseReorder):
 
             # SLICE AND DISTRIBUTE
             if split_idx > 0:
-                out_batch = buffer[:split_idx]
-                buffer = buffer[split_idx:]  # Slice off the processed items
+                # Acquire a batch from the manager
+                with pool_acquire() as out_batch:
+                    _append = out_batch.append
 
-                distribute(out_batch)
+                    # Move references from our buffer to the new ReusableBatch
+                    # This is a very fast operation (just pointer copying)
+                    for i in range(split_idx):
+                        _append(buffer[i])
+
+                    # Remove from buffer (Slice is faster than 'del' for large chunks)
+                    buffer = buffer[split_idx:]
+
+                    # 5. DISTRIBUTE AND RETAIN
+                    # We distribute the batch. The pool logic handles the ref count.
+                    distribute(out_batch)
 
         if buffer:
-            distribute(buffer)
+            with pool_acquire() as out_batch:
+                for dat in buffer:
+                    out_batch.append(dat)
+                distribute(out_batch)

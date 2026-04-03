@@ -8,6 +8,7 @@ from time import sleep
 
 from ..core.configurable import configuration_property, override_property
 from ..core.log_row import LogRow
+from ..core.reusable_batch_pool import TimeDataEntry
 from ..utils.level_map import LogLevel
 from .BaseReader import BaseReader, DeviceFactory
 
@@ -173,7 +174,11 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         log_rx_tx = self.log_rx_tx
         channel = self.channel
 
-        batch = []
+        pool_acquire = self.shared.pool.get(TimeDataEntry, self).acquire
+
+        batch = pool_acquire()
+        batch_append = batch.append
+
         last_flush_time = time_ns()
         batch_bytes = 0
         push_log = self.local.push_log
@@ -183,15 +188,16 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
             batch_rx_log = []
 
         def flush():
-            nonlocal batch, batch_bytes, last_flush_time, batch_rx_log
-            if batch:
+            nonlocal batch, batch_bytes, last_flush_time, batch_rx_log, batch_append
+            if batch.size:
                 last_flush_time = time_ns()
                 if log_rx_tx and batch_rx_log:
                     push_log(batch_rx_log)
                     batch_rx_log = []
-                self.distribute(batch)
-                batch = []
-                batch_bytes = 0
+                with batch:
+                    self.distribute(batch)
+                batch = pool_acquire()
+                batch_append = batch.append
 
         while not stop_is_set():
             if self.jlink is None:
@@ -211,7 +217,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
                 if data:
                     chunk_bytes = bytes(data)
-                    batch.append((now, chunk_bytes))
+                    batch_append(now, chunk_bytes)
                     batch_bytes += len(chunk_bytes)
 
                     if log_rx_tx:
@@ -235,6 +241,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                 sleep(1.0)
 
         flush()
+        batch.release()
         self.cleanup_jlink()
 
     def cleanup_jlink(self):

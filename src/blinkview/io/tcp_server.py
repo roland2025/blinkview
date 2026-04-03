@@ -64,18 +64,27 @@ class TcpServerSource(BaseReader):
 
         logger.info(f"Starting TCP Server Source on {self.host}:{self.port}")
 
-        batch = []
+        pool_acquire = self.shared.pool.get(TimeDataEntry, self.__class__.__name__).acquire
+
+        batch = pool_acquire()
+        batch_append = batch.append
+
         last_flush_time = time_ns()
         batch_bytes = 0
 
         server_sock = None
 
         def flush():
-            nonlocal batch, batch_bytes, last_flush_time
+            nonlocal batch, batch_bytes, last_flush_time, batch_append
             if batch:
                 last_flush_time = time_ns()
                 self.distribute(batch)
-                batch = []
+
+                with batch:
+                    self.distribute(batch)
+                batch = pool_acquire()
+                batch_append = batch.append
+
                 batch_bytes = 0
 
         while not stop_is_set():
@@ -104,7 +113,7 @@ class TcpServerSource(BaseReader):
                 # Wait for a client (sender) to connect
                 try:
                     conn, addr = server_sock.accept()
-                    logger.info(f"✅ Client connected from {addr}")
+                    logger.info(f"Client connected from {addr}")
 
                     # Short timeout for the active connection to allow flushing during idle times
                     conn.settimeout(0.1)
@@ -124,8 +133,7 @@ class TcpServerSource(BaseReader):
                             logger.info(f"Client {addr} disconnected gracefully.")
                             break  # Break inner loop to go back to listening
 
-                        now = time_ns()
-                        batch.append((now, chunk))
+                        batch_append(time_ns(), chunk)
                         batch_bytes += len(chunk)
 
                     except socket.timeout:
@@ -154,5 +162,6 @@ class TcpServerSource(BaseReader):
 
         # Final cleanup on thread exit
         flush()
+        batch.release()
         if server_sock:
             server_sock.close()

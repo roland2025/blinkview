@@ -7,6 +7,8 @@
 import queue
 from typing import TYPE_CHECKING
 
+from ..core.limits import BATCH_MAXLEN
+
 if TYPE_CHECKING:
     import logging
     from logging import LogRecord
@@ -31,7 +33,7 @@ def _get_logger_handler_class():
         def emit(self, record: LogRecord):
             try:
                 # Pass the raw (fake_timestamp, record) tuple
-                self.output_queue.put((int(record.created * 1_000_000_000), record))
+                self.output_queue.put(record)
             except Exception:
                 self.handleError(record)
 
@@ -47,7 +49,10 @@ def _get_logger_handler_class():
     description="Sets the global root logger level.",
 )
 @configuration_property(
-    "maxlen", type="integer", default=1000, description="The maximum number of LogRecords to batch before flushing."
+    "maxlen",
+    type="integer",
+    default=BATCH_MAXLEN,
+    description="The maximum number of LogRecords to batch before flushing.",
 )
 @configuration_property(
     "delay",
@@ -92,27 +97,29 @@ objects downstream based on count or time.
 
         logger.info("Starting Global Logger Reader Thread (Attached to Root)")
 
-        batch = []
+        pool_acquire = self.shared.pool.get(tag="LogRows").acquire
+
+        batch = pool_acquire()
+        batch_append = batch.append
         last_flush_time = time_ns()
-        batch_size = 0
 
         def flush():
-            nonlocal batch, batch_size, last_flush_time
-            if batch:
+            nonlocal batch, last_flush_time, batch_append
+            if batch.size:
+                with batch:
+                    self.distribute(batch)
                 last_flush_time = time_ns()
-                self.distribute(batch)
-                batch = []
-                batch_size = 0
+                batch = pool_acquire()
+                batch_append = batch.append
 
         try:
             while not stop_is_set():
                 now = time_ns()
                 try:
-                    item = self._queue.get(timeout=0.05)
-                    batch.append(item)
-                    batch_size += 1
+                    item: "LogRecord" = self._queue.get(timeout=0.05)
+                    batch_append(item.created * 1_000_000_000, item)
 
-                    if batch_size >= maxlen:
+                    if batch.size >= maxlen:
                         flush()
                         continue
 

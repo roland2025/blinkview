@@ -3,6 +3,7 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 #
 # Copyright (c) 2026 Roland Uuesoo
+
 import os
 import signal
 import sys
@@ -10,6 +11,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Optional
 
+from PySide6.QtGui import QFont
 from qtpy.QtCore import Qt, QTimer, Signal, Slot
 from qtpy.QtGui import QAction, QIcon
 from qtpy.QtWidgets import (
@@ -161,6 +163,20 @@ class BlinkMainWindow(QMainWindow):
         self.action_view_pipelines.setText("Pipelines")
         self.toolbar.addAction(self.action_view_pipelines)
 
+        self.toolbar.addSeparator()
+
+        # Create the MPS Label
+        self.mps_label = QLabel("0 msg/s")
+        self.mps_label.setMinimumWidth(100)
+        # Use a monospace font so the toolbar doesn't "jump" when numbers change
+        self.mps_label.setFont(QFont("Consolas", 9) if sys.platform == "win32" else QFont("Monospace", 9))
+        self.mps_label.setStyleSheet("color: #eee; margin-right: 10px;")  # Dim it slightly to look like a status
+        self.toolbar.addWidget(self.mps_label)
+
+        # Counters for calculation
+        self._msg_counter = 0
+        self._last_mps_time = perf_counter()
+
         # --- Set up the Central Tabbed Workspace ---
         self.central_tabs = QTabWidget()
         self.central_tabs.setTabsClosable(True)  # Allow users to close config tabs
@@ -234,7 +250,6 @@ class BlinkMainWindow(QMainWindow):
         self.timeout_fast = self.gui_context.theme.ui_update_rate_ms
         self.timer_fast = QTimer(self)
         self.timer_fast.timeout.connect(self.poll_queue)
-        self.timer_fast.start(self.timeout_fast)
 
         self.gui_context.set_telemetry_model(TelemetryModel(gui_context=self.gui_context))
 
@@ -243,7 +258,6 @@ class BlinkMainWindow(QMainWindow):
         # 1FPS Structure Syncer
         self.timer_slow = QTimer(self)
         self.timer_slow.timeout.connect(self.gui_context.on_heartbeat)
-        self.timer_slow.start(self.timeout_slow)  # 1 second
 
         self.widget_factories = {
             "LogViewerWidget": LogViewerWidget,
@@ -279,6 +293,10 @@ class BlinkMainWindow(QMainWindow):
 
         # delay the start of the registry, allows the windows to appear before doing anything heavy
         QTimer.singleShot(100, self.gui_context.registry.start)
+
+        QTimer.singleShot(200, lambda: self.timer_slow.start(self.timeout_slow))  # 1 second
+
+        QTimer.singleShot(300, lambda: self.timer_fast.start(self.timeout_fast))
 
     def register_log_target(self, target):
         """Adds a target that expects a 'process_log_batch(list)' method."""
@@ -450,16 +468,18 @@ class BlinkMainWindow(QMainWindow):
                 if not batch:
                     break  # Queue is empty, all caught up!
 
-                batches_processed += 1
+                with batch:
+                    self._msg_counter += batch.size
+                    batches_processed += 1
 
-                # print(f"[BlinkMainWindow] Processing batch of {len(batch)} logs (Batch #{batches_processed})")
+                    # print(f"[BlinkMainWindow] Processing batch of {len(batch)} logs (Batch #{batches_processed})")
 
-                # Broadcast the batch to all targets
-                for target in log_targets:
-                    try:
-                        target.process_log_batch(batch)
-                    except Exception as e:
-                        print(f"[BlinkMainWindow] Target {target} failed to process batch: {e}")
+                    # Broadcast the batch to all targets
+                    for target in log_targets:
+                        try:
+                            target.process_log_batch(batch)
+                        except Exception as e:
+                            print(f"[BlinkMainWindow] Target {target} failed to process batch: {e}")
 
                 # Check if we've overstayed our welcome on the UI thread
                 elapsed_processing = perf_counter() - current_time
@@ -468,6 +488,18 @@ class BlinkMainWindow(QMainWindow):
                         f"[UI Monitor] ⚠️ Oversaturated! Processed {batches_processed} batches in {elapsed_processing * 1000:.1f}ms. Yielding to event loop."
                     )
                     break  # Leave the remaining batches in the queue for the next timer tick
+
+            elapsed_since_mps = current_time - self._last_mps_time
+            if elapsed_since_mps >= 1.0:
+                # Calculate throughput
+                mps = int(self._msg_counter / elapsed_since_mps)
+
+                # Formatting with thousands separator (e.g., 538,521)
+                self.mps_label.setText(f"{mps:,} msg/s")
+
+                # Reset counters
+                self._msg_counter = 0
+                self._last_mps_time = current_time
 
             self.gui_context.on_update()
 

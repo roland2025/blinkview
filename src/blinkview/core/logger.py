@@ -7,21 +7,25 @@
 from traceback import format_exc
 from typing import Callable
 
-from .log_row import LogRow
 from ..utils.level_map import LogLevel
 from ..utils.log_level import LevelIdentity
+from .log_row import LogRow
 
 
 class BaseLogger:
-    __slots__ = ('log',)
+    __slots__ = ("log",)
 
-    def trace(self, msg: str):  self.log(msg, LogLevel.TRACE)
+    def trace(self, msg: str):
+        self.log(msg, LogLevel.TRACE)
 
-    def debug(self, msg: str): self.log(msg, LogLevel.DEBUG)
+    def debug(self, msg: str):
+        self.log(msg, LogLevel.DEBUG)
 
-    def info(self, msg: str):  self.log(msg, LogLevel.INFO)
+    def info(self, msg: str):
+        self.log(msg, LogLevel.INFO)
 
-    def warn(self, msg: str):  self.log(msg, LogLevel.WARN)
+    def warn(self, msg: str):
+        self.log(msg, LogLevel.WARN)
 
     warning = warn  # Alias for convenience
 
@@ -45,54 +49,68 @@ class BaseLogger:
 
     log: Callable[[str, LevelIdentity], None]
 
+    def child(self, name: str) -> "BaseLogger":
+        """
+        Creates a child logger with an appended module path.
+        This method should be overridden by subclasses to return the correct type.
+        """
+        raise NotImplementedError("Child loggers must implement the child() method.")
+
 
 class SystemLogger(BaseLogger):
     """
-    A contextual logger that routes system events (Reader/Parser status)
-    to the SYSTEM namespace in the Registry.
+    A contextual logger that routes system events to the SYSTEM namespace.
+    Supports hierarchical child loggers.
     """
 
-    def __init__(self, category: str, owner_name: str, registry):
-        """
-        Args:
-            category: e.g., 'reader', 'parser'
-            owner_name: e.g., 'RNG', 'C3X'
-            registry: The global Registry
-            queue: The BatchQueue for logs
-        """
-
+    def __init__(self, category: str, owner_name: str, registry, _internal_path: str = None):
         from .registry import Registry
-        registry: Registry
-        print(f"Logging: reorder: {registry.reorder is not None}, central: {registry.central is not None}")
-        put_fn = registry.reorder.put if registry.reorder else registry.central.put
+
+        self.registry: Registry = registry
+        self.category = category
+        self.owner_name = owner_name
+
+        # Determine the module path: either inherited from a parent or built from scratch
+        if _internal_path:
+            self.module_path = _internal_path
+        else:
+            self.module_path = f"{category}"
+            if owner_name:
+                self.module_path += f".{owner_name}"
+
+        # Resolve IDs and resources once during initialization
+        dev_id = self.registry.get_device("SYSTEM")
+        mod_id = dev_id.get_module(self.module_path)
+
+        is_reorder_enabled = registry.reorder is not None and registry.reorder.enabled
+        put_fn = registry.reorder.put if is_reorder_enabled else registry.central.put
+
         time_ns = registry.now_ns
-        dev_id = registry.get_device("SYSTEM")
-
-        # Pre-resolve the module ID once (e.g., 'reader.RNG')
-        module_path = f"{category}"
-        if owner_name is not None:
-            module_path += f".{owner_name}"
-
-        mod_id = dev_id.get_module(module_path)
+        pool_acquire = registry.system_ctx.pool.get(tag="LogRow").acquire
         LogRowCtr = LogRow
 
+        # The fast_log closure remains optimized for speed
         def fast_log(msg: str, level: LevelIdentity):
-            """Internal worker to package and queue the LogRow."""
-            # Use time_ns() for high-precision telemetry alignment
-            # print(f"Logging: {level} SYSTEM {module_path} \t{msg}")
-            row = LogRowCtr(
-                time_ns(),
-                level,
-                mod_id,
-                msg
-            )
-            put_fn([row])
+            with pool_acquire() as batch:
+                batch.append(LogRowCtr(time_ns(), level, mod_id, msg))
+                put_fn(batch)
+                batch.retain()
 
         self.log = fast_log
 
+    def child(self, name: str) -> "SystemLogger":
+        """
+        Creates a new SystemLogger instance with an appended module path.
+        Example: 'reader.RNG' -> 'reader.RNG.Validator'
+        """
+        new_path = f"{self.module_path}.{name}"
+        return SystemLogger(
+            category=self.category, owner_name=self.owner_name, registry=self.registry, _internal_path=new_path
+        )
+
 
 class PrintLogger(BaseLogger):
-    __slots__ = ('ctx',)
+    __slots__ = ("ctx",)
 
     def __init__(self, category: str, owner_name: str = None, queue=None, time_ns=None):
         """
@@ -105,7 +123,8 @@ class PrintLogger(BaseLogger):
 
         self.ctx = ctx
 
-        from time import strftime, localtime
+        from time import localtime, strftime
+
         strftime_ = strftime
         localtime_ = localtime
 

@@ -8,6 +8,7 @@ from time import sleep
 
 from ..core.configurable import configuration_property, override_property
 from ..core.log_row import LogRow
+from ..core.reusable_batch_pool import TimeDataEntry
 from ..utils.level_map import LogLevel
 from .BaseReader import BaseReader, DeviceFactory
 
@@ -125,7 +126,11 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         print("Starting Serial Reader Thread")
         logger.info(f"Starting Serial")
 
-        batch = []
+        pool_acquire = self.shared.pool.get(TimeDataEntry, self).acquire
+
+        batch = pool_acquire()
+        batch_append = batch.append
+
         last_flush_time = time_ns()
 
         if log_rx_tx:
@@ -140,8 +145,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         ser = None
 
         def flush():
-            nonlocal batch, batch_bytes, last_flush_time, batch_rx_log
-            if batch:
+            nonlocal batch, batch_bytes, last_flush_time, batch_rx_log, batch_append
+            if batch.size:
                 last_flush_time = time_ns()
                 # logger.log(f"Flush batch of {len(batch)} | {batch_bytes} bytes",
                 #            LogLevel.WARN if batch_bytes >= maxlen else LogLevel.DEBUG)
@@ -149,9 +154,11 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 if log_rx_tx and batch_rx_log:
                     push_log(batch_rx_log)
                     batch_rx_log = []
+                with batch:
+                    self.distribute(batch)
 
-                self.distribute(batch)
-                batch = []
+                batch = pool_acquire()
+                batch_append = batch.append
                 batch_bytes = 0
 
         while not stop_is_set():
@@ -168,15 +175,15 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 if first_byte:
                     now = time_ns()
                     remaining = _read(ser.in_waiting)  # Read the rest of the available data
-                    chunk = (now, first_byte + remaining)
-                    chunk_len = len(chunk[1])
-                    batch.append(chunk)
+                    chunk = first_byte + remaining
+                    batch_append(now, chunk)
+
                     # self.log(f"Read {chunk_len} bytes")
 
                     if log_rx_tx:
                         batch_rx_log.append(LogRow(now, LogLevel.TRACE, mod_rx, chunk[1].hex()))
 
-                    batch_bytes += chunk_len
+                    batch_bytes += len(chunk)
 
                     if batch_bytes >= maxlen:
                         flush()
@@ -194,6 +201,13 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
         # Flush any remaining batch on exit
         flush()
+        batch.release()
+
+        if self.serial is not None:
+            try:
+                self.serial.close()
+            finally:
+                self.serial = None
 
     def open(self):
         try:

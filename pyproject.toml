@@ -28,24 +28,29 @@ keywords = [
 
 # --- Core Dependencies (Safe for all runtimes, including 3.14t) ---
 dependencies = [
-    "pyserial>=3.5",
     "rich>=13.0.0",
     "readchar",
-    #    "pyzmq>=25.0.0",  # Essential for the Daemon <-> GUI bridge
     "jsonschema",
     "jsonpatch",
     "msgpack",
     "cobs",
-    "python-can",
-    "cantools",
     "requests",
-    "pylink-square",
     "packaging",
-    "ruff>=0.15.8",
+]
+
+[project.optional-dependencies]
+
+# Hardware Backends
+serial = ["pyserial>=3.5"]
+can = ["python-can", "cantools"]
+jlink = ["pylink-square"]
+
+# Combined Hardware Support (All drivers)
+hardware = [
+    "blinkview[serial,can,jlink]",
 ]
 
 # --- Optional GUI Dependencies (GIL-dependent) ---
-[project.optional-dependencies]
 gui-core = [
     "qtpy>=2.4.0",
     "pyqtdarktheme",
@@ -56,53 +61,41 @@ gui-core = [
 pyside6 = ["PySide6>=6.6.0", "blinkview[gui-core]"]
 pyqt6 = ["PyQt6>=6.6.0", "blinkview[gui-core]"]
 
-# --- Future-proof "All" Catch-all ---
 all = [
-    "blinkview[pyside6]",
+    "blinkview[hardware,pyside6]",
 ]
 
 [project.scripts]
 blink = "blinkview.__main__:main"
-blinc = "blinkview.cli:main"
-bling = "blinkview.gui:main"
-blind = "blinkview.daemon:main"
+#blind = "blinkview.cli:main"
 
 [dependency-groups]
-# Used by uv / hatch for development environments
-daemon = [
-    # This automatically includes everything in [project].dependencies
-    # No need to "include-group = default"
+dev = [
+    "ruff>=0.15.8",
+    "blinkview[all]",
 ]
-
-gui = [
-    "blinkview[pyside6]", # This pulls in the project dependencies + the gui extra
-]
-
 docs = [
     "mkdocs>=1.6.0",
     "mkdocs-material>=9.5.0",
     "mkdocstrings[python]>=0.25.0",
 ]
 
+daemon = [
+    "blinkview[hardware]",
+]
 
 # --- HATCH SPECIFIC ---
 [tool.hatch.envs.default]
-# This makes 'hatch shell' or 'uv run' install the FULL experience by default
 features = ["all"]
 
 [tool.hatch.envs.daemon]
-# Targeted for your 3.14t environment
-# It will only install [project].dependencies
-features = []
+# Target for 3.14t (No-GIL) - naming the env 'daemon' but using 'hardware' features
+features = ["hardware"]
 
 [tool.hatch.version]
 path = "src/blinkview/__init__.py"
 
 [tool.ruff]
-# Select the 'I' (isort) rules for sorting
-select = ["I"]
 line-length = 120
-
-[tool.ruff.lint]
-# Explicitly ignore 'F401' (the rule that finds unused imports)
-ignore = ["F401"]
+lint.select = ["I"]
+lint.ignore = ["F401"]

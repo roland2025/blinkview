@@ -4,21 +4,23 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from time import perf_counter, sleep
+from time import perf_counter, sleep, time
 from typing import Any, Callable, List
 
+from ..core.base_daemon import BaseDaemon
+from ..core.batch_queue import BatchQueue
 from ..core.configurable import (
     configuration_factory,
     configuration_property,
     on_config_change,
     override_property,
 )
-from ..core.base_daemon import BaseDaemon
-from ..core.batch_queue import BatchQueue
 from ..core.constants import SysCat
 from ..core.device_identity import DeviceIdentity
 from ..core.factory import BaseFactory
+from ..core.limits import BATCH_MAXLEN
 from ..core.log_row import LogRow
+from ..core.reusable_batch_pool import TimeDataEntry
 from ..utils.level_map import LogLevel
 
 # Define the signature for a transformation
@@ -29,7 +31,7 @@ TransformFunc = Callable[[Any], Any]
 @configuration_property(
     "max_batch",
     type="integer",
-    default=200,
+    default=BATCH_MAXLEN,
     description="Maximum number of log entries to buffer before flushing",
     ui_order=1,
 )
@@ -238,126 +240,218 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
         device_identity = self.local.device_id
 
-        parsed_batch = []
-        last_flush_time = perf_counter()
+        pool_acquire = self.shared.pool.get(tag="LogRows").acquire
 
-        if self._assemble is None:
+        parsed_batch = pool_acquire()
+        batch_append = parsed_batch.append
+        _perf_counter = perf_counter
+        last_flush_time = _perf_counter()
+
+        gui_mode = self.gui_mode
+        _msg_since_yield = 0
+
+        LogRowCtr = LogRow
+
+        error = self.logger.error
+
+        _split_char = self._split_char
+        _print = self._print
+        _decode = self._decode
+        _transform = self._transform
+        _assemble = self._assemble
+        _len = len
+        _str = str
+
+        if _assemble is None:
             module_log = device_identity.get_module("log")
 
         module_unknown = None
 
         def flush():
-            nonlocal parsed_batch, last_flush_time
-            if parsed_batch:
-                self.distribute(parsed_batch)
-                parsed_batch = []
-                last_flush_time = perf_counter()
+            nonlocal parsed_batch, last_flush_time, batch_append
+            if parsed_batch.size:
+                # print(f"[{self.__class__.__name__}] {time()} Flushing: {parsed_batch}")
+                with parsed_batch:
+                    self.distribute(parsed_batch)
 
-        buffer = bytearray()
+                parsed_batch = pool_acquire()
+                batch_append = parsed_batch.append
+                last_flush_time = _perf_counter()
+
+        # Pre-allocate 1MB (or whatever fits your max expected "burst")
+        BUFFER_CAPACITY = 64 * 1024
+        buffer = bytearray(BUFFER_CAPACITY)
+        buffer_find = buffer.find
+        write_offset = 0  # Where we append new data
+        read_offset = 0  # Where we start searching for split_char
 
         stop_is_set = self._stop_event.is_set
         while not stop_is_set():
-            time_remaining = max(0, (last_flush_time + max_timeout) - perf_counter())
+            time_remaining = max(0, (last_flush_time + max_timeout) - _perf_counter())
             batch = get(timeout=time_remaining)
             if not batch:
                 # No data
                 if parsed_batch:
                     flush()
-                last_flush_time = perf_counter()
+                last_flush_time = _perf_counter()
                 continue
+            with batch:
+                # print(f"[ParserThread] Receive {time()} batch={batch}")
+                for entry in batch:
+                    entry: TimeDataEntry
+                    # print(f"[{self.__class__.__name__}] Got entry: {entry}")
+                    # timestamp_ns, raw_data = entry
+                    # self.logger.info(f"Timestamp: {timestamp_ns}, Raw data: {raw_data}")
+                    # raw data is byte stream
+                    # print(f"split: {self._split_char}")
 
-            for entry in batch:
-                # self.logger.info(f"Got entry: {entry}")
-                timestamp_ns, raw_data = entry
-                # self.logger.info(f"Timestamp: {timestamp_ns}, Raw data: {raw_data}")
-                # raw data is byte stream
-                # print(f"split: {self._split_char}")
+                    if gui_mode:
+                        _msg_since_yield += batch.size
+                        if _msg_since_yield >= 25_000:
+                            sleep(0.002)
+                            _msg_since_yield = 0
 
-                lines = []
+                    if _split_char is not None:
+                        try:
+                            data = entry.data
+                            data_len = _len(data)
+                            if write_offset + data_len > BUFFER_CAPACITY:
+                                # How much unparsed data is left?
+                                unparsed_len = write_offset - read_offset
 
-                if self._split_char is not None:
-                    try:
-                        buffer.extend(raw_data)
-                        # self.logger.info(f"Buffer after extend: {buffer}")
-                        while True:
-                            split_index = buffer.find(self._split_char)
-                            # self.logger.info(f"Split index: {split_index}")
-                            if split_index == -1:
-                                break
-                            line_bytes = buffer[:split_index]
-                            del buffer[: split_index + 1]
-                            if line_bytes:
-                                lines.append((timestamp_ns, line_bytes))
-                            # self.logger.info(f"Split line: {line_bytes}")
-                            # self.logger.info(f"Processing line: {line_bytes}")
-                    except Exception as e:
-                        self.logger.error(f"Error during splitting.", e)
+                                # Shift the "tail" to the front of the buffer
+                                buffer[0:unparsed_len] = buffer[read_offset:write_offset]
 
-                        if module_unknown is None:
-                            module_unknown = device_identity.get_module("_unknown")
-                        parsed_batch.append(
-                            LogRow(
-                                timestamp_ns,
-                                LogLevel.ERROR,
-                                module_unknown,
-                                str(raw_data),
-                            )
-                        )
-                else:
-                    lines.append((timestamp_ns, raw_data))
+                                # Reset pointers
+                                read_offset = 0
+                                write_offset = unparsed_len
 
-                for ts, line in lines:
-                    # line_original = line
-                    # self.logger.trace(f"Processing {ts}: '{line}'")
+                                # If it's STILL too small, we must grow (rare)
+                                if write_offset + data_len > BUFFER_CAPACITY:
+                                    buffer.extend(bytearray(data_len + BUFFER_CAPACITY))
+                                    BUFFER_CAPACITY = _len(buffer)
 
-                    try:
-                        if self._print is not None:
-                            line = self._print(line)
-                            if not line:
-                                continue
-                            # self.logger.trace(f"printable: {ts}: '{line}'")
+                            buffer[write_offset : write_offset + data_len] = data
+                            write_offset += data_len
 
-                        if self._decode is not None:
-                            line = self._decode(line)
-                            if not line:
-                                continue
-                            # self.logger.trace(f"decoded: {ts}: '{line}'")
+                            while True:
+                                split_index = buffer_find(_split_char, read_offset, write_offset)
 
-                        if self._transform is not None:
-                            line = self._transform(line)
-                            if not line:
-                                continue
-                            # self.logger.trace(f"transformed: {ts}: '{line}'")
+                                # print(f"[{self.__class__.__name__}] Got entry: {split_index}")
 
-                        if self._assemble is not None:
-                            line = self._assemble(ts, device_identity, line)
-                            # self.logger.trace(f"assembled: {ts}: '{line}'")
-                        else:
-                            line = LogRow(timestamp_ns, LogLevel.INFO, module_log, str(line))
+                                if split_index == -1:
+                                    break
 
-                        parsed_batch.append(line)
-                    except Exception as e:
-                        if log_error_row_on_invalid:
-                            # print(f"[ParserThread] {device_identity.name} ... Error processing line. Error: {e}")
+                                if read_offset != split_index:
+                                    prev_read_offset = read_offset
+                                    read_offset = split_index + 1
+                                    try:
+                                        line = buffer[prev_read_offset:split_index]
+                                        if _print is not None:
+                                            line = _print(line)
+                                            if not line:
+                                                continue
+                                            # self.logger.trace(f"printable: {ts}: '{line}'")
+
+                                        if _decode is not None:
+                                            line = _decode(line)
+                                            if not line:
+                                                continue
+                                            # self.logger.trace(f"decoded: {ts}: '{line}'")
+
+                                        if _transform is not None:
+                                            line = _transform(line)
+                                            if not line:
+                                                continue
+                                            # self.logger.trace(f"transformed: {ts}: '{line}'")
+
+                                        if _assemble is not None:
+                                            line = _assemble(entry.time, device_identity, line)
+                                            # self.logger.trace(f"assembled: {ts}: '{line}'")
+                                        else:
+                                            line = LogRowCtr(entry.time, LogLevel.INFO, module_log, _str(line))
+
+                                        batch_append(line)
+                                    except Exception as e:
+                                        if log_error_row_on_invalid:
+                                            # print(f"[ParserThread] {device_identity.name} ... Error processing line. Error: {e}")
+                                            if module_unknown is None:
+                                                module_unknown = device_identity.get_module("_unknown")
+                                            batch_append(
+                                                LogRowCtr(
+                                                    entry.time,
+                                                    LogLevel.ERROR,
+                                                    module_unknown,
+                                                    _str(line),
+                                                )
+                                            )
+
+                                if parsed_batch.size >= max_batch or (_perf_counter() - last_flush_time >= max_timeout):
+                                    flush()
+
+                        except Exception as e:
+                            error(f"Error during splitting.", e)
+
                             if module_unknown is None:
                                 module_unknown = device_identity.get_module("_unknown")
-                            parsed_batch.append(
-                                LogRow(
-                                    timestamp_ns,
+                            batch_append(
+                                LogRowCtr(
+                                    entry.time,
                                     LogLevel.ERROR,
                                     module_unknown,
-                                    str(line),
+                                    _str(entry.data),
                                 )
                             )
+                    else:
+                        ts = entry.time
+                        line = entry.data
 
-                    if len(parsed_batch) >= max_batch:
+                        try:
+                            if _print is not None:
+                                line = _print(line)
+                                if not line:
+                                    continue
+                                # self.logger.trace(f"printable: {ts}: '{line}'")
+
+                            if _decode is not None:
+                                line = _decode(line)
+                                if not line:
+                                    continue
+                                # self.logger.trace(f"decoded: {ts}: '{line}'")
+
+                            if _transform is not None:
+                                line = _transform(line)
+                                if not line:
+                                    continue
+                                # self.logger.trace(f"transformed: {ts}: '{line}'")
+
+                            if _assemble is not None:
+                                line = _assemble(ts, device_identity, line)
+                                # self.logger.trace(f"assembled: {ts}: '{line}'")
+                            else:
+                                line = LogRowCtr(ts, LogLevel.INFO, module_log, _str(line))
+
+                            batch_append(line)
+                        except Exception as e:
+                            if log_error_row_on_invalid:
+                                # print(f"[ParserThread] {device_identity.name} ... Error processing line. Error: {e}")
+                                if module_unknown is None:
+                                    module_unknown = device_identity.get_module("_unknown")
+                                batch_append(
+                                    LogRowCtr(
+                                        ts,
+                                        LogLevel.ERROR,
+                                        module_unknown,
+                                        _str(line),
+                                    )
+                                )
+
+                    if parsed_batch.size >= max_batch or (_perf_counter() - last_flush_time >= max_timeout):
                         flush()
-
-                if parsed_batch and (perf_counter() - last_flush_time >= max_timeout):
-                    flush()
 
         # Flush any remaining batch on exit
         flush()
+        parsed_batch.release()
 
 
 @ParserFactory.register("serial_default")

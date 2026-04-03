@@ -6,12 +6,14 @@
 
 from typing import Optional
 
-from blinkview.core.device_identity import ModuleIdentity, DeviceIdentity
-from blinkview.utils.log_level import LogLevel, LevelIdentity
+from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
+from blinkview.utils.log_level import LevelIdentity, LogLevel
 
 
 class LogFilter:
-    def __init__(self, id_registry, allowed_device=None, filtered_module=None, log_level=None, filtered_module_children=False):
+    def __init__(
+        self, id_registry, allowed_device=None, filtered_module=None, log_level=None, filtered_module_children=False
+    ):
         self.registry = id_registry
 
         self.filter_index = None
@@ -34,7 +36,9 @@ class LogFilter:
         base_level = self.log_level
         include_children = self.filtered_module_children
 
-        print(f"[LogFilter] allowed_dev={allowed_dev} idx={idx}, base_level={base_level} target_mod={target_mod.name if target_mod else None}")
+        print(
+            f"[LogFilter] allowed_dev={allowed_dev} idx={idx}, base_level={base_level} target_mod={target_mod.name if target_mod else None}"
+        )
 
         if base_level == LogLevel.ALL:
             base_level = None  # Treat ALL as no level constraint
@@ -51,8 +55,20 @@ class LogFilter:
                     return batch.copy()  # Or just return batch, depending on mutation rules
                 return [msg for msg in batch if msg.seq > after_seq]
 
+        elif base_level is None and idx is None and target_mod is None and allowed_dev is not None:
+
+            def fast_matches(msg) -> bool:
+                return msg.module.device is allowed_dev
+
+            def fast_filter_batch(batch: list, after_seq: int = -1) -> list:
+                if after_seq == -1:
+                    return [msg for msg in batch if msg.module.device is allowed_dev]
+                else:
+                    return [msg for msg in batch if msg.seq > after_seq and msg.module.device is allowed_dev]
+
         # --- STANDARD PATH: Constraints exist ---
         else:
+
             def fast_matches(msg) -> bool:
                 # --- LEVEL CHECK FIRST ---
                 # Check the global log level constraint

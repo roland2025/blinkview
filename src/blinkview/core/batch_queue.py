@@ -7,13 +7,21 @@
 import itertools
 from collections import deque
 from threading import Condition, Lock
+from time import time
+
+from blinkview.core.limits import BATCH_QUEUE_MAXLEN
 
 
 class BatchQueue:
-    def __init__(self, maxlen=100_000):
+    def __init__(self, maxlen=BATCH_QUEUE_MAXLEN):
         self.maxlen = maxlen
         self._deque = deque()  # Stores the batches (lists of objects)
         self._total_objects = 0  # Tracks the actual number of individual objects
+
+        # Statistics members
+        self.pushed = 0  # Total individual objects added over time
+        self.popped = 0  # Total individual objects retrieved over time
+        self.dropped = 0  # Added to track overflow
 
         # Condition is safer and faster than Event + Lock for queues
         self._lock = Lock()
@@ -29,15 +37,30 @@ class BatchQueue:
             return
 
         with self._not_empty:
+            retain = getattr(batch, "retain", None)
+            if retain is not None:
+                retain()
+
             self._deque.append(batch)
             self._total_objects += batch_size
+
+            self.pushed += batch_size
 
             # Drop oldest batches until we are under maxlen.
             # We enforce len(self._deque) > 1 so we don't drop the batch
             # we *just* added, even if it alone exceeds maxlen.
             while self._total_objects > self.maxlen and len(self._deque) > 1:
                 oldest_batch = self._deque.popleft()
-                self._total_objects -= len(oldest_batch)
+                drop_count = len(oldest_batch)
+                self._total_objects -= drop_count
+                self.dropped += drop_count
+                release = getattr(oldest_batch, "release", None)
+                if release is not None:
+                    release()
+
+                # print(
+                #     f"[BatchQueue] Dropped batch of size {len(oldest_batch)} to maintain maxlen. Total objects now: {self._total_objects}"
+                # )
 
             self._not_empty.notify()
 
@@ -48,13 +71,13 @@ class BatchQueue:
                 if timeout is None:
                     return None
                 # Check our total objects tracker instead of the deque length
-                if not self._not_empty.wait_for(
-                    lambda: self._total_objects > 0, timeout
-                ):
+                if not self._not_empty.wait_for(lambda: self._total_objects > 0, timeout):
                     return None
 
             batch = self._deque.popleft()
-            self._total_objects -= len(batch)
+            batch_len = len(batch)
+            self._total_objects -= batch_len
+            self.popped += batch_len
             return batch
 
     def get_many(self, timeout=None):
@@ -64,16 +87,16 @@ class BatchQueue:
                 if timeout is None:
                     return None
                 # Check our total objects tracker
-                if not self._not_empty.wait_for(
-                    lambda: self._total_objects > 0, timeout
-                ):
+                if not self._not_empty.wait_for(lambda: self._total_objects > 0, timeout):
                     return None
 
             # Flatten the nested batches into a single list of objects instantly
+            count = self._total_objects
             all_objects = list(itertools.chain.from_iterable(self._deque))
 
             self._deque.clear()
             self._total_objects = 0
+            self.popped += count
 
             return all_objects
 
@@ -82,6 +105,23 @@ class BatchQueue:
         with self._not_empty:
             if self._total_objects > 0:
                 batch = self._deque.popleft()
-                self._total_objects -= len(batch)
+
+                batch_len = len(batch)
+                self._total_objects -= batch_len
+                self.popped += batch_len
+
                 return batch
         return None
+
+    def get_stats(self):
+        """Returns snapshot with timestamp for rate calculation."""
+        with self._lock:
+            # Returning a dict makes it easier to manage in the stats loop
+            return {
+                "total": self._total_objects,
+                "maxlen": self.maxlen,
+                "pushed": self.pushed,
+                "popped": self.popped,
+                "dropped": self.dropped,
+                "now": time(),
+            }

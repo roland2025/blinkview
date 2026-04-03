@@ -4,16 +4,16 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from itertools import count
 from time import sleep
 
-from .configurable import configuration_property, configuration_factory, override_property
+from ..storage.file_logger import LogRow
+from ..utils.log_filter import LogFilter
 from .base_daemon import BaseDaemon
 from .batch_queue import BatchQueue
+from .configurable import configuration_factory, configuration_property, override_property
 from .factory import BaseFactory
-from ..storage.file_logger import LogRow
-from itertools import count
-
-from ..utils.log_filter import LogFilter
+from .limits import BATCH_QUEUE_MAXLEN, CENTRAL_STORAGE_MAXLEN
 
 
 @configuration_factory("central")
@@ -28,46 +28,63 @@ class CentralFactory(BaseFactory[BaseCentralStorage]):
 
 
 @CentralFactory.register("default")
-@configuration_property("max_rows", type="integer", default=1_000_000, description="Maximum number of log entries to keep in memory", ui_order=10)
-@override_property("logging", hidden=False, required=True, default={"enabled": True, "processor": {"type": "log_row"}}, ui_order=20)
+@configuration_property(
+    "maxlen",
+    type="integer",
+    default=CENTRAL_STORAGE_MAXLEN,
+    description="Maximum number of log entries to keep in memory",
+    ui_order=10,
+)
+@override_property(
+    "logging", hidden=False, required=True, default={"enabled": True, "processor": {"type": "log_row"}}, ui_order=20
+)
 class CentralStorage(BaseCentralStorage):
-
-    max_rows: int
+    maxlen: int
 
     def __init__(self):
         super().__init__()
         self.name = "central"
 
-        self._msg_log = BatchQueue(self.max_rows)
+        self._msg_log = BatchQueue(self.maxlen)
 
-        self._unpushed = BatchQueue()  # messages that have not yet been pushed to subscribers
-        self._id_generator = count(start=1)
+        self.input_queue = BatchQueue()  # messages that have not yet been pushed to subscribers
+        self.sequence = 1
 
-        self.put = self._unpushed.put
+        self.put = self.input_queue.put
 
     def run(self):
         # Localize method lookups
         stop_is_set = self._stop_event.is_set
-        get = self._unpushed.get
-        get_next_id = self._id_generator.__next__
+        get = self.input_queue.get
+        sequence = self.sequence
 
         while not stop_is_set():
             # we need to push messages to subscribers here, but for now we just keep them in the log
-            entry = get(timeout=0.2)
-            if entry is None:
+            batch = get(timeout=0.2)
+            if batch is None:
                 continue
-            # print(f"[CENTRAL] Received batch of {len(entry)} entries.")
 
-            for item in entry:
-                item: LogRow
-                # assign a unique, incrementing ID to each log entry as it comes into central storage.
-                # This can be used by subscribers to track which entries they've already seen and ensure they process each entry exactly once.
-                item.seq = get_next_id()
-                item.module.latest_row = item
+            with batch:
+                # print(f"[CENTRAL] Received batch of {len(entry)} entries.")
 
-            self._msg_log.put(entry)
+                for seq_id, item in enumerate(batch, start=sequence):
+                    item.seq = seq_id
+                    item.module.latest_row = item
 
-            self.distribute(entry)
+                # Increment the sequence tracker by the size of the batch
+                sequence += len(batch)
+                # for item in batch:
+                #     item: LogRow
+                #     # assign a unique, incrementing ID to each log entry as it comes into central storage.
+                #     # This can be used by subscribers to track which entries they've already seen and ensure they process each entry exactly once.
+                #     item.seq = get_next_id()
+                #     item.module.latest_row = item
+
+                self._msg_log.put(batch.copy())
+
+                self.distribute(batch)
+
+        self.sequence = sequence
 
     def get_rows(self, log_filter: LogFilter, total: int, after_seq: int = -1):
         """Returns the most recent log entries that match the given filter, up to the specified total."""
@@ -87,4 +104,3 @@ class CentralStorage(BaseCentralStorage):
         # reverse the order back to chronological
         matching_entries = [entry for batch in reversed(matching_batches) for entry in batch]
         return matching_entries[-total:]
-

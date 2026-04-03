@@ -4,21 +4,17 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from abc import ABC, abstractmethod
-from datetime import datetime
 from io import BytesIO, StringIO
 from pathlib import Path
 from struct import Struct
-from threading import Thread
-from time import perf_counter, sleep
+from time import perf_counter
 from typing import Callable
 
-from ..core.batch_queue import BatchQueue
-from ..core.configurable import configuration_property, override_property
+from ..core.configurable import configuration_property
 from ..core.factory import BaseFactory
 from ..core.log_row import LogRow
 from ..subscribers.subscriber import BaseSubscriber
-from ..utils.time_utils import ISO8601TimestampFormatter, TimeUtils
+from ..utils.time_utils import ISO8601TimestampFormatter
 
 
 class BaseFileLogger(BaseSubscriber):
@@ -133,7 +129,7 @@ class FileLogger(BaseFileLogger):
         bytes_total = self.open_file()
 
         # Localize for performance
-        queue_get = self._queue.get
+        queue_get = self.input_queue.get
         stop_is_set = self._stop_event.is_set
         process_batch = self.process_batch
         current_size = self.batch_processor.current_size
@@ -150,7 +146,8 @@ class FileLogger(BaseFileLogger):
             while not stop_is_set():
                 batch = queue_get(timeout=0.1)
                 if batch is not None:
-                    process_batch(batch)
+                    with batch:
+                        process_batch(batch)
 
                 now = perf_counter()
                 buf_size = current_size()

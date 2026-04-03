@@ -183,14 +183,15 @@ class PipelineManager:
             return
 
         # Map the fixed infrastructure
-        mapped_targets = {
-            SysCat.REORDER: self.shared.registry.reorder,
-            SysCat.STORAGE: self.shared.registry.central,
-        }
-        mapped_sources = {
-            # SysCat.REORDER: self.shared.registry.reorder,
-            # SysCat.STORAGE: self.shared.registry.central
-        }
+        mapped_targets = {}
+        mapped_sources = {}
+        is_reorderer = self.shared.registry.reorder is not None and self.shared.registry.reorder.enabled
+        if is_reorderer:
+            mapped_targets[SysCat.REORDER] = self.shared.registry.reorder
+            mapped_sources[SysCat.REORDER] = self.shared.registry.reorder
+
+        mapped_targets[SysCat.STORAGE] = self.shared.registry.central
+        mapped_sources[SysCat.STORAGE] = self.shared.registry.central
 
         if pipeline is not None:
             # Map the device-specific pipeline dynamically
@@ -222,7 +223,9 @@ class PipelineManager:
                     break
 
         # Connect Sources (Where 'ref' gets data FROM)
+        print(f"sources: {getattr(ref, 'sources', [])}")
         for source_key in getattr(ref, "sources", []):
+            print(f"{name_debug}: {source_key}")
             source_obj = mapped_sources.get(source_key)
             if source_obj and hasattr(source_obj, "subscribe"):
                 source_obj.subscribe(ref)

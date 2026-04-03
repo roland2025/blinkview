@@ -25,10 +25,11 @@ class ReorderBuffer(BaseReorder):
         heap = self.heap
         time_ns = self.shared.time_ns
         delay_ns = self.delay * 1_000_000  # Convert milliseconds to nanoseconds
-        out_batch = []
-        append = out_batch.append
         get = self.input_queue.get
         distribute = self.distribute
+
+        pool_acquire = self.shared.pool.get(tag="LogRows").acquire
+
         # Localize heap functions for speed
         push = heappush
         pop = heappop
@@ -60,17 +61,21 @@ class ReorderBuffer(BaseReorder):
 
             # Drain the "Mature" items
             # An item is mature if it has lived in our buffer for at least delay_ns
-            out_batch = []
-            append = out_batch.append
-            while heap and (heap[0].timestamp_ns + delay_ns) <= now:
-                append(pop(heap))
+            if heap:
+                with pool_acquire() as out_batch:
+                    _append = out_batch.append
+                    while heap and (heap[0].timestamp_ns + delay_ns) <= now:
+                        _append(pop(heap))
+
+                    if out_batch:
+                        distribute(out_batch)
+
+        # On exit, flush all remaining items
+
+        with pool_acquire() as out_batch:
+            _append = out_batch.append
+            while heap:
+                _append(pop(heap))
 
             if out_batch:
                 distribute(out_batch)
-
-        # On exit, flush all remaining items
-        while heap:
-            append(pop(heap))
-
-        if out_batch:
-            distribute(out_batch)

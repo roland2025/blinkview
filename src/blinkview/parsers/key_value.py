@@ -15,7 +15,7 @@ from blinkview.parsers.parser import BaseParser, ParserFactory
 @ParserFactory.register("key_value")
 @override_property(
     "sources_",
-    items={"type": "string", "_reference": "/pipelines"},
+    items={"type": "string", "_reference": "/targets"},
 )
 class KeyValueParser(BaseParser):
     def __init__(self):
@@ -30,14 +30,19 @@ class KeyValueParser(BaseParser):
         device_identity: DeviceIdentity = self.local.device_id
         system_identity = self.shared.id_registry.get_device("SYSTEM")
 
-        parsed_batch = []
+        pool_acquire = self.shared.pool.get(tag="LogRows").acquire
+        LogRowCtr = LogRow
+
+        parsed_batch = pool_acquire()
         last_flush_time = perf_counter()
 
         def flush():
             nonlocal parsed_batch, last_flush_time
             if parsed_batch:
-                self.distribute(parsed_batch)
-                parsed_batch = []
+                with parsed_batch:
+                    self.distribute(parsed_batch)
+
+                parsed_batch = pool_acquire()
                 last_flush_time = perf_counter()
 
         stop_is_set = self._stop_event.is_set
@@ -52,31 +57,32 @@ class KeyValueParser(BaseParser):
                 last_flush_time = perf_counter()
                 continue
 
-            for entry in batch:
-                entry: LogRow
-                device_id = entry.module.device
-                if device_id == device_identity or device_id == system_identity:
-                    # this is us, skip it to avoid loops
-                    continue
-                # print(f"Got entry: {entry}")
+            with batch:
+                for entry in batch:
+                    entry: LogRow
+                    device_id = entry.module.device
+                    if device_id == device_identity or device_id == system_identity:
+                        # this is us, skip it to avoid loops
+                        continue
+                    # print(f"Got entry: {entry}")
 
-                if "=" in entry.message:
-                    # print(f"Parsing entry: {entry.message}")
-                    splitted = entry.message.split(" ")
-                    for key_value in splitted:
-                        if "=" in key_value:
-                            key, value = key_value.split("=", 1)
-                            value = value.rstrip(",;")
-                            if key and value:
-                                try:
-                                    module = device_identity.get_module(f"{entry.module.name}.{key}")
-                                    parsed_batch.append(LogRow(entry.timestamp_ns, entry.level, module, value))
-                                except Exception as e:
-                                    # self.logger.error(f"Failed to create module for key '{key}': {e}")
-                                    pass
+                    if "=" in entry.message:
+                        # print(f"Parsing entry: {entry.message}")
+                        splitted = entry.message.split(" ")
+                        for key_value in splitted:
+                            if "=" in key_value:
+                                key, value = key_value.split("=", 1)
+                                value = value.rstrip(",;")
+                                if key and value:
+                                    try:
+                                        module = device_identity.get_module(f"{entry.module.name}.{key}")
+                                        parsed_batch.append(LogRowCtr(entry.timestamp_ns, entry.level, module, value))
+                                    except Exception as e:
+                                        # self.logger.error(f"Failed to create module for key '{key}': {e}")
+                                        pass
 
-                    if len(parsed_batch) >= max_batch:
-                        flush()
+                        if len(parsed_batch) >= max_batch:
+                            flush()
 
             now = perf_counter()
             if parsed_batch and (now - last_flush_time >= max_timeout):

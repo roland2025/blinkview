@@ -187,4 +187,4 @@ class DeviceIdentity:
         return self.name
 
     def __repr__(self):
-        return f"ModuleIdentity({self.id}: '{self.name}')"
+        return f"DeviceIdentity({self.id}: '{self.name}')"

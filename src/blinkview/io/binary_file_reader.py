@@ -8,6 +8,7 @@ from pathlib import Path
 from time import sleep
 
 from ..core.configurable import configuration_property
+from ..core.reusable_batch_pool import TimeDataEntry
 from ..utils.paths import resolve_config_path
 from .BaseReader import BaseReader, DeviceFactory
 
@@ -60,6 +61,8 @@ class BinaryFileReader(BaseReader):
 
         logger.info(f"Starting Binary Reader: {path} (@{self.frequency}Hz)")
 
+        pool_acquire = self.shared.pool.get(TimeDataEntry, self.__class__.__name__).acquire
+
         if not path.exists():
             logger.error(f"Binary file not found: {path}")
             return
@@ -86,12 +89,14 @@ class BinaryFileReader(BaseReader):
                         logger.info(f"Binary replay finished: {path.name}")
                         break
 
+                batch = pool_acquire()
                 # Create a synthetic 'arrival' timestamp for the pipeline
-                # This mimics live hardware latency
-                now = time_ns()
+                batch.append(time_ns(), data)
 
                 # Distribute as (timestamp, payload) list
-                self.distribute([(now, data)])
+                self.distribute(batch)
+
+                batch.release()
 
                 # Precise-ish frequency control
                 sleep(interval_s)

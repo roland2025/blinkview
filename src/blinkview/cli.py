@@ -112,7 +112,7 @@ class BlinkViewApp:
         signal.signal(signal.SIGTERM, self._signal_handler)
 
         self.registry.start()
-        self.init_console(LogLevel.ALL)
+        self.init_console(LogLevel.WARN)
 
         self.console.print('[bold green]BLINK ACTIVE[/bold green] | [dim]Press "s" to pause, "q" to quit[/dim]')
 

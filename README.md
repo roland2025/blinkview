@@ -210,6 +210,16 @@ cd blinkview
 uv tool install ".[all]" --python 3.14
 ```
 
+### Daemon mode (experimental)
+
+```bash
+# linux
+UV_PROJECT_ENVIRONMENT=".venvd" uv sync --only-group daemon --python 3.14t
+
+# windows powershell
+$env:UV_PROJECT_ENVIRONMENT=".venvd"; uv sync --only-group daemon --python 3.14t
+```
+
 #### Upgrading
 
 ```bash

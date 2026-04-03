@@ -55,10 +55,11 @@ class SourcesManager:
                 item = self.sources.get(item_id)
 
                 if item is None:
+                    is_reorder_enabled = registry.reorder is not None and registry.reorder.enabled
                     # Logic for creating a brand new source
                     local_ctx = SimpleNamespace(
                         get_logger=registry.logger_creator("source", source_config.get("name", item_id)),
-                        push_log=registry.reorder.put if registry.reorder else registry.central.put,
+                        push_log=registry.reorder.put if is_reorder_enabled else registry.central.put,
                         logging_id=item_id,
                     )
                     item = factories.build("source", source_config, system_ctx, local_ctx)
@@ -66,18 +67,18 @@ class SourcesManager:
                     self.sources[item_id] = item
                     registry.config.subscribe(f"/sources/{item_id}", item)
 
-                    if not self.needs_delayed_init:
+                    if not self.needs_delayed_init and item.enabled:
                         self.apply_target(item_id, item)
                 else:
                     # Update existing source and check if configuration actually changed
-                    old_sources = self._get_link_set(item, "sources_")
-                    old_targets = self._get_link_set(item, "targets_")
+                    old_sources = self._get_link_set(item, "sources_") if item.enabled else []
+                    old_targets = self._get_link_set(item, "targets_") if item.enabled else []
 
                     config_changed = item.apply_config(source_config)
 
                     if config_changed:
-                        new_sources = self._get_link_set(item, "sources_")
-                        new_targets = self._get_link_set(item, "targets_")
+                        new_sources = self._get_link_set(item, "sources_") if item.enabled else []
+                        new_targets = self._get_link_set(item, "targets_") if item.enabled else []
 
                         if self.logger:
                             self.logger.info(f"Source '{item_id}' config changed; rebuilding topology.")
@@ -133,7 +134,8 @@ class SourcesManager:
 
     def apply_targets(self):
         for item_id, item in self.sources.items():
-            self.apply_target(item_id, item)
+            if item.enabled:
+                self.apply_target(item_id, item)
 
     def apply_target(self, item_id, item):
         print(f"Applying targets for source '{item_id}'")

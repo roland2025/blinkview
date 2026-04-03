@@ -5,32 +5,64 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from time import sleep
-
 from typing import TYPE_CHECKING
+
+from ..core.limits import BATCH_MAXLEN
+from ..core.reusable_batch_pool import TimeDataEntry
 
 if TYPE_CHECKING:
     from can import Bus, CanError
 
-from .BaseReader import DeviceFactory, BaseReader
 from ..core.configurable import configuration_property
 from ..core.log_row import LogRow
 from ..utils.level_map import LogLevel
+from .BaseReader import BaseReader, DeviceFactory
 
 
 @DeviceFactory.register("can")
-@configuration_property("interface", type="string", default="virtual", required=True, ui_order=10,
-                        enum=["virtual", "socketcan", "pcan", "ixxat", "slcan"],
-                        description="The python-can interface to use (e.g., 'socketcan' for Linux, 'pcan' for Windows/Peak).")
-@configuration_property("channel", type="string", default="vcan0", required=True, ui_order=11,
-                        description="The CAN channel or port name (e.g., 'vcan0', 'PCAN_USBBUS1', 'can0').")
-@configuration_property("bitrate", type="integer", default=250000, required=True, ui_order=12,
-                        description="The CAN bus communication speed in bits per second. Usually 250000, 500000, or 1000000.")
-@configuration_property("maxlen", type="integer", default=2000,
-                        description="The maximum number of CAN messages to batch before flushing downstream.")
-@configuration_property("delay", type="integer", default=50,
-                        description="The maximum time (in milliseconds) to hold messages before flushing a batch.")
-@configuration_property("log_rx_tx", type="boolean", default=False,
-                        description="When enabled, dumps raw CAN frames (ID, DLC, DATA) to the system log for low-level protocol debugging.")
+@configuration_property(
+    "interface",
+    type="string",
+    default="virtual",
+    required=True,
+    ui_order=10,
+    enum=["virtual", "socketcan", "pcan", "ixxat", "slcan"],
+    description="The python-can interface to use (e.g., 'socketcan' for Linux, 'pcan' for Windows/Peak).",
+)
+@configuration_property(
+    "channel",
+    type="string",
+    default="vcan0",
+    required=True,
+    ui_order=11,
+    description="The CAN channel or port name (e.g., 'vcan0', 'PCAN_USBBUS1', 'can0').",
+)
+@configuration_property(
+    "bitrate",
+    type="integer",
+    default=250000,
+    required=True,
+    ui_order=12,
+    description="The CAN bus communication speed in bits per second. Usually 250000, 500000, or 1000000.",
+)
+@configuration_property(
+    "maxlen",
+    type="integer",
+    default=BATCH_MAXLEN,
+    description="The maximum number of CAN messages to batch before flushing downstream.",
+)
+@configuration_property(
+    "delay",
+    type="integer",
+    default=50,
+    description="The maximum time (in milliseconds) to hold messages before flushing a batch.",
+)
+@configuration_property(
+    "log_rx_tx",
+    type="boolean",
+    default=False,
+    description="When enabled, dumps raw CAN frames (ID, DLC, DATA) to the system log for low-level protocol debugging.",
+)
 class CANReader(BaseReader):
     __doc__ = """The primary ingestion source for Controller Area Network (CAN) bus data.
 
@@ -51,7 +83,7 @@ class CANReader(BaseReader):
     def __init__(self):
         super().__init__()
 
-        self.bus: 'Bus' = None
+        self.bus: "Bus" = None
 
     def run(self):
         from can import Bus, CanError
@@ -67,41 +99,41 @@ class CANReader(BaseReader):
 
         logger.info(f"Starting CAN Reader Thread ({self.interface}:{self.channel} @ {self.bitrate}bps)")
 
-        batch = []
+        pool_acquire = self.shared.pool.get(TimeDataEntry, self.__class__.__name__).acquire
+
+        batch = pool_acquire()
+        batch_append = batch.append
+
         last_flush_time = time_ns()
-        batch_size = 0
 
         if log_rx_tx:
-            mod_rx = self.local.device_id.get_module('_reader.rx')
+            mod_rx = self.local.device_id.get_module("_reader.rx")
             batch_rx_log = []
             push_log = self.local.push_log
 
         bus = None
 
         def flush():
-            nonlocal batch, batch_size, last_flush_time
+            nonlocal batch, last_flush_time, batch_append
             if log_rx_tx:
                 nonlocal batch_rx_log
 
-            if batch:
+            if batch.size:
                 last_flush_time = time_ns()
 
                 if log_rx_tx and batch_rx_log:
                     push_log(batch_rx_log)
                     batch_rx_log = []
+                with batch:
+                    self.distribute(batch)
 
-                self.distribute(batch)
-                batch = []
-                batch_size = 0
+                batch = pool_acquire()
+                batch_append = batch.append
 
         while not stop_is_set():
             if bus is None:
                 try:
-                    bus = Bus(
-                        interface=self.interface,
-                        channel=self.channel,
-                        bitrate=self.bitrate
-                    )
+                    bus = Bus(interface=self.interface, channel=self.channel, bitrate=self.bitrate)
                     logger.info("CAN bus connected successfully.")
                 except Exception as e:
                     logger.error(f"Failed to open CAN bus '{self.channel}'.", e)
@@ -132,15 +164,14 @@ class CANReader(BaseReader):
 
                 if msg:
                     # print(f"[CAN] {now} {msg}")
-                    batch.append((now, msg))
-                    batch_size += 1
+                    batch_append(now, msg)
 
                     if log_rx_tx:
                         hex_data = msg.data.hex().upper() if msg.data else ""
                         log_msg = f"ID: {msg.arbitration_id:04X} DLC: {msg.dlc} DATA: {hex_data}"
                         batch_rx_log.append(LogRow(now, LogLevel.TRACE, mod_rx, log_msg))
 
-                    if batch_size >= maxlen:
+                    if batch.size >= maxlen:
                         flush()
                         continue
 

@@ -28,6 +28,7 @@ from .log_row import LogRow
 from .logger import PrintLogger, SystemLogger
 from .plugin_manager import PluginManager
 from .reorder_buffer import ReorderBuffer, ReorderFactory
+from .reusable_batch_pool import PoolManager
 from .settings_manager import SettingsManager
 from .sources import SourcesManager
 from .system_context import SystemContext
@@ -125,6 +126,7 @@ class Registry:
             factories=factories,
             tasks=TaskManager(),
             settings=SettingsManager(),
+            pool=PoolManager(),
         )
         self.file_manager.set_context(self.system_ctx)
 
@@ -139,6 +141,8 @@ class Registry:
 
         self.central = None
         self.reorder = None
+
+        self._subscribers = []
 
     def _create_and_bind(self, cls, name, config):
         print(f"[Registry] _create_and_bind name={name} cls={cls.__name__}  config={config}")
@@ -172,7 +176,7 @@ class Registry:
 
     def get_registry_schema(self, key: str):
         if hasattr(self, key):
-            obj = getattr(self, key)
+            obj = getattr(self, key, None)
             if obj is not None and hasattr(obj, "get_config_schema"):
                 return obj.get_config_schema()
             else:
@@ -242,6 +246,12 @@ class Registry:
             self.central.stop()
 
         self.file_manager.stop()
+
+        for sub in self._subscribers.copy():
+            stop_fn = getattr(sub, "stop", None)
+            if stop_fn is not None:
+                sub.stop()
+            self.unsubscribe(sub)
 
         self.system_ctx.tasks.shutdown()
 
@@ -348,16 +358,19 @@ class Registry:
             self.logger.error(f"Error during system configuration", e)
 
     def _dump_temp_logs(self):
-        log_put_fn = self.reorder.put if self.reorder else self.central.put
+        is_reorder_enabled = self.reorder is not None and self.reorder.enabled
+        log_put_fn = self.reorder.put if is_reorder_enabled else self.central.put
         module = self.get_device("SYSTEM")
-        log_batch = []
-        while True:
-            try:
-                timestamp, module_name, level_id, msg = self._temp_log_queue.get_nowait()
-                log_batch.append(LogRow(timestamp, level_id, module.get_module(module_name), msg))
-            except Exception:
-                break
-        log_put_fn(log_batch)
+
+        with self.system_ctx.pool.get(tag="LogRows").acquire() as log_batch:
+            while True:
+                try:
+                    timestamp, module_name, level_id, msg = self._temp_log_queue.get_nowait()
+                    log_batch.append(LogRow(timestamp, level_id, module.get_module(module_name), msg))
+                except Exception:
+                    break
+            log_put_fn(log_batch)
+            log_batch.retain()
 
     def start(self):
         if self._is_running:
@@ -387,6 +400,8 @@ class Registry:
         if self.sources is not None:
             self.sources.start()
 
+        # self.system_ctx.tasks.run_periodic(1, self.buffer_stats)
+
         self._is_running = True
         self.logger.warn("BlinkView is now live.")
 
@@ -398,16 +413,27 @@ class Registry:
     #     self.parser_thread.add_raw_consumer(consumer.put_many)
 
     def build_subscriber(self, name, subscriber_type: str, config=None, **kwargs):
+        print(
+            f"[System] Building subscriber name='{name}' type='{subscriber_type}' with config: {config} and kwargs: {kwargs}"
+        )
         if config is None:
-            config = {"type": subscriber_type}
+            config = {"type": subscriber_type, "enabled": True}
 
         local_ctx = SimpleNamespace(get_logger=self.logger_creator(subscriber_type))
         subscriber = SubscriberFactory.build(config, self.system_ctx, local_ctx, **kwargs)
+        subscriber.reference_id = name
         self.pipelines.subscribe(name, subscriber)
+        self._subscribers.append(subscriber)
         return subscriber
 
     def subscribe(self, subscriber):
         self.central.subscribe(subscriber)
+
+        self._subscribers.append(subscriber)
+
+    def unsubscribe(self, subscriber):
+        self.central.unsubscribe(subscriber)
+        self._subscribers.remove(subscriber)
 
     add_file_logger: Callable[[any, str, Optional[str]], FileLogger]
     now: Callable[[], float]
@@ -481,3 +507,104 @@ class Registry:
             return self.reorder
 
         return None
+
+    def buffer_stats(self, rate_width=12):
+        """
+        Prints buffer statistics.
+        :param rate_width: The character width for Push/s and Pop/s columns.
+        """
+        if not hasattr(self, "_prev_buffer_stats"):
+            self._prev_buffer_stats = {}
+
+        try:
+            # Collect all queues
+            queue_map = {}
+
+            def collect(obj_group):
+                if not obj_group:
+                    return
+                # Handle dictionaries (like self.sources.sources)
+                if isinstance(obj_group, dict):
+                    items = obj_group.values()
+                # Handle lists or sets (like self._subscribers)
+                elif isinstance(obj_group, (list, set)):
+                    items = obj_group
+                else:
+                    return
+
+                for item in items:
+                    q = getattr(item, "input_queue", None)
+                    ref_id = getattr(item, "reference_id", None)
+                    if q and ref_id:
+                        queue_map[ref_id] = q
+
+            collect(self.pipelines.pipelines)
+            collect(self.sources.sources)
+            collect(self._subscribers)
+
+            if self.reorder:
+                queue_map[self.reorder.reference_id] = self.reorder.input_queue
+            if self.central:
+                queue_map[self.central.reference_id] = self.central.input_queue
+
+            # Build Table Header
+            # Using dynamic width for rates;
+            # format: < ensures left align for header, > ensures right align for numbers
+            header = (
+                f"{'Queue Name':<20} | "
+                f"{'Count':<7} | "
+                f"{'% Full':<8} | "
+                f"{'Push/s':>{rate_width}} | "
+                f"{'Pop/s':>{rate_width}} | "
+                f"{'State':<10}"
+            )
+            lines = [header, "-" * len(header)]
+
+            for name, q in queue_map.items():
+                curr = q.get_stats()
+                prev = self._prev_buffer_stats.get(name)
+
+                push_rate = 0.0
+                pop_rate = 0.0
+                is_dropping = False
+
+                if prev:
+                    dt = curr["now"] - prev["now"]
+                    if dt > 0:
+                        push_rate = (curr["pushed"] - prev["pushed"]) / dt
+                        pop_rate = (curr["popped"] - prev["popped"]) / dt
+                        is_dropping = curr["dropped"] > prev["dropped"]
+
+                fill_pct = (curr["total"] / curr["maxlen"]) * 100 if curr["maxlen"] > 0 else 0
+
+                # Determine State
+                if is_dropping:
+                    state = "⚠️ DROP"
+                elif fill_pct > 90:
+                    state = "🔥 CRIT"
+                elif fill_pct > 70:
+                    state = "WARN"
+                elif push_rate > pop_rate * 1.1 and fill_pct > 20:
+                    state = "📈 FILL"
+                else:
+                    state = "✅ OK"
+
+                # Format Row
+                # {value:>{rate_width},.1f} adds commas and ensures 1 decimal place
+                row = (
+                    f"{name[:20]:<20} | "
+                    f"{curr['total']:<7} | "
+                    f"{fill_pct:>6.1f}% | "
+                    f"{push_rate:>{rate_width},.0f} | "
+                    f"{pop_rate:>{rate_width},.0f} | "
+                    f"{state:<10}"
+                )
+                lines.append(row)
+
+                # Store for next delta
+                self._prev_buffer_stats[name] = curr
+
+            print(f"\n[BUFFER_STATS]\n" + "\n".join(lines) + "\n")
+
+        except Exception as e:
+            self.logger.exception(f"buffer_stats failed: {e}")

@@ -258,49 +258,72 @@ class TelemetryPlotter(QWidget):
 
     def process_log_batch(self, batch: list[LogRow], load_history=False):
         updated = False
+        try:
+            self.latest_seq = batch[-1].seq
+            np = self._np
 
-        self.latest_seq = batch[-1].seq
+            for module in self.modules:
+                # 1. Initial extraction of rows that have ANY values
+                raw_extracted = [
+                    (row.timestamp, row.get_values()) for row in batch if row.module == module and row.get_values()
+                ]
 
-        np = self._np
+                if not raw_extracted:
+                    continue
 
-        for module in self.modules:
-            # Extraction per module
-            extracted = [
-                (row.timestamp, row.get_values()) for row in batch if row.module == module and row.get_values()
-            ]
+                # 2. Initialize if this is the first time we see this module
+                if module not in self.buffers:
+                    # We use the VERY FIRST message's column count as the "Gold Standard"
+                    first_msg_val_count = len(raw_extracted[0][1])
+                    print(
+                        f"[{self.__class__.__name__}] process_log_batch: Column count: {first_msg_val_count} ({raw_extracted}"
+                    )
+                    buf = ModuleBuffer(x_data=np.zeros(self.max_points))
+                    self.buffers[module] = buf
+                    self._init_module_channels(module, first_msg_val_count)
 
-            if not extracted:
-                continue
-
-            try:
                 buf = self.buffers[module]
-            except KeyError:
-                buf = ModuleBuffer(x_data=np.zeros(self.max_points))
-                self.buffers[module] = buf
-                self._init_module_channels(module, len(extracted[0][1]))
+                target_cols = buf.num_channels
 
-            # Convert to numpy
-            new_times = np.array([t for t, v in extracted], dtype=float)
-            new_values = np.array([v[: buf.num_channels] for t, v in extracted], dtype=float)
-            num_new = new_times.size
+                # 3. FILTER: Only keep rows where the column count matches exactly
+                # This ignores rows that are too short or too long
+                valid_extracted = [(ts, vals) for ts, vals in raw_extracted if len(vals) == target_cols]
 
-            # Buffer Management (2D Rolling)
-            if buf.ptr + num_new <= self.max_points:
-                buf.x_data[buf.ptr : buf.ptr + num_new] = new_times
-                buf.y_data[buf.ptr : buf.ptr + num_new, :] = new_values
-                buf.ptr += num_new
-            else:
-                shift = (buf.ptr + num_new) - self.max_points
-                buf.x_data[:-shift] = buf.x_data[shift:]
-                buf.y_data[:-shift, :] = buf.y_data[shift:, :]
+                if not valid_extracted:
+                    continue
 
-                buf.x_data[-num_new:] = new_times
-                buf.y_data[-num_new:, :] = new_values
-                buf.ptr = self.max_points
+                # 4. Convert the valid subset to numpy
+                new_times = np.array([t for t, v in valid_extracted], dtype=float)
+                new_values = np.array([v for t, v in valid_extracted], dtype=float)
+                num_new = new_times.size
 
-            updated = True
+                # 5. Buffer Management
+                if num_new >= self.max_points:
+                    # THE "FIREHOSE" CASE: New data is bigger than our whole buffer
+                    # Just take the last 'max_points' of the new data and overwrite everything
+                    buf.x_data[:] = new_times[-self.max_points :]
+                    buf.y_data[:] = new_values[-self.max_points :, :]
+                    buf.ptr = self.max_points
+                elif buf.ptr + num_new <= self.max_points:
+                    # THE "NORMAL" CASE: Fits in remaining space
+                    buf.x_data[buf.ptr : buf.ptr + num_new] = new_times
+                    buf.y_data[buf.ptr : buf.ptr + num_new, :] = new_values
+                    buf.ptr += num_new
+                else:
+                    # THE "SLIDING" CASE: Partial overlap
+                    shift = (buf.ptr + num_new) - self.max_points
+                    buf.x_data[:-shift] = buf.x_data[shift:]
+                    buf.y_data[:-shift, :] = buf.y_data[shift:, :]
 
-        # Visual Update only if we ingested something
+                    buf.x_data[-num_new:] = new_times
+                    buf.y_data[-num_new:, :] = new_values
+                    buf.ptr = self.max_points
+
+                updated = True
+
+        except Exception as e:
+            print(f"[{self.__class__.__name__}] process_log_batch: {e}")
+
         if updated:
             self._update_plots()
 
@@ -445,23 +468,26 @@ class TelemetryPlotter(QWidget):
 
     def _update_plots(self):
         latest_time = 0.0
+        try:
+            for s in self.series_list:
+                buf = self.buffers.get(s.module)
+                if not buf or buf.ptr == 0:
+                    continue
 
-        for s in self.series_list:
-            buf = self.buffers.get(s.module)
-            if not buf or buf.ptr == 0:
-                continue
+                x_slice = buf.x_data[: buf.ptr]
+                y_slice = buf.y_data[: buf.ptr]
 
-            x_slice = buf.x_data[: buf.ptr]
-            y_slice = buf.y_data[: buf.ptr]
+                # Track the absolute latest time across all modules for auto-scrolling
+                if x_slice[-1] > latest_time:
+                    latest_time = x_slice[-1]
 
-            # Track the absolute latest time across all modules for auto-scrolling
-            if x_slice[-1] > latest_time:
-                latest_time = x_slice[-1]
-
-            if s.curve:
-                s.curve.setData(x_slice, y_slice[:, s.index])
-            if s.overview_curve:
-                s.overview_curve.setData(x_slice, y_slice[:, s.index])
+                if s.curve:
+                    s.curve.setData(x_slice, y_slice[:, s.index])
+                if s.overview_curve:
+                    s.overview_curve.setData(x_slice, y_slice[:, s.index])
+        except Exception as e:
+            print(f"[{self.__class__.__name__}] _update_plots: {e}")
+            pass
 
         if self.is_auto_scroll and latest_time > 0:
             self._apply_view_range(latest_time - self.view_duration, latest_time)

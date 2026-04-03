@@ -16,9 +16,9 @@ class BaseSubscriber(BaseDaemon):
 
         self.sources = [SysCat.STORAGE, SysCat.REORDER, SysCat.PARSER]
 
-        self._queue = BatchQueue()
+        self.input_queue = BatchQueue()
 
-        self.put = self._queue.put
+        self.put = self.input_queue.put
 
 
 class SubscriberFactory(BaseFactory[BaseSubscriber]):
