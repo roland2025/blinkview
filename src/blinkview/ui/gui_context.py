@@ -13,6 +13,7 @@ from blinkview.ui.log_filter_index_manager import LogFilterIndexManager
 from blinkview.ui.native_dark_mode import set_native_dark_mode
 
 if TYPE_CHECKING:
+    from blinkview.core.logger import SystemLogger
     from blinkview.core.settings_manager import SettingsManager
     from blinkview.ui.utils.config_node_manager import ConfigNodeManager
     from blinkview.ui.widgets.config.style_config import StyleConfig
@@ -57,6 +58,8 @@ class GUIContext(QObject):
         self.updatable = []
 
         self.set_update_version = None
+
+        self.logger: "SystemLogger" = None
 
         # Central Heartbeat: Drives all 30fps UI animations/updates
         # self.update_timer = QTimer(self)
@@ -129,3 +132,6 @@ class GUIContext(QObject):
 
     def set_gui_config_handler(self, gui_config):
         self.gui_config = gui_config
+
+    def set_logger(self, logger):
+        self.logger = logger

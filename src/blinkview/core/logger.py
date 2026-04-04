@@ -82,19 +82,17 @@ class SystemLogger(BaseLogger):
         dev_id = self.registry.get_device("SYSTEM")
         mod_id = dev_id.get_module(self.module_path)
 
-        is_reorder_enabled = registry.reorder is not None and registry.reorder.enabled
-        put_fn = registry.reorder.put if is_reorder_enabled else registry.central.put
+        # is_reorder_enabled = registry.reorder is not None and registry.reorder.enabled
+        # self.system_log_queue = registry.system_log_queue.put
+        # put_fn = registry.reorder.put if is_reorder_enabled else registry.central.put
+        put_fn = registry.system_log_queue.put  # Always put system logs in the system log queue
 
         time_ns = registry.now_ns
-        pool_acquire = registry.system_ctx.pool.get(tag="LogRow").acquire
         LogRowCtr = LogRow
 
         # The fast_log closure remains optimized for speed
         def fast_log(msg: str, level: LevelIdentity):
-            with pool_acquire() as batch:
-                batch.append(LogRowCtr(time_ns(), level, mod_id, msg))
-                put_fn(batch)
-                batch.retain()
+            put_fn(LogRowCtr(time_ns(), level, mod_id, msg))
 
         self.log = fast_log
 

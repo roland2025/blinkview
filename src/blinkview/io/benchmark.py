@@ -121,7 +121,7 @@ class Benchmark(BaseReader):
                     msg_per_sec = mb_per_sec = 0
 
                 msg_per_sec = (
-                    f"TX: {msg_per_sec:,.0f} msg/s ({mb_per_sec:.2f} MB/s) | "
+                    f"TX: {msg_per_sec:,.0f} msg/s {mb_per_sec:.2f} MB/s | "
                     f"Backlog: {in_flight:,} / {effective_max_backlog:,} | Total RX: {total_recv_msgs:,}"
                 )
                 logger.warn(msg_per_sec)
@@ -275,7 +275,7 @@ class Benchmark(BaseReader):
                     log_fn = stats_logger.info
 
                 log_fn(
-                    f"{interval_msg_rate:.0f} msg/s ({interval_mb_s:.2f} MB/s) | "
+                    f"{interval_msg_rate:.0f} msg/s {interval_mb_s:.2f} MB/s | "
                     f"Session Avg: {session_avg_mb_s:.2f} MB/s | "
                     f"Backlog: {int(ema_backlog):} / {effective_max_backlog:} | {state}"
                 )

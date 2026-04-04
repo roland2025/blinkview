@@ -8,7 +8,7 @@ import os
 import signal
 import sys
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, time
 from typing import Optional
 
 from PySide6.QtGui import QFont
@@ -67,9 +67,13 @@ class BlinkMainWindow(QMainWindow):
         self.resize(1280, 800)
         set_native_dark_mode(self)
 
+        registry.configure_system()
+
         use_frameless = False  # Set to False to see the standard window frame (useful for debugging)
 
         self.gui_context = GUIContext()
+        self.logger = registry.logger_creator("gui")()
+        self.gui_context.set_logger(self.logger)
         self.gui_context.set_register_log_target(self.register_log_target)
         self.gui_context.set_deregister_log_target(self.deregister_log_target)
 
@@ -174,8 +178,8 @@ class BlinkMainWindow(QMainWindow):
         self.toolbar.addWidget(self.mps_label)
 
         # Counters for calculation
-        self._msg_counter = 0
-        self._last_mps_time = perf_counter()
+        self._last_stats = {"pushed": 0, "popped": 0, "dropped": 0, "now": time()}
+        # self._last_mps_time = perf_counter()
 
         # --- Set up the Central Tabbed Workspace ---
         self.central_tabs = QTabWidget()
@@ -234,7 +238,7 @@ class BlinkMainWindow(QMainWindow):
 
         self.log_targets = []
 
-        self.gui_context.registry.subscribe(self)
+        # self.gui_context.registry.subscribe(self)
 
         # Signal Handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -244,6 +248,8 @@ class BlinkMainWindow(QMainWindow):
 
         # UI Poller (Runs here, updates the log window)
         self.gui_context.set_theme(StyleConfig())
+
+        self.logger_fast_timer = self.gui_context.logger.child("timer_fast")
 
         self.fps_slow = 1
         self.timeout_slow = 1000 // self.fps_slow
@@ -296,7 +302,13 @@ class BlinkMainWindow(QMainWindow):
 
         QTimer.singleShot(200, lambda: self.timer_slow.start(self.timeout_slow))  # 1 second
 
-        QTimer.singleShot(300, lambda: self.timer_fast.start(self.timeout_fast))
+        def start_fast_timer():
+            self.last_poll_time = (
+                perf_counter() + self.timeout_fast / 1000
+            )  # Set it to the future to avoid false lag detection on the first tick
+            self.timer_fast.start(self.timeout_fast)
+
+        QTimer.singleShot(300, start_fast_timer)
 
     def register_log_target(self, target):
         """Adds a target that expects a 'process_log_batch(list)' method."""
@@ -454,52 +466,81 @@ class BlinkMainWindow(QMainWindow):
             get_nowait = self.input_queue.get_nowait
             log_targets = self.log_targets
 
+            self.logger_fast_timer.debug(f"off={drift_ms - self.timeout_fast:.3f} last={drift_ms:.3f}")
+
             # If the gap is significantly larger than our ~16.6ms target, the UI is lagging
             if drift_ms > self.timeout_fast * 2:  # More than 2 frames late
-                print(f"[UI Monitor] 🐌 Thread Lag Detected: {drift_ms:.1f}ms since last poll!")
+                msg = f"[UI Monitor] 🐌 Thread Lag Detected: {drift_ms:.1f}ms since last poll!"
+                self.logger.warn(msg)
+                print(msg)
 
             time_budget = (
                 self.timeout_fast * 0.8 / 1000
             )  # Spend at most 80% of the frame time processing logs, converted to seconds
             batches_processed = 0
 
-            while True:
-                batch = get_nowait()
-                if not batch:
-                    break  # Queue is empty, all caught up!
+            # while True:
+            #     batch = get_nowait()
+            #     if not batch:
+            #         break  # Queue is empty, all caught up!
+            #
+            #     with batch:
+            #         self._msg_counter += batch.size
+            #         batches_processed += 1
+            #
+            #         # print(f"[BlinkMainWindow] Processing batch of {len(batch)} logs (Batch #{batches_processed})")
+            #
+            #         # Broadcast the batch to all targets
+            #         for target in log_targets:
+            #             try:
+            #                 target.process_log_batch(batch)
+            #             except Exception as e:
+            #                 print(f"[BlinkMainWindow] Target {target} failed to process batch: {e}")
+            #
+            #     # Check if we've overstayed our welcome on the UI thread
+            #     elapsed_processing = perf_counter() - current_time
+            #     if elapsed_processing > time_budget:
+            #         print(
+            #             f"[UI Monitor] ⚠️ Oversaturated! Processed {batches_processed} batches in {elapsed_processing * 1000:.1f}ms. Yielding to event loop."
+            #         )
+            #         break  # Leave the remaining batches in the queue for the next timer tick
+            #
+            # for target in log_targets:
+            #     try:
+            #         target.processing_done()
+            #     except Exception as e:
+            #         print(f"[BlinkMainWindow] Target {target} failed processing done: {e}")
 
-                with batch:
-                    self._msg_counter += batch.size
-                    batches_processed += 1
+            current_stats = self.gui_context.registry.central.input_queue.get_stats()
+            elapsed = current_stats["now"] - self._last_stats["now"]
 
-                    # print(f"[BlinkMainWindow] Processing batch of {len(batch)} logs (Batch #{batches_processed})")
+            if elapsed >= 1.0:
+                # 1. Calculate Deltas
+                new_msgs = current_stats["pushed"] - self._last_stats["pushed"]
+                out_msgs = current_stats["popped"] - self._last_stats["popped"]
+                dropped = current_stats["dropped"] - self._last_stats["dropped"]
 
-                    # Broadcast the batch to all targets
-                    for target in log_targets:
-                        try:
-                            target.process_log_batch(batch)
-                        except Exception as e:
-                            print(f"[BlinkMainWindow] Target {target} failed to process batch: {e}")
+                # 2. Calculate Rates
+                in_mps = int(new_msgs / elapsed)
+                out_mps = int(out_msgs / elapsed)
 
-                # Check if we've overstayed our welcome on the UI thread
-                elapsed_processing = perf_counter() - current_time
-                if elapsed_processing > time_budget:
-                    print(
-                        f"[UI Monitor] ⚠️ Oversaturated! Processed {batches_processed} batches in {elapsed_processing * 1000:.1f}ms. Yielding to event loop."
-                    )
-                    break  # Leave the remaining batches in the queue for the next timer tick
+                # 3. Calculate Backlog (Queue Depth)
+                backlog = current_stats["total"]
+                capacity_pct = (backlog / current_stats["maxlen"]) * 100
 
-            elapsed_since_mps = current_time - self._last_mps_time
-            if elapsed_since_mps >= 1.0:
-                # Calculate throughput
-                mps = int(self._msg_counter / elapsed_since_mps)
+                # 4. Update UI
+                # Formatting: "In: 150,000 msg/s | Out: 148,000 msg/s | Buffer: 12%"
+                self.mps_label.setText(
+                    f"In: {in_mps:,} | Out: {out_mps:,} | Backlog: {backlog:,} ({capacity_pct:.1f}%)"
+                )
 
-                # Formatting with thousands separator (e.g., 538,521)
-                self.mps_label.setText(f"{mps:,} msg/s")
+                # Optional: Highlight drop rate if it's non-zero
+                if dropped > 0:
+                    drop_mps = int(dropped / elapsed)
+                    # self.status_label.setText(f"⚠️ Dropping {drop_mps:,} msg/s")
 
-                # Reset counters
-                self._msg_counter = 0
-                self._last_mps_time = current_time
+                # 5. Store current snapshot as the 'last' for next time
+                self._last_stats = current_stats
 
             self.gui_context.on_update()
 

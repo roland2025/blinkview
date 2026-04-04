@@ -11,9 +11,11 @@ from ..storage.file_logger import LogRow
 from ..utils.log_filter import LogFilter
 from .base_daemon import BaseDaemon
 from .batch_queue import BatchQueue
+from .batched_logrows import BatchedLogRows
 from .configurable import configuration_factory, configuration_property, override_property
 from .factory import BaseFactory
 from .limits import BATCH_QUEUE_MAXLEN, CENTRAL_STORAGE_MAXLEN
+from .numpy_buffer_pool import NumpyBufferPool
 
 
 @configuration_factory("central")
@@ -45,12 +47,24 @@ class CentralStorage(BaseCentralStorage):
         super().__init__()
         self.name = "central"
 
-        self._msg_log = BatchQueue(self.maxlen)
+        self._msg_log = BatchedLogRows(self.maxlen)
+
+        self.get_batches = self._msg_log.get_batches
+
+        get_telemetry_batch = self._msg_log.get_telemetry_batch
 
         self.input_queue = BatchQueue()  # messages that have not yet been pushed to subscribers
         self.sequence = 1
 
         self.put = self.input_queue.put
+
+        pool = NumpyBufferPool()
+        self.numpy_pool = pool
+
+        def baked_get_telemetry_batch(module, start_seq: int, target_cols: int = 0):
+            return get_telemetry_batch(pool.acquire, module, start_seq, target_cols)
+
+        self.get_telemetry_batch = baked_get_telemetry_batch
 
     def run(self):
         # Localize method lookups
@@ -80,27 +94,8 @@ class CentralStorage(BaseCentralStorage):
                 #     item.seq = get_next_id()
                 #     item.module.latest_row = item
 
-                self._msg_log.put(batch.copy())
+                self._msg_log.put([item for item in batch])
 
                 self.distribute(batch)
 
         self.sequence = sequence
-
-    def get_rows(self, log_filter: LogFilter, total: int, after_seq: int = -1):
-        """Returns the most recent log entries that match the given filter, up to the specified total."""
-        # We can optimize this by iterating backwards through the log and stopping once we've collected enough entries.
-        matching_batches = []
-        total_counted = 0
-        with self._msg_log._lock:
-            for batch in reversed(self._msg_log._deque):
-                filtered_batch = log_filter.filter_batch(batch, after_seq=after_seq)
-                if filtered_batch:
-                    matching_batches.append(filtered_batch)
-                    total_counted += len(filtered_batch)
-                    if total_counted >= total:
-                        break
-
-        # Flatten the list of batches and return only the most recent 'total' entries
-        # reverse the order back to chronological
-        matching_entries = [entry for batch in reversed(matching_batches) for entry in batch]
-        return matching_entries[-total:]

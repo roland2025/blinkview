@@ -6,11 +6,10 @@
 
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.utils.log_level import LevelIdentity
-
 
 _FLOAT_RE = re.compile(r"[-+]?\d*\.\d+(?:[eE][-+]?\d+)?|[-+]?\d+")
 _FLOAT_RE_FINDALL = _FLOAT_RE.findall  # Cache the method for performance
@@ -23,7 +22,7 @@ class LogRow:
     module: ModuleIdentity
     message: str
     seq: int = 0
-    _values: Optional[List[float]] = field(default=None, init=False)
+    _values: Optional[tuple[float, ...]] = None
 
     def __lt__(self, other):
         return self.timestamp_ns < other.timestamp_ns
@@ -33,7 +32,7 @@ class LogRow:
         """Helper to provide float seconds for legacy UI components if needed."""
         return self.timestamp_ns / 1_000_000_000.0
 
-    def get_values(self) -> List[float]:
+    def get_values(self) -> tuple[float, ...]:
         """
         Extracts all floating point numbers from the message.
         Caches the result in _values for subsequent calls.
@@ -43,5 +42,5 @@ class LogRow:
 
         # Find all matches and convert to float
         # Using a list comprehension here is faster than a loop
-        self._values = [float(val) for val in _FLOAT_RE_FINDALL(self.message)]
+        self._values = tuple(float(val) for val in _FLOAT_RE_FINDALL(self.message))
         return self._values

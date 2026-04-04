@@ -36,9 +36,9 @@ class LogFilter:
         base_level = self.log_level
         include_children = self.filtered_module_children
 
-        print(
-            f"[LogFilter] allowed_dev={allowed_dev} idx={idx}, base_level={base_level} target_mod={target_mod.name if target_mod else None}"
-        )
+        # print(
+        #     f"[LogFilter] allowed_dev={allowed_dev} idx={idx}, base_level={base_level} target_mod={target_mod.name if target_mod else None}"
+        # )
 
         if base_level == LogLevel.ALL:
             base_level = None  # Treat ALL as no level constraint

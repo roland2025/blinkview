@@ -28,10 +28,6 @@ class BatchQueue:
         self._not_empty = Condition(self._lock)
 
     def put(self, batch):
-        """
-        Puts a batch (list of objects) into the queue.
-        Drops the oldest batches if total objects exceed maxlen.
-        """
         batch_size = len(batch)
         if batch_size == 0:
             return
@@ -43,24 +39,23 @@ class BatchQueue:
 
             self._deque.append(batch)
             self._total_objects += batch_size
-
             self.pushed += batch_size
 
-            # Drop oldest batches until we are under maxlen.
-            # We enforce len(self._deque) > 1 so we don't drop the batch
-            # we *just* added, even if it alone exceeds maxlen.
-            while self._total_objects > self.maxlen and len(self._deque) > 1:
-                oldest_batch = self._deque.popleft()
-                drop_count = len(oldest_batch)
-                self._total_objects -= drop_count
-                self.dropped += drop_count
-                release = getattr(oldest_batch, "release", None)
-                if release is not None:
-                    release()
+            # NEW LOGIC: Only drop if the REMAINING total would still be >= maxlen
+            # We check the size of the oldest batch (self._deque[0]) before popping it.
+            while len(self._deque) > 1:
+                oldest_batch_size = len(self._deque[0])
+                if (self._total_objects - oldest_batch_size) >= self.maxlen:
+                    oldest_batch = self._deque.popleft()
+                    self._total_objects -= oldest_batch_size
+                    self.dropped += oldest_batch_size
 
-                # print(
-                #     f"[BatchQueue] Dropped batch of size {len(oldest_batch)} to maintain maxlen. Total objects now: {self._total_objects}"
-                # )
+                    release = getattr(oldest_batch, "release", None)
+                    if release is not None:
+                        release()
+                else:
+                    # If dropping the oldest batch would put us under maxlen, stop dropping.
+                    break
 
             self._not_empty.notify()
 
@@ -125,3 +120,33 @@ class BatchQueue:
                 "dropped": self.dropped,
                 "now": time(),
             }
+
+    def clear(self):
+        with self._not_empty:
+            while self._deque:
+                batch = self._deque.pop()
+                release = getattr(batch, "release", None)
+                if release is not None:
+                    release()
+
+            self._total_objects = 0
+
+    def __getitem__(self, index):
+        """
+        Returns the batch at the specified index.
+        Supports negative indexing (e.g., bq[-1] for the newest batch).
+        Lock-free: assumes no concurrent mutations.
+        """
+        return self._deque[index]
+
+    def __iter__(self):
+        """
+        Returns the raw deque iterator.
+        Lock-free: assumes no concurrent mutations.
+        """
+        return iter(self._deque)
+
+    def __len__(self):
+        """Returns the number of batches currently in the queue."""
+        # len() on a deque is O(1) and atomic in CPython/3.14t
+        return len(self._deque)

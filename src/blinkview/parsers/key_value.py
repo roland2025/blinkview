@@ -28,21 +28,26 @@ class KeyValueParser(BaseParser):
         max_timeout = self.delay / 1000.0  # Convert milliseconds to seconds
 
         device_identity: DeviceIdentity = self.local.device_id
+        get_module = device_identity.get_module
         system_identity = self.shared.id_registry.get_device("SYSTEM")
 
         pool_acquire = self.shared.pool.get(tag="LogRows").acquire
         LogRowCtr = LogRow
 
         parsed_batch = pool_acquire()
+        batch_append = parsed_batch.append
         last_flush_time = perf_counter()
 
+        module_cache = {}
+
         def flush():
-            nonlocal parsed_batch, last_flush_time
-            if parsed_batch:
+            nonlocal parsed_batch, last_flush_time, batch_append
+            if parsed_batch.size:
                 with parsed_batch:
                     self.distribute(parsed_batch)
 
                 parsed_batch = pool_acquire()
+                batch_append = parsed_batch.append
                 last_flush_time = perf_counter()
 
         stop_is_set = self._stop_event.is_set
@@ -61,7 +66,7 @@ class KeyValueParser(BaseParser):
                 for entry in batch:
                     entry: LogRow
                     device_id = entry.module.device
-                    if device_id == device_identity or device_id == system_identity:
+                    if device_id is device_identity or device_id == system_identity:
                         # this is us, skip it to avoid loops
                         continue
                     # print(f"Got entry: {entry}")
@@ -75,13 +80,19 @@ class KeyValueParser(BaseParser):
                                 value = value.rstrip(",;")
                                 if key and value:
                                     try:
-                                        module = device_identity.get_module(f"{entry.module.name}.{key}")
-                                        parsed_batch.append(LogRowCtr(entry.timestamp_ns, entry.level, module, value))
+                                        try:
+                                            cache_key = (entry.module, key)
+                                            module = module_cache[cache_key]
+                                        except KeyError:
+                                            module = get_module(f"{entry.module.name}.{key}")
+                                            module_cache[cache_key] = module
+
+                                        batch_append(LogRowCtr(entry.timestamp_ns, entry.level, module, value))
                                     except Exception as e:
                                         # self.logger.error(f"Failed to create module for key '{key}': {e}")
                                         pass
 
-                        if len(parsed_batch) >= max_batch:
+                        if parsed_batch.size >= max_batch:
                             flush()
 
             now = perf_counter()
@@ -90,3 +101,4 @@ class KeyValueParser(BaseParser):
 
         # Flush any remaining batch on exit
         flush()
+        parsed_batch.release()

@@ -6,7 +6,7 @@
 
 import json
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -48,6 +48,8 @@ class Registry:
 
         self.initialized = False
         self._temp_log_queue: Queue = Queue()
+
+        self.system_log_queue: Queue[LogRow] = Queue()
 
         self.time_utils = TimeUtils()
         self.now = self.time_utils.now
@@ -129,6 +131,8 @@ class Registry:
             pool=PoolManager(),
         )
         self.file_manager.set_context(self.system_ctx)
+
+        self.pool_acquire_logrows = self.system_ctx.pool.get(tag="LogRows").acquire
 
         self.sources = None
 
@@ -369,15 +373,18 @@ class Registry:
                     log_batch.append(LogRow(timestamp, level_id, module.get_module(module_name), msg))
                 except Exception:
                     break
-            log_put_fn(log_batch)
             log_batch.retain()
+            log_put_fn(log_batch)
 
-    def start(self):
+        self._temp_log_queue = None  # Release the temporary log queue
+
+    def start(self, configure=True):
         if self._is_running:
             return
         self.logger.warn(f"--- Starting Session: {self.session_name} ---")
 
-        self.configure_system()
+        if configure:
+            self.configure_system()
 
         # This allows for plugin registration between __init__ and start()
         # self.pipelines.build_from_config()
@@ -401,6 +408,8 @@ class Registry:
             self.sources.start()
 
         # self.system_ctx.tasks.run_periodic(1, self.buffer_stats)
+        flush_interval = self.reorder.delay / 2 / 1000 if self.reorder is not None and self.reorder.enabled else 0.1
+        self.system_ctx.tasks.run_periodic(flush_interval, self.flush_log_queue)
 
         self._is_running = True
         self.logger.warn("BlinkView is now live.")
@@ -608,3 +617,22 @@ class Registry:
 
         except Exception as e:
             self.logger.exception(f"buffer_stats failed: {e}")
+
+    def flush_log_queue(self):
+        log_queue = self.system_log_queue
+        if not log_queue:
+            return
+
+        with self.pool_acquire_logrows() as batch:
+            batch_append = batch.append
+            get_nowait = log_queue.get_nowait
+
+            try:
+                while True:
+                    batch_append(get_nowait())
+            except Empty:
+                pass
+
+            put_fn = self.reorder.put if self.reorder is not None and self.reorder.enabled else self.central.put
+            put_fn(batch)
+            batch.retain()

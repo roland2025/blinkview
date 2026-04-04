@@ -10,6 +10,8 @@ from typing import Iterable
 from qtpy.QtGui import QAction, Qt
 from qtpy.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLayout, QWidget
 
+from blinkview.core.batch_queue import BatchQueue
+from blinkview.core.batched_logrows import BatchedLogRows
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
 from blinkview.ui.widgets.log_highlighter import LogHighlighter
@@ -76,7 +78,8 @@ QToolButton[filterEnabled="true"] {
 
         # --- HISTORY BUFFER ---
         # Stores the raw message objects so we can instantly redraw when a toggle changes
-        self.log_history = deque(maxlen=self.max_rows)
+        # self.log_history = deque(maxlen=self.max_rows)
+        self.log_history = BatchedLogRows(maxlen=self.max_rows)
 
         # Main layout
         self.layout = QVBoxLayout(self)
@@ -251,8 +254,7 @@ QToolButton[filterEnabled="true"] {
         if idx != -1:
             self.level_combo.setCurrentIndex(idx)
 
-        self.load_history()
-        self.gui_context.register_log_target(self)
+        self.gui_context.add_updatable(self)
 
     def _set_defaults(self):
         self.tab_name = self.__class__.__name__
@@ -318,7 +320,6 @@ QToolButton[filterEnabled="true"] {
         self.log_filter.set_level(level_identity.name_conf)
 
         self.clear_logs()
-        self.load_history()
 
     def set_log_index(self):
         """Updates the syntax highlighter's index based on which columns are active."""
@@ -388,59 +389,48 @@ QToolButton[filterEnabled="true"] {
         self.action_all.setChecked(all_active)
         self.action_all.blockSignals(False)
 
-        self.reload_and_redraw()
+        self._redraw_history()
 
     def reload_and_redraw(self):
         """Public method to clear current logs and reload from the source with current filters."""
         self.clear_logs()
-        self.load_history()
+        self.latest_seq_seen = -1  # Reset sequence tracker to ensure we load all relevant logs
 
-    def process_log_batch(self, batch: list, load_history=False):
-        """
-        Ingests logs into the view.
-        - If load_history: Bypasses filters and velocity checks (assumed pre-filtered).
-        - If Live: Applies full Baked Filter and Velocity Throttling.
-        """
-        # BATCH FILTERING & DE-DUPLICATION
-        if load_history:
-            # Optimization: History from get_rows() is already pre-filtered.
-            # We only do a quick sequence check to ensure zero overlap.
-            # batch = [msg for msg in batch if msg.seq > self.latest_seq_seen]
-            pass
-        else:
-            # Live path: Apply the 'Baked' metadata + sequence filter in one pass.
-            batch = self.log_filter.filter_batch(batch, after_seq=self.latest_seq_seen)
+    def apply_updates(self):
+        # get messages from central storage and show them on the screen
 
-        if not batch:
-            return
+        now_ns = self.gui_context.registry.now_ns
+        fetch_start = now_ns()
+        batches, self.latest_seq_seen = self.gui_context.registry.central.get_batches(
+            self.log_filter, total=self.max_rows, start_seq=self.latest_seq_seen
+        )
+        fetch_end = now_ns()
+        # print(f"[LogViewer] Fetched batches={len(batches)} duration={(fetch_end - fetch_start) / 1e6:.3f} ms")
 
-        # UPDATE HIGH WATERMARK
-        # Crucial to do this BEFORE the pause check so the next batch knows where we left off.
-        self.latest_seq_seen = max(self.latest_seq_seen, batch[-1].seq)
+        first_data = len(self.log_history)
 
-        # BACKGROUND STORAGE
-        # Deque handles 'max_rows' via its maxlen automatically.
-        self.log_history.extend(batch)
+        for batch in batches:
+            self.log_history.put(batch)
 
-        # VELOCITY MONITOR (Throttling)
-        # Only run for live logs; historical loads are bursts by nature.
-        if not load_history:
-            if self.velocity_tracker.update_and_check(len(batch)):
+            if self.is_paused or self.auto_paused:
+                continue
+
+            if not first_data and self.velocity_tracker.update_and_check(len(batch)):
                 if not self.is_paused:
                     self.auto_paused = True
                     self.action_pause.setChecked(True)
+                    continue
 
-        # UI UPDATE GATE
-        # Pause blocks the text area update, but not the background buffer (Step 3).
-        if self.is_paused and not load_history:
-            return
+            formatted_rows = self._format_messages(batch)
+            if not formatted_rows:
+                continue
 
-        # FORMATTING & RENDERING
-        formatted_rows = self._format_messages(batch)
-        if not formatted_rows:
-            return
+            self.text_area.append_log(formatted_rows)
 
-        self.text_area.append_log(formatted_rows)
+        end = now_ns()
+        # print(
+        #     f"[LogViewer] Fetched batches={len(batches)} duration={(fetch_end - fetch_start) / 1e6:.3f} ms total={(end - fetch_start) / 1e6:.3f} ms"
+        # )
 
     def _format_messages(self, messages: Iterable) -> list:
         """Dynamically builds the string based on the active toggles."""
@@ -475,12 +465,17 @@ QToolButton[filterEnabled="true"] {
     def _redraw_history(self):
         """Instantly clears the screen and redraws all historical logs with the new layout."""
         self.text_area.clear()
-        self.text_area.clear()
         if self.log_history:
             # Re-sync the high watermark to the last item in our history buffer
-            self.latest_seq_seen = self.log_history[-1].seq
+            self.latest_seq_seen = self.log_history[-1][-1].seq
+            formatted_rows = []
+            for batch in self.log_history:
+                formatted_rows.extend(self._format_messages(batch))
 
-            formatted_rows = self._format_messages(self.log_history)
+            print(
+                f"[BlinkMainWindow] Redrawing historical logs batches={len(self.log_history)} rows={len(formatted_rows)}"
+            )
+
             self.text_area.setPlainText("\n".join(formatted_rows))
 
             # Scroll to the bottom
@@ -490,17 +485,6 @@ QToolButton[filterEnabled="true"] {
         self.log_history.clear()
         self.text_area.clear()
         self.latest_seq_seen = -1  # Reset tracker
-
-    def load_history(self):
-        """Special one-time call for the initial historical load."""
-        try:
-            history = self.gui_context.registry.central.get_rows(
-                self.log_filter, total=self.max_rows, after_seq=self.latest_seq_seen
-            )
-
-            self.process_log_batch(history, load_history=True)
-        finally:
-            self.text_area.scroll_to_end()
 
     def _toggle_telemetry_sidebar(self, checked):
         """Toggles the visibility of the Telemetry sidebar."""
@@ -540,4 +524,5 @@ QToolButton[filterEnabled="true"] {
     def closeEvent(self, event):
         """Clean up by unregistering from the GUI context."""
         self.gui_context.deregister_log_target(self)
+        self.gui_context.remove_updatable(self)
         super().closeEvent(event)

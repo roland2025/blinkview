@@ -8,6 +8,10 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Union
 
+from blinkview.core.batch_queue import BatchQueue
+from blinkview.core.batched_logrows import BatchedLogRows
+from blinkview.utils.log_level import LogLevel
+
 if TYPE_CHECKING:
     import numpy as np
     import pyqtgraph as pg
@@ -27,8 +31,11 @@ class ModuleBuffer:
 
     x_data: "np.ndarray"
     y_data: Optional["np.ndarray"] = None
+    head: int = 0  # Where to insert the next batch of data
+    size: int = 0  # How many valid points are in the buffer currently
     ptr: int = 0
     num_channels: int = 0
+    buffer: BatchQueue = None
 
 
 @dataclass
@@ -43,6 +50,7 @@ class SeriesContainer:
     curve: Optional["pg.PlotDataItem"] = None
     overview_curve: Optional["pg.PlotDataItem"] = None
     plot_item: Optional["pg.PlotItem"] = None
+    last_seq: int = -1
 
 
 class TelemetryPlotter(QWidget):
@@ -56,15 +64,22 @@ class TelemetryPlotter(QWidget):
         self._np = np
         self._pg = pg
 
+        # pg.setConfigOptions(useOpenGL=True)
+        pg.setConfigOptions(antialias=False)
+
         self.gui_context: GUIContext = gui_context
-        self.max_points = self.gui_context.settings.get("plot.max_points", 10000)
+
+        self.logger = gui_context.logger.child(f"plotter_{id(self):x}")
+
+        self.max_points = self.gui_context.settings.get("plot.max_points", 50000)
 
         self.tab_name: str = ""
         self.is_split: bool = False
-        self.module: Optional[ModuleIdentity] = None
 
         self.log_seq = -1
         self.latest_seq = -1
+
+        self.plot_data_changed = False
 
         # Buffers
         self.modules: List[ModuleIdentity] = []
@@ -110,7 +125,7 @@ class TelemetryPlotter(QWidget):
         self.duration_combo = QComboBox()
         self.duration_combo.setMinimumWidth(60)
         self.duration_combo.setEditable(True)
-        self.duration_combo.addItems(["10s", "30s", "60s", "5m", "10m", "30m", "1h"])
+        self.duration_combo.addItems(["0.1s", "0.5s", "1s", "10s", "30s", "60s", "5m", "10m", "30m", "1h"])
 
         idx = self.duration_combo.findText(self.view_duration_text)
         if idx >= 0:
@@ -146,9 +161,7 @@ class TelemetryPlotter(QWidget):
 
         self.setAcceptDrops(True)
 
-        self.gui_context.register_log_target(self)
-
-        self.load_history()
+        self.gui_context.add_updatable(self)
 
     def _set_defaults(self):
         self.tab_name = self.__class__.__name__
@@ -226,14 +239,14 @@ class TelemetryPlotter(QWidget):
     def _init_module_channels(self, module: ModuleIdentity, num_channels: int):
         """Called exactly once per module when data first arrives."""
         np = self._np
-
         buf = self.buffers[module]
-        buf.y_data = np.zeros((self.max_points, num_channels))
+
+        # ALLOCATE 2x SIZE FOR MIRRORED BUFFER
+        buf.y_data = np.zeros((self.max_points * 2, num_channels), order="F")
+        buf.x_data = np.zeros(self.max_points * 2)
         buf.num_channels = num_channels
 
-        # If we didn't restore series from state, generate them now
         if not any(s.module == module for s in self.series_list):
-            # Calculate a global offset for colors so modules don't look identical
             existing_series_count = len(self.series_list)
             for i in range(num_channels):
                 self.series_list.append(
@@ -246,7 +259,6 @@ class TelemetryPlotter(QWidget):
                     )
                 )
 
-        # Re-trigger UI building
         self.set_split_mode(self.is_split)
 
     def get_color(self, i: int) -> QColor:
@@ -256,89 +268,265 @@ class TelemetryPlotter(QWidget):
     def total_series_count(self) -> int:
         return len(self.series_list)
 
-    def process_log_batch(self, batch: list[LogRow], load_history=False):
+    def update_batch(self, module: ModuleIdentity, batches):
+        np = self._np
+        _len = len
         updated = False
-        try:
-            self.latest_seq = batch[-1].seq
-            np = self._np
 
-            for module in self.modules:
-                # 1. Initial extraction of rows that have ANY values
-                raw_extracted = [
-                    (row.timestamp, row.get_values()) for row in batch if row.module == module and row.get_values()
-                ]
+        for batch in batches:
+            batch_len = len(batch)
+            if batch_len == 0:
+                continue
 
-                if not raw_extracted:
-                    continue
-
-                # 2. Initialize if this is the first time we see this module
-                if module not in self.buffers:
-                    # We use the VERY FIRST message's column count as the "Gold Standard"
-                    first_msg_val_count = len(raw_extracted[0][1])
-                    print(
-                        f"[{self.__class__.__name__}] process_log_batch: Column count: {first_msg_val_count} ({raw_extracted}"
-                    )
-                    buf = ModuleBuffer(x_data=np.zeros(self.max_points))
-                    self.buffers[module] = buf
-                    self._init_module_channels(module, first_msg_val_count)
-
+            # 1. Resolve buffer and target columns
+            try:
                 buf = self.buffers[module]
                 target_cols = buf.num_channels
-
-                # 3. FILTER: Only keep rows where the column count matches exactly
-                # This ignores rows that are too short or too long
-                valid_extracted = [(ts, vals) for ts, vals in raw_extracted if len(vals) == target_cols]
-
-                if not valid_extracted:
+            except KeyError:
+                # Find the first valid row to determine column count
+                first_row = next((r for r in batch if r.module == module), None)
+                if not first_row:
+                    continue
+                vals = first_row.get_values()
+                if not vals:
                     continue
 
-                # 4. Convert the valid subset to numpy
-                new_times = np.array([t for t, v in valid_extracted], dtype=float)
-                new_values = np.array([v for t, v in valid_extracted], dtype=float)
-                num_new = new_times.size
+                target_cols = len(vals)
+                buf = ModuleBuffer(x_data=np.zeros(0), buffer=BatchQueue(self.max_points))
+                self.buffers[module] = buf
+                self._init_module_channels(module, target_cols)
 
-                # 5. Buffer Management
-                if num_new >= self.max_points:
-                    # THE "FIREHOSE" CASE: New data is bigger than our whole buffer
-                    # Just take the last 'max_points' of the new data and overwrite everything
-                    buf.x_data[:] = new_times[-self.max_points :]
-                    buf.y_data[:] = new_values[-self.max_points :, :]
-                    buf.ptr = self.max_points
-                elif buf.ptr + num_new <= self.max_points:
-                    # THE "NORMAL" CASE: Fits in remaining space
-                    buf.x_data[buf.ptr : buf.ptr + num_new] = new_times
-                    buf.y_data[buf.ptr : buf.ptr + num_new, :] = new_values
-                    buf.ptr += num_new
+            # 2. Pre-allocate temporary numpy arrays for THIS batch
+            temp_t = np.empty(batch_len, dtype=float)
+            temp_v = np.empty((batch_len, target_cols), dtype=float)
+
+            # 3. Fill the arrays directly (avoids building intermediate python lists/tuples)
+            idx = 0
+            for row in batch:
+                if row.module == module:
+                    vals = row.get_values()
+                    if vals and len(vals) == target_cols:
+                        temp_t[idx] = row.timestamp
+                        temp_v[idx] = vals  # Numpy handles the list-to-C-array conversion instantly
+                        idx += 1
+
+            if idx == 0:
+                continue
+
+            # 4. Slice out only the valid data we collected
+            new_times = temp_t[:idx]
+            new_values = temp_v[:idx]
+            num_new = idx
+
+            if num_new >= self.max_points:
+                # Keep only the latest data if batch is massive
+                new_times = new_times[-self.max_points :]
+                new_values = new_values[-self.max_points :, :]
+                num_new = self.max_points
+
+                # Write to primary half
+                buf.x_data[: self.max_points] = new_times
+                buf.y_data[: self.max_points, :] = new_values
+                # Mirror to second half
+                buf.x_data[self.max_points : 2 * self.max_points] = new_times
+                buf.y_data[self.max_points : 2 * self.max_points, :] = new_values
+
+                buf.head = 0
+                buf.size = self.max_points
+            else:
+                end_idx = buf.head + num_new
+                if end_idx <= self.max_points:
+                    # Fits without wrapping primary half
+                    buf.x_data[buf.head : end_idx] = new_times
+                    buf.y_data[buf.head : end_idx, :] = new_values
+
+                    # Mirror to second half
+                    buf.x_data[buf.head + self.max_points : end_idx + self.max_points] = new_times
+                    buf.y_data[buf.head + self.max_points : end_idx + self.max_points, :] = new_values
                 else:
-                    # THE "SLIDING" CASE: Partial overlap
-                    shift = (buf.ptr + num_new) - self.max_points
-                    buf.x_data[:-shift] = buf.x_data[shift:]
-                    buf.y_data[:-shift, :] = buf.y_data[shift:, :]
+                    # Wraps the primary half
+                    overflow = end_idx - self.max_points
+                    first_part = num_new - overflow
 
-                    buf.x_data[-num_new:] = new_times
-                    buf.y_data[-num_new:, :] = new_values
-                    buf.ptr = self.max_points
+                    # Fill end of primary and end of mirror
+                    buf.x_data[buf.head : self.max_points] = new_times[:first_part]
+                    buf.y_data[buf.head : self.max_points, :] = new_values[:first_part, :]
+                    buf.x_data[buf.head + self.max_points : 2 * self.max_points] = new_times[:first_part]
+                    buf.y_data[buf.head + self.max_points : 2 * self.max_points, :] = new_values[:first_part, :]
 
+                    # Fill start of primary and start of mirror
+                    buf.x_data[0:overflow] = new_times[first_part:]
+                    buf.y_data[0:overflow, :] = new_values[first_part:, :]
+                    buf.x_data[self.max_points : self.max_points + overflow] = new_times[first_part:]
+                    buf.y_data[self.max_points : self.max_points + overflow, :] = new_values[first_part:, :]
+
+                buf.head = (buf.head + num_new) % self.max_points
+                buf.size = min(buf.size + num_new, self.max_points)
+
+            updated = True
+
+        return updated
+
+    def _apply_updates(self):
+        # fetches entries from backend and updates screen
+        now_ns = self.gui_context.registry.now_ns
+        start_seq = self.latest_seq
+        fetch_duration = 0
+        start = now_ns()
+        get_batches = self.gui_context.registry.central.get_batches
+        updated = False
+        for module in self.modules:
+            log_filter = LogFilter(self.gui_context.id_registry, filtered_module=module)
+            fetch_start = now_ns()
+            batches, self.latest_seq = get_batches(log_filter, total=self.max_points, start_seq=start_seq)
+            # batches = [[LogRow(fetch_start, LogLevel.INFO, module, "1 2 3 4 5", fetch_start)]]
+            fetch_end = now_ns()
+            fetch_duration += fetch_end - fetch_start
+
+            if self.update_batch(module, batches):
                 updated = True
 
-        except Exception as e:
-            print(f"[{self.__class__.__name__}] process_log_batch: {e}")
+        pass
+
+        draw_start = now_ns()
 
         if updated:
             self._update_plots()
+
+        # if self.is_auto_scroll:
+        #     self._scroll_to_now()
+
+        end = now_ns()
+        draw_duration = end - draw_start
+        # Calculate ratio, defaulting to 0.0 if fetch_duration is 0 to avoid crash
+        ratio = draw_duration / fetch_duration if fetch_duration > 0 else 0.0
+
+        self.logger.debug(
+            f"updated={1 if updated else 0} "
+            f"total={(end - start) / 1e6:.3f} ms "
+            f"draw={draw_duration / 1e6:.3f} ms "
+            f"fetch={fetch_duration / 1e6:.3f} ms "
+            f"ratio={ratio:.3f}"
+        )
+
+    def apply_updates(self):
+        # Fetches entries from backend and updates screen
+        now_ns = self.gui_context.registry.now_ns
+        start_seq = self.latest_seq
+
+        # Point to the new fast-path getter
+        get_telemetry_batch = self.gui_context.registry.central.get_telemetry_batch
+
+        updated = False
+
+        start = now_ns()
+
+        fetch_duration = 0
+
+        for module in self.modules:
+            fetch_start = now_ns()
+
+            buf = self.buffers.get(module)
+            target_cols = buf.num_channels if buf else 0
+
+            # 1. Pull native numpy arrays straight from the central queue
+            batch_container = get_telemetry_batch(module, start_seq, target_cols)
+
+            if batch_container is not None:
+                with batch_container as batch:
+                    self.latest_seq = batch.latest_seq
+
+                    if not buf:
+                        buf = ModuleBuffer(
+                            x_data=self._np.zeros(self.max_points * 2),
+                            y_data=self._np.zeros((self.max_points * 2, batch.target_cols), order="F"),
+                            buffer=BatchQueue(self.max_points),
+                        )
+                        self.buffers[module] = buf
+                        self._init_module_channels(module, batch.target_cols)
+
+                    # Read directly from the perfectly-sized views
+                    self._insert_into_circular_buffer(module, batch.times, batch.values)
+                    updated = True
+
+            fetch_end = now_ns()
+            fetch_duration += fetch_end - fetch_start
+
+        draw_start = now_ns()
+        if updated:
+            self._update_plots()
+
+        end = now_ns()
+        draw_duration = end - draw_start
+        # Calculate ratio, defaulting to 0.0 if fetch_duration is 0 to avoid crash
+        ratio = draw_duration / fetch_duration if fetch_duration > 0 else 0.0
+
+        self.logger.debug(
+            f"updated={1 if updated else 0} "
+            f"total={(end - start) / 1e6:.3f} ms "
+            f"draw={draw_duration / 1e6:.3f} ms "
+            f"fetch={fetch_duration / 1e6:.3f} ms "
+            f"ratio={ratio:.3f}"
+        )
+
+    def _insert_into_circular_buffer(self, module, new_times, new_values):
+        """Inserts arrays directly into the Mirrored Ring Buffer."""
+        buf = self.buffers[module]
+        num_new = new_times.size
+
+        if num_new >= self.max_points:
+            # Massive batch: overwrite the whole buffer
+            new_times = new_times[-self.max_points :]
+            new_values = new_values[-self.max_points :, :]
+            num_new = self.max_points
+
+            buf.x_data[: self.max_points] = new_times
+            buf.y_data[: self.max_points, :] = new_values
+            # Mirror
+            buf.x_data[self.max_points : 2 * self.max_points] = new_times
+            buf.y_data[self.max_points : 2 * self.max_points, :] = new_values
+
+            buf.head = 0
+            buf.size = self.max_points
+        else:
+            end_idx = buf.head + num_new
+            if end_idx <= self.max_points:
+                # Clean fit
+                buf.x_data[buf.head : end_idx] = new_times
+                buf.y_data[buf.head : end_idx, :] = new_values
+                # Mirror
+                buf.x_data[buf.head + self.max_points : end_idx + self.max_points] = new_times
+                buf.y_data[buf.head + self.max_points : end_idx + self.max_points, :] = new_values
+            else:
+                # Wraps around
+                overflow = end_idx - self.max_points
+                first_part = num_new - overflow
+
+                # First chunk
+                buf.x_data[buf.head : self.max_points] = new_times[:first_part]
+                buf.y_data[buf.head : self.max_points, :] = new_values[:first_part, :]
+                buf.x_data[buf.head + self.max_points : 2 * self.max_points] = new_times[:first_part]
+                buf.y_data[buf.head + self.max_points : 2 * self.max_points, :] = new_values[:first_part, :]
+
+                # Overflow chunk
+                buf.x_data[0:overflow] = new_times[first_part:]
+                buf.y_data[0:overflow, :] = new_values[first_part:, :]
+                buf.x_data[self.max_points : self.max_points + overflow] = new_times[first_part:]
+                buf.y_data[self.max_points : self.max_points + overflow, :] = new_values[first_part:, :]
+
+            buf.head = (buf.head + num_new) % self.max_points
+            buf.size = min(buf.size + num_new, self.max_points)
 
     def _load_module_history(self, module: ModuleIdentity):
         """Helper to load history for a single module (used during drop)."""
         print(f"Loading history for newly dropped module: '{module}'")
         log_filter = LogFilter(self.gui_context.id_registry, filtered_module=module)
-        history = self.gui_context.registry.central.get_rows(log_filter, total=self.max_points, after_seq=self.log_seq)
-        if history:
-            self.process_log_batch(history, load_history=True)
-
-    def load_history(self):
-        """Load history for all configured modules (used on startup)."""
-        for module in self.modules:
-            self._load_module_history(module)
+        batches = self.gui_context.registry.central.get_batches(
+            log_filter, total=self.max_points, start_seq=self.log_seq
+        )
+        if batches:
+            if self.update_batch(module, batches):
+                self._update_plots()
 
     def get_state(self):
         series = []
@@ -407,7 +595,15 @@ class TelemetryPlotter(QWidget):
             else:
                 s.plot_item = shared_plot
 
-            s.curve = s.plot_item.plot(pen=s.color, name=s.name)
+            s.curve = s.plot_item.plot(
+                pen=s.color,
+                name=s.name,
+                clipToView=True,  # Only draw what is inside the axes
+                autoDownsample=False,  # Disable PyQtGraph's internal downsampler (use the Numpy stride trick instead)
+                skipFiniteCheck=True,  # BYPASS: Assumes your array has no NaN or Inf values
+                connect="all",  # BYPASS: Assumes the line is continuous (no gaps)
+                antialias=False,  # BYPASS: Anti-aliasing requires heavy CPU smoothing
+            )
             s.curve.setVisible(s.visible)
             if self.is_split:
                 s.plot_item.setVisible(s.visible)
@@ -444,6 +640,14 @@ class TelemetryPlotter(QWidget):
                     s.plot_item.setXRange(minX, maxX, padding=0)
 
         def update_region_from_main(window, viewRange):
+            import math
+
+            rlow, rhigh = viewRange[0]
+
+            # CRITICAL: Prevent Qt BSP Segfaults
+            if math.isnan(rlow) or math.isnan(rhigh):
+                return
+
             # Break the infinite feedback loop
             if self._is_system_updating:
                 return
@@ -466,31 +670,62 @@ class TelemetryPlotter(QWidget):
 
         self._update_plots()
 
+    def processing_done(self):
+        if self.plot_data_changed:
+            self._update_plots()
+            self.plot_data_changed = False
+
     def _update_plots(self):
         latest_time = 0.0
         try:
             for s in self.series_list:
                 buf = self.buffers.get(s.module)
-                if not buf or buf.ptr == 0:
+                if not buf or buf.size == 0:
                     continue
 
-                x_slice = buf.x_data[: buf.ptr]
-                y_slice = buf.y_data[: buf.ptr]
+                if buf.size < self.max_points:
+                    # Buffer hasn't wrapped yet, just read from 0 to head
+                    x_ordered = buf.x_data[: buf.head]
+                    y_ordered = buf.y_data[: buf.head, s.index]
+                else:
+                    # MAGIC: Zero-allocation contiguous slice!
+                    # Because we mirrored the data, head to (head + max_points)
+                    # is guaranteed to be chronologically sorted.
+                    x_ordered = buf.x_data[buf.head : buf.head + self.max_points]
+                    y_ordered = buf.y_data[buf.head : buf.head + self.max_points, s.index]
 
-                # Track the absolute latest time across all modules for auto-scrolling
-                if x_slice[-1] > latest_time:
-                    latest_time = x_slice[-1]
+                if len(x_ordered) > 0 and x_ordered[-1] > latest_time:
+                    latest_time = x_ordered[-1]
 
                 if s.curve:
-                    s.curve.setData(x_slice, y_slice[:, s.index])
+                    s.curve.setData(x_ordered, y_ordered)
                 if s.overview_curve:
-                    s.overview_curve.setData(x_slice, y_slice[:, s.index])
+                    s.overview_curve.setData(x_ordered, y_ordered)
+
         except Exception as e:
             print(f"[{self.__class__.__name__}] _update_plots: {e}")
-            pass
 
         if self.is_auto_scroll and latest_time > 0:
             self._apply_view_range(latest_time - self.view_duration, latest_time)
+
+        if self.is_auto_scroll and latest_time > 0:
+            self._apply_view_range(latest_time - self.view_duration, latest_time)
+
+    def _scroll_to_now(self):
+        """Moves the window to the current system time, regardless of data arrival."""
+        if not self.is_auto_scroll:
+            return
+
+        # Get current time in seconds (matching your data's timestamp format)
+        # Based on your code, this seems to be the registry's now_ns / 1e9
+        now_sec = self.gui_context.registry.now_ns() / 1e9
+
+        # Optional: If you want the plot to 'wait' for the first piece of data
+        # before it starts flying off into the future:
+        # latest_data = self._get_latest_timestamp()
+        # if latest_data == 0: return
+
+        self._apply_view_range(now_sec - self.view_duration, now_sec)
 
     def clear(self):
         self.log_seq = self.latest_seq
@@ -508,6 +743,7 @@ class TelemetryPlotter(QWidget):
     def closeEvent(self, event):
         """Cleanup registration when the widget is closed."""
         self.gui_context.deregister_log_target(self)
+        self.gui_context.remove_updatable(self)
         super().closeEvent(event)
 
     def _show_channel_menu(self):
@@ -590,6 +826,9 @@ class TelemetryPlotter(QWidget):
         """Safely updates both the region and the main plots without triggering feedback loops."""
         if not self.region:
             return
+
+        if end_time - start_time < 0.1:
+            start_time = end_time - 0.1
 
         self._is_system_updating = True
         try:
