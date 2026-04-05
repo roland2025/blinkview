@@ -728,17 +728,33 @@ class TelemetryPlotter(QWidget):
         self._apply_view_range(now_sec - self.view_duration, now_sec)
 
     def clear(self):
+        # Reset the sequence tracker so we don't re-fetch old data
+        # Note: self.latest_seq should stay at its current value so the
+        # next 'apply_updates' only picks up logs generated AFTER this moment.
         self.log_seq = self.latest_seq
 
         for buf in self.buffers.values():
-            buf.x_data.fill(0)
-            if buf.y_data is not None:
-                buf.y_data.fill(0)
-            buf.ptr = 0
+            # Reset the Mirrored Ring Buffer pointers
+            buf.head = 0
+            buf.size = 0
+            buf.ptr = 0  # Reset legacy pointer too
 
+            # # Optional: Wipe the actual arrays
+            # buf.x_data.fill(0)
+            # if buf.y_data is not None:
+            #     buf.y_data.fill(0)
+
+        # Clear the visual curves
         for series in self.series_list:
             if series.curve:
                 series.curve.setData([], [])
+
+            # CRITICAL: You were missing the overview curve reset!
+            if series.overview_curve:
+                series.overview_curve.setData([], [])
+
+        # 5. Trigger a redraw to show the empty plots immediately
+        self._update_plots()
 
     def closeEvent(self, event):
         """Cleanup registration when the widget is closed."""

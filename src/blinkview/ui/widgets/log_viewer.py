@@ -409,33 +409,33 @@ QToolButton[filterEnabled="true"] {
 
         first_data = len(self.log_history)
 
+        formatted_rows = []
+
         for batch in batches:
             self.log_history.put(batch)
 
             if self.is_paused or self.auto_paused:
                 continue
 
-            if not first_data and self.velocity_tracker.update_and_check(len(batch)):
+            if first_data > 0 and self.velocity_tracker.update_and_check(len(batch)):
                 if not self.is_paused:
                     self.auto_paused = True
                     self.action_pause.setChecked(True)
                     continue
 
-            formatted_rows = self._format_messages(batch)
-            if not formatted_rows:
-                continue
+            formatted_rows = self._format_messages(batch, formatted_rows)
 
-            self.text_area.append_log(formatted_rows)
+        self.text_area.append_log(formatted_rows)
 
         end = now_ns()
         # print(
         #     f"[LogViewer] Fetched batches={len(batches)} duration={(fetch_end - fetch_start) / 1e6:.3f} ms total={(end - fetch_start) / 1e6:.3f} ms"
         # )
 
-    def _format_messages(self, messages: Iterable) -> list:
+    def _format_messages(self, messages: Iterable, rows=None) -> list:
         """Dynamically builds the string based on the active toggles."""
         format_ts = self.timestamp_formatter.format
-        rows = []
+        rows = rows or []
         append = rows.append
 
         # Local cache for speed
@@ -449,13 +449,13 @@ QToolButton[filterEnabled="true"] {
             if show_ts:
                 parts.append(format_ts(msg.timestamp_ns))
             if show_dev:
-                parts.append(str(msg.module.device))
+                parts.append(msg.module.device.name)
             if show_lvl:
-                parts.append(str(msg.level))
+                parts.append(msg.level.name)
             if show_mod:
                 parts.append(f"{msg.module.name}:")
 
-            parts.append(str(msg.message))
+            parts.append(msg.message)
 
             # Join the active parts with a space
             append(" ".join(parts))

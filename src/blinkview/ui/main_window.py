@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import gc
 import os
 import signal
 import sys
@@ -68,6 +69,11 @@ class BlinkMainWindow(QMainWindow):
         set_native_dark_mode(self)
 
         registry.configure_system()
+
+        self._full_gc_counter = 0
+        # gc.disable()
+        gc.set_threshold(1_000_000, 10000, 10)
+        # gc.set_threshold(1_000_000, 50_000, 50_000)
 
         use_frameless = False  # Set to False to see the standard window frame (useful for debugging)
 
@@ -249,7 +255,10 @@ class BlinkMainWindow(QMainWindow):
         # UI Poller (Runs here, updates the log window)
         self.gui_context.set_theme(StyleConfig())
 
-        self.logger_fast_timer = self.gui_context.logger.child("timer_fast")
+        self.logger_fast_timer = self.logger.child("timer_fast")
+
+        self.logger_gc = self.logger.child("gc")
+        self.logger_stats = self.logger.child("stats")
 
         self.fps_slow = 1
         self.timeout_slow = 1000 // self.fps_slow
@@ -303,9 +312,8 @@ class BlinkMainWindow(QMainWindow):
         QTimer.singleShot(200, lambda: self.timer_slow.start(self.timeout_slow))  # 1 second
 
         def start_fast_timer():
-            self.last_poll_time = (
-                perf_counter() + self.timeout_fast / 1000
-            )  # Set it to the future to avoid false lag detection on the first tick
+            self.last_poll_time = self.gui_context.registry.now_ns() + (self.timeout_fast) * 1_000_000
+            # Set it to the future to avoid false lag detection on the first tick
             self.timer_fast.start(self.timeout_fast)
 
         QTimer.singleShot(300, start_fast_timer)
@@ -460,79 +468,64 @@ class BlinkMainWindow(QMainWindow):
         """Drains the queue, monitors UI lag, and yields to the event loop if budgeted time is exceeded."""
         try:
             # print("[BlinkMainWindow] Polling log queue...")
-            current_time = perf_counter()
-            drift_ms = (current_time - self.last_poll_time) * 1000
-            self.last_poll_time = current_time
-            get_nowait = self.input_queue.get_nowait
-            log_targets = self.log_targets
+            now_ns = self.gui_context.registry.now_ns
+            now = now_ns()
+            drift_ns = now - self.last_poll_time
+            self.last_poll_time = now
 
-            self.logger_fast_timer.debug(f"off={drift_ms - self.timeout_fast:.3f} last={drift_ms:.3f}")
+            self.logger_fast_timer.debug(
+                f"off={drift_ns / 1_000_000 - self.timeout_fast:.3f} last={drift_ns / 1_000_000:.3f}"
+            )
 
             # If the gap is significantly larger than our ~16.6ms target, the UI is lagging
-            if drift_ms > self.timeout_fast * 2:  # More than 2 frames late
-                msg = f"[UI Monitor] 🐌 Thread Lag Detected: {drift_ms:.1f}ms since last poll!"
+            if drift_ns / 1_000_000 > self.timeout_fast * 2:  # More than 2 frames late
+                msg = f"[UI Monitor] 🐌 Thread Lag Detected: {drift_ns / 1_000_000:.1f}ms since last poll!"
                 self.logger.warn(msg)
                 print(msg)
 
             time_budget = (
                 self.timeout_fast * 0.8 / 1000
             )  # Spend at most 80% of the frame time processing logs, converted to seconds
-            batches_processed = 0
-
-            # while True:
-            #     batch = get_nowait()
-            #     if not batch:
-            #         break  # Queue is empty, all caught up!
-            #
-            #     with batch:
-            #         self._msg_counter += batch.size
-            #         batches_processed += 1
-            #
-            #         # print(f"[BlinkMainWindow] Processing batch of {len(batch)} logs (Batch #{batches_processed})")
-            #
-            #         # Broadcast the batch to all targets
-            #         for target in log_targets:
-            #             try:
-            #                 target.process_log_batch(batch)
-            #             except Exception as e:
-            #                 print(f"[BlinkMainWindow] Target {target} failed to process batch: {e}")
-            #
-            #     # Check if we've overstayed our welcome on the UI thread
-            #     elapsed_processing = perf_counter() - current_time
-            #     if elapsed_processing > time_budget:
-            #         print(
-            #             f"[UI Monitor] ⚠️ Oversaturated! Processed {batches_processed} batches in {elapsed_processing * 1000:.1f}ms. Yielding to event loop."
-            #         )
-            #         break  # Leave the remaining batches in the queue for the next timer tick
-            #
-            # for target in log_targets:
-            #     try:
-            #         target.processing_done()
-            #     except Exception as e:
-            #         print(f"[BlinkMainWindow] Target {target} failed processing done: {e}")
 
             current_stats = self.gui_context.registry.central.input_queue.get_stats()
             elapsed = current_stats["now"] - self._last_stats["now"]
 
             if elapsed >= 1.0:
-                # 1. Calculate Deltas
+                # self._full_gc_counter += 1
+                #
+                # gc_level = 1
+                #
+                # if self._full_gc_counter >= 300:
+                #     gc_level = 2
+                #     self._full_gc_counter = 0
+                #
+                # gc_start = now_ns()
+                # prev0, prev1, prev2 = gc.get_count()
+                # gc.collect(gc_level)
+                # gc_duration = now_ns() - gc_start
+                # count0, count1, count2 = gc.get_count()
+                # self.logger_gc.debug(
+                #     f"gc {gc_level} | {gc_duration / 1_000_000:.3f} ms {prev0} >> {count0} | {prev1} >> {count1} | {prev2} >> {count2}"
+                # )
+
+                # Calculate Deltas
                 new_msgs = current_stats["pushed"] - self._last_stats["pushed"]
                 out_msgs = current_stats["popped"] - self._last_stats["popped"]
                 dropped = current_stats["dropped"] - self._last_stats["dropped"]
 
-                # 2. Calculate Rates
+                # Calculate Rates
                 in_mps = int(new_msgs / elapsed)
                 out_mps = int(out_msgs / elapsed)
 
-                # 3. Calculate Backlog (Queue Depth)
+                # Calculate Backlog (Queue Depth)
                 backlog = current_stats["total"]
                 capacity_pct = (backlog / current_stats["maxlen"]) * 100
 
-                # 4. Update UI
+                # Update UI
                 # Formatting: "In: 150,000 msg/s | Out: 148,000 msg/s | Buffer: 12%"
-                self.mps_label.setText(
-                    f"In: {in_mps:,} | Out: {out_mps:,} | Backlog: {backlog:,} ({capacity_pct:.1f}%)"
-                )
+                msg = f"In: {in_mps} | Out: {out_mps} | Backlog: {backlog} ({capacity_pct:.1f}%)"
+                self.mps_label.setText(msg)
+                self.logger_stats.debug(msg)
 
                 # Optional: Highlight drop rate if it's non-zero
                 if dropped > 0:
