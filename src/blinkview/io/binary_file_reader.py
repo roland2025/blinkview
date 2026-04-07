@@ -8,6 +8,7 @@ from pathlib import Path
 from time import sleep
 
 from ..core.configurable import configuration_property
+from ..core.numpy_batch_manager import PooledLogBatch
 from ..core.reusable_batch_pool import TimeDataEntry
 from ..utils.paths import resolve_config_path
 from .BaseReader import BaseReader, DeviceFactory
@@ -25,9 +26,8 @@ from .BaseReader import BaseReader, DeviceFactory
 @configuration_property(
     "chunk_size", type="integer", default=8, description="Number of bytes to read per injection 'tick'."
 )
-@configuration_property(
-    "frequency", type="integer", default=100, description="Injection rate in Hz (times per second)."
-)
+@configuration_property("frequency", type="integer", default=100, description="Read rate in Hz (times per second).")
+@configuration_property("delay", type="integer", default=30, description="Time to collect batch")
 @configuration_property(
     "loop", type="boolean", default=True, description="Restart from the beginning of the file when EOF is reached."
 )
@@ -53,57 +53,90 @@ class BinaryFileReader(BaseReader):
         time_ns = self.shared.time_ns
         logger = self.logger
 
-        # Resolve path and convert to a Path object
         path = Path(resolve_config_path(self.file_path))
-
         interval_s = 1.0 / max(1, self.frequency)
+
+        # Convert delay (ms) to nanoseconds for comparison with time_ns()
+        delay_ns = self.delay * 1_000_000
         chunk_size = self.chunk_size
 
-        logger.info(f"Starting Binary Reader: {path} (@{self.frequency}Hz)")
-
-        pool_acquire = self.shared.pool.get(TimeDataEntry, self.__class__.__name__).acquire
+        logger.info(f"Starting Binary Reader: {path} (@{self.frequency}Hz, {self.delay}ms batching)")
 
         if not path.exists():
             logger.error(f"Binary file not found: {path}")
             return
 
-        # Main Ingestion Loop
+        buffer_bytes = self.frequency * chunk_size * (self.delay + 30) // 1000
+        buffer_chunks = buffer_bytes // chunk_size
+
+        pool_create = self.shared.array_pool.create
+
+        def batch_acquire():
+            return pool_create(PooledLogBatch, buffer_chunks, buffer_bytes // 1024)
+
         f = None
+        batch = None
+
         try:
-            # open() accepts Path objects directly
             f = path.open("rb")
             _read = f.read
             _seek = f.seek
 
             while not stop_is_set():
-                # Read the next raw chunk
+                # 1. Initialize a new batch if we don't have one active
+                if batch is None:
+                    batch = batch_acquire()
+
+                # 2. Read the next raw chunk
+                ts_data = time_ns()
                 data = _read(chunk_size)
 
-                # Handle End of File
+                # 3. Handle End of File
                 if not data:
                     if self.loop:
                         _seek(0)
                         logger.debug(f"Replay loop: Resetting {path.name}")
                         continue
                     else:
+                        # Flush remaining data in current batch before exiting
+                        if len(batch) > 0:
+                            with batch:  # This automatically calls release()
+                                self.distribute(batch)
+                        else:
+                            batch.release()  # Manually return empty batch to pool
+
+                        batch = None
                         logger.info(f"Binary replay finished: {path.name}")
                         break
 
-                batch = pool_acquire()
-                # Create a synthetic 'arrival' timestamp for the pipeline
-                batch.append(time_ns(), data)
+                # 4. Add data to the current batch
+                if not batch.append(ts_data, data):
+                    # Batch capacity or buffer is full, flush it
+                    with batch:
+                        self.distribute(batch)
 
-                # Distribute as (timestamp, payload) list
-                self.distribute(batch)
+                    # Acquire new batch and immediately append the skipped data
+                    batch = batch_acquire()
+                    batch.append(ts_data, data)
 
-                batch.release()
+                # 5. Check if the batching window has elapsed
+                if (time_ns() - batch.start_ts) >= delay_ns:
+                    with batch:
+                        self.distribute(batch)
 
-                # Precise-ish frequency control
+                    # Set to None so Step 1 pulls a fresh batch on the next loop.
+                    # Do NOT call batch.release() here; the 'with' block already did!
+                    batch = None
+
+                    # 6. Maintain injection frequency
                 sleep(interval_s)
 
         except Exception as e:
-            logger.error(f"Error in BinaryFileReader for {path.name}", e)
+            logger.exception(f"Error in BinaryFileReader for {path.name}", e)
         finally:
+            # Guarantee we don't leak the batch on unexpected errors
+            if batch is not None:
+                batch.release()
             if f:
                 f.close()
                 logger.info(f"Binary file closed: {path.name}")

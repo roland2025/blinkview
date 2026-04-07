@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
+    from .array_pool import NumpyArrayPool
     from .factory_registry import FactoryRegistry  # Adjust import path as needed
     from .id_registry import IDRegistry  # Adjust import path as needed
     from .registry import Registry
@@ -25,3 +26,4 @@ class SystemContext:
     tasks: "TaskManager"
     settings: "SettingsManager"
     pool: "PoolManager"
+    array_pool: "NumpyArrayPool"

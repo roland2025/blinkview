@@ -6,72 +6,86 @@
 
 from queue import Empty, SimpleQueue
 
+import numpy as np
+
 
 class PooledTelemetryBatch:
-    """A slotted transport object that automatically returns itself to the pool."""
+    """
+    A lightweight, slotted transport object.
+    It fetches its heavy arrays from the global NumpyArrayPool and manages 2D reshaping.
+    """
 
     __slots__ = (
-        "base_times",
-        "base_values",  # The massive, pre-allocated C-arrays
-        "times",
-        "values",  # The tightly sliced views for the GUI
+        "_pool",  # Reference to the global NumpyArrayPool
+        "_times_handle",  # The PooledArrayHandle for the 1D times array
+        "_values_handle",  # The PooledArrayHandle for the 2D values array
+        "times",  # The tightly sliced 1D view for the GUI
+        "values",  # The tightly sliced 2D view for the GUI
         "latest_seq",
-        "target_cols",  # Metadata
-        "_pool",  # Reference back to the parent pool
+        "target_cols",
     )
 
     def __init__(self, pool):
         self._pool = pool
-        self.base_times = None
-        self.base_values = None
+        self._times_handle = None
+        self._values_handle = None
         self.times = None
         self.values = None
         self.latest_seq = -1
         self.target_cols = 0
 
     def allocate(self, required_size: int, target_cols: int):
-        """The Learning Step: Resizes native arrays only if the existing ones are too small."""
-        import numpy as np
-
-        # Check if reallocation is needed
-        if self.base_times is None or len(self.base_times) < required_size or self.base_values.shape[1] != target_cols:
-            self.base_times = np.empty(required_size, dtype=np.float64)
-            self.base_values = np.empty((required_size, target_cols), dtype=np.float64)
-
+        """Acquires appropriately sized memory slabs from the central pool."""
         self.target_cols = target_cols
 
+        # Calculate byte requirements
+        itemsize = np.dtype(np.float64).itemsize
+        times_bytes = required_size * itemsize
+        values_bytes = required_size * target_cols * itemsize
+
+        # Release old handles if they aren't large enough for the new requirements
+        if self._times_handle and self._times_handle.array.nbytes < times_bytes:
+            self._times_handle.release()
+            self._times_handle = None
+
+        if self._values_handle and self._values_handle.array.nbytes < values_bytes:
+            self._values_handle.release()
+            self._values_handle = None
+
+        # Acquire new memory slabs (returns instantly if cached in the pool)
+        if self._times_handle is None:
+            self._times_handle = self._pool.acquire(times_bytes, dtype=np.float64)
+
+        if self._values_handle is None:
+            self._values_handle = self._pool.acquire(values_bytes, dtype=np.float64)
+
     def set_views(self, idx: int, latest_seq: int):
-        """Sets the tight slices used by the GUI to read the valid data."""
-        self.times = self.base_times[:idx]
-        self.values = self.base_values[:idx]
+        """Slices the 1D power-of-two slabs and reshapes into exact GUI views."""
         self.latest_seq = latest_seq
 
+        # 1D Slice for times
+        self.times = self._times_handle.array[:idx]
+
+        # 2D Reshape & Slice for values:
+        # Extract exactly the elements needed, then view as a 2D matrix
+        flat_values = self._values_handle.array[: idx * self.target_cols]
+        self.values = flat_values.reshape(idx, self.target_cols)
+
     def release(self):
-        """Clears view references and returns this object to the pool."""
+        """Releases the underlying arrays back to the pool."""
         self.times = None
         self.values = None
-        self._pool._queue.put(self)
+
+        if self._times_handle:
+            self._times_handle.release()
+            self._times_handle = None
+
+        if self._values_handle:
+            self._values_handle.release()
+            self._values_handle = None
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.release()
-
-
-class NumpyBufferPool:
-    def __init__(self):
-        from queue import SimpleQueue
-
-        self._queue = SimpleQueue()
-
-    def acquire(self, required_size: int, target_cols: int) -> PooledTelemetryBatch:
-        from queue import Empty
-
-        try:
-            batch = self._queue.get_nowait()
-        except Empty:
-            batch = PooledTelemetryBatch(self)
-
-        batch.allocate(required_size, target_cols)
-        return batch

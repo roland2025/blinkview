@@ -72,7 +72,7 @@ class BlinkMainWindow(QMainWindow):
 
         self._full_gc_counter = 0
         # gc.disable()
-        gc.set_threshold(1_000_000, 10000, 10)
+        # gc.set_threshold(10_000, 20, 10)
         # gc.set_threshold(1_000_000, 50_000, 50_000)
 
         use_frameless = False  # Set to False to see the standard window frame (useful for debugging)
@@ -468,7 +468,8 @@ class BlinkMainWindow(QMainWindow):
         """Drains the queue, monitors UI lag, and yields to the event loop if budgeted time is exceeded."""
         try:
             # print("[BlinkMainWindow] Polling log queue...")
-            now_ns = self.gui_context.registry.now_ns
+            registry = self.gui_context.registry
+            now_ns = registry.now_ns
             now = now_ns()
             drift_ns = now - self.last_poll_time
             self.last_poll_time = now
@@ -487,7 +488,7 @@ class BlinkMainWindow(QMainWindow):
                 self.timeout_fast * 0.8 / 1000
             )  # Spend at most 80% of the frame time processing logs, converted to seconds
 
-            current_stats = self.gui_context.registry.central.input_queue.get_stats()
+            current_stats = registry.central.input_queue.get_stats()
             elapsed = current_stats["now"] - self._last_stats["now"]
 
             if elapsed >= 1.0:
@@ -521,9 +522,11 @@ class BlinkMainWindow(QMainWindow):
                 backlog = current_stats["total"]
                 capacity_pct = (backlog / current_stats["maxlen"]) * 100
 
+                current_rows, max_rows = registry.central.log_pool.get_counts()
+
                 # Update UI
                 # Formatting: "In: 150,000 msg/s | Out: 148,000 msg/s | Buffer: 12%"
-                msg = f"In: {in_mps} | Out: {out_mps} | Backlog: {backlog} ({capacity_pct:.1f}%)"
+                msg = f"In: {in_mps} | Out: {out_mps} | Backlog: {backlog} ({capacity_pct:.1f}%) | pool: {current_rows} / {max_rows} ({current_rows / max_rows * 100:.1f}%)"
                 self.mps_label.setText(msg)
                 self.logger_stats.debug(msg)
 

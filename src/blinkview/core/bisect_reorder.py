@@ -26,7 +26,7 @@ class Reorder(BaseReorder):
         time_ns = self.shared.time_ns
         delay_ns = self.delay * 1_000_000  # Convert milliseconds to nanoseconds
         distribute = self.distribute
-        get_many = self.input_queue.get_many
+        # get_many = self.input_queue.get_many
         get = self.input_queue.get
         bisect_right_ = bisect_right
 

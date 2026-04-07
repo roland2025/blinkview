@@ -19,6 +19,7 @@ from ..storage.file_manager import FileManager
 from ..subscribers.subscriber import SubscriberFactory
 from ..utils import level_map
 from ..utils.time_utils import TimeUtils
+from .array_pool import NumpyArrayPool
 from .bisect_reorder import Reorder
 from .central_storage import BaseCentralStorage, CentralFactory, CentralStorage
 from .config_manager import ConfigManager
@@ -129,6 +130,7 @@ class Registry:
             tasks=TaskManager(),
             settings=SettingsManager(),
             pool=PoolManager(),
+            array_pool=NumpyArrayPool(max_bytes=64 * 1024 * 1024),
         )
         self.file_manager.set_context(self.system_ctx)
 

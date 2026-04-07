@@ -6,7 +6,9 @@
 
 
 from time import perf_counter, sleep, time
-from typing import Any, Callable, List
+from typing import Any, Callable, List, NamedTuple
+
+import numpy as np
 
 from ..core.base_daemon import BaseDaemon
 from ..core.batch_queue import BatchQueue
@@ -21,6 +23,7 @@ from ..core.device_identity import DeviceIdentity
 from ..core.factory import BaseFactory
 from ..core.limits import BATCH_MAXLEN
 from ..core.log_row import LogRow
+from ..core.numpy_batch_manager import PooledLogBatch
 from ..core.reusable_batch_pool import TimeDataEntry
 from ..utils.level_map import LogLevel
 
@@ -137,7 +140,7 @@ class ParserFactory(BaseFactory[BaseParser]):
     default=False,
     ui_order=5,
 )
-@ParserFactory.register("default")
+@ParserFactory.register("default_original")
 class ParserThread(BaseParser):
     __doc__ = """The default pipeline, designed for maximum flexibility and configurability.
 
@@ -455,7 +458,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         parsed_batch.release()
 
 
-@ParserFactory.register("serial_default")
+@ParserFactory.register("serial_default_original")
 @override_property("split", default={})  # Default to newline character for splitting
 @override_property("printable", default={})
 @override_property("decode", default={})

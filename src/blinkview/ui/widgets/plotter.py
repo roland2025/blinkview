@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, List, Optional, Union
 
 from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.batched_logrows import BatchedLogRows
+from blinkview.core.numpy_log import fetch_telemetry_arrays, peek_channel_count
 from blinkview.utils.log_level import LogLevel
 
 if TYPE_CHECKING:
@@ -367,49 +368,7 @@ class TelemetryPlotter(QWidget):
 
         return updated
 
-    def _apply_updates(self):
-        # fetches entries from backend and updates screen
-        now_ns = self.gui_context.registry.now_ns
-        start_seq = self.latest_seq
-        fetch_duration = 0
-        start = now_ns()
-        get_batches = self.gui_context.registry.central.get_batches
-        updated = False
-        for module in self.modules:
-            log_filter = LogFilter(self.gui_context.id_registry, filtered_module=module)
-            fetch_start = now_ns()
-            batches, self.latest_seq = get_batches(log_filter, total=self.max_points, start_seq=start_seq)
-            # batches = [[LogRow(fetch_start, LogLevel.INFO, module, "1 2 3 4 5", fetch_start)]]
-            fetch_end = now_ns()
-            fetch_duration += fetch_end - fetch_start
-
-            if self.update_batch(module, batches):
-                updated = True
-
-        pass
-
-        draw_start = now_ns()
-
-        if updated:
-            self._update_plots()
-
-        # if self.is_auto_scroll:
-        #     self._scroll_to_now()
-
-        end = now_ns()
-        draw_duration = end - draw_start
-        # Calculate ratio, defaulting to 0.0 if fetch_duration is 0 to avoid crash
-        ratio = draw_duration / fetch_duration if fetch_duration > 0 else 0.0
-
-        self.logger.debug(
-            f"updated={1 if updated else 0} "
-            f"total={(end - start) / 1e6:.3f} ms "
-            f"draw={draw_duration / 1e6:.3f} ms "
-            f"fetch={fetch_duration / 1e6:.3f} ms "
-            f"ratio={ratio:.3f}"
-        )
-
-    def apply_updates(self):
+    def __apply_updates(self):
         # Fetches entries from backend and updates screen
         now_ns = self.gui_context.registry.now_ns
         start_seq = self.latest_seq
@@ -459,6 +418,65 @@ class TelemetryPlotter(QWidget):
         end = now_ns()
         draw_duration = end - draw_start
         # Calculate ratio, defaulting to 0.0 if fetch_duration is 0 to avoid crash
+        ratio = draw_duration / fetch_duration if fetch_duration > 0 else 0.0
+
+        self.logger.debug(
+            f"updated={1 if updated else 0} "
+            f"total={(end - start) / 1e6:.3f} ms "
+            f"draw={draw_duration / 1e6:.3f} ms "
+            f"fetch={fetch_duration / 1e6:.3f} ms "
+            f"ratio={ratio:.3f}"
+        )
+
+    def apply_updates(self):
+        np = self._np
+        now_ns = self.gui_context.registry.now_ns
+        start_seq = self.latest_seq
+        updated = False
+        start = now_ns()
+        fetch_duration = 0
+
+        log_pool = self.gui_context.registry.central.log_pool
+
+        for module in self.modules:
+            fetch_start = now_ns()
+
+            buf = self.buffers.get(module)
+            target_cols = buf.num_channels if buf else 0
+
+            # === PEEK LOGIC ===
+            if target_cols == 0:
+                target_cols = peek_channel_count(log_pool, module.id, start_seq)
+
+                # If we found data, initialize the buffer and series!
+                if target_cols > 0:
+                    buf = ModuleBuffer(
+                        x_data=np.zeros(self.max_points * 2),
+                        y_data=np.zeros((self.max_points * 2, target_cols), order="F"),
+                        buffer=BatchQueue(self.max_points),
+                    )
+                    self.buffers[module] = buf
+                    self._init_module_channels(module, target_cols)
+                    print(f"[TelemetryPlotter] Schema discovered for {module}: {target_cols} channels")
+                else:
+                    # Still no numeric data for this module yet, skip to next module
+                    continue
+
+            # We now absolutely know target_cols > 0
+            for new_times, new_values, max_seq in fetch_telemetry_arrays(log_pool, module.id, start_seq, target_cols):
+                self.latest_seq = max(self.latest_seq, max_seq)
+                self._insert_into_circular_buffer(module, new_times, new_values)
+                updated = True
+
+            fetch_end = now_ns()
+            fetch_duration += fetch_end - fetch_start
+
+        draw_start = now_ns()
+        if updated:
+            self._update_plots()
+
+        end = now_ns()
+        draw_duration = end - draw_start
         ratio = draw_duration / fetch_duration if fetch_duration > 0 else 0.0
 
         self.logger.debug(

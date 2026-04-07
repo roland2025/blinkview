@@ -15,7 +15,7 @@ from .batched_logrows import BatchedLogRows
 from .configurable import configuration_factory, configuration_property, override_property
 from .factory import BaseFactory
 from .limits import BATCH_QUEUE_MAXLEN, CENTRAL_STORAGE_MAXLEN
-from .numpy_buffer_pool import NumpyBufferPool
+from .numpy_log import CircularLogPool
 
 
 @configuration_factory("central")
@@ -47,24 +47,23 @@ class CentralStorage(BaseCentralStorage):
         super().__init__()
         self.name = "central"
 
-        self._msg_log = BatchedLogRows(self.maxlen)
-
-        self.get_batches = self._msg_log.get_batches
-
-        get_telemetry_batch = self._msg_log.get_telemetry_batch
-
         self.input_queue = BatchQueue()  # messages that have not yet been pushed to subscribers
         self.sequence = 1
 
         self.put = self.input_queue.put
 
-        pool = NumpyBufferPool()
-        self.numpy_pool = pool
+        self.log_pool = None
 
-        def baked_get_telemetry_batch(module, start_seq: int, target_cols: int = 0):
-            return get_telemetry_batch(pool.acquire, module, start_seq, target_cols)
+    def apply_config(self, config: dict):
+        changed = super().apply_config(config)
+        if changed:
+            buffer_size_mb = 1
+            avg_msg_len = 32
+            segments = buffer_size_mb * 1024 * 1024 // avg_msg_len
+            if self.log_pool is None:
+                self.log_pool = CircularLogPool(self.shared.array_pool, 10, segments, buffer_size_mb)
 
-        self.get_telemetry_batch = baked_get_telemetry_batch
+        return changed
 
     def run(self):
         # Localize method lookups
@@ -82,19 +81,22 @@ class CentralStorage(BaseCentralStorage):
                 # print(f"[CENTRAL] Received batch of {len(entry)} entries.")
 
                 for seq_id, item in enumerate(batch, start=sequence):
+                    item: LogRow
                     item.seq = seq_id
                     item.module.latest_row = item
 
+                    # append(self, ts_ns: int, level: int, module: int, device: int, seq: int, msg_bytes: bytes):
+                    self.log_pool.append(
+                        item.timestamp_ns,
+                        item.level.value,
+                        item.module.id,
+                        item.module.device.id,
+                        seq_id,
+                        item.message.encode(),
+                    )
+
                 # Increment the sequence tracker by the size of the batch
                 sequence += len(batch)
-                # for item in batch:
-                #     item: LogRow
-                #     # assign a unique, incrementing ID to each log entry as it comes into central storage.
-                #     # This can be used by subscribers to track which entries they've already seen and ensure they process each entry exactly once.
-                #     item.seq = get_next_id()
-                #     item.module.latest_row = item
-
-                self._msg_log.put([item for item in batch])
 
                 self.distribute(batch)
 

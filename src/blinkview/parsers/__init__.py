@@ -4,6 +4,22 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from . import configurable_parser, line_parser, parser, transformer, assembler, cobs_decode, msgpack_parser, logger_parser, key_value, can_parser, can_bus, cantools_decoder, module_path_normalizer, fixed_width_path_normalizer
+from . import (
+    assembler,
+    binary_parser,
+    can_bus,
+    can_parser,
+    cantools_decoder,
+    cobs_decode,
+    configurable_parser,
+    fixed_width_path_normalizer,
+    key_value,
+    line_parser,
+    logger_parser,
+    module_path_normalizer,
+    msgpack_parser,
+    parser,
+    transformer,
+)
 
-__all__ = ['configurable_parser', 'line_parser', 'parser', 'transformer', 'assembler', 'can_bus']
+__all__ = ["configurable_parser", "line_parser", "parser", "transformer", "assembler", "can_bus"]

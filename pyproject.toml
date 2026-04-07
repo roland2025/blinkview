@@ -56,6 +56,7 @@ gui-core = [
     "pyqtdarktheme",
     "pyqtgraph",
     "numpy",
+    "numba"
 ]
 
 pyside6 = ["PySide6>=6.6.0", "blinkview[gui-core]"]

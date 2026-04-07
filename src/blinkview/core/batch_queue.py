@@ -28,14 +28,21 @@ class BatchQueue:
         self._not_empty = Condition(self._lock)
 
     def put(self, batch):
+
         batch_size = len(batch)
         if batch_size == 0:
             return
 
+        retain = getattr(batch, "retain", None)
+        if retain is not None:
+            retain()
+
+        batches_to_release = None
+
         with self._not_empty:
-            retain = getattr(batch, "retain", None)
-            if retain is not None:
-                retain()
+            # print(
+            #     f"[BatchQueue] put: batch={batch} batch_size={batch_size} {self._total_objects} retain={retain is not None}  deque={self._deque}"
+            # )
 
             self._deque.append(batch)
             self._total_objects += batch_size
@@ -52,12 +59,19 @@ class BatchQueue:
 
                     release = getattr(oldest_batch, "release", None)
                     if release is not None:
-                        release()
+                        if batches_to_release is None:
+                            batches_to_release = []
+
+                        batches_to_release.append(oldest_batch)
                 else:
                     # If dropping the oldest batch would put us under maxlen, stop dropping.
                     break
 
             self._not_empty.notify()
+
+        if batches_to_release:
+            for i in batches_to_release:
+                i.release()
 
     def get(self, timeout=None):
         """Returns the oldest batch."""
@@ -69,31 +83,12 @@ class BatchQueue:
                 if not self._not_empty.wait_for(lambda: self._total_objects > 0, timeout):
                     return None
 
+            # print(f"batch queue get: {self._total_objects} {self._deque}")
             batch = self._deque.popleft()
             batch_len = len(batch)
             self._total_objects -= batch_len
             self.popped += batch_len
             return batch
-
-    def get_many(self, timeout=None):
-        """Returns ALL objects currently in the queue, flattened."""
-        with self._not_empty:
-            if self._total_objects == 0:
-                if timeout is None:
-                    return None
-                # Check our total objects tracker
-                if not self._not_empty.wait_for(lambda: self._total_objects > 0, timeout):
-                    return None
-
-            # Flatten the nested batches into a single list of objects instantly
-            count = self._total_objects
-            all_objects = list(itertools.chain.from_iterable(self._deque))
-
-            self._deque.clear()
-            self._total_objects = 0
-            self.popped += count
-
-            return all_objects
 
     def get_nowait(self):
         """Returns the oldest batch immediately, or None if empty."""
@@ -150,3 +145,23 @@ class BatchQueue:
         """Returns the number of batches currently in the queue."""
         # len() on a deque is O(1) and atomic in CPython/3.14t
         return len(self._deque)
+
+    # def get_many(self, timeout=None):
+    #     """Returns ALL objects currently in the queue, flattened."""
+    #     with self._not_empty:
+    #         if self._total_objects == 0:
+    #             if timeout is None:
+    #                 return None
+    #             # Check our total objects tracker
+    #             if not self._not_empty.wait_for(lambda: self._total_objects > 0, timeout):
+    #                 return None
+    #
+    #         # Flatten the nested batches into a single list of objects instantly
+    #         count = self._total_objects
+    #         all_objects = list(itertools.chain.from_iterable(self._deque))
+    #
+    #         self._deque.clear()
+    #         self._total_objects = 0
+    #         self.popped += count
+    #
+    #         return all_objects

@@ -155,7 +155,7 @@ class SearchableLogArea(QWidget):
             cursor.movePosition(QTextCursor.End)
 
             # If document isn't empty, ensure we start on a new line
-            if not self.editor.document().isEmpty():
+            if not self.editor.document().isEmpty() and not cursor.atBlockStart():
                 cursor.insertBlock()
 
             cursor.insertText(text_to_append)
