@@ -149,33 +149,14 @@ class Benchmark(BaseReader):
             # Generate batch
 
             with pool_acquire() as batch:
-                _append = batch.append
+                _insert = batch.insert
                 t = time_ns()
 
                 items_from_cache = current_batch_size // rows_per_bytes
                 for i in range(items_from_cache):
                     tmp = cache[i]
-                    _append((t + i), tmp)
+                    _insert((t + i), tmp)
                     interval_bytes += _len(tmp)
-
-                # variant 2
-                # batch = []
-                # _append = batch.append
-                # t = time_ns()
-                #
-                # items_from_cache = current_batch_size // rows_per_bytes
-                # for i in range(items_from_cache):
-                #     tmp = cache[i]
-                #     _append(((t + i), tmp))
-                #     interval_bytes += _len(tmp)
-                #
-                #
-                # variant 3
-                # for i in range(t, current_batch_size + t, 1):
-                # msg = b"Random value: %d\n" % i
-                #
-                # _append((i, msg))
-                # interval_bytes += _len(msg)
 
                 interval_msgs += current_batch_size
                 total_sent_msgs += current_batch_size
@@ -290,14 +271,14 @@ class Benchmark(BaseReader):
 
             if in_flight < effective_max_backlog:
                 with pool_acquire() as batch:
-                    _append = batch.append
+                    _insert = batch.insert
                     chunks = max(1, msgs_per_tick // rows_per_bytes)
 
                     tick_bytes = 0
                     for i in range(chunks):
                         idx = i % num_cache_items
                         data = cache[idx]
-                        _append((current_time + i), data)
+                        _insert((current_time + i), data)
                         tick_bytes += cache_lengths[idx]
 
                     # Update all byte counters

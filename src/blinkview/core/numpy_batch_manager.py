@@ -9,23 +9,8 @@ from typing import NamedTuple
 
 import numpy as np
 
-
-class LogBundle(NamedTuple):
-    timestamps: np.ndarray  # int64
-    offsets: np.ndarray  # uint32
-    lengths: np.ndarray  # uint32
-    buffer: np.ndarray  # uint8
-    # Optional columns (Pass empty arrays if not used)
-    levels: np.ndarray  # uint8
-    modules: np.ndarray  # uint16
-    devices: np.ndarray  # uint16
-    sequences: np.ndarray  # uint64
-    size: int  # number of rows
-    # Status flags
-    has_levels: bool
-    has_modules: bool
-    has_devices: bool
-    has_sequences: bool
+from blinkview.core import dtypes
+from blinkview.core.types.log_batch import LogBundle
 
 
 class PooledLogBatch:
@@ -34,9 +19,9 @@ class PooledLogBatch:
     Dynamically acquires power-of-two columnar arrays from a central NumpyArrayPool.
     """
 
-    EMPTY_U8 = np.empty(0, dtype=np.uint8)
-    EMPTY_U16 = np.empty(0, dtype=np.uint16)
-    EMPTY_U64 = np.empty(0, dtype=np.uint64)
+    EMPTY_U8 = np.empty(0, dtype=dtypes.BYTE)
+    EMPTY_U16 = np.empty(0, dtype=dtypes.ID_TYPE)
+    EMPTY_U64 = np.empty(0, dtype=dtypes.SEQ_TYPE)
 
     __slots__ = (
         "capacity",
@@ -83,7 +68,6 @@ class PooledLogBatch:
         self._pool = pool
         self.size = 0
         self.msg_cursor = 0
-
         self._ref_count = 1
         self._lock = Lock()
         self.in_use = True
@@ -106,38 +90,35 @@ class PooledLogBatch:
 
         acquire = self._pool.acquire
 
-        # 1. Acquire the primary timestamps array using the requested capacity
-        self._ts_h = acquire(req_capacity, dtype=np.int64)
+        # Mandatory Columns
+        self._ts_h = acquire(req_capacity, dtype=dtypes.TS_TYPE)
         self.timestamps = self._ts_h.array
+        self.capacity = len(self.timestamps)  # Use true power-of-two capacity
 
-        # 2. The pool returned a power-of-two slab. Read our TRUE capacity from it!
-        self.capacity = len(self.timestamps)
-
-        # 3. Use this true capacity to natively size the remaining columnar arrays.
-        self._off_h = acquire(self.capacity, dtype=np.uint32)
+        self._off_h = acquire(self.capacity, dtype=dtypes.OFFSET_TYPE)
         self.offsets = self._off_h.array
 
-        self._len_h = acquire(self.capacity, dtype=np.uint32)
+        self._len_h = acquire(self.capacity, dtype=dtypes.LEN_TYPE)
         self.lengths = self._len_h.array
 
-        self._buf_h = acquire(req_buffer_kb * 1024, dtype=np.uint8)
+        self._buf_h = acquire(req_buffer_kb * 1024, dtype=dtypes.BYTE)
         self.buffer = self._buf_h.array
 
-        # Optional columns
+        # Optional Columns using centralized dtypes
         if self.has_levels:
-            self._lvl_h = acquire(self.capacity, dtype=np.uint8)
+            self._lvl_h = acquire(self.capacity, dtype=dtypes.LEVEL_TYPE)
             self.levels = self._lvl_h.array
 
         if self.has_modules:
-            self._mod_h = acquire(self.capacity, dtype=np.uint16)
+            self._mod_h = acquire(self.capacity, dtype=dtypes.ID_TYPE)
             self.modules = self._mod_h.array
 
         if self.has_devices:
-            self._dev_h = acquire(self.capacity, dtype=np.uint16)
+            self._dev_h = acquire(self.capacity, dtype=dtypes.ID_TYPE)
             self.devices = self._dev_h.array
 
         if self.has_sequences:
-            self._seq_h = acquire(self.capacity, dtype=np.uint64)
+            self._seq_h = acquire(self.capacity, dtype=dtypes.SEQ_TYPE)
             self.sequences = self._seq_h.array
 
     def bundle(self):
@@ -155,6 +136,7 @@ class PooledLogBatch:
             has_modules=self.has_modules,
             has_devices=self.has_devices,
             has_sequences=self.has_sequences,
+            msg_cursor=self.msg_cursor,
         )
 
     def clear(self):
@@ -162,9 +144,12 @@ class PooledLogBatch:
         self.size = 0
         self.msg_cursor = 0
 
-    def append(
-        self, ts_ns: int, msg_bytes: bytes, level: int = 0, module: int = 0, device: int = 0, seq: int = 0
+    def insert(
+        self, ts_ns: int, msg_bytes: bytes = b"", level: int = 0, module: int = 0, device: int = 0, seq: int = 0
     ) -> bool:
+        """
+        Starts a new log entry. If msg_bytes is provided, it acts as the initial chunk.
+        """
         if self.size >= self.capacity:
             return False
 
@@ -189,11 +174,35 @@ class PooledLogBatch:
         if self.has_sequences:
             self.sequences[idx] = seq
 
-        # Fast contiguous buffer write
-        self.buffer[self.msg_cursor : self.msg_cursor + msg_len] = np.frombuffer(msg_bytes, dtype=np.uint8)
+        # Fast contiguous buffer write (if message provided)
+        if msg_len > 0:
+            self.buffer[self.msg_cursor : self.msg_cursor + msg_len] = np.frombuffer(msg_bytes, dtype=dtypes.BYTE)
+            self.msg_cursor += msg_len
 
-        self.msg_cursor += msg_len
         self.size += 1
+        return True
+
+    def append(self, msg_bytes: bytes) -> bool:
+        """
+        Continues the message data for the MOST RECENTLY inserted entry.
+        """
+        if self.size == 0:
+            # Cannot append to a record that hasn't been started with 'insert'
+            return False
+
+        msg_len = len(msg_bytes)
+        if self.msg_cursor + msg_len > len(self.buffer):
+            return False
+
+        # Target the last entry
+        idx = self.size - 1
+
+        # Write to buffer
+        self.buffer[self.msg_cursor : self.msg_cursor + msg_len] = np.frombuffer(msg_bytes, dtype=dtypes.BYTE)
+
+        # Update the length for the current record and move cursor
+        self.lengths[idx] += msg_len
+        self.msg_cursor += msg_len
         return True
 
     def retain(self):
@@ -277,10 +286,10 @@ class PooledLogBatch:
             yield (
                 timestamps[i],
                 msg_bytes,
-                levels[i] if levels is not None else 0,
-                modules[i] if modules is not None else 0,
-                devices[i] if devices is not None else 0,
-                sequences[i] if sequences is not None else 0,
+                levels[i] if levels is not None else None,
+                modules[i] if modules is not None else None,
+                devices[i] if devices is not None else None,
+                sequences[i] if sequences is not None else None,
             )
 
     def iter_time_messages(self):
@@ -299,3 +308,38 @@ class PooledLogBatch:
         """
         # 9223372036854775807 is (2**63 - 1), the max for int64
         return self.timestamps[0] if self.size > 0 else 9223372036854775807
+
+    def __getitem__(self, index):
+        """
+        Allows indexed access to log rows.
+        Returns the same tuple format as __iter__.
+        """
+        # 1. Handle Slicing (e.g., batch[1:5])
+        if isinstance(index, slice):
+            indices = range(*index.indices(self.size))
+            return [self[i] for i in indices]
+
+        # 2. Handle Integer Indexing
+        if not isinstance(index, int):
+            raise TypeError(f"Index must be an integer or slice, not {type(index).__name__}")
+
+        # Support negative indexing (e.g., -1 for the last row)
+        if index < 0:
+            index += self.size
+
+        if index < 0 or index >= self.size:
+            raise IndexError("PooledLogBatch index out of range")
+
+        # 3. Extract Row Data (SoA to AoS conversion)
+        offset = self.offsets[index]
+        length = self.lengths[index]
+        msg_bytes = self.buffer[offset : offset + length].tobytes()
+
+        return (
+            self.timestamps[index],
+            msg_bytes,
+            self.levels[index] if self.has_levels else None,
+            self.modules[index] if self.has_modules else None,
+            self.devices[index] if self.has_devices else None,
+            self.sequences[index] if self.has_sequences else None,
+        )

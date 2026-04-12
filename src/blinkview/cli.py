@@ -26,7 +26,7 @@ from .parsers.line_parser import LineParser
 from .parsers.text_filter import TextFilter
 from .storage.file_logger import BinaryBatchProcessor, FileLogger, LogRowBatchProcessor
 from .subscribers.console import ConsoleSubscriber
-from .utils.level_map import LogLevel
+from .utils.log_level import LogLevel
 
 
 class BlinkViewApp:

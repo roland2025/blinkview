@@ -6,15 +6,15 @@
 
 from blinkview.parsers.assembler import AssemblerFactory, BaseAssembler
 
+from ..core.base_daemon import BaseDaemon
 from ..core.configurable import (
     configuration_factory,
     configuration_property,
     override_property,
 )
-from ..core.base_daemon import BaseDaemon
 from ..core.device_identity import DeviceIdentity
 from ..core.log_row import LogRow
-from ..utils.level_map import LogLevel
+from ..utils.log_level import LogLevel
 from .parser import ParserFactory, ParserThread
 
 

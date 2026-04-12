@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 from ..core.configurable import configuration_property
 from ..core.log_row import LogRow
-from ..utils.level_map import LogLevel
+from ..utils.log_level import LogLevel
 from .BaseReader import BaseReader, DeviceFactory
 
 

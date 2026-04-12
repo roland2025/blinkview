@@ -7,102 +7,57 @@
 from bisect import bisect_right
 from operator import attrgetter
 
+import numpy as np
+
 from blinkview.core.base_reorder import BaseReorder, ReorderFactory
 from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.log_row import LogRow
+from blinkview.core.numpy_batch_manager import PooledLogBatch
 
 
 @ReorderFactory.register("default")
 class Reorder(BaseReorder):
     def __init__(self):
         super().__init__()
-
         self.input_queue = BatchQueue()
-
         self.put = self.input_queue.put
 
+    def apply_config(self, config: dict):
+        if self.s_ts is None:
+            pool = self.shared.array_pool
+            # cap = 128_000
+            # self._h_ts = pool.acquire(cap, dtype=np.int64)
+            # self._h_batch_id = pool.acquire(cap, dtype=np.uint32)
+            # self._h_row_idx = pool.acquire(cap, dtype=np.uint32)
+            # self._h_lengths = pool.acquire(cap, dtype=np.uint32)
+
     def run(self):
-        buffer = []
+        pool = self.shared.array_pool
         time_ns = self.shared.time_ns
-        delay_ns = self.delay * 1_000_000  # Convert milliseconds to nanoseconds
+        delay_s = self.delay / 1000
+        delay_ns = self.delay * 1_000_000
         distribute = self.distribute
-        # get_many = self.input_queue.get_many
         get = self.input_queue.get
-        bisect_right_ = bisect_right
 
-        # Fast C-level attribute lookup for the sort and bisect
-        # Replace 'timestamp_ns' with the exact name of the attribute on your LogRow
-        get_ts = attrgetter("timestamp_ns")
+        batch_out = None
 
-        pool_acquire = self.shared.pool.get(tag="LogRows").acquire
+        def flush():
+            nonlocal batch_out
+            if batch_out is not None and batch_out.size > 0:
+                with batch_out:
+                    self.distribute(batch_out)
+                    pass
+            batch_out = None
 
         stop_is_set = self._stop_event.is_set
+
         while not stop_is_set():
             now = time_ns()
 
-            # DYNAMIC TIMEOUT
-            if buffer:
-                # buffer[0] is guaranteed to be the oldest item because we sort it
-                wait_ns = (buffer[0].timestamp_ns + delay_ns) - now
-                timeout_sec = wait_ns / 1_000_000_000.0 if wait_ns > 0 else 0.0
-            else:
-                # Idle state: sleep until data arrives or 100ms passes
-                timeout_sec = 0.1
-
-            # GREEDY FETCH
-            # The OS blocks this thread perfectly based on the oldest item's needs
-
-            # batches = []
-            batch = get(timeout=timeout_sec)
-            # print(f"[Reorder] got batch: {batch} with timeout: {timeout_sec:.3f}s")
-            if batch is not None:
-                with batch:
-                    buffer.extend(batch)
-                # batches.append(batch)
-                # batches = get_many(timeout=timeout_sec)
-
-                # if batches:
-                #     for in_batch in batches:
-                #         buffer.extend(in_batch)
-                #         in_batch.release()
-
-                # TIMSORT
-                # We only sort if new data arrived.
-                # Timsort is brutally fast here because the list is already 99% sorted.
-                buffer.sort(key=get_ts)
-
-            if not buffer:
-                continue
-
-            # RECALCULATE TIME
-            # We must check the clock again because get_many() might have blocked
-            now = time_ns()
-            cutoff = now - delay_ns
-
-            # C-LEVEL BINARY SEARCH (Python 3.10+)
-            # Finds exactly where the mature items end and the delayed items begin
-            split_idx = bisect_right_(buffer, cutoff, key=get_ts)
-
-            # SLICE AND DISTRIBUTE
-            if split_idx > 0:
-                # Acquire a batch from the manager
-                with pool_acquire() as out_batch:
-                    _append = out_batch.append
-
-                    # Move references from our buffer to the new ReusableBatch
-                    # This is a very fast operation (just pointer copying)
-                    for i in range(split_idx):
-                        _append(buffer[i])
-
-                    # Remove from buffer (Slice is faster than 'del' for large chunks)
-                    buffer = buffer[split_idx:]
-
-                    # 5. DISTRIBUTE AND RETAIN
-                    # We distribute the batch. The pool logic handles the ref count.
-                    distribute(out_batch)
-
-        if buffer:
-            with pool_acquire() as out_batch:
-                for dat in buffer:
-                    out_batch.append(dat)
-                distribute(out_batch)
+            # 2. Ingest
+            batch_in = get(timeout=delay_s)
+            if batch_in is not None:
+                print(f"[Reorder] batch_in: {batch_in}")
+                # print(f"[REORDER] Received batch of {len(batch_in)} items for reordering")
+                # for item in batch_in:
+                #     self._insert(item)

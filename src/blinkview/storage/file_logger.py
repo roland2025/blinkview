@@ -147,6 +147,7 @@ class FileLogger(BaseFileLogger):
                 batch = queue_get(timeout=0.1)
                 if batch is not None:
                     with batch:
+                        continue  # TODO: remove this
                         process_batch(batch)
 
                 now = perf_counter()

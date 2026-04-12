@@ -7,9 +7,7 @@
 from traceback import format_exc
 from typing import Callable
 
-from ..utils.level_map import LogLevel
-from ..utils.log_level import LevelIdentity
-from .log_row import LogRow
+from ..utils.log_level import LevelIdentity, LogLevel
 
 
 class BaseLogger:
@@ -79,20 +77,15 @@ class SystemLogger(BaseLogger):
                 self.module_path += f".{owner_name}"
 
         # Resolve IDs and resources once during initialization
-        dev_id = self.registry.get_device("SYSTEM")
-        mod_id = dev_id.get_module(self.module_path)
+        mod_id = self.registry.system_device.get_module(self.module_path).id
 
-        # is_reorder_enabled = registry.reorder is not None and registry.reorder.enabled
-        # self.system_log_queue = registry.system_log_queue.put
-        # put_fn = registry.reorder.put if is_reorder_enabled else registry.central.put
-        put_fn = registry.system_log_queue.put  # Always put system logs in the system log queue
+        system_log_append = self.registry.log_append
 
         time_ns = registry.now_ns
-        LogRowCtr = LogRow
 
         # The fast_log closure remains optimized for speed
         def fast_log(msg: str, level: LevelIdentity):
-            put_fn(LogRowCtr(time_ns(), level, mod_id, msg))
+            system_log_append(time_ns(), level.value, mod_id, msg)
 
         self.log = fast_log
 
@@ -106,11 +99,22 @@ class SystemLogger(BaseLogger):
             category=self.category, owner_name=self.owner_name, registry=self.registry, _internal_path=new_path
         )
 
+    def child_creator(self, name: str) -> Callable[[], "SystemLogger"]:
+        """
+        Returns a callable that creates a child logger with the specified name.
+        This is useful for deferred logger creation in factories or dynamic contexts.
+        """
+
+        def creator():
+            return self.child(name)
+
+        return creator
+
 
 class PrintLogger(BaseLogger):
     __slots__ = ("ctx",)
 
-    def __init__(self, category: str, owner_name: str = None, queue=None, time_ns=None):
+    def __init__(self, category: str, owner_name: str = None, queue_put=None, time_ns=None):
         """
         Dummy Logger: Bypasses Registry/Queue and prints directly to console.
         """
@@ -125,15 +129,16 @@ class PrintLogger(BaseLogger):
 
         strftime_ = strftime
         localtime_ = localtime
+        print_ = print
 
         # The 'dummy' fast_log replaces the registry-based one
         def fast_log(msg: str, level_name: LevelIdentity):
             # Format: [TIME] LEVEL [CATEGORY.OWNER] MESSAGE
             # Using .2f for seconds to keep it readable
             t = strftime_("%H:%M:%S", localtime_())
-            print(f"{t} {level_name} SYSTEM {ctx} \t{msg}")
+            print_(f"{t} {level_name} SYSTEM {ctx} \t{msg}")
 
-            if queue is not None and time_ns is not None:
-                queue.put((time_ns(), ctx, level_name, msg))
+            if queue_put is not None and time_ns is not None:
+                queue_put((time_ns(), ctx, level_name, msg))
 
         self.log = fast_log

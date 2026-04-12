@@ -8,8 +8,10 @@ from time import sleep
 
 from ..core.configurable import configuration_property, override_property
 from ..core.log_row import LogRow
+from ..core.numpy_batch_manager import PooledLogBatch
 from ..core.reusable_batch_pool import TimeDataEntry
-from ..utils.level_map import LogLevel
+from ..utils.log_level import LogLevel
+from ..utils.throughput import Speedometer, ThroughputAutoTuner
 from .BaseReader import BaseReader, DeviceFactory
 
 
@@ -27,24 +29,24 @@ from .BaseReader import BaseReader, DeviceFactory
     default=115200,
     description="The communication speed in bits per second. Typically ignored for pure socket connections.",
 )
-@configuration_property(
-    "maxlen",
-    type="integer",
-    default=1_000_000,
-    description="The maximum internal byte buffer size. Prevents memory exhaustion during massive data spikes or downstream pipeline stalls.",
-)
+# @configuration_property(
+#     "maxlen",
+#     type="integer",
+#     default=1_000_000,
+#     description="The maximum internal byte buffer size. Prevents memory exhaustion during massive data spikes or downstream pipeline stalls.",
+# )
 @configuration_property(
     "delay",
     type="integer",
     default=100,
     description="The maximum time (in milliseconds) to hold incoming bytes before flushing a batch downstream. Balances latency against throughput efficiency.",
 )
-@configuration_property(
-    "log_rx_tx",
-    type="boolean",
-    default=False,
-    description="When enabled, dumps raw RX/TX hex data to the system log for low-level protocol debugging (WARNING: significantly impacts performance).",
-)
+# @configuration_property(
+#     "log_rx_tx",
+#     type="boolean",
+#     default=False,
+#     description="When enabled, dumps raw RX/TX hex data to the system log for low-level protocol debugging (WARNING: significantly impacts performance).",
+# )
 @override_property(
     "logging",
     hidden=False,
@@ -74,7 +76,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
     baudrate: int
     maxlen: int
     delay: int
-    log_rx_tx: bool
+    # log_rx_tx: bool
     suppress_auto_reset: bool
 
     def __init__(self):
@@ -113,101 +115,103 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         return schema
 
     def run(self):
-        # Localize method lookups
+        # 1. Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
         time_ns = self.shared.time_ns
-
         logger = self.logger
 
-        delay_ns = int(self.delay * 1_000_000)  # Convert milliseconds to nanoseconds
-        maxlen = self.maxlen
-        log_rx_tx = self.log_rx_tx
+        # Tuner configuration
+        delay_s = self.delay / 1000.0
+        delay_ns = int(self.delay * 1_000_000)
 
-        print("Starting Serial Reader Thread")
-        logger.info(f"Starting Serial")
+        # 2. Stats and Auto-Tuning Setup
+        # We set msg_size_bytes to 20 to maintain your ~50 chunks/KB density preference
+        stats = Speedometer(logger=self.logger.child("stats"))
+        tuner = ThroughputAutoTuner(
+            speedometer=stats, default_buffer_kb=4, msg_size_bytes=20, logger=self.logger.child("tuner")
+        )
 
-        pool_acquire = self.shared.pool.get(TimeDataEntry, self).acquire
+        pool_create = self.shared.array_pool.create
 
-        batch = pool_acquire()
-        batch_append = batch.append
+        def batch_acquire():
+            # Dynamically pull configuration from the tuner's latest projections
+            return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_kb)
 
-        last_flush_time = time_ns()
-
-        if log_rx_tx:
-            mod_rx = self.local.device_id.get_module("_reader.rx")
-            batch_rx_log = []
-
-        batch_bytes = 0
-
-        push_log = self.local.push_log
-
-        self.serial = None
+        batch = None
         ser = None
+        self.serial = None
 
-        def flush():
-            nonlocal batch, batch_bytes, last_flush_time, batch_rx_log, batch_append
-            if batch.size:
-                last_flush_time = time_ns()
-                # logger.log(f"Flush batch of {len(batch)} | {batch_bytes} bytes",
-                #            LogLevel.WARN if batch_bytes >= maxlen else LogLevel.DEBUG)
-
-                if log_rx_tx and batch_rx_log:
-                    push_log(batch_rx_log)
-                    batch_rx_log = []
-                with batch:
-                    self.distribute(batch)
-
-                batch = pool_acquire()
-                batch_append = batch.append
-                batch_bytes = 0
-
-        while not stop_is_set():
-            if ser is None:
-                ser = self.open()
+        try:
+            while not stop_is_set():
+                # 3. Serial Lifecycle Management
                 if ser is None:
-                    sleep(1.0)
-                    continue
-
-                _read = ser.read  # Localize method lookup for performance
-
-            try:
-                first_byte = ser.read()
-                if first_byte:
-                    now = time_ns()
-                    remaining = _read(ser.in_waiting)  # Read the rest of the available data
-                    chunk = first_byte + remaining
-                    batch_append(now, chunk)
-
-                    # self.log(f"Read {chunk_len} bytes")
-
-                    if log_rx_tx:
-                        batch_rx_log.append(LogRow(now, LogLevel.TRACE, mod_rx, chunk[1].hex()))
-
-                    batch_bytes += len(chunk)
-
-                    if batch_bytes >= maxlen:
-                        flush()
+                    ser = self.open()
+                    if ser is None:
+                        sleep(1.0)
                         continue
+                    _read = ser.read
 
-                    # Timeout Check
-                    if batch and (now - last_flush_time >= delay_ns):
-                        flush()
+                # 4. Acquire batch using current Tuner projections
+                if batch is None:
+                    batch = batch_acquire()
 
-            except Exception as e:
-                logger.error("error", e)
-                ser = None
-                self.serial = None
-                sleep(1.0)
+                try:
+                    # 5. Read Lead Byte (Establish Arrival Timestamp)
+                    first_byte = _read(1)
+                    if first_byte:
+                        now = time_ns()
 
-        # Flush any remaining batch on exit
-        flush()
-        batch.release()
+                        # Start record
+                        if not batch.insert(now, first_byte):
+                            with batch:
+                                self.distribute(batch)
+                                # Update tuner with the results of the finished batch
+                                tuner.update(batch.msg_cursor, batch.size, delay_s)
 
-        if self.serial is not None:
-            try:
-                self.serial.close()
-            finally:
-                self.serial = None
+                            batch = batch_acquire()
+                            batch.insert(now, first_byte)
+
+                        # 6. Drain remaining burst and Append
+                        in_waiting = ser.in_waiting
+                        if in_waiting > 0:
+                            rest = _read(in_waiting)
+                            if not batch.append(rest):
+                                with batch:
+                                    self.distribute(batch)
+                                    tuner.update(batch.msg_cursor, batch.size, delay_s)
+
+                                batch = batch_acquire()
+                                batch.insert(now, rest)
+
+                        # 7. Batching Window Check
+                        if (now - batch.start_ts) >= delay_ns:
+                            with batch:
+                                self.distribute(batch)
+                                tuner.update(batch.msg_cursor, batch.size, delay_s)
+                            batch = None
+
+                except Exception as e:
+                    logger.error(f"Serial read error: {e}")
+                    ser = None
+                    self.serial = None
+                    sleep(1.0)
+
+        except Exception as e:
+            logger.exception("Fatal error in Serial Reader loop", e)
+        finally:
+            # 8. Final Cleanup
+            if batch is not None:
+                if len(batch) > 0:
+                    with batch:
+                        self.distribute(batch)
+                else:
+                    batch.release()
+
+            if self.serial is not None:
+                try:
+                    self.serial.close()
+                finally:
+                    self.serial = None
 
     def open(self):
         try:

@@ -12,12 +12,20 @@ from blinkview.ui.cli_args import setup_gui_parser
 
 def run_init(args):
     from blinkview.utils.project_settings import ProjectSettings
+
     ProjectSettings.init(args.path)
 
 
 def run_gui(args):
     from .gui import main
+
     main(args)
+
+
+def run_cli(args):
+    from .cli import main
+
+    main()
 
 
 def run_daemon(args):
@@ -30,16 +38,20 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     from blinkview import __version__
+
     parser.add_argument("-v", "--version", action="version", version=f"BlinkView {__version__}")
 
     # INIT Command
     init_parser = subparsers.add_parser("init", help="Setup project")
-    init_parser.add_argument("path", nargs="?", default=".", help="Directory to initialize (default: current directory)")
+    init_parser.add_argument(
+        "path", nargs="?", default=".", help="Directory to initialize (default: current directory)"
+    )
     init_parser.set_defaults(func=run_init)
 
     # PROFILE Command
     profile_parser = subparsers.add_parser("switch", help="Switch profiles")
-    from blinkview.utils.project_settings import setup_project_parser, handle_profile_args
+    from blinkview.utils.project_settings import handle_profile_args, setup_project_parser
+
     setup_project_parser(profile_parser)
     profile_parser.set_defaults(func=handle_profile_args)
 
@@ -48,6 +60,9 @@ def main():
     setup_gui_parser(gui_parser)
 
     gui_parser.set_defaults(func=run_gui)
+
+    cli_parser = subparsers.add_parser("cli", help="Command Line Interface")
+    cli_parser.set_defaults(func=run_cli)
 
     # DAEMON Command
     daemon_parser = subparsers.add_parser("daemon", help="Background service")
@@ -58,11 +73,13 @@ def main():
 
     # Link to the handler
     from blinkview.utils.config_handler import handle_config, setup_config_parser
+
     setup_config_parser(config_parser)
     config_parser.set_defaults(func=handle_config)
 
     update_parser = subparsers.add_parser("update", help="Manage BlinkView versions")
-    from blinkview.utils.cli_updater import setup_update_parser, handle_update
+    from blinkview.utils.cli_updater import handle_update, setup_update_parser
+
     setup_update_parser(update_parser)
     update_parser.set_defaults(func=handle_update)
 
@@ -74,7 +91,7 @@ def main():
     # sys.argv[0] is the script name. We check sys.argv[1].
     if len(sys.argv) > 1:
         # If it's not a command and not -v/--version/--help...
-        if sys.argv[1] not in valid_commands and sys.argv[1] not in ['-h', '--help', '-v', '--version']:
+        if sys.argv[1] not in valid_commands and sys.argv[1] not in ["-h", "--help", "-v", "--version"]:
             sys.argv.insert(1, "gui")
     elif len(sys.argv) == 1:
         # No arguments at all? Default to gui.
@@ -84,6 +101,7 @@ def main():
 
     if args.command != "config":
         from blinkview.utils.github_update import GitHubUpdate
+
         msg = GitHubUpdate.get_update_message()
         if msg:
             print(f"[{msg}]\n")
@@ -100,6 +118,7 @@ def main():
     except Exception:
         # dump formatexc
         from traceback import print_exc
+
         print_exc()
         sys.exit(1)
 

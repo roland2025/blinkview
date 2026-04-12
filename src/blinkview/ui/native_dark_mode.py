@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+
 def set_native_dark_mode(window):
     import ctypes
     import sys
@@ -34,8 +35,6 @@ def set_native_dark_mode(window):
     value = ctypes.c_int(1)
 
     try:
-        dwmapi.DwmSetWindowAttribute(
-            hwnd, attr, ctypes.byref(value), ctypes.sizeof(value)
-        )
+        dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
     except Exception as e:
         print(f"Failed to set dark mode: {e}")

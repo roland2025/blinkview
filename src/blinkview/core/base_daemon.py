@@ -61,7 +61,7 @@ class BaseDaemon:
 
         self.file_logger = None  # Optional file logger instance for binary logging
 
-        self.gui_mode = True
+        self.gui_mode = False
         self._yield_msg_counter = 0  # Counter for messages distributed, used to trigger fairness yield
 
     @property
@@ -126,7 +126,26 @@ class BaseDaemon:
         self._stop_event.clear()
         name = getattr(self, "reference_id", None)
         self._thread = Thread(target=self._run_wrapper, daemon=True, name=f"{self.__class__.__name__}({name})")
+
+        numba_needs_compile = getattr(self, "numba_needs_compile", False)
+        if numba_needs_compile:
+            msg = f"[{self.__class__.__name__}] Note: This daemon uses Numba and may take a moment to start as it compiles."
+            print(msg)
+            if self.logger:
+                self.logger.warn(msg)
+
+        print(f"[{self.__class__.__name__}] Thread starting...")
+
         self._thread.start()
+
+        if numba_needs_compile:
+            while self.numba_needs_compile:
+                sleep(0.1)
+
+            msg = f"[{self.__class__.__name__}] Numba compilation complete, daemon is now running."
+            print(msg)
+            if self.logger:
+                self.logger.warn(msg)
 
     def stop(self, timeout=5.0):
         if not self.is_running:
@@ -192,13 +211,13 @@ class BaseDaemon:
             sub.put(batch)
 
         # UNIVERSAL FAIRNESS GATE
-        if self.gui_mode:
-            # Optimization: Only sleep(0.001) every ~50,000 messages.
-            # This keeps the "Liquid GUI" feel without cutting throughput by 50%.
-            self._yield_msg_counter += batch.size
-            if self._yield_msg_counter >= 50000:
-                sleep(0.001)
-                self._yield_msg_counter = 0
+        # if self.gui_mode:
+        #     # Optimization: Only sleep(0.001) every ~50,000 messages.
+        #     # This keeps the "Liquid GUI" feel without cutting throughput by 50%.
+        #     self._yield_msg_counter += batch.size
+        #     if self._yield_msg_counter >= 50000:
+        #         sleep(0.001)
+        #         self._yield_msg_counter = 0
 
     def update_fields(self, config: dict, fields: Iterable[str]) -> bool:
         return update_object_from_config(self, config, fields)

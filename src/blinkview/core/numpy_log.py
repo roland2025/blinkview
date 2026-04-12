@@ -8,10 +8,15 @@ from collections import deque
 from threading import Lock
 
 import numpy as np
-from numba import njit
 
+from blinkview.core import dtypes
 from blinkview.core.id_registry import IDRegistry
 from blinkview.core.log_row import LogRow
+from blinkview.core.numba_config import app_njit
+from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.core.types.segments import LogSegmentParams
+from blinkview.ops.segments import copy_batch_to_segment, filter_segment
+from blinkview.ops.telemetry import extract_floats_from_bytes, extract_telemetry_segment, peek_segment_channels
 from blinkview.utils.log_level import LogLevel
 
 
@@ -26,7 +31,7 @@ class LogSegment:
         "levels",
         "modules",
         "devices",
-        "seqs",
+        "sequence_ids",
         "msg_offsets",
         "msg_lens",
         "msg_buffer",
@@ -40,6 +45,7 @@ class LogSegment:
         "_off_h",
         "_len_h",
         "_buf_h",
+        "_bundle",
     )
 
     def __init__(self, pool, segment_seq: int, req_capacity: int, req_buffer_mb: int):
@@ -49,39 +55,63 @@ class LogSegment:
         self.msg_cursor = 0
 
         # Acquire arrays natively from the global pool using element count
-        self._ts_h = self._pool.acquire(req_capacity, dtype=np.int64)
+        self._ts_h = self._pool.acquire(req_capacity, dtype=dtypes.TS_TYPE)
         self.timestamps = self._ts_h.array
 
         # Read true power-of-two capacity
         self.capacity = len(self.timestamps)
 
-        self._lvl_h = self._pool.acquire(self.capacity, dtype=np.uint8)
+        self._lvl_h = self._pool.acquire(self.capacity, dtype=dtypes.LEVEL_TYPE)
         self.levels = self._lvl_h.array
 
-        self._mod_h = self._pool.acquire(self.capacity, dtype=np.uint16)
+        self._mod_h = self._pool.acquire(self.capacity, dtype=dtypes.ID_TYPE)
         self.modules = self._mod_h.array
 
-        self._dev_h = self._pool.acquire(self.capacity, dtype=np.uint16)
+        self._dev_h = self._pool.acquire(self.capacity, dtype=dtypes.ID_TYPE)
         self.devices = self._dev_h.array
 
-        self._seq_h = self._pool.acquire(self.capacity, dtype=np.uint64)
-        self.seqs = self._seq_h.array
+        self._seq_h = self._pool.acquire(self.capacity, dtype=dtypes.SEQ_TYPE)
+        self.sequence_ids = self._seq_h.array
 
-        self._off_h = self._pool.acquire(self.capacity, dtype=np.uint32)
+        self._off_h = self._pool.acquire(self.capacity, dtype=dtypes.OFFSET_TYPE)
         self.msg_offsets = self._off_h.array
 
-        self._len_h = self._pool.acquire(self.capacity, dtype=np.uint32)
+        self._len_h = self._pool.acquire(self.capacity, dtype=dtypes.LEN_TYPE)
         self.msg_lens = self._len_h.array
 
         # 1 MB = 1024 * 1024 bytes (elements for uint8)
-        self._buf_h = self._pool.acquire(req_buffer_mb * 1024 * 1024, dtype=np.uint8)
+        self._buf_h = self._pool.acquire(req_buffer_mb * 1024 * 1024, dtype=dtypes.BYTE)
         self.msg_buffer = self._buf_h.array
+
+        self._bundle = None
+
+    def bundle(self) -> LogSegmentParams:
+        """Returns a baked snapshot. Re-baked only if the row count has changed."""
+        if self._bundle is None:
+            self._bundle = LogSegmentParams(
+                self.timestamps,
+                self.levels,
+                self.modules,
+                self.devices,
+                self.sequence_ids,
+                self.msg_offsets,
+                self.msg_lens,
+                self.msg_buffer,
+                self.count,
+                self.capacity,
+            )
+        return self._bundle
+
+    def invalidate(self):
+        """Forces a re-bake of the bundle on the next access."""
+        self._bundle = None
 
     def clear_and_recycle(self, new_segment_seq: int):
         """O(1) reset to reuse the existing memory slabs for the next rotation."""
         self.segment_seq = new_segment_seq
         self.count = 0
         self.msg_cursor = 0
+        self.invalidate()
 
     def append(self, ts_ns: int, level: int, module: int, device: int, seq: int, msg_bytes: bytes) -> bool:
         if self.count >= self.capacity:
@@ -97,15 +127,17 @@ class LogSegment:
         self.levels[idx] = level
         self.modules[idx] = module
         self.devices[idx] = device
-        self.seqs[idx] = seq
+        self.sequence_ids[idx] = seq
 
         self.msg_offsets[idx] = self.msg_cursor
         self.msg_lens[idx] = msg_len
 
-        self.msg_buffer[self.msg_cursor : self.msg_cursor + msg_len] = np.frombuffer(msg_bytes, dtype=np.uint8)
+        self.msg_buffer[self.msg_cursor : self.msg_cursor + msg_len] = np.frombuffer(msg_bytes, dtype=dtypes.BYTE)
 
         self.msg_cursor += msg_len
         self.count += 1
+
+        self.invalidate()
         return True
 
     def release(self):
@@ -115,6 +147,43 @@ class LogSegment:
             if h is not None:
                 h.release()
                 setattr(self, handle_name, None)
+
+    def append_batch_chunk(self, batch: "PooledLogBatch", start_idx: int, start_seq_id: int) -> int:
+        """
+        Appends a chunk of the batch starting from `start_idx`.
+        Assigns sequentially increasing IDs starting from `start_seq_id`.
+        Returns the number of rows successfully appended.
+        """
+        seg_view = self.bundle()
+        batch_view = batch.bundle()
+
+        # 2. Call the "De-Souped" JIT Kernel
+        # We pass self.msg_cursor explicitly as it is the only dynamic write-head
+        rows_copied, bytes_copied = copy_batch_to_segment(
+            seg_view, self.msg_cursor, batch_view, start_idx, start_seq_id
+        )
+
+        self.count += rows_copied
+        self.msg_cursor += bytes_copied
+        self.invalidate()
+        return rows_copied
+
+    def append_truncated_error(self, ts_ns: int, module: int, device: int, seq: int, msg_bytes: bytes):
+        """Forces a message into the buffer by truncating it to 512 chars."""
+        limit = 512
+        suffix = b" ... [TRUNCATED]"
+
+        # Ensure the total length is exactly 'limit'
+        if len(msg_bytes) > limit:
+            truncated_msg = msg_bytes[: limit - len(suffix)] + suffix
+        else:
+            truncated_msg = msg_bytes
+
+        print(
+            f"WARNING append_truncated_error: Original length {len(msg_bytes)} exceeds limit. Truncated to {len(truncated_msg)} bytes. msg={truncated_msg}"
+        )
+
+        return self.append(ts_ns, LogLevel.ERROR.value, module, device, seq, truncated_msg)
 
 
 class CircularLogPool:
@@ -127,6 +196,8 @@ class CircularLogPool:
         self.segments: deque[LogSegment] = deque()
         self.segment_counter = 0
         self.active_segment = None
+
+        self.sequence = 0  # log item sequence number
 
         self._lock = Lock()
 
@@ -180,58 +251,66 @@ class CircularLogPool:
                 seg = self.segments.popleft()
                 seg.release()
 
+    def batch_append(self, batch: "PooledLogBatch"):
+        if batch.size == 0:
+            return
 
-@njit()
-def filter_segment(
-    count,
-    timestamps,
-    levels,
-    modules,
-    devices,
-    seqs,  # Ensure this is here
-    target_modules_arr,
-    start_seq=-1,  # Ensure this is here
-    start_ts=-1,
-    end_ts=-1,
-    target_level=0xFF,
-    target_module=0xFFFF,
-    target_device=0xFFFF,
-):
-    matching_indices = np.empty(count, dtype=np.int64)
-    match_count = 0
-    use_multi_module = target_modules_arr.size > 0
+        with self._lock:
+            rows_written = 0
 
-    for i in range(count):
-        # 1. Sequence Check (Fastest exclusion)
-        if start_seq != -1 and seqs[i] <= start_seq:
-            continue
+            while rows_written < batch.size:
+                # Fast Path: Numba handles the bulk
+                copied = self.active_segment.append_batch_chunk(batch, rows_written, self.sequence)
 
-        # 2. Module Filter
-        if use_multi_module:
-            found = False
-            for m_idx in range(target_modules_arr.size):
-                if modules[i] == target_modules_arr[m_idx]:
-                    found = True
-                    break
-            if not found:
-                continue
-        elif target_module != 0xFFFF and modules[i] != target_module:
-            continue
+                rows_written += copied
+                self.sequence += copied
 
-        # 3. Level/Device/Time filters...
-        if target_level != 0xFF and levels[i] != target_level:
-            continue
-        if target_device != 0xFFFF and devices[i] != target_device:
-            continue
-        if start_ts != -1 and timestamps[i] < start_ts:
-            continue
-        if end_ts != -1 and timestamps[i] > end_ts:
-            continue
+                # Slow Path: Rotation or Truncation
+                if rows_written < batch.size:
+                    next_msg_len = batch.lengths[rows_written]
 
-        matching_indices[match_count] = i
-        match_count += 1
+                    # Logic: If it can't fit in a segment OR it's just objectively
+                    # huge (e.g., > 1MB), we treat it as toxic and truncate to 512.
+                    toxic_threshold = self.buffer_mb * 1024 * 1024
 
-    return matching_indices[:match_count]
+                    if next_msg_len > toxic_threshold or next_msg_len > 1024 * 1024:
+                        self._rotate_segment()
+
+                        # Grab the metadata using your shiny new __getitem__
+                        ts, raw_msg, _, mod, dev, _ = batch[rows_written]
+
+                        # This now enforces your 512 limit
+                        self.active_segment.append_truncated_error(ts, mod, dev, self.sequence, raw_msg)
+
+                        rows_written += 1
+                        self.sequence += 1
+
+                        # if self.logger:
+                        #     self.logger.error(f"Toxic log detected ({next_msg_len} bytes). Truncated to 512 chars.")
+                    else:
+                        # Normal rotation for a normal-sized log
+                        self._rotate_segment()
+
+    def clear(self):
+        """
+        Wipes all log data, resets sequence counters, and prepares
+        the pool for fresh data. Useful for removing 'warm-up' dummy data.
+        """
+        with self._lock:
+            # 1. Release all currently held segments back to the global array pool
+            # This is safer than just zeroing indices because it ensures
+            # no "residue" remains in the memory slabs.
+            while self.segments:
+                seg = self.segments.popleft()
+                seg.release()
+
+            # 2. Reset global counters
+            self.segment_counter = 0
+            self.sequence = 0
+            self.active_segment = None
+
+            # 3. Re-initialize with a single fresh segment
+            self._rotate_segment()
 
 
 def query_pool(id_registry: IDRegistry, pool: CircularLogPool, target_modules: list[int] = None, **filters):
@@ -242,9 +321,9 @@ def query_pool(id_registry: IDRegistry, pool: CircularLogPool, target_modules: l
 
     # List to numpy for Numba compatibility
     if target_modules:
-        tm_arr = np.array(target_modules, dtype=np.uint16)
+        tm_arr = np.array(target_modules, dtype=dtypes.ID_TYPE)
     else:
-        tm_arr = np.empty(0, dtype=np.uint16)
+        tm_arr = np.empty(0, dtype=dtypes.ID_TYPE)
 
     # Grab the sequence filter from kwargs
     start_seq = filters.get("start_seq", -1)
@@ -253,14 +332,8 @@ def query_pool(id_registry: IDRegistry, pool: CircularLogPool, target_modules: l
         if segment.count == 0:
             continue
 
-        # CRITICAL FIX: Pass 'segment.seqs' and 'start_seq'
         matched_idx = filter_segment(
-            segment.count,
-            segment.timestamps,
-            segment.levels,
-            segment.modules,
-            segment.devices,
-            segment.seqs,  # Wire this in!
+            segment.bundle(),
             target_modules_arr=tm_arr,
             start_seq=start_seq,  # Wire this in!
             start_ts=filters.get("start_ts", -1),
@@ -280,150 +353,8 @@ def query_pool(id_registry: IDRegistry, pool: CircularLogPool, target_modules: l
                 level=get_level(segment.levels[idx]),
                 module=module_from_int(segment.modules[idx]),
                 message=msg,
-                seq=segment.seqs[idx],
+                seq=segment.sequence_ids[idx],
             )
-
-
-@njit(inline="always")
-def extract_floats_from_bytes(buffer, offset, length, out_array):
-    """
-    Scans a uint8 buffer directly for floats.
-    Returns the number of floats successfully extracted.
-    """
-    count = 0
-    max_floats = len(out_array)
-
-    in_number = False
-    is_negative = False
-    val = 0.0
-    fraction_div = 1.0
-    has_decimal = False
-    has_digit = False
-
-    for i in range(offset, offset + length):
-        c = buffer[i]
-
-        is_digit = 48 <= c <= 57
-        is_dot = c == 46
-        is_minus = c == 45
-        is_plus = c == 43
-
-        if is_digit:
-            if not in_number:
-                in_number = True
-                is_negative = False
-                val = 0.0
-                fraction_div = 1.0
-                has_decimal = False
-                has_digit = False
-
-            has_digit = True
-            if has_decimal:
-                fraction_div *= 10.0
-                val = val + (c - 48) / fraction_div
-            else:
-                val = val * 10.0 + (c - 48)
-
-        elif is_dot:
-            if not in_number:
-                in_number = True
-                is_negative = False
-                val = 0.0
-                fraction_div = 1.0
-                has_decimal = True
-                has_digit = False
-            elif not has_decimal:
-                has_decimal = True
-            else:
-                # Two dots? Terminate current number
-                if has_digit:
-                    out_array[count] = -val if is_negative else val
-                    count += 1
-                    if count >= max_floats:
-                        return count
-                # Reset for next potential number
-                in_number = True
-                is_negative = False
-                val = 0.0
-                fraction_div = 1.0
-                has_decimal = True
-                has_digit = False
-
-        elif is_minus or is_plus:
-            if in_number and has_digit:
-                out_array[count] = -val if is_negative else val
-                count += 1
-                if count >= max_floats:
-                    return count
-
-            in_number = True
-            is_negative = is_minus
-            val = 0.0
-            fraction_div = 1.0
-            has_decimal = False
-            has_digit = False
-
-        else:
-            # Any other character (space, letter, etc.) terminates the number
-            if in_number:
-                if has_digit:
-                    out_array[count] = -val if is_negative else val
-                    count += 1
-                    if count >= max_floats:
-                        return count
-                in_number = False
-
-    # Handle a number terminating at the exact end of the string
-    if in_number and has_digit and count < max_floats:
-        out_array[count] = -val if is_negative else val
-        count += 1
-
-    return count
-
-
-@njit(nogil=True)
-def extract_telemetry_segment_numba(
-    count, timestamps, modules, seqs, msg_offsets, msg_lens, msg_buffer, target_module, start_seq, num_channels
-):
-    """
-    Finds logs, parses bytes to floats, and builds the return arrays in one pass.
-    """
-    # Pre-allocate worst-case scenario. Numba does this very quickly.
-    times = np.empty(count, dtype=np.float64)
-    values = np.empty((count, num_channels), dtype=np.float64)
-
-    valid_count = 0
-    latest_seq = start_seq
-
-    # A reusable buffer for our inline byte parser
-    temp_floats = np.empty(num_channels, dtype=np.float64)
-
-    for i in range(count):
-        if modules[i] != target_module:
-            continue
-
-        seq = seqs[i]
-        if seq <= start_seq:
-            continue
-
-        offset = msg_offsets[i]
-        length = msg_lens[i]
-
-        # Call the inline byte parser directly on the SoA buffer
-        extracted_count = extract_floats_from_bytes(msg_buffer, offset, length, temp_floats)
-
-        # Only keep rows that had all the required channels
-        if extracted_count >= num_channels:
-            times[valid_count] = timestamps[i] / 1_000_000_000.0
-            for c in range(num_channels):
-                values[valid_count, c] = temp_floats[c]
-
-            valid_count += 1
-            if seq > latest_seq:
-                latest_seq = seq
-
-    # Return perfectly sized slices
-    return times[:valid_count], values[:valid_count], latest_seq
 
 
 def fetch_telemetry_arrays(pool: "CircularLogPool", target_module_int: int, start_seq: int, num_channels: int):
@@ -435,18 +366,12 @@ def fetch_telemetry_arrays(pool: "CircularLogPool", target_module_int: int, star
             continue
 
         # Fast exit: Skip entire segment if we've already processed its newest log
-        if segment.seqs[segment.count - 1] <= start_seq:
+        if segment.sequence_ids[segment.count - 1] <= start_seq:
             continue
 
         # Execute the C-speed extraction
-        new_times, new_values, max_seq = extract_telemetry_segment_numba(
-            segment.count,
-            segment.timestamps,
-            segment.modules,
-            segment.seqs,
-            segment.msg_offsets,
-            segment.msg_lens,
-            segment.msg_buffer,
+        new_times, new_values, max_seq = extract_telemetry_segment(
+            segment.bundle(),
             target_module_int,
             start_seq,
             num_channels,
@@ -456,45 +381,17 @@ def fetch_telemetry_arrays(pool: "CircularLogPool", target_module_int: int, star
             yield new_times, new_values, max_seq
 
 
-@njit()
-def peek_segment_channels(count, modules, seqs, msg_offsets, msg_lens, msg_buffer, target_module, start_seq):
-    """
-    Scans forward to find the first log from target_module that contains floats.
-    Returns the number of floats found, or 0 if no numeric logs exist in this segment.
-    """
-    # Pre-allocate a generous temp buffer (e.g., 256 channels max per log line)
-    temp_floats = np.empty(256, dtype=np.float64)
-
-    for i in range(count):
-        if modules[i] == target_module and seqs[i] > start_seq:
-            offset = msg_offsets[i]
-            length = msg_lens[i]
-
-            extracted_count = extract_floats_from_bytes(msg_buffer, offset, length, temp_floats)
-
-            # Keep going if it was just a text-only log!
-            if extracted_count > 0:
-                return extracted_count
-
-    return 0
-
-
 def peek_channel_count(pool: "CircularLogPool", target_module_int: int, start_seq: int) -> int:
     """Returns the channel count for the first numeric log after start_seq."""
     for segment in pool.get_ordered_segments():
         if segment.count == 0:
             continue
 
-        if segment.seqs[segment.count - 1] <= start_seq:
+        if segment.sequence_ids[segment.count - 1] <= start_seq:
             continue
 
         channels = peek_segment_channels(
-            segment.count,
-            segment.modules,
-            segment.seqs,
-            segment.msg_offsets,
-            segment.msg_lens,
-            segment.msg_buffer,
+            segment.bundle(),
             target_module_int,
             start_seq,
         )
@@ -503,123 +400,3 @@ def peek_channel_count(pool: "CircularLogPool", target_module_int: int, start_se
             return channels
 
     return 0
-
-
-@njit(nogil=True)
-def format_log_batch_numba(
-    indices,
-    timestamps,
-    levels,
-    modules,
-    device_ids,
-    msg_offsets,
-    msg_lens,
-    msg_buffer,
-    level_params,
-    module_params,
-    device_params,
-    show_ts,
-    show_dev,
-    show_lvl,
-    show_mod,
-):
-    l_buf, l_off, l_len = level_params
-    m_buf, m_off, m_len = module_params
-    d_buf, d_off, d_len = device_params
-
-    # PHASE 1: SIZE CALCULATION
-    total_size = 0
-    for idx in indices:
-        row_size = 0
-        if show_ts:
-            row_size += 13  # "[HH:MM:SS.mmm] "
-        if show_dev:
-            row_size += d_len[device_ids[idx]] + 1
-        if show_lvl:
-            row_size += l_len[levels[idx]] + 1
-        if show_mod:
-            row_size += m_len[modules[idx]] + 2  # "Module: "
-
-        row_size += msg_lens[idx] + 1  # Msg + \n
-        total_size += row_size
-
-    out = np.empty(total_size, dtype=np.uint8)
-    curr = 0
-
-    for idx in indices:
-        first_field = True
-
-        # --- 1. Timestamp ---
-        if show_ts:
-            ts_ns = timestamps[idx]
-            ms = (ts_ns // 1_000_000) % 1000
-            sec = (ts_ns // 1_000_000_000) % 60
-            mn = (ts_ns // 60_000_000_000) % 60
-            hr = (ts_ns // 3_600_000_000_000) % 24
-
-            out[curr + 0] = 48 + (hr // 10)
-            out[curr + 1] = 48 + (hr % 10)
-            out[curr + 2] = 58
-            out[curr + 3] = 48 + (mn // 10)
-            out[curr + 4] = 48 + (mn % 10)
-            out[curr + 5] = 58
-            out[curr + 6] = 48 + (sec // 10)
-            out[curr + 7] = 48 + (sec % 10)
-            out[curr + 8] = 46
-            out[curr + 9] = 48 + (ms // 100)
-            out[curr + 10] = 48 + ((ms // 10) % 10)
-            out[curr + 11] = 48 + (ms % 10)
-            curr += 12
-            first_field = False
-
-        # --- 2. Device ---
-        if show_dev:
-            if not first_field:
-                out[curr] = 32
-                curr += 1
-            d_id = device_ids[idx]
-            ln = d_len[d_id]
-            off = d_off[d_id]
-            out[curr : curr + ln] = d_buf[off : off + ln]
-            curr += ln
-            first_field = False
-
-        # --- 3. Level ---
-        if show_lvl:
-            if not first_field:
-                out[curr] = 32
-                curr += 1
-            l_id = levels[idx]
-            ln = l_len[l_id]
-            off = l_off[l_id]
-            out[curr : curr + ln] = l_buf[off : off + ln]
-            curr += ln
-            first_field = False
-
-        # --- 4. Module ---
-        if show_mod:
-            if not first_field:
-                out[curr] = 32
-                curr += 1
-            m_id = modules[idx]
-            ln = m_len[m_id]
-            off = m_off[m_id]
-            out[curr : curr + ln] = m_buf[off : off + ln]
-            curr += ln
-            out[curr] = 58
-            curr += 1  # ':'
-            first_field = False
-
-        # --- 5. Message ---
-        if not first_field:
-            out[curr] = 32
-            curr += 1
-        mo = msg_offsets[idx]
-        ml = msg_lens[idx]
-        out[curr : curr + ml] = msg_buffer[mo : mo + ml]
-        curr += ml
-
-        out[curr] = 10
-        curr += 1  # \n
-
-    return out[:curr]

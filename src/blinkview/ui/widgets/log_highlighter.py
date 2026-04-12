@@ -11,10 +11,8 @@ from blinkview.utils.log_level import LogLevel
 
 
 class LogHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent, level_map: LevelMap):
+    def __init__(self, parent):
         super().__init__(parent)
-
-        self.level_map: LevelMap = level_map
 
         # Define formats for each level
         # self.formats = {
@@ -26,7 +24,7 @@ class LogHighlighter(QSyntaxHighlighter):
 
         self.level_index = 0
 
-        for level in level_map.levels():
+        for level in LogLevel.LIST_CONF:
             self.formats[level.name] = self._create_format(level.color, bold=level >= LogLevel.WARN)
 
     def _create_format(self, color_hex, bold=False):

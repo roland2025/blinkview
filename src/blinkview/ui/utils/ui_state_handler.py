@@ -19,6 +19,7 @@ from blinkview.utils.atomic_json_dump import atomic_json_dump
 class UIStateHandler:
     def __init__(self, main_window):
         self.window = main_window
+        self.ui_restored_cb = None
 
     def get_data(self):
         """Captures geometry and dock states to JSON."""
@@ -49,10 +50,12 @@ class UIStateHandler:
 
         return state_data
 
-    def load_ui_state(self, file_path):
+    def load_ui_state(self, file_path, ui_state_restored_cb):
         """Restores geometry and dock states from JSON."""
         if not file_path.exists():
             return
+
+        self.ui_restored_cb = ui_state_restored_cb
 
         try:
             data = json.loads(file_path.read_text())
@@ -92,38 +95,51 @@ class UIStateHandler:
                         self.window.central_tabs.setCurrentIndex(data["current_tab_index"])
 
                 # --- Restore Floating Windows ---
-                if "floating_windows" in data:
-                    for win_info in data["floating_windows"]:
-                        params = win_info.get("params", {})
-                        tab_name = params.get("tab_name") or win_info.get("name", "Floating Tool")
-                        new_win = self.window.create_widget(
-                            cls_name=win_info.get("class"),
-                            name=tab_name,
-                            as_window=True,
-                            show=False,
-                            params=params,
-                            reattach_on_close=win_info.get("reattach_on_close", True),
-                        )
+                floating_data = data.get("floating_windows", [])
+                windows_to_restore = len(floating_data)
+                if windows_to_restore == 0:
+                    self.on_ui_restoration_complete()
+                    return
+                for win_info in floating_data:
+                    params = win_info.get("params", {})
+                    tab_name = params.get("tab_name") or win_info.get("name", "Floating Tool")
+                    new_win = self.window.create_widget(
+                        cls_name=win_info.get("class"),
+                        name=tab_name,
+                        as_window=True,
+                        show=False,
+                        params=params,
+                        reattach_on_close=win_info.get("reattach_on_close", True),
+                    )
 
-                        if not new_win:
-                            continue  # Skip unknown widgets
+                    if not new_win:
+                        continue  # Skip unknown widgets
 
-                        # Ghost Mode
-                        new_win.setWindowOpacity(0.0)
-                        new_win.show()
+                    # Ghost Mode
+                    new_win.setWindowOpacity(0.0)
+                    new_win.show()
 
-                        # Create the closure.
-                        def restore_this_window(win=new_win, info=win_info):
-                            geo_dict = info.get("window_geometry", {})
-                            if geo_dict:
-                                restore_window_geometry_safe(win, geo_dict)
+                    # Create the closure.
+                    def restore_this_window(win=new_win, info=win_info):
+                        nonlocal windows_to_restore
+                        geo_dict = info.get("window_geometry", {})
+                        if geo_dict:
+                            restore_window_geometry_safe(win, geo_dict)
 
-                            win.raise_()
-                            win.activateWindow()
-                            win.setWindowOpacity(1.0)
+                        win.raise_()
+                        win.activateWindow()
+                        win.setWindowOpacity(1.0)
+                        windows_to_restore -= 1
+                        if windows_to_restore <= 0:
+                            self.on_ui_restoration_complete()
 
-                        # Give the OS 100ms
-                        QTimer.singleShot(100, restore_this_window)
+                    # Give the OS 100ms
+                    QTimer.singleShot(100, restore_this_window)
 
         except Exception as e:
             print(f"⚠Could not restore UI state: {e}")
+
+    def on_ui_restoration_complete(self):
+        """This is your callback method."""
+        if self.ui_restored_cb:
+            self.ui_restored_cb()

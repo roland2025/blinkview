@@ -25,7 +25,7 @@ from ..core.limits import BATCH_MAXLEN
 from ..core.log_row import LogRow
 from ..core.numpy_batch_manager import PooledLogBatch
 from ..core.reusable_batch_pool import TimeDataEntry
-from ..utils.level_map import LogLevel
+from ..utils.log_level import LogLevel
 
 # Define the signature for a transformation
 TransformFunc = Callable[[Any], Any]
@@ -71,6 +71,9 @@ class BaseParser(BaseDaemon):
     max_batch: int
     delay: int
     name: str
+
+    TRACKER_CAPACITY = 1024
+    AVG_NAME_LEN = 64
 
     def __init__(self):
         super().__init__()

@@ -36,6 +36,7 @@ dependencies = [
     "cobs",
     "requests",
     "packaging",
+    "fnvhash"
 ]
 
 [project.optional-dependencies]
@@ -73,6 +74,7 @@ blink = "blinkview.__main__:main"
 [dependency-groups]
 dev = [
     "ruff>=0.15.8",
+    "psutil>=6.0.0",
     "blinkview[all]",
 ]
 docs = [
@@ -98,5 +100,14 @@ path = "src/blinkview/__init__.py"
 
 [tool.ruff]
 line-length = 120
-lint.select = ["I"]
-lint.ignore = ["F401"]
+
+[tool.lint]
+# "E" is Pycodestyle, "F" is Pyflakes, "I" is Isort
+select = ["E", "F", "I"]
+# F401: Unused imports (your choice)
+# E203: Whitespace before ':' (the fix for your slice)
+ignore = ["F401", "E203"]
+
+[tool.uv]
+managed = true
+package = true

@@ -298,8 +298,30 @@ class BlinkMainWindow(QMainWindow):
 
         QTimer.singleShot(1000, lambda: check_for_updates_silently(self.gui_context, parent=self))
 
+    def _start_stage_3(self):
+        self.timer_slow.start(self.timeout_slow)
+
+        def start_fast_timer():
+            self.last_poll_time = self.gui_context.registry.now_ns() + (self.timeout_fast) * 1_000_000
+            # Set it to the future to avoid false lag detection on the first tick
+            self.timer_fast.start(self.timeout_fast)
+
+            ToastManager.show("System ready", ToastType.SUCCESS, parent=self)
+
+        QTimer.singleShot(100, start_fast_timer)
+
+    def _start_stage_2(self):
+        self.gui_context.registry.start()
+        QTimer.singleShot(100, self._start_stage_3)
+
+    def _start_stage_1(self):
+        ToastManager.show("Compiling Numba kernels", ToastType.WARNING, duration=1.0, parent=self)
+        QTimer.singleShot(200, self._start_stage_2)
+
     def load_ui_state(self):
-        self.gui_context.gui_state.load_ui_state(self.gui_context.registry.file_manager.get_config_path("gui_state"))
+        self.gui_context.gui_state.load_ui_state(
+            self.gui_context.registry.file_manager.get_config_path("gui_state"), self._start_stage_1
+        )
 
         # QTimer.singleShot(0, lambda: ToastManager.show("Something happened...", ToastType.INFO))
         # QTimer.singleShot(333, lambda: ToastManager.show("WAARNING...", ToastType.WARNING))
@@ -307,16 +329,7 @@ class BlinkMainWindow(QMainWindow):
         # QTimer.singleShot(999, lambda: ToastManager.show("Attention error...", ToastType.ERROR))
 
         # delay the start of the registry, allows the windows to appear before doing anything heavy
-        QTimer.singleShot(100, self.gui_context.registry.start)
-
-        QTimer.singleShot(200, lambda: self.timer_slow.start(self.timeout_slow))  # 1 second
-
-        def start_fast_timer():
-            self.last_poll_time = self.gui_context.registry.now_ns() + (self.timeout_fast) * 1_000_000
-            # Set it to the future to avoid false lag detection on the first tick
-            self.timer_fast.start(self.timeout_fast)
-
-        QTimer.singleShot(300, start_fast_timer)
+        # QTimer.singleShot(333, self._start_stage_1)
 
     def register_log_target(self, target):
         """Adds a target that expects a 'process_log_batch(list)' method."""
@@ -474,9 +487,9 @@ class BlinkMainWindow(QMainWindow):
             drift_ns = now - self.last_poll_time
             self.last_poll_time = now
 
-            self.logger_fast_timer.debug(
-                f"off={drift_ns / 1_000_000 - self.timeout_fast:.3f} last={drift_ns / 1_000_000:.3f}"
-            )
+            # self.logger_fast_timer.debug(
+            #     f"off={drift_ns / 1_000_000 - self.timeout_fast:.3f} last={drift_ns / 1_000_000:.3f}"
+            # )
 
             # If the gap is significantly larger than our ~16.6ms target, the UI is lagging
             if drift_ns / 1_000_000 > self.timeout_fast * 2:  # More than 2 frames late
@@ -528,12 +541,14 @@ class BlinkMainWindow(QMainWindow):
                 # Formatting: "In: 150,000 msg/s | Out: 148,000 msg/s | Buffer: 12%"
                 msg = f"In: {in_mps} | Out: {out_mps} | Backlog: {backlog} ({capacity_pct:.1f}%) | pool: {current_rows} / {max_rows} ({current_rows / max_rows * 100:.1f}%)"
                 self.mps_label.setText(msg)
-                self.logger_stats.debug(msg)
+                # self.logger_stats.debug(msg)
 
                 # Optional: Highlight drop rate if it's non-zero
                 if dropped > 0:
                     drop_mps = int(dropped / elapsed)
                     # self.status_label.setText(f"⚠️ Dropping {drop_mps:,} msg/s")
+
+                # registry.system_ctx.array_pool.audit()
 
                 # 5. Store current snapshot as the 'last' for next time
                 self._last_stats = current_stats
@@ -541,6 +556,7 @@ class BlinkMainWindow(QMainWindow):
             self.gui_context.on_update()
 
         except Exception as e:
+            self.logger.exception("Error while polling queue", e)
             print(f"[BlinkMainWindow] Error while polling queue: {e}")
 
     def _signal_handler(self, signum, frame):
@@ -825,6 +841,7 @@ def run(args):
         QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
         app = QApplication(sys.argv)
 
+        app.setStyle("Fusion")
         use_qdarktheme = True
         if use_qdarktheme:
             import qdarktheme
@@ -840,8 +857,6 @@ def run(args):
             }
             """
             app.setStyleSheet(app.styleSheet() + custom_tooltips)
-        else:
-            app.setStyle("Fusion")
 
         # Set the global application icon
         app.setWindowIcon(QIcon(str(Path(__file__).parent.parent / "assets" / "icon.png")))

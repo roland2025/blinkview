@@ -4,62 +4,16 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from threading import Lock, RLock
-from typing import Dict, List, NamedTuple, Set, Tuple
+from threading import RLock
+from typing import Dict, List
 
-import numpy as np
-
-from ..utils.level_map import LevelMap
-from ..utils.log_level import LogLevel
-from .device_identity import DeviceIdentity, ModuleIdentity
-from .logger import PrintLogger
-
-
-class ByteMapParams(NamedTuple):
-    buffer: np.ndarray  # uint8
-    offsets: np.ndarray  # uint32
-    lens: np.ndarray  # uint32
-
-
-class IdentityByteMap:
-    __slots__ = ("buffer", "offsets", "lens", "cursor")
-
-    def __init__(self, initial_capacity: int = 1024, buffer_size_kb: int = 128):
-        # Metadata arrays indexed by ID
-        self.offsets = np.zeros(initial_capacity, dtype=np.uint32)
-        self.lens = np.zeros(initial_capacity, dtype=np.uint32)
-
-        # The raw string data
-        self.buffer = np.zeros(buffer_size_kb * 1024, dtype=np.uint8)
-        self.cursor = 0
-
-    def register_name(self, identity_id: int, name: str):
-        """Encodes a string into the flat buffer and stores its offset/length."""
-        name_bytes = name.encode("utf-8")
-        n_len = len(name_bytes)
-
-        # 1. Resize metadata arrays if ID exceeds current capacity
-        if identity_id >= len(self.offsets):
-            new_cap = max(identity_id + 1, len(self.offsets) * 2)
-            self.offsets = np.resize(self.offsets, new_cap)
-            self.lens = np.resize(self.lens, new_cap)
-
-        # 2. Resize byte buffer if we run out of room
-        if self.cursor + n_len > len(self.buffer):
-            new_buf_size = max(len(self.buffer) * 2, self.cursor + n_len)
-            new_buf = np.zeros(new_buf_size, dtype=np.uint8)
-            new_buf[: len(self.buffer)] = self.buffer
-            self.buffer = new_buf
-
-        # 3. Write data
-        start = self.cursor
-        self.buffer[start : start + n_len] = np.frombuffer(name_bytes, dtype=np.uint8)
-        self.offsets[identity_id] = start
-        self.lens[identity_id] = n_len
-        self.cursor += n_len
-
-    def get_numba_params(self) -> ByteMapParams:
-        return ByteMapParams(self.buffer, self.offsets, self.lens)
+from blinkview.core.array_pool import NumpyArrayPool
+from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
+from blinkview.core.id_registry.tables import IndexedStringTable
+from blinkview.core.id_registry.types import RegistryParams
+from blinkview.core.logger import PrintLogger
+from blinkview.utils.level_map import LevelMap
+from blinkview.utils.log_level import LogLevel
 
 
 class IDRegistry:
@@ -74,12 +28,12 @@ class IDRegistry:
         "logger",
         "module_list",
         "modules",
-        "module_map",
-        "level_map_bytes",
-        "device_map",
+        "modules_table",
+        "levels_table",
+        "devices_table",
     )
 
-    def __init__(self):
+    def __init__(self, array_pool):
         self._lock = RLock()
         self.logger = PrintLogger("id_registry")
 
@@ -98,15 +52,15 @@ class IDRegistry:
 
         self.level_map = LevelMap()
 
-        self.module_map = IdentityByteMap(initial_capacity=1024)
-        self.device_map = IdentityByteMap(initial_capacity=10)
-        self.level_map_bytes = IdentityByteMap(initial_capacity=10)
+        self.modules_table = IndexedStringTable(array_pool, initial_capacity=1024)
+        self.devices_table = IndexedStringTable(array_pool, initial_capacity=10)
+        self.levels_table = IndexedStringTable(array_pool, initial_capacity=10)
 
         self._init_level_maps()
 
     def _init_level_maps(self):
         for lvl in LogLevel.LIST:
-            self.level_map_bytes.register_name(lvl.value, lvl.name)
+            self.levels_table.register_name(lvl.value, lvl.name)
 
     def _generate_module_id(self) -> int:
         """Internal callback passed to DeviceIdentity."""
@@ -127,7 +81,7 @@ class IDRegistry:
 
             for module in modules:
                 self.modules[module.id] = module
-                self.module_map.register_name(module.id, module.name)
+                self.modules_table.register_name(module.id, module.name)
 
     def get_device(self, name: str) -> DeviceIdentity:
         """Retrieve or create a DeviceIdentity by name."""
@@ -157,7 +111,7 @@ class IDRegistry:
 
             self.logger.info(f"[Device] {new_id} -> {name}")
 
-            self.device_map.register_name(new_id, name)
+            self.devices_table.register_name(new_id, name)
 
             return new_device
 
@@ -207,3 +161,33 @@ class IDRegistry:
 
     def module_from_int(self, mod: int):
         return self.modules[mod]
+
+    def bundle(self) -> RegistryParams:
+        """Returns a combined snapshot of all identity tables."""
+        return RegistryParams(
+            levels=self.levels_table.bundle(), modules=self.modules_table.bundle(), devices=self.devices_table.bundle()
+        )
+
+
+def create_mock_modules(iterations=1_000):
+    mock_pool = NumpyArrayPool()
+    registry = IDRegistry(mock_pool)
+
+    # 3. Allocation Loop
+    print(f"Registering {iterations} modules...")
+    device = registry.get_device("stress_test_device")
+
+    for i in range(iterations):
+        # We wrap in a list because your _register_new_modules expects one
+        new_mod = device.get_module(f"module_{i}")
+
+
+def memory_test(iterations=1_000):
+
+    from blinkview.utils.profile_memory import profile_memory
+
+    profile_memory(create_mock_modules)
+
+
+if __name__ == "__main__":
+    memory_test()

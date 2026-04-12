@@ -9,6 +9,9 @@ import time
 
 import numpy as np
 
+from blinkview.core import dtypes
+from blinkview.utils.profile_memory import profile_memory
+
 
 class PooledArrayHandle:
     """
@@ -65,7 +68,7 @@ class NumpyArrayPool:
         # Round up to next power of 2
         return 1 << (size_in_bytes - 1).bit_length()
 
-    def acquire(self, element_count, dtype=np.uint8):
+    def acquire(self, element_count, dtype=dtypes.BYTE):
         """
         Acquires an array capable of holding at least `element_count` items.
         """
@@ -85,22 +88,41 @@ class NumpyArrayPool:
                 if bucket:
                     _, base_arr = bucket.pop()  # LIFO
 
+                    # --- DEBUG: POOL HIT ---
+                    # mb_size = slab_size / (1024 * 1024)
+                    # print(f"[POOL] ♻️ REUSE mb={mb_size:.4f} bytes={slab_size} dtype={dt.name}")
+
         # Always allocate a full power-of-two slab if no pooled array was found
         if base_arr is None:
             num_elements = slab_size // dt.itemsize
+
+            # --- DEBUG: OS ALLOCATION ---
+            # mb_size = slab_size / (1024 * 1024)
+            # print(f"[POOL] 🚨 ALLOC mb={mb_size:.4f} bytes={slab_size} dtype={dt.name} elements={num_elements}")
+
             base_arr = np.empty(num_elements, dtype=dt)
 
         return PooledArrayHandle(self, base_arr, bucket_key)
 
     def _put(self, bucket_key, array):
         """Thread-safe return to pool with aging timestamp."""
-        slab_size, _ = bucket_key
+        slab_size, dtype = bucket_key
         if self.min_bytes <= slab_size <= self.max_bytes:
             with self.lock:
                 # Initialize bucket lazily to keep __init__ clean
-                if bucket_key not in self.buckets:
-                    self.buckets[bucket_key] = []
-                self.buckets[bucket_key].append((time.monotonic(), array))
+                try:
+                    bucket = self.buckets[bucket_key]
+                except KeyError:
+                    bucket = []
+                    self.buckets[bucket_key] = bucket
+
+                bucket.append((time.monotonic(), array))
+
+        #         mb_size = slab_size / (1024 * 1024)
+        #         print(f"[POOL] ♻️ RETUR mb={mb_size:.4f} bytes={slab_size} dtype={dtype}")
+        # else:
+        #     mb_size = slab_size / (1024 * 1024)
+        #     print(f"[POOL] 🚨 DELET  mb={mb_size:.4f} bytes={slab_size} dtype={dtype}")
 
     def cleanup(self, max_age_seconds):
         """Evicts arrays that have been idle for too long."""
@@ -111,7 +133,7 @@ class NumpyArrayPool:
                 # Filter bucket: keep only arrays returned within the time window
                 self.buckets[key] = [(ts, arr) for ts, arr in bucket if (now - ts) < max_age_seconds]
 
-    def get(self, element_count, dtype=np.uint8):
+    def get(self, element_count, dtype=dtypes.BYTE):
         """Sugar for context manager usage."""
         return self.acquire(element_count, dtype)
 
@@ -121,3 +143,26 @@ class NumpyArrayPool:
         automatically injecting this pool as the first argument.
         """
         return wrapper_class(self, *args, **kwargs)
+
+    def audit(self):
+        print("\n" + "=" * 40)
+        print("      NUMPY POOL STORAGE AUDIT")
+        print("=" * 40)
+        total_mb = 0
+        total_count = 0
+
+        with self.lock:
+            for (size_bytes, dtype), bucket in self.buckets.items():
+                count = len(bucket)
+                mb = (size_bytes * count) / (1024 * 1024)
+                total_mb += mb
+                total_count += count
+                if count > 0:
+                    print(
+                        f"Bucket: {size_bytes:>7} bytes | Dtype: {dtype.name:<7} | Count: {count:>6} | Total: {mb:>7.2f} MB"
+                    )
+
+        print("-" * 40)
+        print(f"GRAND TOTAL POOLED: {total_mb:.2f} MB")
+        print(f"TOTAL ARRAY OBJECTS: {total_count:,}")
+        print("=" * 40 + "\n")

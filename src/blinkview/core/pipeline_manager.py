@@ -10,7 +10,7 @@ from typing import Dict, Type
 
 from ..io.BaseReader import BaseReader, DeviceFactory
 from ..parsers.parser import BaseParser, ParserFactory, ParserThread
-from ..utils.level_map import LogLevel
+from ..utils.log_level import LogLevel
 from .bindable import bindable
 from .central_storage import CentralFactory
 from .configurable import configurable, configuration_property
@@ -136,7 +136,7 @@ class PipelineManager:
                             item.restart()
 
             except Exception as e:
-                self.logger.error(f"Failed to process pipeline '{item_id}'", e)
+                self.logger.exception(f"Failed to process pipeline '{item_id}'", e)
 
         # ---FINALIZATION ---
         if not self.needs_delayed_init:

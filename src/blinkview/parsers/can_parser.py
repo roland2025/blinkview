@@ -13,7 +13,7 @@ from blinkview.core.device_identity import DeviceIdentity
 from blinkview.core.log_row import LogRow
 from blinkview.parsers.assembler import BaseAssembler
 from blinkview.parsers.can_bus import CanAssemblerFactory, CanParserFactory
-from blinkview.utils.level_map import LogLevel
+from blinkview.utils.log_level import LogLevel
 
 from ..core.configurable import configuration_property
 from ..io.BaseReader import DeviceFactory
@@ -77,7 +77,7 @@ from ..core.configurable import (
     override_property,
 )
 from ..core.log_row import LogRow
-from ..utils.level_map import LogLevel
+from ..utils.log_level import LogLevel
 
 
 @configuration_property(

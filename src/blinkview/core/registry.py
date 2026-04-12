@@ -4,31 +4,32 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import json
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Queue
+from threading import RLock
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Optional
+
+from blinkview.core.id_registry import IDRegistry
+from blinkview.parsers import frame_decoders, frame_parsers
 
 from ..io import *
 from ..io.BaseReader import DeviceFactory
 from ..parsers import *
 from ..storage import *
-from ..storage.file_logger import FileLogger, LogRowBatchProcessor
+from ..storage.file_logger import FileLogger
 from ..storage.file_manager import FileManager
 from ..subscribers.subscriber import SubscriberFactory
 from ..utils import level_map
 from ..utils.time_utils import TimeUtils
 from .array_pool import NumpyArrayPool
-from .bisect_reorder import Reorder
-from .central_storage import BaseCentralStorage, CentralFactory, CentralStorage
+from .central_storage import CentralFactory
 from .config_manager import ConfigManager
 from .factory_registry import FactoryRegistry
-from .id_registry import IDRegistry
-from .log_row import LogRow
 from .logger import PrintLogger, SystemLogger
+from .numpy_batch_manager import PooledLogBatch
 from .plugin_manager import PluginManager
-from .reorder_buffer import ReorderBuffer, ReorderFactory
+from .reorder_buffer import ReorderFactory
 from .reusable_batch_pool import PoolManager
 from .settings_manager import SettingsManager
 from .sources import SourcesManager
@@ -41,16 +42,22 @@ if TYPE_CHECKING:
 
 class Registry:
     def __init__(
-        self, session_name: str, config_path: str = None, profile_name: str = None, log_dir: str | Path = None
+        self, session_name: str = None, config_path: str = None, profile_name: str = None, log_dir: str | Path = None
     ):
         # ==========================================
         # LAYER 1: Core Services
         # ==========================================
 
         self.initialized = False
+
         self._temp_log_queue: Queue = Queue()
 
-        self.system_log_queue: Queue[LogRow] = Queue()
+        np_pool = NumpyArrayPool(max_bytes=64 * 1024 * 1024)
+
+        self.log_lock = RLock()
+        self.log_batch: Optional[PooledLogBatch] = None
+        self.log_buffer_kb = 4
+        self.log_capacity = self.log_buffer_kb * 1024 / 32  # 32 chars per msg
 
         self.time_utils = TimeUtils()
         self.now = self.time_utils.now
@@ -72,9 +79,12 @@ class Registry:
         factories.register("can_assembler", can_bus.CanAssemblerFactory)
         factories.register("can_decode", can_bus.CanDecoderFactory)
         factories.register("can_transform", can_bus.CanTransformFactory)
-        factories.register("log_level_map", level_map.LogLevelMapFactory)
+        # factories.register("log_level_map", level_map.LogLevelMapFactory)
         factories.register("logging_processor", file_logger.BatchProcessorFactory)
         factories.register("file_logging", file_logger.FileLoggerFactory)
+        factories.register("frame_decoder", frame_decoders.FrameDecoderFactory)
+        factories.register("frame_parser", frame_parsers.FrameParserFactory)
+        factories.register("frame_section_parser", frame_parsers.FrameSectionParserFactory)
 
         self.file_manager = FileManager(
             session_name=session_name, profile_name=profile_name, log_dir=log_dir, config_path=config_path
@@ -120,7 +130,7 @@ class Registry:
         # Snapshot the logic immediately
         # self.file_manager.save_snapshot(["src/", "configs/"])
 
-        self.id_registry = IDRegistry()
+        self.id_registry = IDRegistry(np_pool)
 
         self.system_ctx = SystemContext(
             time_ns=self.now_ns,
@@ -130,11 +140,27 @@ class Registry:
             tasks=TaskManager(),
             settings=SettingsManager(),
             pool=PoolManager(),
-            array_pool=NumpyArrayPool(max_bytes=64 * 1024 * 1024),
+            array_pool=np_pool,
         )
         self.file_manager.set_context(self.system_ctx)
 
-        self.pool_acquire_logrows = self.system_ctx.pool.get(tag="LogRows").acquire
+        self.system_device = self.id_registry.get_device("SYSTEM")
+        self.log_device_id = self.system_device.id
+
+        # estimated_buffer_kb = 4
+        # estimated_capacity = estimated_buffer_kb * 1024 / 32  # 32 chars per msg
+        #
+        # def batch_acquire():
+        #     return np_pool.create(
+        #         PooledLogBatch,
+        #         estimated_capacity,
+        #         estimated_buffer_kb,
+        #         has_levels=True,
+        #         has_modules=True,
+        #         has_devices=True,
+        #     )
+        #
+        # self.pool_acquire_logrows = self.system_ctx.pool.get(tag="LogRows").acquire
 
         self.sources = None
 
@@ -173,7 +199,7 @@ class Registry:
 
     def logger_creator(self, category: str, name: str = None):
         if not self.initialized:
-            return lambda: PrintLogger(category, name, self._temp_log_queue, self.now_ns)
+            return lambda: PrintLogger(category, name, self._temp_log_queue.put, self.now_ns)
 
         return lambda: SystemLogger(category, name, self)
 
@@ -364,19 +390,16 @@ class Registry:
             self.logger.error(f"Error during system configuration", e)
 
     def _dump_temp_logs(self):
-        is_reorder_enabled = self.reorder is not None and self.reorder.enabled
-        log_put_fn = self.reorder.put if is_reorder_enabled else self.central.put
-        module = self.get_device("SYSTEM")
+        get_module = self.system_device.get_module
+        log_append = self.log_append
+        get_nowait = self._temp_log_queue.get_nowait
 
-        with self.system_ctx.pool.get(tag="LogRows").acquire() as log_batch:
-            while True:
-                try:
-                    timestamp, module_name, level_id, msg = self._temp_log_queue.get_nowait()
-                    log_batch.append(LogRow(timestamp, level_id, module.get_module(module_name), msg))
-                except Exception:
-                    break
-            log_batch.retain()
-            log_put_fn(log_batch)
+        while True:
+            try:
+                timestamp, module_name, level_id, msg = get_nowait()
+                log_append(timestamp, level_id.value, get_module(module_name).id, msg)
+            except Exception:
+                break
 
         self._temp_log_queue = None  # Release the temporary log queue
 
@@ -621,20 +644,99 @@ class Registry:
             self.logger.exception(f"buffer_stats failed: {e}")
 
     def flush_log_queue(self):
-        log_queue = self.system_log_queue
-        if not log_queue:
-            return
+        with self.log_lock:
+            batch = self.log_batch
+            if batch is not None and batch.size > 0:
+                with batch:
+                    put_fn = self.reorder.put if self.reorder is not None and self.reorder.enabled else self.central.put
+                    put_fn(batch)
 
-        with self.pool_acquire_logrows() as batch:
-            batch_append = batch.append
-            get_nowait = log_queue.get_nowait
+            self.log_batch = None
 
-            try:
-                while True:
-                    batch_append(get_nowait())
-            except Empty:
-                pass
+    def log_create_batch(self):
+        batch = self.system_ctx.array_pool.create(
+            PooledLogBatch,
+            self.log_capacity,
+            self.log_buffer_kb,
+            has_levels=True,
+            has_modules=True,
+            has_devices=True,
+        )
+        with self.log_lock:
+            self.log_batch = batch
+        return batch
 
-            put_fn = self.reorder.put if self.reorder is not None and self.reorder.enabled else self.central.put
-            put_fn(batch)
-            batch.retain()
+    def log_append(self, timestamp, level_id, module_id, msg):
+        with self.log_lock:
+            batch = self.log_batch
+            if batch is None:
+                batch = self.log_create_batch()
+            encoded = msg.encode()
+            if not batch.insert(timestamp, encoded, level_id, module_id, self.log_device_id):
+                # batch full, flush and create new batch
+                self.flush_log_queue()
+                batch = self.log_create_batch()
+                batch.insert(timestamp, encoded, level_id, module_id, self.log_device_id)
+
+
+def run_memory_test():
+    import gc
+    import os
+    from time import sleep
+
+    import psutil
+
+    process = psutil.Process(os.getpid())
+
+    def get_stats():
+        gc.collect()  # Ensure we measure actual retained memory
+        full_info = process.memory_full_info()
+        basic_info = process.memory_info()
+
+        # .private is Windows specific. Fallback to rss if on Linux/macOS
+        private_bytes = getattr(basic_info, "private", basic_info.rss)
+        uss = full_info.uss
+        return private_bytes, uss
+
+    # 1. Baseline
+    print("--- Starting Test ---")
+    base_private, base_uss = get_stats()
+
+    # 2. Setup and Execution
+    # registry = Registry()
+    # registry.configure_system()
+    # registry.start()
+
+    # SIMULATION: Replace this with your actual registry logic
+    sleep(2)
+
+    # 3. Final Measurement
+    # registry.stop()
+    final_private, final_uss = get_stats()
+
+    # 4. Formatting Output
+    def to_mb(b):
+        return b / (1024 * 1024)
+
+    print(f"\n{'Metric':<20} | {'Baseline':<12} | {'Final':<12} | {'Delta':<12}")
+    print("-" * 65)
+
+    p_delta = final_private - base_private
+    print(
+        f"{'Private Bytes':<20} | {to_mb(base_private):>8.2f} MB | {to_mb(final_private):>8.2f} MB | {to_mb(p_delta):>+8.2f} MB"
+    )
+
+    u_delta = final_uss - base_uss
+    print(
+        f"{'USS (Unique Set)':<20} | {to_mb(base_uss):>8.2f} MB | {to_mb(final_uss):>8.2f} MB | {to_mb(u_delta):>+8.2f} MB"
+    )
+
+    print("-" * 65)
+    if p_delta > u_delta * 1.5:
+        print("\n[!] WARNING: Private Bytes are significantly higher than USS.")
+        print("    This suggests heavy heap fragmentation or memory claimed by C-extensions/Pools")
+        print("    that hasn't been mapped to the physical Working Set yet.")
+
+
+if __name__ == "__main__":
+    run_memory_test()

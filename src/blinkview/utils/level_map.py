@@ -4,35 +4,27 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import Callable
+from typing import List, Optional
 
+from blinkview.core import dtypes
 from blinkview.core.configurable import (
-    configurable,
     configuration_property,
     on_config_change,
     override_property,
 )
-from blinkview.core.factory import BaseFactory
+from blinkview.core.id_registry.tables import IndexedStringTable
+from blinkview.ops.constants import EMPTY_STATE
+from blinkview.ops.levels import parse_log_level
+from blinkview.parsers.frame_parsers import FrameSectionParser, FrameSectionParserFactory
 from blinkview.utils.log_level import LogLevel
 
 
-@configurable
-class BaseLogLevelMap:
-    pass
-
-
-class LogLevelMapFactory(BaseFactory[BaseLogLevelMap]):
-    pass
-
-
-@LogLevelMapFactory.register("default")
+@FrameSectionParserFactory.register("log_level_default")
 @configuration_property(
     "mapping",
     type="object",
     title="Level Text Mappings",
     description="Map specific text strings found in logs to LogLevels.",
-    # This allows the UI to add arbitrary keys (the text)
-    # and select a LogLevel from a dropdown for each.
     additionalProperties={
         "type": "integer",
         "enum": [lvl.value for lvl in LogLevel.LIST_CONF],
@@ -49,36 +41,64 @@ class LogLevelMapFactory(BaseFactory[BaseLogLevelMap]):
         "C": LogLevel.CRITICAL.value,
     },
 )
-class LevelMap(BaseLogLevelMap):
+class LevelMap(FrameSectionParser):
     mapping: dict
 
     def __init__(self):
         super().__init__()
+        self._table: Optional[IndexedStringTable] = None
+
         self._lookup = {}
-        self._bake_internal()
 
-    @on_config_change("mapping")
-    def _on_mapping_changed(self, new_mapping, _):
-        """Re-bakes the internal lookup dictionary whenever the config changes."""
-        self._bake_internal()
+    def apply_config(self, config):
+        changed = super().apply_config(config)
 
-    def _bake_internal(self):
-        """Converts integer values from config into LogLevel objects for fast lookup."""
+        # 1. Cleanup old resources
+        if self._table:
+            self._table.release()
+
+        # 2. Prepare items
+        items = list(self.mapping.items())
+        count = len(items)
+
+        # 3. Initialize Table and Values Array
+        # We use sequential IDs (0 to count-1) to keep the table dense
+        self._table = IndexedStringTable(
+            self.shared.array_pool, initial_capacity=count, values_dtype=dtypes.VALUES_TYPE
+        )
+
+        for i, (text, level_val) in enumerate(items):
+            # Register string at index i
+            self._table.register_name(i, text, level_val)
+
         self._lookup = {text: LogLevel.from_value(val, LogLevel.INFO) for text, val in self.mapping.items()}
 
-    def get_level(self, text: str, default: LogLevel = None) -> LogLevel:
-        """Returns the LogLevel object for the given text string."""
-        return self._lookup.get(text, default)
+        return changed
+
+    def bundle(self):
+        """Returns the StringTableParams for backend processing."""
+        return parse_log_level, EMPTY_STATE, self._table.bundle()
+
+    def table(self):
+        return self._table
+
+    def release(self):
+        """Explicitly release pool resources."""
+        if self._table:
+            self._table.release()
+            self._table = None
+
+    def __del__(self):
+        self.release()
 
     def levels(self):
         """Returns the set of all LogLevel objects currently in the mapping."""
         return self._lookup.values()
 
 
-@LogLevelMapFactory.register("nrf")
+@FrameSectionParserFactory.register("log_level_nrf")
 @override_property(
     "mapping",
-    # type="object",
     title="NRF Level Mappings",
     description="Predefined mapping for Nordic NRF logs.",
     default={
@@ -96,12 +116,11 @@ class NrfLevelMap(LevelMap):
     pass
 
 
-@LogLevelMapFactory.register("zephyr")
+@FrameSectionParserFactory.register("log_level_zephyr")
 @override_property(
     "mapping",
-    # type="object",
-    title="NRF Level Mappings",
-    description="Predefined mapping for Nordic NRF logs.",
+    title="Zephyr Level Mappings",
+    description="Predefined mapping for Zephyr RTOS logs.",
     default={
         "<dbg>": LogLevel.DEBUG.value,
         "<inf>": LogLevel.INFO.value,
@@ -109,11 +128,11 @@ class NrfLevelMap(LevelMap):
         "<err>": LogLevel.ERROR.value,
     },
 )
-class NrfLevelMap(LevelMap):
+class ZephyrLevelMap(LevelMap):
     pass
 
 
-@LogLevelMapFactory.register("custom")
+@FrameSectionParserFactory.register("log_level_custom")
 @override_property("mapping", title="Custom level Mappings", description="Custom mapping for logs.", default={})
 class CustomLevelMap(LevelMap):
     pass

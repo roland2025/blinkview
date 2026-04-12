@@ -9,7 +9,7 @@ from time import sleep
 from ..core.configurable import configuration_property, override_property
 from ..core.log_row import LogRow
 from ..core.reusable_batch_pool import TimeDataEntry
-from ..utils.level_map import LogLevel
+from ..utils.log_level import LogLevel
 from .BaseReader import BaseReader, DeviceFactory
 
 # Values in kHz as required by jlink.connect()

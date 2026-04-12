@@ -5,22 +5,27 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from collections import deque
+from datetime import datetime
 from typing import Iterable
 
+import numpy as np
 from qtpy.QtGui import QAction, Qt
 from qtpy.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLayout, QWidget
 
+from blinkview.core import dtypes
 from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.batched_logrows import BatchedLogRows
-from blinkview.core.numpy_log import filter_segment, format_log_batch_numba, query_pool
+from blinkview.core.numpy_log import filter_segment, query_pool
+from blinkview.core.types.formatting import FormattingConfig
+from blinkview.ops.formatting import format_log_batch
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
 from blinkview.ui.widgets.log_highlighter import LogHighlighter
 from blinkview.ui.widgets.module_filter_sidebar import ModuleFilterSidebar
 from blinkview.ui.widgets.searchable_log_area import SearchableLogArea
 from blinkview.ui.widgets.telemetry_table import TelemetryTable
-from blinkview.utils.level_map import LogLevel
 from blinkview.utils.log_filter import LogFilter
+from blinkview.utils.log_level import LogLevel
 from blinkview.utils.time_utils import ConsoleTimestampFormatter
 
 
@@ -67,9 +72,6 @@ QToolButton[filterEnabled="true"] {
         self.show_lvl = True
         self.show_mod = True
         self.saved_sizes = None
-        import numpy as np
-
-        self._np = np
 
         self._set_defaults()
 
@@ -209,7 +211,7 @@ QToolButton[filterEnabled="true"] {
 
         self.splitter.addWidget(self.text_area)
 
-        self.highlighter = LogHighlighter(self.text_area.document(), self.gui_context.id_registry.level_map)
+        self.highlighter = LogHighlighter(self.text_area.document())
 
         self.timestamp_formatter = ConsoleTimestampFormatter()
 
@@ -402,140 +404,14 @@ QToolButton[filterEnabled="true"] {
         self.clear_logs()
         self.latest_seq_seen = -1  # Reset sequence tracker to ensure we load all relevant logs
 
-    def _apply_updates(self):
-        # get messages from central storage and show them on the screen
-
-        now_ns = self.gui_context.registry.now_ns
-        fetch_start = now_ns()
-        batches, self.latest_seq_seen = self.gui_context.registry.central.get_batches(
-            self.log_filter, total=self.max_rows, start_seq=self.latest_seq_seen
-        )
-        fetch_end = now_ns()
-        # print(f"[LogViewer] Fetched batches={len(batches)} duration={(fetch_end - fetch_start) / 1e6:.3f} ms")
-
-        first_data = len(self.log_history)
-
-        formatted_rows = []
-
-        for batch in batches:
-            self.log_history.put(batch)
-
-            if self.is_paused or self.auto_paused:
-                continue
-
-            if first_data > 0 and self.velocity_tracker.update_and_check(len(batch)):
-                if not self.is_paused:
-                    self.auto_paused = True
-                    self.action_pause.setChecked(True)
-                    continue
-
-            formatted_rows = self._format_messages(batch, formatted_rows)
-
-        self.text_area.append_log(formatted_rows)
-
-        end = now_ns()
-        self.logger.debug(
-            f"Fetched batches={len(batches)} total={(end - fetch_start) / 1e6:.3f} ms fetch={(fetch_end - fetch_start) / 1e6:.3f} ms print={(end - fetch_end) / 1e6:.3f} ms rows={len(formatted_rows)}"
-        )
-
-    def ____apply_updates(self):
-        """
-        Drop-in replacement using CircularLogPool with Numba-accelerated filtering.
-        """
-        now_ns = self.gui_context.registry.now_ns
-        t_start = now_ns()
-
-        # 1. Extract Filter Params
-        f = self.log_filter
-        # Assuming your LogFilter now holds a 'target_modules' list or we use the singular
-        t_modules = getattr(f, "target_modules", None)
-        t_module = f.filtered_module.id if f.filtered_module else 0xFFFF
-        t_device = f.allowed_device.id if f.allowed_device else 0xFFFF
-
-        # 2. Fetch Stage (Accelerated)
-        t_fetch_start = now_ns()
-
-        # msg_query_args = f"t_modules={t_modules}, t_module={t_module}, t_device={t_device}, level={f.log_level.value}, start_seq={self.latest_seq_seen}"
-        # print(msg_query_args)
-
-        new_batch = []
-        # Note: We pass start_seq to the query_pool to let Numba skip old data
-        log_gen = query_pool(
-            self.gui_context.id_registry,
-            self.gui_context.registry.central.log_pool,
-            target_modules=t_modules,
-            target_module=t_module,
-            target_device=t_device,
-            target_level=f.log_level.value if f.log_level.value else 0xFF,
-            start_seq=self.latest_seq_seen,  # Numba-optimized skip
-        )
-
-        for row in log_gen:
-            # Update sequence tracker
-            if row.seq > self.latest_seq_seen:
-                self.latest_seq_seen = row.seq
-
-            new_batch.append(row)
-
-            # Safety cap to prevent UI locking on massive bursts
-            if len(new_batch) >= self.max_rows:
-                break
-
-        t_fetch_end = now_ns()
-        fetch_ms = (t_fetch_end - t_fetch_start) / 1e6
-
-        # 3. Processing Stage
-        t_format_ms = 0.0
-        t_ui_ms = 0.0
-        formatted_count = 0
-
-        if new_batch:
-            # Update underlying history storage
-            # self.log_history.put(new_batch)
-
-            # Check for Auto-Pause / Velocity logic
-            if not (self.is_paused or self.auto_paused):
-                is_clogged = len(self.log_history) > 0 and self.velocity_tracker.update_and_check(len(new_batch))
-
-                if is_clogged:
-                    if not self.is_paused:
-                        self.auto_paused = True
-                        self.action_pause.setChecked(True)
-                else:
-                    # 4. Formatting Stage
-                    t_format_start = now_ns()
-                    formatted_rows = []
-                    formatted_rows = self._format_messages(new_batch, formatted_rows)
-                    formatted_count = len(formatted_rows)
-                    t_format_end = now_ns()
-                    t_format_ms = (t_format_end - t_format_start) / 1e6
-
-                    # 5. UI Append Stage
-                    t_ui_start = now_ns()
-                    self.text_area.append_log(formatted_rows)
-                    t_ui_end = now_ns()
-                    t_ui_ms = (t_ui_end - t_ui_start) / 1e6
-
-        t_total_end = now_ns()
-        total_ms = (t_total_end - t_start) / 1e6
-
-        # 6. Detailed Performance Telemetry
-        # if new_batch or total_ms > 10:  # Only log if there's work or a stutter
-        msg = (
-            f"LogUpdate | Total: {total_ms:6.2f}ms | "
-            f"Fetch: {fetch_ms:6.2f}ms ({len(new_batch)} rows) | "
-            f"Format: {t_format_ms:6.2f}ms | "
-            f"UI: {t_ui_ms:6.2f}ms | "
-            # f"Seq: {self.latest_seq_seen}"
-        )
-        self.logger.debug(msg)
-        # print(msg)
-
     def apply_updates(self):
         """
         Zero-hydration replacement. Blasts raw bytes from the pool into a single
         formatted string for the UI, bypassing LogRow object creation entirely.
         """
+        if self.is_paused or self.auto_paused:
+            return
+
         now_ns = self.gui_context.registry.now_ns
         t_start = now_ns()
 
@@ -544,18 +420,16 @@ QToolButton[filterEnabled="true"] {
         reg = self.gui_context.id_registry
         pool = self.gui_context.registry.central.log_pool
 
-        # Get Numba-friendly byte maps
+        tz_offset_sec = int(datetime.now().astimezone().utcoffset().total_seconds())
 
-        l_params = reg.level_map_bytes.get_numba_params()
-        m_params = reg.module_map.get_numba_params()
-        d_params = reg.device_map.get_numba_params()
+        # Get Numba-friendly byte maps
 
         # Prepare module whitelist for Numba
         t_modules = getattr(f, "target_modules", None)
         if t_modules:
-            tm_arr = self._np.array(t_modules, dtype=self._np.uint16)
+            tm_arr = np.array(t_modules, dtype=dtypes.ID_TYPE)
         else:
-            tm_arr = self._np.empty(0, dtype=self._np.uint16)
+            tm_arr = np.empty(0, dtype=dtypes.ID_TYPE)
 
         t_module = f.filtered_module.id if f.filtered_module else 0xFFFF
         t_device = f.allowed_device.id if f.allowed_device else 0xFFFF
@@ -567,20 +441,17 @@ QToolButton[filterEnabled="true"] {
         total_new_rows = 0
         full_string_batch = ""
 
+        format_cfg = FormattingConfig(self.show_ts, self.show_dev, self.show_lvl, self.show_mod)
+
         # Iterate segments chronologically
         for segment in pool.get_ordered_segments():
             # Quick skip: segment is empty or already fully seen
-            if segment.count == 0 or segment.seqs[segment.count - 1] <= self.latest_seq_seen:
+            if segment.count == 0 or segment.sequence_ids[segment.count - 1] <= self.latest_seq_seen:
                 continue
 
             # Find matching indices in this segment
             indices = filter_segment(
-                segment.count,
-                segment.timestamps,
-                segment.levels,
-                segment.modules,
-                segment.devices,
-                segment.seqs,
+                segment.bundle(),
                 target_modules_arr=tm_arr,
                 start_seq=self.latest_seq_seen,
                 target_level=target_level,
@@ -590,27 +461,11 @@ QToolButton[filterEnabled="true"] {
 
             if len(indices) > 0:
                 # Pass the toggles directly to Numba
-                raw_bytes = format_log_batch_numba(
-                    indices,
-                    segment.timestamps,
-                    segment.levels,
-                    segment.modules,
-                    segment.devices,  # segment.devices is the device_id array
-                    segment.msg_offsets,
-                    segment.msg_lens,
-                    segment.msg_buffer,
-                    l_params,
-                    m_params,
-                    d_params,
-                    self.show_ts,
-                    self.show_dev,
-                    self.show_lvl,
-                    self.show_mod,
-                )
+                raw_bytes = format_log_batch(indices, segment.bundle(), reg.bundle(), format_cfg, tz_offset_sec)
 
                 full_string_batch += raw_bytes.tobytes().decode("utf-8", errors="replace")
                 total_new_rows += len(indices)
-                self.latest_seq_seen = max(self.latest_seq_seen, segment.seqs[indices[-1]])
+                self.latest_seq_seen = max(self.latest_seq_seen, segment.sequence_ids[indices[-1]])
 
             if total_new_rows >= self.max_rows:
                 break
@@ -644,10 +499,10 @@ QToolButton[filterEnabled="true"] {
         total_ms = (t_total_end - t_start) / 1e6
 
         # 4. Telemetry
-        if total_new_rows:
-            msg = f"rows={total_new_rows} total={total_ms:.2f}ms fetch={fetch_and_format_ms:.2f}ms ui={t_ui_ms:.2f}ms"
-            self.logger.debug(msg)
-            # print(msg)
+        # if total_new_rows:
+        #     msg = f"rows={total_new_rows} total={total_ms:.2f}ms fetch={fetch_and_format_ms:.2f}ms ui={t_ui_ms:.2f}ms"
+        #     self.logger.debug(msg)
+        # print(msg)
 
     def _format_messages(self, messages: Iterable, rows=None) -> list:
         """Dynamically builds the string based on the active toggles."""
@@ -702,6 +557,7 @@ QToolButton[filterEnabled="true"] {
         self.log_history.clear()
         self.text_area.clear()
         self.latest_seq_seen = -1  # Reset tracker
+        self.velocity_tracker.reset()
 
     def _toggle_telemetry_sidebar(self, checked):
         """Toggles the visibility of the Telemetry sidebar."""
@@ -718,6 +574,7 @@ QToolButton[filterEnabled="true"] {
         else:
             text = "⏸ Pause"
             self.auto_paused = False  # Reset auto-flag on manual resume
+            self.velocity_tracker.reset()
 
         self.action_pause.setText(text)
 

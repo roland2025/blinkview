@@ -368,66 +368,6 @@ class TelemetryPlotter(QWidget):
 
         return updated
 
-    def __apply_updates(self):
-        # Fetches entries from backend and updates screen
-        now_ns = self.gui_context.registry.now_ns
-        start_seq = self.latest_seq
-
-        # Point to the new fast-path getter
-        get_telemetry_batch = self.gui_context.registry.central.get_telemetry_batch
-
-        updated = False
-
-        start = now_ns()
-
-        fetch_duration = 0
-
-        for module in self.modules:
-            fetch_start = now_ns()
-
-            buf = self.buffers.get(module)
-            target_cols = buf.num_channels if buf else 0
-
-            # 1. Pull native numpy arrays straight from the central queue
-            batch_container = get_telemetry_batch(module, start_seq, target_cols)
-
-            if batch_container is not None:
-                with batch_container as batch:
-                    self.latest_seq = batch.latest_seq
-
-                    if not buf:
-                        buf = ModuleBuffer(
-                            x_data=self._np.zeros(self.max_points * 2),
-                            y_data=self._np.zeros((self.max_points * 2, batch.target_cols), order="F"),
-                            buffer=BatchQueue(self.max_points),
-                        )
-                        self.buffers[module] = buf
-                        self._init_module_channels(module, batch.target_cols)
-
-                    # Read directly from the perfectly-sized views
-                    self._insert_into_circular_buffer(module, batch.times, batch.values)
-                    updated = True
-
-            fetch_end = now_ns()
-            fetch_duration += fetch_end - fetch_start
-
-        draw_start = now_ns()
-        if updated:
-            self._update_plots()
-
-        end = now_ns()
-        draw_duration = end - draw_start
-        # Calculate ratio, defaulting to 0.0 if fetch_duration is 0 to avoid crash
-        ratio = draw_duration / fetch_duration if fetch_duration > 0 else 0.0
-
-        self.logger.debug(
-            f"updated={1 if updated else 0} "
-            f"total={(end - start) / 1e6:.3f} ms "
-            f"draw={draw_duration / 1e6:.3f} ms "
-            f"fetch={fetch_duration / 1e6:.3f} ms "
-            f"ratio={ratio:.3f}"
-        )
-
     def apply_updates(self):
         np = self._np
         now_ns = self.gui_context.registry.now_ns
@@ -479,13 +419,13 @@ class TelemetryPlotter(QWidget):
         draw_duration = end - draw_start
         ratio = draw_duration / fetch_duration if fetch_duration > 0 else 0.0
 
-        self.logger.debug(
-            f"updated={1 if updated else 0} "
-            f"total={(end - start) / 1e6:.3f} ms "
-            f"draw={draw_duration / 1e6:.3f} ms "
-            f"fetch={fetch_duration / 1e6:.3f} ms "
-            f"ratio={ratio:.3f}"
-        )
+        # self.logger.debug(
+        #     f"updated={1 if updated else 0} "
+        #     f"total={(end - start) / 1e6:.3f} ms "
+        #     f"draw={draw_duration / 1e6:.3f} ms "
+        #     f"fetch={fetch_duration / 1e6:.3f} ms "
+        #     f"ratio={ratio:.3f}"
+        # )
 
     def _insert_into_circular_buffer(self, module, new_times, new_values):
         """Inserts arrays directly into the Mirrored Ring Buffer."""
@@ -657,27 +597,34 @@ class TelemetryPlotter(QWidget):
                 if s.plot_item:
                     s.plot_item.setXRange(minX, maxX, padding=0)
 
-        def update_region_from_main(window, viewRange):
+        def update_region_from_main(*args):  # Use *args to ignore whatever PyQtGraph sends
             import math
 
-            rlow, rhigh = viewRange[0]
-
-            # CRITICAL: Prevent Qt BSP Segfaults
-            if math.isnan(rlow) or math.isnan(rhigh):
-                return
-
-            # Break the infinite feedback loop
+            # 1. Break infinite feedback loops
             if self._is_system_updating:
                 return
 
+            # 2. Grab the source of truth directly from the PlotItem
+            # .viewRange() always returns a list: [[xMin, xMax], [yMin, yMax]]
+            try:
+                main_p = self.series_list[0].plot_item
+                v_range = main_p.viewRange()
+                rlow, rhigh = v_range[0]  # This is the X-axis range
+            except (IndexError, AttributeError):
+                return
+
+            # 3. CRITICAL: Prevent Qt BSP Segfaults
+            if math.isnan(rlow) or math.isnan(rhigh):
+                return
+
+            # 4. Update the overview UI
             self.set_autoscroll(False)
 
-            rlow, rhigh = viewRange[0]
-
-            # Safely update the overview region
             self._is_system_updating = True  # Lock
-            self.region.setRegion([rlow, rhigh])  # Triggers update_main_from_region, which will safely return
-            self._is_system_updating = False  # Unlock
+            try:
+                self.region.setRegion([rlow, rhigh])
+            finally:
+                self._is_system_updating = False  # Unlock
 
         # Connect the signals once and leave them alone
         self.region.sigRegionChanged.connect(update_main_from_region)

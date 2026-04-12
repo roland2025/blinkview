@@ -4,15 +4,15 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from qtpy.QtCore import QObject
 
 from blinkview.ui.log_filter_index_manager import LogFilterIndexManager
-from blinkview.ui.native_dark_mode import set_native_dark_mode
 
 if TYPE_CHECKING:
+    from blinkview import Registry
+    from blinkview.core.id_registry import IDRegistry
     from blinkview.core.logger import SystemLogger
     from blinkview.core.settings_manager import SettingsManager
     from blinkview.ui.utils.config_node_manager import ConfigNodeManager
@@ -27,8 +27,8 @@ class GUIContext(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.registry = None
-        self.id_registry = None
+        self.registry: "Registry" = None
+        self.id_registry: "IDRegistry" = None
         self.settings: "SettingsManager" = None
 
         self.telemetry_model = None

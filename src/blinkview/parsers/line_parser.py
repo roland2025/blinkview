@@ -6,11 +6,8 @@
 
 from ..core.configurable import configuration_property
 from ..core.device_identity import DeviceIdentity
-from ..core.id_registry import IDRegistry
 from ..core.log_row import LogRow
-from ..core.system_context import SystemContext
-from ..utils.level_map import LogLevel
-from ..utils.settings_updater import update_object_from_config
+from ..utils.log_level import LogLevel
 from .assembler import AssemblerFactory, BaseAssembler
 
 
@@ -75,9 +72,7 @@ class LineParser(BaseAssembler):
 
         level_map_config = config.get("level_map")
         if level_map_config:
-            self.local_level_map = self.shared.factories.build(
-                "log_level_map", level_map_config, self.shared
-            )
+            self.local_level_map = self.shared.factories.build("log_level_map", level_map_config, self.shared)
         else:
             self.local_level_map = None
 
@@ -89,9 +84,7 @@ class LineParser(BaseAssembler):
 
         # Cache frequently used objects locally
         get_level_obj = (
-            self.local_level_map.get_level
-            if self.local_level_map
-            else self.shared.id_registry.level_map.get_level
+            self.local_level_map.get_level if self.local_level_map else self.shared.id_registry.level_map.get_level
         )
         LogRowCtor = LogRow
 

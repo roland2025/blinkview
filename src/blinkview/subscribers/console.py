@@ -11,8 +11,8 @@ from rich.text import Text
 
 from ..core.constants import SysCat
 from ..core.log_row import LogRow
-from ..utils.level_map import LogLevel
 from ..utils.log_filter import LogFilter
+from ..utils.log_level import LogLevel
 from ..utils.time_utils import ConsoleTimestampFormatter
 from .subscriber import BaseSubscriber, SubscriberFactory
 

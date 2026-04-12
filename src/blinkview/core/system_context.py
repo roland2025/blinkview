@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
+    from blinkview.core.id_registry import IDRegistry  # Adjust import path as needed
+
     from .array_pool import NumpyArrayPool
     from .factory_registry import FactoryRegistry  # Adjust import path as needed
-    from .id_registry import IDRegistry  # Adjust import path as needed
     from .registry import Registry
     from .reusable_batch_pool import PoolManager
     from .settings_manager import SettingsManager

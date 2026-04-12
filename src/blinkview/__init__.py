@@ -7,4 +7,11 @@
 __version__ = "0.7.0"
 __author__ = "Roland Uuesoo"
 
-from .core.registry import Registry
+import os
+
+# These must come BEFORE numpy, scipy, or any telemetry logic
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+
+# from .core.registry import Registry

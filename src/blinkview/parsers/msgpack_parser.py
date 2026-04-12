@@ -9,7 +9,7 @@ from blinkview.parsers.assembler import AssemblerFactory, BaseAssembler
 from ..core.configurable import configuration_property, override_property
 from ..core.device_identity import DeviceIdentity
 from ..core.log_row import LogRow
-from ..utils.level_map import LogLevel
+from ..utils.log_level import LogLevel
 from .parser import ParserFactory, ParserThread
 
 
@@ -36,9 +36,7 @@ class MsgPackToLogRow(BaseAssembler):
         def fast_parse(_: int, dev_id: DeviceIdentity, line: bytes):
             created, levelno, name, msg = unpackb(line, use_list=False)
 
-            return LogRowCtor(
-                created, level_from_int(levelno), dev_id.get_module(name), msg
-            )
+            return LogRowCtor(created, level_from_int(levelno), dev_id.get_module(name), msg)
 
         self.process = fast_parse
 
@@ -52,8 +50,6 @@ class MsgPackToLogRow(BaseAssembler):
 @override_property("decode", hidden=True, default={"type": "cobs_decode"})
 @override_property("transform", hidden=True)
 @override_property("assembler", hidden=True, default={"type": "msgpack"})
-@configuration_property(
-    "sources_", title="Source", type="string", required=True, _reference="/sources"
-)
+@configuration_property("sources_", title="Source", type="string", required=True, _reference="/sources")
 class MsgPackParser(ParserThread):
     __doc__ = "A parser that converts msgpack-encoded log lines into LogRow objects."
