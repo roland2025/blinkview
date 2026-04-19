@@ -75,21 +75,18 @@ def _merge_and_copy(chunks, ts_scr, b_idx_scr, r_idx_scr, out_bundle):
     """
     # 1. FILL SCRATCHPADS
     cursor = 0
+    # 1. FILL SCRATCHPADS
     for i in range(len(chunks)):
         chunk = chunks[i]
-        bundle = chunk.bundle
-        s = chunk.start
-        e = chunk.end
-
-        for j in range(s, e):
-            ts_scr[cursor] = bundle.timestamps[j]
+        b = chunk.bundle
+        for j in range(chunk.start, chunk.end):
+            ts_scr[cursor] = b.timestamps[j]
             b_idx_scr[cursor] = i
             r_idx_scr[cursor] = j
             cursor += 1
 
-    # 2. SORT CHRONOLOGICALLY
-    # Numba natively supports np.argsort and compiles it down to C
-    sort_order = np.argsort(ts_scr, kind="mergesort")
+    # 2. SORT (mergesort is stable, keeping same-TS logs in arrival order)
+    sort_order = np.argsort(ts_scr[:cursor], kind="mergesort")
 
     # 3. COPY TO OUTPUT BUNDLE
     num_rows = len(sort_order)
@@ -114,6 +111,7 @@ def _merge_and_copy(chunks, ts_scr, b_idx_scr, r_idx_scr, out_bundle):
         # Raw Memory Copy for Bytes
         for b in range(src_len):
             out_bundle.buffer[out_msg_cursor + b] = src_bundle.buffer[src_off + b]
+        # out_bundle.buffer[out_msg_cursor : out_msg_cursor + src_len] = src_bundle.buffer[src_off : src_off + src_len]
 
         out_msg_cursor += src_len
 
@@ -141,6 +139,20 @@ class Reorder(BaseReorder):
         self.input_queue = BatchQueue()
         self.put = self.input_queue.put
         self.numba_needs_compile = True
+
+        self._h_ts = self._h_b_idx = self._h_r_idx = None
+
+    def _get_scratchpads(self, size, pool):
+        """Re-acquire scratchpads only if they need to grow."""
+        if self._h_ts is None or self._h_ts.array.size < size:
+            if self._h_ts:
+                self._h_ts.release()
+                self._h_b_idx.release()
+                self._h_r_idx.release()
+            self._h_ts = pool.acquire(size, dtype=dtypes.TS_TYPE)
+            self._h_b_idx = pool.acquire(size, dtype=np.uint32)
+            self._h_r_idx = pool.acquire(size, dtype=np.uint32)
+        return self._h_ts.array, self._h_b_idx.array, self._h_r_idx.array
 
     def run(self):
         pool = self.shared.array_pool
@@ -281,32 +293,9 @@ class Reorder(BaseReorder):
                                 PooledLogBatch, cap, buf_kb, has_levels=True, has_modules=True, has_devices=True
                             )
 
-                        h_ts = None
-                        h_b_idx = None
-                        h_r_idx = None
+                        ts_scr, b_idx_scr, r_idx_scr = self._get_scratchpads(total_ready_rows, pool)
 
-                        try:
-                            h_ts = pool.acquire(total_ready_rows, dtype=dtypes.TS_TYPE)
-                            h_b_idx = pool.acquire(total_ready_rows, dtype=np.uint32)
-                            h_r_idx = pool.acquire(total_ready_rows, dtype=np.uint32)
-
-                            ts_scr = h_ts.array[:total_ready_rows]
-                            b_idx_scr = h_b_idx.array[:total_ready_rows]
-                            r_idx_scr = h_r_idx.array[:total_ready_rows]
-
-                            _merge_and_copy(ready_chunks, ts_scr, b_idx_scr, r_idx_scr, batch_out.bundle())
-
-                            # [FIX 4 - Logic Note] If you want true batching, remove the flush() line below
-                            # and rely on the capacity check above and the idle flush in the get() timeout block.
-                            flush()
-
-                        finally:
-                            if h_ts is not None:
-                                h_ts.release()
-                            if h_b_idx is not None:
-                                h_b_idx.release()
-                            if h_r_idx is not None:
-                                h_r_idx.release()
+                        _merge_and_copy(ready_chunks, ts_scr, b_idx_scr, r_idx_scr, batch_out.bundle())
 
                 except Exception as e:
                     self.logger.exception("Error during reorder merge", e)
