@@ -6,6 +6,7 @@
 
 from builtins import print as builtin_print
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import List, Optional, Union
 
 from qtpy.QtCore import QMimeData, Qt, Signal
@@ -27,6 +28,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from blinkview.core import dtypes
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.core.log_row import LogRow
 from blinkview.ui.gui_context import GUIContext
@@ -88,9 +90,6 @@ class SectionEntry(TelemetryEntry):
     def to_dict(self) -> dict:
         return {"type": self.type, "label": self.label}
 
-    def update(self):
-        pass
-
     def clear_widgets(self):
         # Sections currently don't hold runtime widget refs,
         # but we implement it for consistency.
@@ -105,25 +104,9 @@ class RowEntry(TelemetryEntry):
 
     # UI/Runtime State
     value_label: Optional[QLabel] = None
-    latest: Optional[LogRow] = None
+    last_painted_seq: dtypes.SEQ_TYPE = dtypes.SEQ_NONE
+    last_painted_msg: str = ""
     type: str = "row"
-
-    def update(self):
-        """Logic to check for new telemetry data."""
-        if not self.value_label:
-            return
-
-        best_row = self.latest
-        best_seq = best_row.seq if best_row else -1
-
-        for m in self.modules:
-            if (row := m.latest_row) and row.seq > best_seq:
-                best_row = row
-                best_seq = row.seq
-
-        if best_row is not self.latest:
-            self.latest = best_row
-            self.value_label.setText(best_row.message)
 
     def to_dict(self) -> dict:
         return {
@@ -237,6 +220,8 @@ class TelemetryWatch(QScrollArea):
         self.setWidget(self.main_widget)
 
         self.entries: List[Union[SectionEntry, RowEntry]] = []
+
+        self.prev_apply = 0.0
 
         self.gui_context: GUIContext = gui_context
         self.tab_name = ""
@@ -384,7 +369,7 @@ class TelemetryWatch(QScrollArea):
                 content.setFrameShape(QFrame.HLine)
                 content.setFrameShadow(QFrame.Plain)
             else:
-                msg = entry.latest.message if entry.latest else "---"
+                msg = entry.last_painted_msg if entry.last_painted_msg else "---"
                 content = QLabel(msg)
                 content.setFont(self.font)
                 entry.value_label = content
@@ -473,8 +458,39 @@ class TelemetryWatch(QScrollArea):
         self.save_config()
 
     def apply_updates(self):
-        for entry in self.entries:
-            entry.update()
+        now = perf_counter()
+        # 100ms = 10Hz refresh. Perfect for human reading.
+        if now - self.prev_apply < 0.1:
+            return
+        self.prev_apply = now
+
+        tracker = self.gui_context.registry.module_value_tracker
+        if not tracker:
+            return
+
+        # Acquire a single snapshot for the entire batch of entries
+        with tracker.get_snapshot() as snap:
+            for entry in self.entries:
+                if not isinstance(entry, RowEntry) or not entry.value_label:
+                    continue
+
+                # Check all modules assigned to this row (for multi-module aggregation)
+                best_seq = entry.last_painted_seq
+                new_msg = None
+
+                for m in entry.modules:
+                    current_seq = snap.get_sequence(m.id)
+
+                    # If this specific module has a newer sequence than what we've ever seen
+                    if current_seq > best_seq:
+                        best_seq = current_seq
+                        new_msg = snap.get_message(m.id)
+
+                # Only hit the heavy QLabel.setText if we actually found newer data
+                if new_msg is not None:
+                    entry.last_painted_seq = best_seq
+                    entry.last_painted_msg = new_msg
+                    entry.value_label.setText(new_msg)
 
     @classmethod
     def new_watch(cls, name, parent: dict = None):

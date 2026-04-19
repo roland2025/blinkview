@@ -9,15 +9,19 @@ from typing import NamedTuple
 import numpy as np
 
 from blinkview.core import dtypes
+from blinkview.core.types.empty import EMPTY_BYTES, EMPTY_HASH, EMPTY_ID, EMPTY_LEN, EMPTY_OFF
 
 
 class StringTableParams(NamedTuple):
-    buffer: np.ndarray  # dtype: dtypes.BYTE
-    offsets: np.ndarray  # dtype: dtypes.OFFSET_TYPE
-    lens: np.ndarray  # dtype: dtypes.LEN_TYPE
-    hashes: np.ndarray  # dtype: dtypes.HASH_TYPE
-    values: np.ndarray  # dtype: ?
-    count: int
+    buffer: np.ndarray = EMPTY_BYTES  # dtype: dtypes.BYTE
+    offsets: np.ndarray = EMPTY_OFF  # dtype: dtypes.OFFSET_TYPE
+    lens: np.ndarray = EMPTY_LEN  # dtype: dtypes.LEN_TYPE
+    hashes: np.ndarray = EMPTY_HASH  # dtype: dtypes.HASH_TYPE
+    values: np.ndarray = EMPTY_ID  # dtype: ?
+    count: int = 0
+
+
+EmptyStringTableParams = StringTableParams()
 
 
 class RegistryParams(NamedTuple):

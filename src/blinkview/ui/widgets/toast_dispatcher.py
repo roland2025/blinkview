@@ -12,21 +12,23 @@ if TYPE_CHECKING:
     from blinkview.ui.widgets.toast import ToastType
 
 
-class ToastDispatcher(QObject):
-    _instance = None
+class Singleton(type(QObject)):  # Combine QObject's meta with our singleton meta
+    _instances = {}
+
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            cls._instances[cls] = super().__call__(*args, **kwargs)
+        return cls._instances[cls]
+
+
+class ToastDispatcher(QObject, metaclass=Singleton):
     # Signal: message, type, duration, action_text, action_cb, click_cb, parent
     _request_signal = Signal(str, dict, float, object, object, object, object)
 
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
     def __init__(self, *args, **kwargs):
-        if hasattr(self, "_initialized"):
-            return
+        # With the Metaclass, __init__ only runs ONCE.
+        # No more need for __new__ or hasattr checks.
         super().__init__()
-        self._initialized = True
         self._request_signal.connect(self._handle_request)
 
     @Slot(str, dict, float, object, object, object, object)
@@ -43,21 +45,20 @@ class ToastDispatcher(QObject):
             parent=parent,
         )
 
-    def notify(
-        self,
-        message,
-        toast_type: "ToastType" = None,
-        duration=5.0,
-        action_text=None,
-        action_callback=None,
-        click_callback=None,
-        parent=None,  # Added parent support here
-    ):
+    def notify(self, message, toast_type=None, duration=5.0, **kwargs):
         from blinkview.ui.widgets.toast import ToastType
 
+        # Use .emit so it's thread-safe (in case notify is called from a worker)
         self._request_signal.emit(
-            message, toast_type or ToastType.INFO, duration, action_text, action_callback, click_callback, parent
+            message,
+            toast_type or ToastType.INFO,
+            duration,
+            kwargs.get("action_text"),
+            kwargs.get("action_callback"),
+            kwargs.get("click_callback"),
+            kwargs.get("parent"),
         )
 
 
+# Create the global instance
 toast_dispatcher = ToastDispatcher()

@@ -9,6 +9,7 @@ from typing import NamedTuple
 import numpy as np
 
 from blinkview.core.id_registry.types import StringTableParams
+from blinkview.core.types.empty import EMPTY_BYTES, EMPTY_HASH, EMPTY_LEN, EMPTY_OFF, ZERO_COUNT, ZERO_CURSOR
 
 MODULE_TEMP_ID_BASE = 0xF0000000
 
@@ -25,13 +26,15 @@ class TrackerState(NamedTuple):
 
 
 class ModuleTrackerState(NamedTuple):
-    count: np.ndarray  # [0] = number of unresolved names in current chunk
-    bytes_cursor: np.ndarray  # [0] = write position in name_bytes
-    starts: np.ndarray  # Indices where each raw name starts in name_bytes
-    lengths: np.ndarray  # Length of each raw name
-    hashes: np.ndarray  # Optional: pre-calculated hashes
-    name_bytes: np.ndarray  # The raw byte buffer
+    count: np.ndarray = ZERO_COUNT  # [0] = number of unresolved names in current chunk
+    bytes_cursor: np.ndarray = ZERO_CURSOR  # [0] = write position in name_bytes
+    starts: np.ndarray = EMPTY_OFF  # Indices where each raw name starts in name_bytes
+    lengths: np.ndarray = EMPTY_LEN  # Length of each raw name
+    hashes: np.ndarray = EMPTY_HASH  # Optional: pre-calculated hashes
+    name_bytes: np.ndarray = EMPTY_BYTES  # The raw byte buffer
 
+
+EmptyModuleTrackerState = ModuleTrackerState()
 
 #
 # class ModuleTrackerConfig(NamedTuple):
@@ -44,12 +47,13 @@ class ModuleTrackerState(NamedTuple):
 
 class FixedWidthConfig(NamedTuple):
     width: int
-    byte_map: StringTableParams  # The "slowly changing" registry
 
 
 class DynamicWidthConfig(NamedTuple):
-    byte_map: StringTableParams
-    max_length: int
-    max_depth: int
-    enable_brackets: bool
-    enable_dot_separator: bool
+    max_length: int = 0
+    max_depth: int = 0
+    enable_brackets: bool = 0
+    enable_dot_separator: bool = 0
+
+
+EmptyDynamicWidthConfig = DynamicWidthConfig()

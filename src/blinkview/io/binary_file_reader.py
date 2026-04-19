@@ -9,9 +9,8 @@ from time import sleep
 
 from ..core.configurable import configuration_property
 from ..core.numpy_batch_manager import PooledLogBatch
-from ..core.reusable_batch_pool import TimeDataEntry
 from ..utils.paths import resolve_config_path
-from ..utils.throughput import Speedometer, ThroughputAutoTuner
+from ..utils.throughput import Speedometer
 from .BaseReader import BaseReader, DeviceFactory
 
 

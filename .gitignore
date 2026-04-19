@@ -210,3 +210,4 @@ __marimo__/
 
 logs/
 .blinkview/
+.numba_cache

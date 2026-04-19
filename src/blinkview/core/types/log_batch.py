@@ -21,11 +21,18 @@ class LogBundle(NamedTuple):
     devices: np.ndarray  # dtypes.ID_TYPE (uint32)
     sequences: np.ndarray  # dtypes.SEQ_TYPE (uint64)
 
-    size: int  # number of rows
-    msg_cursor: int  # bytes used in buffer
+    size: np.ndarray  # number of rows
+    msg_cursor: np.ndarray  # bytes used in buffer
 
     # Status flags
     has_levels: bool
     has_modules: bool
     has_devices: bool
     has_sequences: bool
+
+
+class TelemetryBatch(NamedTuple):
+    times: np.ndarray
+    times_int64: np.ndarray
+    values: np.ndarray
+    watermark: int

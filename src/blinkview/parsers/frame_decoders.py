@@ -8,6 +8,7 @@ from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable, configuration_property
 from blinkview.core.factory import BaseFactory
 from blinkview.core.types.frames import FrameConfig
+from blinkview.core.types.parsing import CodecID
 
 
 @configurable
@@ -102,11 +103,15 @@ class FrameDecoder(FrameDecoderBase):
     frame_errors_hidden: bool
 
     def __init__(self):
-        self.decode = None
+        from blinkview.ops.codecs import parser_noop
+
+        self.decode = parser_noop
+        self.codec_id = CodecID.NONE
 
     def bundle(self):
         return FrameConfig(
-            decode_func=self.decode,
+            decode_id=self.codec_id,  # The new stable integer ID
+            # decode_func=self.decode,  # Kept ONLY for ParserID.PLUGIN
             delimiter=self.frame_delimiter,
             length_fixed=not self.frame_length_dynamic,
             length_min=self.frame_length_minimum,
@@ -124,9 +129,9 @@ class LineDecoder(FrameDecoder):
     """Frame processor with no special encoding"""
 
     def __init__(self):
-        from blinkview.ops.codecs import decode_newline_frame
+        super().__init__()
 
-        self.decode = decode_newline_frame
+        self.codec_id = CodecID.NEWLINE
 
 
 @FrameDecoderFactory.register("cobs_decoder")
@@ -134,10 +139,10 @@ class CobsDecoder(FrameDecoder):
     """Frame processor for COBS-encoded frames"""
 
     def __init__(self):
-        from blinkview.ops.codecs import decode_cobs_frame
-
+        super().__init__()
         self.frame_delimiter = 0x00
-        self.decode = decode_cobs_frame
+
+        self.codec_id = CodecID.COBS
 
 
 @FrameDecoderFactory.register("decode_slip_frame")
@@ -145,7 +150,6 @@ class SlipDecoder(FrameDecoder):
     """Frame processor for SLIP-encoded frames"""
 
     def __init__(self):
-        from blinkview.ops.codecs import decode_slip_frame
-
+        super().__init__()
         self.frame_delimiter = 0xC0
-        self.decode = decode_slip_frame
+        self.codec_id = CodecID.SLIP

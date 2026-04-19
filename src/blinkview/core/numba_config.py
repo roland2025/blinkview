@@ -10,7 +10,7 @@ import os
 NUMBA_DISABLE = os.environ.get("BLINKVIEW_DISABLE_NUMBA", "0") == "1"  # or True
 # NUMBA_DISABLE = True
 
-NUMBA_ENABLE_CACHE = os.environ.get("BLINKVIEW_NO_CACHE", "0") == "0" and False
+NUMBA_ENABLE_CACHE = os.environ.get("BLINKVIEW_NO_CACHE", "0") == "0"  # and False
 NUMBA_ENABLE_NOGIL = os.environ.get("BLINKVIEW_NO_NOGIL", "0") == "0"
 
 
@@ -53,6 +53,12 @@ def app_njit(**kwargs):
         kwargs["cache"] = NUMBA_ENABLE_CACHE
     if "nogil" not in kwargs:
         kwargs["nogil"] = NUMBA_ENABLE_NOGIL
+
+    # Add these as "soft" defaults
+    if "fastmath" not in kwargs:
+        kwargs["fastmath"] = True  # Usually safe and highly beneficial for plotting
+    if "boundscheck" not in kwargs:
+        kwargs["boundscheck"] = False  # Use with caution!
 
     def decorator(func):
         from numba import njit

@@ -74,17 +74,18 @@ def normalize_name_inplace(buffer, start_idx, length):
     return write_idx - start_idx
 
 
-@app_njit()
+@app_njit(inline="always")
 def parse_fixed_width_name(
     buffer,
     start_cursor,
     end_cursor,  # Inputs
     out_b,
     out_idx,  # Outputs
-    tracker,  # Mutable State
+    state,  # Mutable State
     config,  # Read-only Config
 ):
-    width = config.width
+    tracker = state.modules
+    width = config.module_config.max_length
 
     actual_width = width
     if start_cursor + width > end_cursor:
@@ -126,11 +127,14 @@ def parse_fixed_width_name(
             start_cursor : start_cursor + logical_len
         ]
 
-        squashed_len = normalize_name_inplace(tracker.name_bytes, current_byte_write, logical_len)
+        squashed_len = int(normalize_name_inplace(tracker.name_bytes, current_byte_write, logical_len))
 
         if squashed_len > 0:
+            tracker.name_bytes[current_byte_write + squashed_len] = 0
             # Config provides the map, Tracker provides the state
-            mod_id = resolve_module_id(tracker.name_bytes, current_byte_write, squashed_len, config.byte_map, tracker)
+            mod_id = resolve_module_id(
+                tracker.name_bytes, current_byte_write, squashed_len, config.string_table, tracker
+            )
             if mod_id == MODULE_ID_FULL:
                 return -1
             out_b.modules[out_idx] = mod_id
@@ -140,18 +144,21 @@ def parse_fixed_width_name(
     return start_cursor + actual_width
 
 
-@app_njit()
+@app_njit(inline="always")
 def parse_module_tags_statemachine(
     buffer,
     cursor,
     end_cursor,  # Inputs
     out_b,
     out_idx,  # Outputs
-    tracker,  # Mutable State
-    config,  # Read-only Config
+    state,  # Mutable State
+    unified_config,  # Read-only Config
 ):
+    tracker = state.modules
     write_start = tracker.bytes_cursor[0]
     write_ptr = write_start
+
+    config = unified_config.module_config
 
     tag_count = 0
     curr = cursor
@@ -249,7 +256,7 @@ def parse_module_tags_statemachine(
     if final_len <= 0:
         return -1
 
-    mod_id = resolve_module_id(tracker.name_bytes, write_start, final_len, config.byte_map, tracker)
+    mod_id = resolve_module_id(tracker.name_bytes, write_start, final_len, unified_config.string_table, tracker)
     if mod_id == MODULE_ID_FULL:
         return -1
 

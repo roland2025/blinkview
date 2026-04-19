@@ -14,7 +14,7 @@ class StyleConfig:
     # Timing (immutable floats/ints are fine as standard defaults)
     fade_duration: float = 0.6
     stale_threshold: float = 30.0
-    ui_update_rate_ms: int = 1000 // 10  # 10 FPS update rate
+    ui_update_rate_ms: int = 1000 // 60  # 10 FPS update rate
 
     # Brand / Visual Colors (must use default_factory for QColor)
     color_flash_base: QColor = field(default_factory=lambda: QColor(0, 155, 0))

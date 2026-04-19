@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Optional
 
 from blinkview.core.id_registry import IDRegistry
+from blinkview.core.module_snapshot import LatestModuleValueTracker
+from blinkview.core.reorderer import Reorder
 from blinkview.parsers import frame_decoders, frame_parsers
 
 from ..io import *
@@ -42,7 +44,12 @@ if TYPE_CHECKING:
 
 class Registry:
     def __init__(
-        self, session_name: str = None, config_path: str = None, profile_name: str = None, log_dir: str | Path = None
+        self,
+        session_name: str = None,
+        config_path: str = None,
+        profile_name: str = None,
+        log_dir: str | Path = None,
+        settings=None,
     ):
         # ==========================================
         # LAYER 1: Core Services
@@ -122,6 +129,8 @@ class Registry:
 
         self.session_name = session_name
 
+        self.warmup_helper = None
+
         # ==========================================
         # LAYER 2: Storage & Sinks
         # ==========================================
@@ -138,7 +147,7 @@ class Registry:
             id_registry=self.id_registry,
             factories=factories,
             tasks=TaskManager(),
-            settings=SettingsManager(),
+            settings=settings or SettingsManager(),
             pool=PoolManager(),
             array_pool=np_pool,
         )
@@ -173,6 +182,8 @@ class Registry:
 
         self.central = None
         self.reorder = None
+
+        self.module_value_tracker: LatestModuleValueTracker = None
 
         self._subscribers = []
 
@@ -342,8 +353,8 @@ class Registry:
 
                     self.central.reference_id = "central"
             except Exception as e:
-                print(f"[Registry] Error configuring central storage: {e}")
-                self.logger.error(f"Error configuring central storage", e)
+                # print(f"[Registry] Error configuring central storage: {e}")
+                self.logger.exception("Error configuring central storage", e)
 
             self.initialized = True
 
@@ -406,6 +417,16 @@ class Registry:
     def start(self, configure=True):
         if self._is_running:
             return
+
+        try:
+            self.logger.warn("NUMBA: compiling kernels")
+
+            self.get_warmup().run_all()
+
+            self.logger.warn("NUMBA: compiling done")
+        except Exception as e:
+            self.logger.exception("Error during compiling kernels", e)
+
         self.logger.warn(f"--- Starting Session: {self.session_name} ---")
 
         if configure:
@@ -433,8 +454,18 @@ class Registry:
             self.sources.start()
 
         # self.system_ctx.tasks.run_periodic(1, self.buffer_stats)
+        tasks = self.system_ctx.tasks
         flush_interval = self.reorder.delay / 2 / 1000 if self.reorder is not None and self.reorder.enabled else 0.1
-        self.system_ctx.tasks.run_periodic(flush_interval, self.flush_log_queue)
+        tasks.run_periodic(flush_interval, self.flush_log_queue)
+
+        tasks.run_periodic(60, self.system_ctx.array_pool.cleanup, max_age_seconds=55.0)
+
+        if self.module_value_tracker is None:
+            self.module_value_tracker = LatestModuleValueTracker(
+                self.central.log_pool, self.id_registry.modules_table, self.system_ctx.array_pool, self.now_ns
+            )
+
+        tasks.run_periodic(1.0 / 60, self.module_value_tracker.update_and_print)
 
         self._is_running = True
         self.logger.warn("BlinkView is now live.")
@@ -677,6 +708,13 @@ class Registry:
                 self.flush_log_queue()
                 batch = self.log_create_batch()
                 batch.insert(timestamp, encoded, level_id, module_id, self.log_device_id)
+
+    def get_warmup(self):
+        if self.warmup_helper is None:
+            from blinkview.core.warmup import NumbaWarmupHelper
+
+            self.warmup_helper = NumbaWarmupHelper(self.system_ctx.array_pool, self.time_utils.now_ns)
+        return self.warmup_helper
 
 
 def run_memory_test():

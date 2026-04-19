@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -18,7 +18,8 @@ class FrameStateParams(NamedTuple):
 
 
 class FrameConfig(NamedTuple):
-    decode_func: any  # The JIT function (decode_newline_frame, etc.)
+    decode_id: int  # ID of the decode function to use (e.g., decode_newline_frame)
+    # decode_func: Any  # The JIT function (for plugins)
     delimiter: int  # e.g., ord('\n')
     length_fixed: bool  # If True, only frames of exactly 'length' bytes are valid. If False, frames between length_min and length_max are valid.
     length_min: int  # Minimum frame size to process

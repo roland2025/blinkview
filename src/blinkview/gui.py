@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+
 def main(args=None):
     import os
     import sys
@@ -14,11 +15,11 @@ def main(args=None):
         sys.path.insert(0, cwd)
 
     if args is None:
-        from .ui.main_window import main as main_fn
+        from .ui.run import main as main_fn
 
         main_fn()
     else:
-        from .ui.main_window import run as main_fn
+        from .ui.run import run as main_fn
 
         main_fn(args)
 

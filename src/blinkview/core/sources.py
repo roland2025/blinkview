@@ -45,9 +45,9 @@ class SourcesManager:
             if hasattr(item, "clear_all_links"):
                 item.clear_all_links()
 
-            # Clean up config subscription
-            if hasattr(registry.config, "unsubscribe"):
-                registry.config.unsubscribe(f"/sources/{item_id}", item)
+            # # Clean up config subscription
+            # if hasattr(registry.config, "unsubscribe"):
+            #     registry.config.unsubscribe(f"/sources/{item_id}", item)
 
         # --- Handle Additions and Updates ---
         for item_id, source_config in config.items():
@@ -65,20 +65,27 @@ class SourcesManager:
                     item = factories.build("source", source_config, system_ctx, local_ctx)
                     item.reference_id = item_id
                     self.sources[item_id] = item
-                    registry.config.subscribe(f"/sources/{item_id}", item)
+                    # registry.config.subscribe(f"/sources/{item_id}", item)
 
                     if not self.needs_delayed_init and item.enabled:
                         self.apply_target(item_id, item)
                 else:
                     # Update existing source and check if configuration actually changed
-                    old_sources = self._get_link_set(item, "sources_") if item.enabled else []
-                    old_targets = self._get_link_set(item, "targets_") if item.enabled else []
+                    old_sources = self._get_link_set(item, "sources_") if item.enabled else set()
+                    old_targets = self._get_link_set(item, "targets_") if item.enabled else set()
 
-                    config_changed = item.apply_config(source_config)
+                    # self.logger.debug(f"'{item_id}' old_sources: {old_sources}")
+                    # self.logger.debug(f"'{item_id}' old_targets: {old_targets}")
 
-                    if config_changed:
-                        new_sources = self._get_link_set(item, "sources_") if item.enabled else []
-                        new_targets = self._get_link_set(item, "targets_") if item.enabled else []
+                    item_config_changed = item.apply_config(source_config)
+                    # self.logger.debug(f"'{item_id}' item_config_changed: {item_config_changed}")
+
+                    if changed or item_config_changed:
+                        new_sources = self._get_link_set(item, "sources_") if item.enabled else set()
+                        new_targets = self._get_link_set(item, "targets_") if item.enabled else set()
+
+                        # self.logger.debug(f"'{item_id}' new_sources: {new_sources}")
+                        # self.logger.debug(f"'{item_id}' new_targets: {new_targets}")
 
                         if self.logger:
                             self.logger.info(f"Source '{item_id}' config changed; rebuilding topology.")

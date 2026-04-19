@@ -5,38 +5,29 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional, Union
 
-from blinkview.core.batch_queue import BatchQueue
-from blinkview.core.batched_logrows import BatchedLogRows
-from blinkview.core.numpy_log import fetch_telemetry_arrays, peek_channel_count
-from blinkview.utils.log_level import LogLevel
+import numpy as np
+
+from blinkview.core import dtypes
+from blinkview.core.buffers import ModuleBuffer
+from blinkview.core.dtypes import SEQ_NONE
+from blinkview.core.numpy_log import (
+    allocate_discovery_workspace,
+    fetch_telemetry_arrays,
+    get_telemetry_anchor,
+)
+from blinkview.ops.telemetry import minmax_downsample_inplace, slice_and_downsample_linear
 
 if TYPE_CHECKING:
-    import numpy as np
     import pyqtgraph as pg
 
 from qtpy.QtGui import QAction, QColor
 from qtpy.QtWidgets import QComboBox, QLabel, QMenu, QSizePolicy, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.core.device_identity import ModuleIdentity
-from blinkview.core.log_row import LogRow
 from blinkview.ui.gui_context import GUIContext
-from blinkview.utils.log_filter import LogFilter
-
-
-@dataclass
-class ModuleBuffer:
-    """Holds the rolling buffers for a specific module."""
-
-    x_data: "np.ndarray"
-    y_data: Optional["np.ndarray"] = None
-    head: int = 0  # Where to insert the next batch of data
-    size: int = 0  # How many valid points are in the buffer currently
-    ptr: int = 0
-    num_channels: int = 0
-    buffer: BatchQueue = None
 
 
 @dataclass
@@ -51,36 +42,66 @@ class SeriesContainer:
     curve: Optional["pg.PlotDataItem"] = None
     overview_curve: Optional["pg.PlotDataItem"] = None
     plot_item: Optional["pg.PlotItem"] = None
-    last_seq: int = -1
+    last_seq: dtypes.SEQ_TYPE = SEQ_NONE
+
+    main_x: List[np.ndarray] = field(default_factory=list)
+    main_y: List[np.ndarray] = field(default_factory=list)
+    ov_x: List[np.ndarray] = field(default_factory=list)
+    ov_y: List[np.ndarray] = field(default_factory=list)
+    buf_idx: int = 0  # Toggle between 0 and 1
+
+    _last_t_min: float = 0.0
+    _last_t_max: float = 0.0
+    _last_bins: int = 0
+
+    _last_y_min: float = 0.0
+    _last_y_max: float = 0.0
+    _has_y_range: bool = False
+
+    def __post_init__(self):
+        # Placeholder size—actual allocation usually happens
+        # when max_points is known, but let's assume 50k
+        for _ in range(2):
+            self.main_x.append(np.zeros(50000, dtype=dtypes.PLOT_TS_TYPE))
+            self.main_y.append(np.zeros(50000, dtype=dtypes.PLOT_VAL_TYPE))
+            self.ov_x.append(np.zeros(10000, dtype=dtypes.PLOT_TS_TYPE))  # Overview is small
+            self.ov_y.append(np.zeros(10000, dtype=dtypes.PLOT_VAL_TYPE))
 
 
 class TelemetryPlotter(QWidget):
     def __init__(self, gui_context, state=None, parent=None):
         super().__init__(parent)
 
-        import numpy as np
         import pyqtgraph as pg
 
         # Store references so other methods can use them easily
-        self._np = np
         self._pg = pg
 
         # pg.setConfigOptions(useOpenGL=True)
         pg.setConfigOptions(antialias=False)
+        pg.setConfigOptions(enableExperimental=True)
 
         self.gui_context: GUIContext = gui_context
 
-        self.logger = gui_context.logger.child(f"plotter_{id(self):x}")
+        self.logger = None
+        self.logger_apply = None
+        self.logger_update = None
+        # self.logger = gui_context.logger.child(f"plotter_{id(self):x}")
 
         self.max_points = self.gui_context.settings.get("plot.max_points", 50000)
 
         self.tab_name: str = ""
         self.is_split: bool = False
 
-        self.log_seq = -1
-        self.latest_seq = -1
+        self.log_seq = SEQ_NONE
+        self.latest_seq = SEQ_NONE
 
         self.plot_data_changed = False
+
+        self._discovery_workspace = allocate_discovery_workspace()
+
+        self._last_overview_update_ns = 0
+        self._overview_update_interval_ns = 1_000_000_000  # in nanoseconds
 
         # Buffers
         self.modules: List[ModuleIdentity] = []
@@ -89,6 +110,9 @@ class TelemetryPlotter(QWidget):
         # New Single Source of Truth for Series
         self.series_list: List[SeriesContainer] = []
 
+        # Maps PlotItem instance -> dictionary of range state
+        self.plot_range_states = {}
+
         self.overview_plot: Optional["pg.PlotItem"] = None
         self.region: Optional["pg.LinearRegionItem"] = None
         self.is_auto_scroll = True  # Keep window on the "last 10 mins"
@@ -96,6 +120,16 @@ class TelemetryPlotter(QWidget):
 
         self.view_duration_text = "60s"  # seconds
         self.view_duration = 0
+        self.show_overview = True
+
+        self.update_freq_text = "1 Hz"
+        self._update_interval_ns = self.gui_context.theme.ui_update_rate_ms * 1_000_000
+        self._last_update_ns = 0
+
+        self._last_region_update_ns = 0
+
+        self._last_data_update_ns = 0
+        self.data_update_interval_ns = 250_000_000
 
         self._set_defaults()
 
@@ -110,6 +144,11 @@ class TelemetryPlotter(QWidget):
         self.toolbar = QToolBar()
         self.layout.addWidget(self.toolbar)
 
+        self.overview_action = self.toolbar.addAction("Overview")
+        self.overview_action.setCheckable(True)
+        self.overview_action.setChecked(self.show_overview)
+        self.overview_action.triggered.connect(self.set_overview_visible)
+
         self.split_action = self.toolbar.addAction("Split View")
         self.split_action.setCheckable(True)
         self.split_action.setChecked(self.is_split)
@@ -123,10 +162,18 @@ class TelemetryPlotter(QWidget):
 
         self.toolbar.addSeparator()
 
+        # Add an Auto-Scroll toggle to the toolbar
+        self.autoscroll_action = self.toolbar.addAction("Auto-Scroll: ON")
+        self.autoscroll_action.setCheckable(True)
+        self.autoscroll_action.setChecked(True)
+        self.autoscroll_action.triggered.connect(self.set_autoscroll)
+
+        # self.toolbar.addWidget(QLabel("Window:"))
         self.duration_combo = QComboBox()
         self.duration_combo.setMinimumWidth(60)
         self.duration_combo.setEditable(True)
-        self.duration_combo.addItems(["0.1s", "0.5s", "1s", "10s", "30s", "60s", "5m", "10m", "30m", "1h"])
+        duration_items = ["0.1s", "0.5s", "1s", "2s", "5s", "10s", "30s", "60s", "5m", "10m", "30m", "1h"]
+        self.duration_combo.addItems(reversed(duration_items))
 
         idx = self.duration_combo.findText(self.view_duration_text)
         if idx >= 0:
@@ -137,16 +184,20 @@ class TelemetryPlotter(QWidget):
 
         self.duration_combo.currentTextChanged.connect(self._on_duration_changed)
 
-        self.toolbar.addSeparator()
-
-        # Add an Auto-Scroll toggle to the toolbar
-        self.autoscroll_action = self.toolbar.addAction("Auto-Scroll: ON")
-        self.autoscroll_action.setCheckable(True)
-        self.autoscroll_action.setChecked(True)
-        self.autoscroll_action.triggered.connect(self.set_autoscroll)
-
-        self.toolbar.addWidget(QLabel("Window:"))
         self.toolbar.addWidget(self.duration_combo)
+        self.toolbar.addWidget(QLabel("@"))
+
+        self.freq_combo = QComboBox()
+        self.freq_combo.setMinimumWidth(65)
+        freq_items = ["1 Hz", "2 Hz", "5 Hz", "10 Hz", "15 Hz", "20 Hz", "30 Hz", "60 Hz"]
+        self.freq_combo.addItems(reversed(freq_items))
+
+        # Initialize from state or default
+        idx = self.freq_combo.findText(self.update_freq_text)
+        self.freq_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.freq_combo.currentTextChanged.connect(self._on_freq_changed)
+
+        self.toolbar.addWidget(self.freq_combo)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -171,6 +222,10 @@ class TelemetryPlotter(QWidget):
         self.is_system_updating = True
         self.view_duration_text = "60s"
         self.view_duration = 60
+        self.show_overview = True
+
+        self.update_freq_text = "60 Hz"
+        self._last_update_ns = 0
 
     def restore(self, state: dict):
         print(f"[TelemetryPlotter] restoring state '{state}'")
@@ -178,9 +233,19 @@ class TelemetryPlotter(QWidget):
         self.is_split = state.get("is_split", self.is_split)
         self.view_duration_text = state.get("view_duration", self.view_duration_text)
         self.view_duration = self._parse_duration(self.view_duration_text)
+        self.show_overview = state.get("show_overview", True)
+
+        self.update_freq_text = state.get("update_freq", "1 Hz")
+        self._on_freq_changed(self.update_freq_text)
 
         # Restore multiple modules
         self.modules = self.gui_context.id_registry.resolve_modules(state.get("modules", []))
+
+        if self.logger is None:
+            module_name = self.modules[0].name if self.modules else "unknown"
+            self.logger = self.gui_context.logger.child(f"plotter_{module_name}")
+            self.logger_apply = self.logger.child("apply")
+            self.logger_update = self.logger.child("update")
 
         self.clear()
 
@@ -198,11 +263,21 @@ class TelemetryPlotter(QWidget):
                     )
                 )
 
+    def _on_freq_changed(self, text: str):
+        """Parses '30 Hz' into a nanosecond interval for the update gate."""
+        match = re.search(r"(\d+)", text)
+        if match:
+            hz = int(match.group(1))
+            self.update_freq_text = text
+            self._update_interval_ns = 1_000_000_000 // hz
+
+        self._update_axis_visibility()
+
     def reset_view(self):
         self.set_autoscroll(True)
         self.set_split_mode(self.is_split)
 
-    def _parse_duration(self, text: str) -> Optional[int]:
+    def _parse_duration(self, text: str) -> Optional[float]:
         """Parses strings like '10s', '5m', '2h' into total seconds."""
         text = text.lower().strip()
         # Regex to capture the number and the unit suffix
@@ -214,11 +289,11 @@ class TelemetryPlotter(QWidget):
         unit = match.group(2)
 
         if unit == "m":
-            return int(value * 60)
+            return value * 60.0
         elif unit == "h":
-            return int(value * 3600)
-        else:  # Default to seconds if 's' or no unit provided
-            return int(value)
+            return value * 3600.0
+        else:  # Default to seconds
+            return value
 
     def _on_duration_changed(self, text: str):
         seconds = self._parse_duration(text)
@@ -226,41 +301,54 @@ class TelemetryPlotter(QWidget):
             return
 
         self.view_duration = seconds
-        latest_now = self._get_latest_timestamp()  # Use the helper
+        latest_now = self._get_latest_timestamp()
 
-        if latest_now > 0:  # Check if we actually have data
+        if latest_now > 0:
             if self.is_auto_scroll:
-                # Snap to the live edge
                 self._apply_view_range(latest_now - self.view_duration, latest_now)
             else:
-                # Stay where we are, but expand/shrink the window to the left
-                _, current_max_x = self.region.getRegion()
+                # --- FIX START ---
+                # Safely get the current 'right edge' of the view
+                if self.region:
+                    _, current_max_x = self.region.getRegion()
+                elif self.series_list and self.series_list[0].plot_item:
+                    # Fallback: Get it directly from the plot's view range
+                    _, current_max_x = self.series_list[0].plot_item.viewRange()[0]
+                else:
+                    current_max_x = latest_now
+                # --- FIX END ---
+
                 self._apply_view_range(current_max_x - self.view_duration, current_max_x)
 
-    def _init_module_channels(self, module: ModuleIdentity, num_channels: int):
+            # Force redraw for the new duration
+            self._update_plots()
+
+    def _init_module_channels(self, module: ModuleIdentity, num_channels: int, anchor_seq: dtypes.SEQ_TYPE):
         """Called exactly once per module when data first arrives."""
-        np = self._np
-        buf = self.buffers[module]
+        # 1. Handle the buffer creation here so it's centralized
+        buf = ModuleBuffer(
+            max_points=self.max_points,
+            num_channels=num_channels,
+            last_seq=anchor_seq,
+        )
+        self.buffers[module] = buf
 
-        # ALLOCATE 2x SIZE FOR MIRRORED BUFFER
-        buf.y_data = np.zeros((self.max_points * 2, num_channels), order="F")
-        buf.x_data = np.zeros(self.max_points * 2)
-        buf.num_channels = num_channels
-
+        # 2. Setup the UI series list
         if not any(s.module == module for s in self.series_list):
-            existing_series_count = len(self.series_list)
+            start_idx = len(self.series_list)
             for i in range(num_channels):
                 self.series_list.append(
                     SeriesContainer(
                         module=module,
                         index=i,
                         name=f"{module.short_name} {i}" if num_channels > 1 else module.short_name,
-                        color=self.get_color(existing_series_count + i).name(),
+                        color=self.get_color(start_idx + i).name(),
                         visible=True,
                     )
                 )
 
         self.set_split_mode(self.is_split)
+        return buf  # Return it so apply_updates can use it immediately
 
     def get_color(self, i: int) -> QColor:
         return QColor.fromHsv((120 + i * 80) % 360, 255, 255)
@@ -269,222 +357,134 @@ class TelemetryPlotter(QWidget):
     def total_series_count(self) -> int:
         return len(self.series_list)
 
-    def update_batch(self, module: ModuleIdentity, batches):
-        np = self._np
-        _len = len
-        updated = False
+    def apply_updates(self, force: bool = False):
+        registry = self.gui_context.registry
+        now_ns_func = registry.now_ns
+        now_ns = now_ns_func()
 
-        for batch in batches:
-            batch_len = len(batch)
-            if batch_len == 0:
-                continue
+        # --- THROTTLE GATE ---
+        # If we are significantly ahead of our target interval, bail early.
+        # The 10ms deadzone ensures we don't miss a cycle due to tiny clock jitters.
+        deadzone_ns = 10_000_000
+        # BYPASS: Ignore the timer if a manual update was forced
+        if not force and (now_ns - self._last_update_ns) < (self._update_interval_ns - deadzone_ns):
+            return
 
-            # 1. Resolve buffer and target columns
-            try:
-                buf = self.buffers[module]
-                target_cols = buf.num_channels
-            except KeyError:
-                # Find the first valid row to determine column count
-                first_row = next((r for r in batch if r.module == module), None)
-                if not first_row:
-                    continue
-                vals = first_row.get_values()
-                if not vals:
-                    continue
+        self._last_update_ns = now_ns
 
-                target_cols = len(vals)
-                buf = ModuleBuffer(x_data=np.zeros(0), buffer=BatchQueue(self.max_points))
-                self.buffers[module] = buf
-                self._init_module_channels(module, target_cols)
+        updated = force
+        log_pool = registry.central.log_pool
+        array_pool = registry.system_ctx.array_pool
 
-            # 2. Pre-allocate temporary numpy arrays for THIS batch
-            temp_t = np.empty(batch_len, dtype=float)
-            temp_v = np.empty((batch_len, target_cols), dtype=float)
+        # 1. Global High-Watermark (Quickest check to see if log moved at all)
+        global_latest_seq = log_pool.latest_sequence()
 
-            # 3. Fill the arrays directly (avoids building intermediate python lists/tuples)
-            idx = 0
-            for row in batch:
-                if row.module == module:
-                    vals = row.get_values()
-                    if vals and len(vals) == target_cols:
-                        temp_t[idx] = row.timestamp
-                        temp_v[idx] = vals  # Numpy handles the list-to-C-array conversion instantly
-                        idx += 1
+        # Determine fetch throttle (0 delay if scrolling, 500ms if looking at history)
+        fetch_throttle_ns = 0 if self.is_auto_scroll else 500_000_000
 
-            if idx == 0:
-                continue
-
-            # 4. Slice out only the valid data we collected
-            new_times = temp_t[:idx]
-            new_values = temp_v[:idx]
-            num_new = idx
-
-            if num_new >= self.max_points:
-                # Keep only the latest data if batch is massive
-                new_times = new_times[-self.max_points :]
-                new_values = new_values[-self.max_points :, :]
-                num_new = self.max_points
-
-                # Write to primary half
-                buf.x_data[: self.max_points] = new_times
-                buf.y_data[: self.max_points, :] = new_values
-                # Mirror to second half
-                buf.x_data[self.max_points : 2 * self.max_points] = new_times
-                buf.y_data[self.max_points : 2 * self.max_points, :] = new_values
-
-                buf.head = 0
-                buf.size = self.max_points
-            else:
-                end_idx = buf.head + num_new
-                if end_idx <= self.max_points:
-                    # Fits without wrapping primary half
-                    buf.x_data[buf.head : end_idx] = new_times
-                    buf.y_data[buf.head : end_idx, :] = new_values
-
-                    # Mirror to second half
-                    buf.x_data[buf.head + self.max_points : end_idx + self.max_points] = new_times
-                    buf.y_data[buf.head + self.max_points : end_idx + self.max_points, :] = new_values
-                else:
-                    # Wraps the primary half
-                    overflow = end_idx - self.max_points
-                    first_part = num_new - overflow
-
-                    # Fill end of primary and end of mirror
-                    buf.x_data[buf.head : self.max_points] = new_times[:first_part]
-                    buf.y_data[buf.head : self.max_points, :] = new_values[:first_part, :]
-                    buf.x_data[buf.head + self.max_points : 2 * self.max_points] = new_times[:first_part]
-                    buf.y_data[buf.head + self.max_points : 2 * self.max_points, :] = new_values[:first_part, :]
-
-                    # Fill start of primary and start of mirror
-                    buf.x_data[0:overflow] = new_times[first_part:]
-                    buf.y_data[0:overflow, :] = new_values[first_part:, :]
-                    buf.x_data[self.max_points : self.max_points + overflow] = new_times[first_part:]
-                    buf.y_data[self.max_points : self.max_points + overflow, :] = new_values[first_part:, :]
-
-                buf.head = (buf.head + num_new) % self.max_points
-                buf.size = min(buf.size + num_new, self.max_points)
-
-            updated = True
-
-        return updated
-
-    def apply_updates(self):
-        np = self._np
-        now_ns = self.gui_context.registry.now_ns
-        start_seq = self.latest_seq
-        updated = False
-        start = now_ns()
-        fetch_duration = 0
-
-        log_pool = self.gui_context.registry.central.log_pool
+        max_points = self.max_points
 
         for module in self.modules:
-            fetch_start = now_ns()
-
             buf = self.buffers.get(module)
-            target_cols = buf.num_channels if buf else 0
 
-            # === PEEK LOGIC ===
-            if target_cols == 0:
-                target_cols = peek_channel_count(log_pool, module.id, start_seq)
-
-                # If we found data, initialize the buffer and series!
-                if target_cols > 0:
-                    buf = ModuleBuffer(
-                        x_data=np.zeros(self.max_points * 2),
-                        y_data=np.zeros((self.max_points * 2, target_cols), order="F"),
-                        buffer=BatchQueue(self.max_points),
-                    )
-                    self.buffers[module] = buf
-                    self._init_module_channels(module, target_cols)
-                    print(f"[TelemetryPlotter] Schema discovered for {module}: {target_cols} channels")
-                else:
-                    # Still no numeric data for this module yet, skip to next module
+            # --- GATE 1: Visibility ---
+            # If we have a buffer and series list, but nothing is visible, skip.
+            # If buf is None, we must proceed to discovery.
+            if buf is not None and len(self.series_list) > 0:
+                if not any(s.visible for s in self.series_list if s.module == module):
                     continue
 
-            # We now absolutely know target_cols > 0
-            for new_times, new_values, max_seq in fetch_telemetry_arrays(log_pool, module.id, start_seq, target_cols):
-                self.latest_seq = max(self.latest_seq, max_seq)
-                self._insert_into_circular_buffer(module, new_times, new_values)
+            # --- GATE 2: Sequence & Freshness Gate ---
+            # Skip ONLY if we've fetched before AND the log hasn't advanced.
+            if buf and buf.last_fetch_ns > 0 and buf.last_seq >= global_latest_seq:
+                continue
+
+            # --- GATE 3: History Throttling ---
+            if buf and not self.is_auto_scroll:
+                if (now_ns - buf.last_fetch_ns) < fetch_throttle_ns:
+                    continue
+
+            # Prepare for fetch/discovery
+            current_module_seq = buf.last_seq if buf else self.log_seq
+            target_cols = buf.num_channels if buf else 0
+
+            # === PEEK LOGIC (Discovery) ===
+            if target_cols == 0:
+                anchor_seq, channels = get_telemetry_anchor(
+                    log_pool, module.id, current_module_seq, self._discovery_workspace, max_points
+                )
+                if channels > 0:
+                    # This initializes buf and updates self.buffers[module]
+                    initial_watermark = dtypes.SEQ_TYPE(anchor_seq - 1) if anchor_seq > 0 else dtypes.SEQ_NONE
+                    buf = self._init_module_channels(module, channels, initial_watermark)
+                    target_cols = channels
+                    current_module_seq = buf.last_seq
+                else:
+                    continue
+
+            # === FETCH LOGIC ===
+            with fetch_telemetry_arrays(
+                array_pool, log_pool, module.id, current_module_seq, target_cols, buf.temp_floats, max_points
+            ) as batch:
+                # Advance the log watermark
+                buf.last_seq = batch.watermark
+                buf.last_fetch_ns = now_ns
+                if buf.update(batch):
+                    updated = True
+
+        # 1. Handle Auto-Scroll (Moves the camera)
+
+        # 2. Main Plot Update (Viewport clipped, high frequency)
+        # We call this if data arrived OR if the view moved (Auto-scroll/Manual)
+
+        graph_view = self.graph_view
+        try:
+            if self.is_auto_scroll:
+                graph_view.setUpdatesEnabled(False)
+                latency_offset = self.data_update_interval_ns
+                # latency_offset = 1_000_000_000
+                latest_time = (now_ns - latency_offset) / 1_000_000_000.0
+                self._apply_view_range(latest_time - self.view_duration, latest_time, force=force)
                 updated = True
 
-            fetch_end = now_ns()
-            fetch_duration += fetch_end - fetch_start
+            time_since_data = now_ns - self._last_data_update_ns
+            if force or time_since_data >= self.data_update_interval_ns:
+                # if updated:
+                graph_view.setUpdatesEnabled(False)
 
-        draw_start = now_ns()
-        if updated:
-            self._update_plots()
-
-        end = now_ns()
-        draw_duration = end - draw_start
-        ratio = draw_duration / fetch_duration if fetch_duration > 0 else 0.0
-
-        # self.logger.debug(
-        #     f"updated={1 if updated else 0} "
-        #     f"total={(end - start) / 1e6:.3f} ms "
-        #     f"draw={draw_duration / 1e6:.3f} ms "
-        #     f"fetch={fetch_duration / 1e6:.3f} ms "
-        #     f"ratio={ratio:.3f}"
-        # )
-
-    def _insert_into_circular_buffer(self, module, new_times, new_values):
-        """Inserts arrays directly into the Mirrored Ring Buffer."""
-        buf = self.buffers[module]
-        num_new = new_times.size
-
-        if num_new >= self.max_points:
-            # Massive batch: overwrite the whole buffer
-            new_times = new_times[-self.max_points :]
-            new_values = new_values[-self.max_points :, :]
-            num_new = self.max_points
-
-            buf.x_data[: self.max_points] = new_times
-            buf.y_data[: self.max_points, :] = new_values
-            # Mirror
-            buf.x_data[self.max_points : 2 * self.max_points] = new_times
-            buf.y_data[self.max_points : 2 * self.max_points, :] = new_values
-
-            buf.head = 0
-            buf.size = self.max_points
-        else:
-            end_idx = buf.head + num_new
-            if end_idx <= self.max_points:
-                # Clean fit
-                buf.x_data[buf.head : end_idx] = new_times
-                buf.y_data[buf.head : end_idx, :] = new_values
-                # Mirror
-                buf.x_data[buf.head + self.max_points : end_idx + self.max_points] = new_times
-                buf.y_data[buf.head + self.max_points : end_idx + self.max_points, :] = new_values
-            else:
-                # Wraps around
-                overflow = end_idx - self.max_points
-                first_part = num_new - overflow
-
-                # First chunk
-                buf.x_data[buf.head : self.max_points] = new_times[:first_part]
-                buf.y_data[buf.head : self.max_points, :] = new_values[:first_part, :]
-                buf.x_data[buf.head + self.max_points : 2 * self.max_points] = new_times[:first_part]
-                buf.y_data[buf.head + self.max_points : 2 * self.max_points, :] = new_values[:first_part, :]
-
-                # Overflow chunk
-                buf.x_data[0:overflow] = new_times[first_part:]
-                buf.y_data[0:overflow, :] = new_values[first_part:, :]
-                buf.x_data[self.max_points : self.max_points + overflow] = new_times[first_part:]
-                buf.y_data[self.max_points : self.max_points + overflow, :] = new_values[first_part:, :]
-
-            buf.head = (buf.head + num_new) % self.max_points
-            buf.size = min(buf.size + num_new, self.max_points)
-
-    def _load_module_history(self, module: ModuleIdentity):
-        """Helper to load history for a single module (used during drop)."""
-        print(f"Loading history for newly dropped module: '{module}'")
-        log_filter = LogFilter(self.gui_context.id_registry, filtered_module=module)
-        batches = self.gui_context.registry.central.get_batches(
-            log_filter, total=self.max_points, start_seq=self.log_seq
-        )
-        if batches:
-            if self.update_batch(module, batches):
+                # if self.is_auto_scroll:
+                #     latest_time = self._get_latest_timestamp()
+                #     if latest_time > 0:
+                #         self._apply_view_range(latest_time - self.view_duration, latest_time)
                 self._update_plots()
+                self._last_data_update_ns = now_ns
+
+            # 3. Overview Update (Full buffer, low frequency)
+            if self.show_overview:
+                time_since_ov = now_ns - self._last_overview_update_ns
+
+                # FORCE update if the main loop is slower than the overview timer
+                # OR if the overview timer has naturally expired.
+                is_ov_due = time_since_ov >= (self._overview_update_interval_ns - deadzone_ns * 3)
+                main_is_slower = self._update_interval_ns >= self._overview_update_interval_ns
+
+                if force or is_ov_due or main_is_slower:
+                    has_new_data = any(buf.is_dirty_overview for buf in self.buffers.values())
+                    # Only draw if there's actually something new to show
+                    if force or has_new_data or self.is_auto_scroll:
+                        graph_view.setUpdatesEnabled(False)
+                        self._update_overview()
+                        self._last_overview_update_ns = now_ns
+
+                    for buf in self.buffers.values():
+                        buf.is_dirty_overview = False
+        finally:
+            if not graph_view.updatesEnabled():
+                graph_view.setUpdatesEnabled(True)
+
+        # 4. Final Cleanup: Clear dirty flags only after both consumers had their turn
+        for buf in self.buffers.values():
+            buf.is_dirty = False
 
     def get_state(self):
         series = []
@@ -503,178 +503,329 @@ class TelemetryPlotter(QWidget):
             "is_split": self.is_split,
             "series": series,
             "view_duration": self.duration_combo.currentText(),
+            "show_overview": self.show_overview,
+            "update_freq": self.update_freq_text,
         }
 
     def set_split_mode(self, split: bool):
         pg = self._pg
-
         self.is_split = split
         if not self.series_list:
             return
 
+        saved_range = None
+        if self.series_list and self.series_list[0].plot_item:
+            saved_range = self.series_list[0].plot_item.viewRange()[0]
+
+        self.plot_range_states.clear()
+
+        # Clear the layout to start fresh
         self.graph_view.clear()
 
-        # Setup Overview Plot with DateAxis
-        self.overview_plot = self.graph_view.addPlot(
-            row=0,
-            col=0,
-            # title="History Overview",
-            axisItems={"bottom": pg.DateAxisItem(orientation="bottom")},
-        )
-        self.overview_plot.setMaximumHeight(120)
-        self.overview_plot.enableAutoRange(axis="y", enable=True)
+        # Track the vertical row index in the GraphicsLayout
+        current_row = 0
+        LEFT_AXIS_WIDTH = 50
+        # --- 1. Setup Overview Plot (Conditional) ---
+        if self.show_overview:
+            self.overview_plot = self.graph_view.addPlot(
+                row=current_row,
+                col=0,
+                axisItems={"bottom": pg.DateAxisItem(orientation="bottom")},
+            )
+            self.overview_plot.setMaximumHeight(200)
+            self.overview_plot.enableAutoRange(axis="y", enable=False)
+            self.overview_plot.getAxis("left").setWidth(LEFT_AXIS_WIDTH)
 
-        # Setup Main Plots
+            # Setup Region/Slider
+            latest_now = self._get_latest_timestamp()
+            current_now = latest_now if latest_now > 0 else 60
+            start_region = current_now - self.view_duration
+            self.region = pg.LinearRegionItem([start_region, current_now])
+            self.region.setZValue(10)
+            self.overview_plot.addItem(self.region)
+
+            # Connect signals for two-way syncing
+            self.region.sigRegionChanged.connect(self._on_region_changed)
+
+            current_row += 1
+        else:
+            # CRITICAL: Nullify references so other methods know to skip overview logic
+            self.overview_plot = None
+            self.region = None
+
+        # --- 2. Setup Main Plots ---
         shared_plot = None
         legend = None
+
         if not self.is_split:
+            # SINGLE PLOT MODE
             shared_plot = self.graph_view.addPlot(
-                row=1, col=0, axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
+                row=current_row, col=0, axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
             )
-            shared_plot.setTitle(None)
-            shared_plot.enableAutoRange(axis="y", enable=True)
-            shared_plot.setAutoVisible(y=True)
+
+            shared_plot.showGrid(x=False, y=True)
+            shared_plot.enableAutoRange(axis="y", enable=False)
+            shared_plot.getAxis("left").setWidth(LEFT_AXIS_WIDTH)
+
+            # shared_plot.getAxis("bottom").setStyle(showValues=False)
+            # shared_plot.setAutoVisible(y=True)
 
             if self.total_series_count > 1:
                 legend = shared_plot.addLegend()
 
+            # Connect range changes to the overview slider if it exists
+            shared_plot.sigRangeChangedManually.connect(self._on_main_plot_range_changed)
+
+        # --- 3. Create Curves and Split Plots ---
         for i, s in enumerate(self.series_list):
             if self.is_split:
+                # MULTI-PLOT MODE (One per channel)
                 p = self.graph_view.addPlot(
-                    row=i + 1, col=0, axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
+                    row=current_row + i, col=0, axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
                 )
                 p.setTitle(f'<span style="color: {s.color}; font-weight: bold;">{s.name}</span>')
-                p.enableAutoRange(axis="y", enable=True)
-                p.setAutoVisible(y=True)
-                # p.setTitle(s.name)
+                p.enableAutoRange(axis="y", enable=False)
+                p.showGrid(x=False, y=True)
+                p.getAxis("left").setWidth(LEFT_AXIS_WIDTH)
+                # p.getAxis("bottom").setStyle(showValues=False)
+                # p.setAutoVisible(y=True)
+
+                # Link all split plots to the same X-axis
                 if i > 0:
                     p.setXLink(self.series_list[0].plot_item)
+
+                # Only need to connect the first plot to the overview (since they are linked)
+                if i == 0 or True:
+                    p.sigRangeChangedManually.connect(self._on_main_plot_range_changed)
+
                 s.plot_item = p
+
+                p.setVisible(s.visible)
             else:
                 s.plot_item = shared_plot
 
-            s.curve = s.plot_item.plot(
-                pen=s.color,
-                name=s.name,
-                clipToView=True,  # Only draw what is inside the axes
-                autoDownsample=False,  # Disable PyQtGraph's internal downsampler (use the Numpy stride trick instead)
-                skipFiniteCheck=True,  # BYPASS: Assumes your array has no NaN or Inf values
-                connect="all",  # BYPASS: Assumes the line is continuous (no gaps)
-                antialias=False,  # BYPASS: Anti-aliasing requires heavy CPU smoothing
-            )
+            # Create/Update Main Curves
+            # s.curve = s.plot_item.plot(pen=s.color, name=s.name, clipToView=True, skipFiniteCheck=True, antialias=False)
+            s.curve = pg.PlotCurveItem(pen=s.color, name=s.name, clipToView=True, skipFiniteCheck=True)
+            s.plot_item.addItem(s.curve)
             s.curve.setVisible(s.visible)
-            if self.is_split:
-                s.plot_item.setVisible(s.visible)
 
+            # Create/Update Overview Curves
+            if self.show_overview:
+                # s.overview_curve = self.overview_plot.plot(pen=s.color)
+                s.overview_curve = pg.PlotCurveItem(pen=s.color)
+                self.overview_plot.addItem(s.overview_curve)
+                s.overview_curve.setVisible(s.visible)
+            else:
+                # CRITICAL: Ensure the update loop doesn't try to draw a non-existent curve
+                s.overview_curve = None
+
+        if saved_range and self.series_list and self.series_list[0].plot_item:
+            self.series_list[0].plot_item.setXRange(saved_range[0], saved_range[1], padding=0)
+
+            # Reset internal series trackers so they don't think they've
+            # already drawn this range on the NEW curve objects
+        for s in self.series_list:
+            s._last_t_min = -1.0
+            s._last_t_max = -1.0
+
+        self._update_axis_visibility()
+
+        # Finalize UI
         if legend:
             self._setup_legend_callbacks(legend)
 
-        # Setup Region with Smart Initialization
-        latest_now = self._get_latest_timestamp()
-        current_now = latest_now if latest_now > 0 else 60
-        start_region = current_now - self.view_duration
-        self.region = pg.LinearRegionItem([start_region, current_now])
-
-        self.region.setZValue(10)
-        self.overview_plot.addItem(self.region)
-
-        for s in self.series_list:
-            s.overview_curve = self.overview_plot.plot(pen=s.color)
-            s.overview_curve.setVisible(s.visible)
-
-        # --- SYNC LOGIC ---
-        def update_main_from_region():
-            # Break the infinite feedback loop
-            if self._is_system_updating:
-                return
-
-            self.set_autoscroll(False)
-
-            minX, maxX = self.region.getRegion()
-
-            # Apply the range to all main plots
-            for s in self.series_list:
-                if s.plot_item:
-                    s.plot_item.setXRange(minX, maxX, padding=0)
-
-        def update_region_from_main(*args):  # Use *args to ignore whatever PyQtGraph sends
-            import math
-
-            # 1. Break infinite feedback loops
-            if self._is_system_updating:
-                return
-
-            # 2. Grab the source of truth directly from the PlotItem
-            # .viewRange() always returns a list: [[xMin, xMax], [yMin, yMax]]
-            try:
-                main_p = self.series_list[0].plot_item
-                v_range = main_p.viewRange()
-                rlow, rhigh = v_range[0]  # This is the X-axis range
-            except (IndexError, AttributeError):
-                return
-
-            # 3. CRITICAL: Prevent Qt BSP Segfaults
-            if math.isnan(rlow) or math.isnan(rhigh):
-                return
-
-            # 4. Update the overview UI
-            self.set_autoscroll(False)
-
-            self._is_system_updating = True  # Lock
-            try:
-                self.region.setRegion([rlow, rhigh])
-            finally:
-                self._is_system_updating = False  # Unlock
-
-        # Connect the signals once and leave them alone
-        self.region.sigRegionChanged.connect(update_main_from_region)
-
-        main_p = self.series_list[0].plot_item
-        if main_p:
-            main_p.sigRangeChangedManually.connect(update_region_from_main)
-
-        self._update_plots()
-
-    def processing_done(self):
-        if self.plot_data_changed:
-            self._update_plots()
-            self.plot_data_changed = False
+        # Initial data push
+        self.apply_updates(force=True)
 
     def _update_plots(self):
-        latest_time = 0.0
+        series_list = self.series_list
+        if not series_list:
+            return
+
+        plot_item_primary = series_list[0].plot_item
+        if plot_item_primary is None:
+            return
+
+        view_range = plot_item_primary.viewRange()
+        t_min, t_max = view_range[0]
+
+        if self.is_auto_scroll:
+            t_max += (self.data_update_interval_ns / 1_000_000_000.0) * 1.2
+
+        num_bins = self._get_target_resolution(plot_item_primary)
+
+        # 1. Track bounds per PlotItem for this frame
+        # Format: { plot_object: [current_min, current_max, has_data_flag] }
+        frame_bounds = {}
+
+        self.graph_view.blockSignals(True)
         try:
-            for s in self.series_list:
-                buf = self.buffers.get(s.module)
+            for module in self.modules:
+                buf = self.buffers.get(module)
                 if not buf or buf.size == 0:
                     continue
 
-                if buf.size < self.max_points:
-                    # Buffer hasn't wrapped yet, just read from 0 to head
-                    x_ordered = buf.x_data[: buf.head]
-                    y_ordered = buf.y_data[: buf.head, s.index]
-                else:
-                    # MAGIC: Zero-allocation contiguous slice!
-                    # Because we mirrored the data, head to (head + max_points)
-                    # is guaranteed to be chronologically sorted.
-                    x_ordered = buf.x_data[buf.head : buf.head + self.max_points]
-                    y_ordered = buf.y_data[buf.head : buf.head + self.max_points, s.index]
+                bundle = buf.bundle()
 
-                if len(x_ordered) > 0 and x_ordered[-1] > latest_time:
-                    latest_time = x_ordered[-1]
+                buf_newest_ts = buf.x_data[buf.head - 1] if buf.size > 0 else 0
 
-                if s.curve:
-                    s.curve.setData(x_ordered, y_ordered)
-                if s.overview_curve:
-                    s.overview_curve.setData(x_ordered, y_ordered)
+                for s in series_list:
+                    if s.module != module or not s.visible:
+                        continue
 
-        except Exception as e:
-            print(f"[{self.__class__.__name__}] _update_plots: {e}")
+                    view_moved = s._last_t_min != t_min or s._last_t_max != t_max or s._last_bins != num_bins
+                    data_visible = self.is_auto_scroll or buf_newest_ts >= t_min
 
-        if self.is_auto_scroll and latest_time > 0:
-            self._apply_view_range(latest_time - self.view_duration, latest_time)
+                    if view_moved or (buf.is_dirty and data_visible):
+                        s.buf_idx = 1 - s.buf_idx
+                        data_start = 0 if buf.size < self.max_points else buf.head
 
-        if self.is_auto_scroll and latest_time > 0:
-            self._apply_view_range(latest_time - self.view_duration, latest_time)
+                        n, y_min, y_max = slice_and_downsample_linear(
+                            bundle,
+                            s.index,
+                            s.main_x[s.buf_idx],
+                            s.main_y[s.buf_idx],
+                            t_min,
+                            t_max,
+                            num_bins,
+                        )
+                        s.curve.setData(s.main_x[s.buf_idx][:n], s.main_y[s.buf_idx][:n])
+
+                        s._last_t_min, s._last_t_max, s._last_bins = t_min, t_max, num_bins
+
+                        # AGGREGATION: Update the global bounds for this series' plot
+                        if n > 0:
+                            if s.plot_item not in frame_bounds:
+                                frame_bounds[s.plot_item] = [y_min, y_max, True]
+                            else:
+                                b = frame_bounds[s.plot_item]
+                                if y_min < b[0]:
+                                    b[0] = y_min
+                                if y_max > b[1]:
+                                    b[1] = y_max
+
+            # 2. Apply Hysteresis once per PlotItem using aggregated bounds
+            for p_item, (y_min, y_max, _) in frame_bounds.items():
+                self._apply_hysteresis_to_plot(p_item, y_min, y_max)
+
+        finally:
+            self.graph_view.blockSignals(False)
+
+    def _update_overview(self):
+        # Fixed resolution for the small strip
+        series_list = self.series_list
+        if not series_list:
+            return
+
+        # Ensure we have a plot to scale
+        if not self.overview_plot:
+            return
+
+        ov_bins = self._get_target_resolution(self.overview_plot)
+        buffers_get = self.buffers.get
+        max_points = self.max_points
+
+        # Aggregator for the overview's Y-axis
+        ov_min = float("inf")
+        ov_max = float("-inf")
+        has_data = False
+
+        for module in self.modules:
+            buf = buffers_get(module)
+            # We only skip the DRAW if not dirty, but we still need
+            # the range if we're going to scale correctly.
+            if not buf or buf.size == 0:
+                continue
+
+            data_start = 0 if buf.size < max_points else buf.head
+
+            for s in series_list:
+                if s.module != module or not s.overview_curve or not s.visible:
+                    continue
+
+                # Capture the n, y_min, y_max from Numba
+                n_ov, y_min, y_max = minmax_downsample_inplace(
+                    buf.x_data,
+                    buf.x_data_int64,
+                    buf.y_data,
+                    s.index,
+                    data_start,
+                    buf.size,
+                    s.ov_x[s.buf_idx],
+                    s.ov_y[s.buf_idx],
+                    ov_bins,
+                )
+
+                if n_ov > 0:
+                    s.overview_curve.setData(s.ov_x[s.buf_idx][:n_ov], s.ov_y[s.buf_idx][:n_ov])
+
+                    # Aggregate bounds
+                    if y_min < ov_min:
+                        ov_min = y_min
+                    if y_max > ov_max:
+                        ov_max = y_max
+                    has_data = True
+
+        # 🚀 Apply hysteresis to the Overview Plot
+        if has_data:
+            self._apply_hysteresis_to_plot(self.overview_plot, ov_min, ov_max)
+
+        if self.region and self.series_list and self.series_list[0].plot_item:
+            v_range = self.series_list[0].plot_item.viewRange()
+            rlow, rhigh = v_range[0]
+
+            self.region.blockSignals(True)
+            self.region.setRegion([rlow, rhigh])
+            self.region.blockSignals(False)
+
+    def _apply_hysteresis_to_plot(self, plot_item, y_min, y_max):
+        import math
+
+        # --- SAFETY GUARD 1: Wait for UI Layout ---
+        # If the widget hasn't been drawn yet (height is 0), calculating ticks
+        # will cause a ZeroDivisionError in PyQtGraph. Bail out and let the
+        # next update loop catch it.
+        vb = plot_item.getViewBox()
+        if vb.height() <= 1.0:
+            return
+
+        # --- SAFETY GUARD 2: Protect against bad data ---
+        if math.isnan(y_min) or math.isnan(y_max) or math.isinf(y_min) or math.isinf(y_max):
+            return
+
+        # Get or create the state for this specific PlotItem
+        state = self.plot_range_states.get(plot_item)
+        if state is None:
+            state = {"min": 0.0, "max": 0.0, "init": False}
+            self.plot_range_states[plot_item] = state
+
+        # 1. Calculate Ideal Range (5% padding)
+        data_span = y_max - y_min
+        padding = data_span * 0.05 if data_span > 0 else 1.0
+        ideal_min = y_min - padding
+        ideal_max = y_max + padding
+
+        # 2. Hysteresis Decision
+        should_update = False
+        if not state["init"]:
+            should_update = True
+        else:
+            # MANDATORY EXPAND: Data is leaving current view
+            if y_min < state["min"] or y_max > state["max"]:
+                should_update = True
+            else:
+                # LAZY SHRINK: Current data span is < 75% of visual window
+                current_view_span = state["max"] - state["min"]
+                if data_span < (current_view_span * 0.75):
+                    should_update = True
+
+        # 3. Apply
+        if should_update:
+            state["init"] = True
+            state["min"] = ideal_min
+            state["max"] = ideal_max
+            plot_item.setYRange(ideal_min, ideal_max, padding=0, update=True)
 
     def _scroll_to_now(self):
         """Moves the window to the current system time, regardless of data arrival."""
@@ -693,33 +844,34 @@ class TelemetryPlotter(QWidget):
         self._apply_view_range(now_sec - self.view_duration, now_sec)
 
     def clear(self):
-        # Reset the sequence tracker so we don't re-fetch old data
-        # Note: self.latest_seq should stay at its current value so the
-        # next 'apply_updates' only picks up logs generated AFTER this moment.
-        self.log_seq = self.latest_seq
+        # 1. Fetch the absolute latest sequence from the pool
+        log_pool = self.gui_context.registry.central.log_pool
+        current_pool_tail = log_pool.latest_sequence()
 
+        # 2. Synchronize the plotter's global pointer
+        self.log_seq = current_pool_tail
+        self.latest_seq = current_pool_tail
+
+        # 3. Reset all individual module buffers to this new tail
         for buf in self.buffers.values():
-            # Reset the Mirrored Ring Buffer pointers
+            buf.last_seq = current_pool_tail
             buf.head = 0
             buf.size = 0
-            buf.ptr = 0  # Reset legacy pointer too
+            buf.ptr = 0
+            buf.is_dirty = True  # Force a redraw of the empty state
 
-            # # Optional: Wipe the actual arrays
-            # buf.x_data.fill(0)
-            # if buf.y_data is not None:
-            #     buf.y_data.fill(0)
-
-        # Clear the visual curves
+        # 4. Clear visual curves
         for series in self.series_list:
             if series.curve:
                 series.curve.setData([], [])
-
-            # CRITICAL: You were missing the overview curve reset!
             if series.overview_curve:
                 series.overview_curve.setData([], [])
 
-        # 5. Trigger a redraw to show the empty plots immediately
+        self.plot_range_states.clear()
+
+        # 5. Refresh both components
         self._update_plots()
+        self._update_overview()
 
     def closeEvent(self, event):
         """Cleanup registration when the widget is closed."""
@@ -753,31 +905,19 @@ class TelemetryPlotter(QWidget):
                     sample.mouseClickEvent = lambda ev, s=series: self.toggle_series(s, not s.visible)
 
     def toggle_series(self, series: SeriesContainer, visible: bool):
-        """The single source of truth for toggling visibility."""
         series.visible = visible
 
-        # Toggle main curve visibility
         if series.curve:
             series.curve.setVisible(visible)
 
-        # Toggle overview curve visibility (The small history lines)
         if series.overview_curve:
             series.overview_curve.setVisible(visible)
 
-        # Handle Split View Layout
         if self.is_split and series.plot_item:
             series.plot_item.setVisible(visible)
 
-        # Trigger a Y-axis rescale
-        # If unhiding, we want the plot to jump to the data's scale immediately
-        if visible and series.plot_item:
-            series.plot_item.autoRange()
-
-        if self.overview_plot:
-            # We tell the overview plot to fit its view to currently visible items
-            self.overview_plot.autoRange()
-
-        # self.graph_view.ci.layout.activate()
+        # Force a refresh of both to account for the new/hidden data
+        self.apply_updates(force=True)
 
     def rename_channel(self, index: int, new_name: str):
         """Example of why persistence is great: you just update the container."""
@@ -790,8 +930,6 @@ class TelemetryPlotter(QWidget):
                 # Note: pyqtgraph legends might need a refresh call here
 
     def set_autoscroll(self, enabled: bool):
-        """Updates the auto-scroll state and UI."""
-        # Optional optimization: only update if state actually changed
         if self.is_auto_scroll == enabled:
             return
 
@@ -799,27 +937,54 @@ class TelemetryPlotter(QWidget):
         self.autoscroll_action.setChecked(enabled)
         self.autoscroll_action.setText(f"Auto-Scroll: {'ON' if enabled else 'OFF'}")
 
+        # Dynamically toggle labels based on mode
+        self._update_axis_visibility()
+
         if enabled:
-            # When re-enabling, jump to the live edge immediately
             self._update_plots()
 
-    def _apply_view_range(self, start_time: float, end_time: float):
-        """Safely updates both the region and the main plots without triggering feedback loops."""
-        if not self.region:
-            return
+    def _update_axis_visibility(self):
+        """Shows labels only when paused (not auto-scrolling) to save CPU."""
+        show_labels = (not self.is_auto_scroll) or self._update_interval_ns >= 250_000_000
 
+        # 1. Update the main plots
+        if self.series_list:
+            # In split mode, we only ever want labels on the bottom-most plot anyway
+            if self.is_split:
+                for i, s in enumerate(self.series_list):
+                    if s.plot_item:
+                        is_bottom = i == len(self.series_list) - 1
+                        # Show values only if it's the bottom plot AND we are paused
+                        s.plot_item.getAxis("bottom").setStyle(showValues=(show_labels and is_bottom))
+            else:
+                # Single plot mode
+                self.series_list[0].plot_item.getAxis("bottom").setStyle(showValues=show_labels)
+
+        # 2. Update the overview plot (Usually keep labels on here for context, or hide if you're hardcore)
+        if self.overview_plot:
+            self.overview_plot.getAxis("bottom").setStyle(showValues=True)
+
+    def _apply_view_range(self, start_time: float, end_time: float, force=False):
+        """Safely updates both the region and the main plots without triggering feedback loops."""
         if end_time - start_time < 0.1:
             start_time = end_time - 0.1
 
         self._is_system_updating = True
         try:
-            # Update the overview slider
-            self.region.setRegion([start_time, end_time])
+            # 1. Update the overview slider ONLY if it exists
+            if self.region:
+                now_ns = self.gui_context.registry.now_ns()
+                # 33ms is the "sweet spot" for visual smoothness vs CPU usage
+                if force:  # or (now_ns - self._last_region_update_ns) > 950_000_000:
+                    self.region.blockSignals(True)
+                    self.region.setRegion([start_time, end_time])
+                    self.region.blockSignals(False)
+                    self._last_region_update_ns = now_ns
 
-            # Update the main plots (the bottom views)
-            for s in self.series_list:
-                if s.plot_item:
-                    s.plot_item.setXRange(start_time, end_time, padding=0)
+            # 2. ALWAYS update the main plots (the bottom views)
+            # This ensures auto-scroll works even if the overview is hidden
+            if self.series_list and self.series_list[0].plot_item:
+                self.series_list[0].plot_item.setXRange(start_time, end_time, padding=0)
         finally:
             self._is_system_updating = False
 
@@ -827,8 +992,8 @@ class TelemetryPlotter(QWidget):
         """Finds the most recent timestamp across all active module buffers."""
         latest = 0.0
         for buf in self.buffers.values():
-            if buf.ptr > 0:
-                ts = buf.x_data[buf.ptr - 1]
+            if buf.size > 0:
+                ts = buf.x_data[buf.head - 1]
                 if ts > latest:
                     latest = ts
         return latest
@@ -854,8 +1019,63 @@ class TelemetryPlotter(QWidget):
         # Add to our tracking list
         self.modules.append(module)
 
-        # Immediately try to load existing history for just this module
-        self._load_module_history(module)
-
         # Accept the action
         event.acceptProposedAction()
+
+    def _get_target_resolution(self, plot_item) -> int:
+        """Returns the number of bins required based on pixel width."""
+        try:
+            # Get width in pixels. Fallback to 1920 if not yet rendered.
+            width = plot_item.getViewBox().width()
+            return int(width) if width > 0 else 1000
+        except AttributeError:
+            return 1000
+
+    def set_overview_visible(self, visible: bool):
+        """Toggles the visibility of the history overview plot."""
+        self.show_overview = visible
+        self.overview_action.setChecked(visible)
+        # Re-triggering split mode will rebuild the GraphicsLayout without the overview row
+        self.set_split_mode(self.is_split)
+
+    def _on_region_changed(self):
+        if self._is_system_updating or not self.region:
+            return
+        self.set_autoscroll(False)
+        minX, maxX = self.region.getRegion()
+
+        # FIX: Same here, only apply to the primary linked plot
+        if self.series_list and self.series_list[0].plot_item:
+            self.series_list[0].plot_item.setXRange(minX, maxX, padding=0)
+
+        self._update_plots()  # Fills the new view range
+
+    def _on_main_plot_range_changed(self):
+        import math
+
+        if self._is_system_updating:
+            return
+        try:
+            # 1. Capture the new range
+            v_range = self.series_list[0].plot_item.viewRange()
+            rlow, rhigh = v_range[0]
+            if math.isnan(rlow) or math.isnan(rhigh):
+                return
+
+            # 2. Stop auto-scroll because the user is manually interacting
+            if self.is_auto_scroll:
+                self.set_autoscroll(False)
+
+            # 3. Sync the Overview Slider (ONLY if it exists)
+            if self.region:
+                self._is_system_updating = True
+                try:
+                    self.region.setRegion([rlow, rhigh])
+                finally:
+                    self._is_system_updating = False
+
+            # 4. ALWAYS update the plots to fill the new X-range with data
+            self._update_plots()
+
+        except Exception as e:
+            self.logger.error(f"Range change error: {e}")

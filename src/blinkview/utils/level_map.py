@@ -6,15 +6,16 @@
 
 from typing import List, Optional
 
+import numpy as np
+
 from blinkview.core import dtypes
 from blinkview.core.configurable import (
     configuration_property,
-    on_config_change,
     override_property,
 )
 from blinkview.core.id_registry.tables import IndexedStringTable
+from blinkview.core.types.parsing import EmptyUnifiedParserState, ParserID, UnifiedParserConfig, UnifiedParserState
 from blinkview.ops.constants import EMPTY_STATE
-from blinkview.ops.levels import parse_log_level
 from blinkview.parsers.frame_parsers import FrameSectionParser, FrameSectionParserFactory
 from blinkview.utils.log_level import LogLevel
 
@@ -49,6 +50,7 @@ class LevelMap(FrameSectionParser):
         self._table: Optional[IndexedStringTable] = None
 
         self._lookup = {}
+        self._bundle = None
 
     def apply_config(self, config):
         changed = super().apply_config(config)
@@ -63,9 +65,7 @@ class LevelMap(FrameSectionParser):
 
         # 3. Initialize Table and Values Array
         # We use sequential IDs (0 to count-1) to keep the table dense
-        self._table = IndexedStringTable(
-            self.shared.array_pool, initial_capacity=count, values_dtype=dtypes.VALUES_TYPE
-        )
+        self._table = IndexedStringTable(initial_capacity=count, buffer_size_kb=1, values_dtype=dtypes.VALUES_TYPE)
 
         for i, (text, level_val) in enumerate(items):
             # Register string at index i
@@ -73,11 +73,14 @@ class LevelMap(FrameSectionParser):
 
         self._lookup = {text: LogLevel.from_value(val, LogLevel.INFO) for text, val in self.mapping.items()}
 
+        self._bundle = ParserID.LEVEL_NAME_MAP, EmptyUnifiedParserState, UnifiedParserConfig(string_table=self._table.bundle())
+
         return changed
 
     def bundle(self):
         """Returns the StringTableParams for backend processing."""
-        return parse_log_level, EMPTY_STATE, self._table.bundle()
+        # return ParserID.LEVEL_NAME_MAP, EMPTY_STATE, self._table.bundle()
+        return self._bundle
 
     def table(self):
         return self._table

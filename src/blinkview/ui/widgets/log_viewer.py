@@ -9,15 +9,17 @@ from datetime import datetime
 from typing import Iterable
 
 import numpy as np
-from qtpy.QtGui import QAction, Qt
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QAction
 from qtpy.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.core import dtypes
 from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.batched_logrows import BatchedLogRows
-from blinkview.core.numpy_log import filter_segment, query_pool
+from blinkview.core.dtypes import ID_UNSPECIFIED, LEVEL_UNSPECIFIED, SEQ_NONE
+from blinkview.core.numpy_log import filter_segment
 from blinkview.core.types.formatting import FormattingConfig
-from blinkview.ops.formatting import format_log_batch
+from blinkview.ops.formatting import estimate_log_batch_size, format_log_batch
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
 from blinkview.ui.widgets.log_highlighter import LogHighlighter
@@ -80,7 +82,9 @@ QToolButton[filterEnabled="true"] {
 
         self.logger = gui_context.logger.child(f"log_viewer_{id(self):x}")
 
-        self.latest_seq_seen = -1
+        self.latest_seq_seen = SEQ_NONE
+
+        self.prev_apply = 0  # Timestamp of the last apply_updates call for throttling
 
         self.max_rows = 100_000  # Max rows to keep in the text area for performance
 
@@ -205,6 +209,7 @@ QToolButton[filterEnabled="true"] {
 
         # Text Area
         self.text_area = SearchableLogArea(self, maxlen=self.max_rows)
+
         self.text_area.setMinimumWidth(300)
 
         self.action_end.triggered.connect(self.text_area.scroll_to_end)
@@ -402,7 +407,7 @@ QToolButton[filterEnabled="true"] {
     def reload_and_redraw(self):
         """Public method to clear current logs and reload from the source with current filters."""
         self.clear_logs()
-        self.latest_seq_seen = -1  # Reset sequence tracker to ensure we load all relevant logs
+        self.latest_seq_seen = SEQ_NONE  # Reset sequence tracker to ensure we load all relevant logs
 
     def apply_updates(self):
         """
@@ -414,6 +419,12 @@ QToolButton[filterEnabled="true"] {
 
         now_ns = self.gui_context.registry.now_ns
         t_start = now_ns()
+
+        if t_start - self.prev_apply < 100_000_000:  # Target ~30Hz (1/30 = 0.033s)
+            return
+        self.prev_apply = t_start
+
+        array_pool = self.gui_context.registry.system_ctx.array_pool
 
         # 1. Setup Filters & Registry Maps
         f = self.log_filter
@@ -431,9 +442,9 @@ QToolButton[filterEnabled="true"] {
         else:
             tm_arr = np.empty(0, dtype=dtypes.ID_TYPE)
 
-        t_module = f.filtered_module.id if f.filtered_module else 0xFFFF
-        t_device = f.allowed_device.id if f.allowed_device else 0xFFFF
-        target_level = f.log_level.value if f.log_level.value else 0xFF
+        t_module = dtypes.ID_TYPE(f.filtered_module.id if f.filtered_module else ID_UNSPECIFIED)
+        t_device = dtypes.ID_TYPE(f.allowed_device.id if f.allowed_device else ID_UNSPECIFIED)
+        target_level = dtypes.LEVEL_TYPE(f.log_level.value if f.log_level.value else LEVEL_UNSPECIFIED)
 
         # 2. Fetch & Format Stage (Numba Accelerated)
         t_fetch_start = now_ns()
@@ -443,32 +454,54 @@ QToolButton[filterEnabled="true"] {
 
         format_cfg = FormattingConfig(self.show_ts, self.show_dev, self.show_lvl, self.show_mod)
 
-        # Iterate segments chronologically
-        for segment in pool.get_ordered_segments():
-            # Quick skip: segment is empty or already fully seen
-            if segment.count == 0 or segment.sequence_ids[segment.count - 1] <= self.latest_seq_seen:
-                continue
+        with pool.get_snapshot() as segments:
+            for segment in segments:
+                segment_last_sequence_id = segment.last_sequence_id
+                # Quick skip: segment is empty or already fully seen
+                if segment.count == 0 or segment_last_sequence_id <= self.latest_seq_seen:
+                    continue
+                # Find matching indices in this segment
+                # print(
+                #     f"filter_segment("
+                #     f"start_seq={type(self.latest_seq_seen)}({self.latest_seq_seen}), "
+                #     f"tm_arr={tm_arr.dtype}, "  # This is usually the culprit
+                #     f"target_level={type(target_level)}({target_level}), "
+                #     f"target_module={type(t_module)}({t_module}), "
+                #     f"target_device={type(t_device)}({t_device}))"
+                # )
+                indices = filter_segment(
+                    segment.bundle(),
+                    target_modules_arr=tm_arr,
+                    start_seq=self.latest_seq_seen,
+                    target_level=target_level,
+                    target_module=t_module,
+                    target_device=t_device,
+                )
 
-            # Find matching indices in this segment
-            indices = filter_segment(
-                segment.bundle(),
-                target_modules_arr=tm_arr,
-                start_seq=self.latest_seq_seen,
-                target_level=target_level,
-                target_module=t_module,
-                target_device=t_device,
-            )
+                if indices.size > 0:
+                    # 1. Estimate
+                    # reg.levels_table.debug_print("LEVELS")
+                    # reg.modules_table.debug_print("MODULES")
+                    # reg.devices_table.debug_print("DEVICES")
+                    req_bytes = estimate_log_batch_size(indices, segment.bundle(), reg.bundle(), format_cfg)
 
-            if len(indices) > 0:
-                # Pass the toggles directly to Numba
-                raw_bytes = format_log_batch(indices, segment.bundle(), reg.bundle(), format_cfg, tz_offset_sec)
+                    # 2. Acquire pooled memory (zero allocation from OS)
+                    with array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
+                        # 3. Format into pool
+                        bytes_written = format_log_batch(
+                            handle.array, indices, segment.bundle(), reg.bundle(), format_cfg, tz_offset_sec
+                        )
 
-                full_string_batch += raw_bytes.tobytes().decode("utf-8", errors="replace")
-                total_new_rows += len(indices)
-                self.latest_seq_seen = max(self.latest_seq_seen, segment.sequence_ids[indices[-1]])
+                        # 4. Final conversion to string
+                        # .tobytes() on a slice is necessary for decode,
+                        # but it's much faster than incremental string building.
+                        full_string_batch += handle.array[:bytes_written].tobytes().decode("utf-8")
 
-            if total_new_rows >= self.max_rows:
-                break
+                    total_new_rows += indices.size
+                    self.latest_seq_seen = max(self.latest_seq_seen, segment_last_sequence_id)
+
+                if total_new_rows >= self.max_rows:
+                    break
 
         t_fetch_end = now_ns()
         fetch_and_format_ms = (t_fetch_end - t_fetch_start) / 1e6

@@ -35,7 +35,7 @@ def process_byte_filters(val, ansi_state, filter_ansi, filter_printable):
     return True, ansi_state
 
 
-@app_njit()
+@app_njit(inline="always")
 def decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
     # 1. O(1) Trailing Carriage Return Strip
     # Fixes the issue where \r trips the filter scanner on every single frame

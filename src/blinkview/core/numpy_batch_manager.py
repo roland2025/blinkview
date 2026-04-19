@@ -25,8 +25,8 @@ class PooledLogBatch:
 
     __slots__ = (
         "capacity",
-        "size",
-        "msg_cursor",
+        "_size_arr",
+        "_cursor_arr",
         "_pool",
         "_ref_count",
         "_lock",
@@ -66,8 +66,10 @@ class PooledLogBatch:
         has_sequences: bool = False,
     ):
         self._pool = pool
-        self.size = 0
-        self.msg_cursor = 0
+
+        self._size_arr = np.zeros(1, dtype=np.int64)
+        self._cursor_arr = np.zeros(1, dtype=np.int64)
+
         self._ref_count = 1
         self._lock = Lock()
         self.in_use = True
@@ -121,6 +123,22 @@ class PooledLogBatch:
             self._seq_h = acquire(self.capacity, dtype=dtypes.SEQ_TYPE)
             self.sequences = self._seq_h.array
 
+    @property
+    def size(self):
+        return self._size_arr[0]
+
+    @size.setter
+    def size(self, value):
+        self._size_arr[0] = value
+
+    @property
+    def msg_cursor(self):
+        return self._cursor_arr[0]
+
+    @msg_cursor.setter
+    def msg_cursor(self, value):
+        self._cursor_arr[0] = value
+
     def bundle(self):
         return LogBundle(
             timestamps=self.timestamps,
@@ -131,18 +149,18 @@ class PooledLogBatch:
             modules=self.modules if self.has_modules else self.EMPTY_U16,
             devices=self.devices if self.has_devices else self.EMPTY_U16,
             sequences=self.sequences if self.has_sequences else self.EMPTY_U64,
-            size=self.size,
+            size=self._size_arr,
+            msg_cursor=self._cursor_arr,
             has_levels=self.has_levels,
             has_modules=self.has_modules,
             has_devices=self.has_devices,
             has_sequences=self.has_sequences,
-            msg_cursor=self.msg_cursor,
         )
 
     def clear(self):
         """O(1) reset."""
-        self.size = 0
-        self.msg_cursor = 0
+        self._size_arr[0] = 0
+        self._cursor_arr[0] = 0
 
     def insert(
         self, ts_ns: int, msg_bytes: bytes = b"", level: int = 0, module: int = 0, device: int = 0, seq: int = 0

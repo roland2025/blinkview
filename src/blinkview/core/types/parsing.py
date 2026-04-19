@@ -8,15 +8,67 @@ from typing import Any, Callable, NamedTuple, Tuple
 
 import numpy as np
 
+from blinkview.core import dtypes
+from blinkview.core.id_registry.types import EmptyStringTableParams, StringTableParams
+from blinkview.core.types.modules import (
+    DynamicWidthConfig,
+    EmptyDynamicWidthConfig,
+    EmptyModuleTrackerState,
+    ModuleTrackerState,
+)
+
+# blinkview/core/types/parsing.py
+
+
+class ParserID:
+    # --- Category Bases ---
+    CAT_TEMPORAL = 100
+    CAT_IDENTITY = 200
+    CAT_CLASSIFICATION = 300
+    CAT_STRUCTURAL = 400
+    CAT_SANITIZATION = 500
+    CAT_PLUGIN_V1 = 1000
+
+    # --- 100: Temporal ---
+    TS_UNIX_SEC = CAT_TEMPORAL + 0
+    TS_UNIX_MS = CAT_TEMPORAL + 1
+    TS_ISO8601 = CAT_TEMPORAL + 2
+    TS_CUSTOM_STRFTIME = CAT_TEMPORAL + 3
+
+    # --- 200: Identity ---
+    MOD_FIXED_WIDTH = CAT_IDENTITY + 0
+    MOD_DYNAMIC_SM = CAT_IDENTITY + 1
+    MOD_BRACKETED = CAT_IDENTITY + 2
+    DEVICE_ID_STATIC = CAT_IDENTITY + 10
+
+    # --- 300: Classification ---
+    LEVEL_NAME_MAP = CAT_CLASSIFICATION + 0
+
+    # --- 400: Structural ---
+    SKIP_WORDS = CAT_STRUCTURAL + 0
+
+
+class CodecID:
+    NONE = 0
+    NEWLINE = 10
+    COBS = 20
+    SLIP = 30
+
+    # 99 is reserved for custom/plugin decoders
+    PLUGIN = 99
+
 
 class ParserConfig(NamedTuple):
-    level_default: int
-    level_error: int
-    module_unknown: int
-    module_log: int
-    device_id: int
-    report_error: bool
-    filter_squash_spaces: bool
+    level_default: int = 0
+    level_error: int = 0
+    module_unknown: int = 0
+    module_log: int = 0
+    device_id: int = 0
+    report_error: bool = False
+    filter_squash_spaces: bool = False
+
+
+EmptyParserConfig = ParserConfig()
 
 
 class InputParams(NamedTuple):
@@ -44,10 +96,32 @@ class LogOutput(NamedTuple):
     has_seq: bool
 
 
+class UnifiedParserState(NamedTuple):
+    modules: ModuleTrackerState = EmptyModuleTrackerState
+
+
+EmptyUnifiedParserState = UnifiedParserState()
+
+
+class UnifiedParserConfig(NamedTuple):
+    parser_id: int = 0
+
+    # --- Main Config Defaults ---
+    parser_config: ParserConfig = EmptyParserConfig
+
+    # --- StringTable / Level Mapping Defaults ---
+    # We use our 'Immortal' empty arrays as defaults
+    string_table: StringTableParams = EmptyStringTableParams
+
+    # --- Module Name Defaults ---
+    module_config: DynamicWidthConfig = EmptyDynamicWidthConfig
+
+
 class ParserPipelineBundle(NamedTuple):
     """
     The complete, bundled state required for the Parser logic in the Numba kernel.
     """
 
     config: ParserConfig
-    pipeline: Tuple[Tuple[Callable, Any, Any], ...]
+    pipeline: Tuple[Tuple[int, UnifiedParserState, UnifiedParserConfig], ...]
+    # pipeline: Tuple[Tuple[Callable, Any, Any], ...]

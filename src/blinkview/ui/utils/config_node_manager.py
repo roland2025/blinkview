@@ -20,7 +20,7 @@ class ConfigNodeManager(QObject):
     """
 
     # Global bus for registry updates
-    signal_received_config_schema = Signal(str, Any, Any)
+    signal_received_config_schema = Signal(str, object, object)
 
     def __init__(self, context: GUIContext, config_manager=None, parent=None):
         super().__init__(parent)

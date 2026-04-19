@@ -71,73 +71,74 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
         self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row, source_parent):
-        # --- DIRECT MODEL ACCESS (High Performance) ---
-        model: "TelemetryModel" = self.sourceModel()
-        state = model._row_states[source_row]
+        try:
+            # --- DIRECT MODEL ACCESS (High Performance) ---
+            model: "TelemetryModel" = self.sourceModel()
+            state: TelemetryRowState = model._row_states[source_row]
 
-        module = state.module
+            module = state.module
 
-        # if state.module.latest_row is None:
-        #     return False
-
-        # Strict Device Filter Check
-        # If a device is specified, reject anything that doesn't match immediately
-        if self.allowed_device is not None and module.device != self.allowed_device:
-            return False
-
-        if self.allowed_module is not None:
-            if module.device != self.allowed_module.device:
+            # Strict Device Filter Check
+            # If a device is specified, reject anything that doesn't match immediately
+            if self.allowed_device is not None and module.device != self.allowed_device:
                 return False
 
-            if self.allowed_module_children:
-                # Traverse parents manually until we hit target_mod or the root (None)
-                curr = module
-                found = False
-                while curr is not None:
-                    if curr == self.allowed_module:
-                        found = True
-                        break
-                    curr = curr.parent
-
-                if not found:
+            if self.allowed_module is not None:
+                if module.device != self.allowed_module.device:
                     return False
-            else:
-                # allow parent modules siblings only
-                parent = self.allowed_module.parent
-                if parent is not None:
+
+                if self.allowed_module_children:
+                    # Traverse parents manually until we hit target_mod or the root (None)
                     curr = module
                     found = False
                     while curr is not None:
-                        if curr == parent:
+                        if curr == self.allowed_module:
                             found = True
                             break
                         curr = curr.parent
 
                     if not found:
                         return False
+                else:
+                    # allow parent modules siblings only
+                    parent = self.allowed_module.parent
+                    if parent is not None:
+                        curr = module
+                        found = False
+                        while curr is not None:
+                            if curr == parent:
+                                found = True
+                                break
+                            curr = curr.parent
 
-        # Empty Search Filter = Show everything (that passed the device check)
-        if not self._positive_groups and not self._global_negatives:
-            return True
+                        if not found:
+                            return False
 
-        # Pre-compute the search string.
-        # Accessing state.module directly avoids QModelIndex and QVariant overhead.
-        row_content = f"{module.name} {module.device.name}".lower()
-
-        # Check Global Negatives (NOT)
-        if self._global_negatives:
-            if any(neg in row_content for neg in self._global_negatives):
-                return False
-
-        # Check Positive Groups (OR / AND)
-        if not self._positive_groups:
-            return True
-
-        for group in self._positive_groups:
-            if all(term in row_content for term in group if term):
+            # Empty Search Filter = Show everything (that passed the device check)
+            if not self._positive_groups and not self._global_negatives:
                 return True
 
-        return False
+            # Pre-compute the search string.
+            # Accessing state.module directly avoids QModelIndex and QVariant overhead.
+            row_content = f"{module.name} {module.device.name}".lower()
+
+            # Check Global Negatives (NOT)
+            if self._global_negatives:
+                if any(neg in row_content for neg in self._global_negatives):
+                    return False
+
+            # Check Positive Groups (OR / AND)
+            if not self._positive_groups:
+                return True
+
+            for group in self._positive_groups:
+                if all(term in row_content for term in group if term):
+                    return True
+
+            return False
+        except Exception as e:
+            print(f"CRASH AVERTED IN PROXY: {e}")
+            return True  # Show the row to be safe if it fails
 
 
 class TelemetryTable(QWidget):
@@ -197,6 +198,8 @@ class TelemetryTable(QWidget):
         # --- SETUP PROXY MODEL ---
         self.proxy_model = MultiColumnFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.gui_context.telemetry_model)
+
+        self.proxy_model.setDynamicSortFilter(False)
 
         # --- SETUP THE VIEW ---
         self.view = QTableView()
@@ -539,8 +542,18 @@ class TelemetryTable(QWidget):
                 QApplication.clipboard().setText(module.name)
 
             case "copy_value":
-                if module.latest_row:
-                    QApplication.clipboard().setText(module.latest_row.message)
+                # Find the row in the proxy model for this module
+                for row in range(self.proxy_model.rowCount()):
+                    # Get the index for the VALUE column
+                    idx = self.proxy_model.index(row, TelemetryCol.VALUE)
+                    # Check if the NAME column matches our target module
+                    name_idx = self.proxy_model.index(row, TelemetryCol.NAME)
+
+                    if self._get_module_at_index(name_idx) == module:
+                        val = idx.data(Qt.DisplayRole)
+                        if val and val != "---":
+                            QApplication.clipboard().setText(str(val))
+                        break
 
             case "view_graph" | "view_graph_with_children":
                 # Future home of your PyQtGraph widget

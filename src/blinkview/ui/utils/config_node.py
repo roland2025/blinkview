@@ -12,7 +12,7 @@ from qtpy.QtCore import QObject, Signal
 
 
 class ConfigNode(QObject):
-    signal_received = Signal(Any, Any)
+    signal_received = Signal(object, object)
     signal_unregister = Signal(object)
     signal_deleted = Signal()  # Widgets will connect to this to close themselves
 

@@ -150,53 +150,52 @@ class UpdateWidget(QWidget):
 
     def ensure_updater(self) -> bool:
         """
-        Attempts to initialize the updater.
-        If path is missing, prompts the user.
+        Guarantees that self.updater is initialized.
+        If settings are missing/invalid, triggers the setup flow.
         """
+        # 1. If already exists, we are good
+        if self.updater:
+            return True
+
+        # 2. Try to initialize with current settings
         try:
             self.updater = Updater(self.gui_context.settings)
-            self.status_label.setText(f"<b>Current Version:</b> v{__version__}")
-            self.fetch_btn.setEnabled(True)
-            self.config_btn.setVisible(False)  # Hide the config button if the updater initializes successfully
+            self._update_ui_after_init()
             return True
         except UpdateError:
-            # This happens if update.path is not set
-            self.status_label.setText("<b>Status:</b> <span style='color:red;'>Update path not configured.</span>")
-            self.fetch_btn.setEnabled(False)
-            return self.prompt_for_path()
+            # 3. Path is missing or invalid. Use the static helper to fix it.
+            if self.ensure_update_path(self.gui_context.settings):
+                # Setup succeeded, try again
+                self.updater = Updater(self.gui_context.settings)
+                self._update_ui_after_init()
+                return True
+
+        # User aborted or failed to provide a valid path
+        self.status_label.setText("<b>Status:</b> <span style='color:red;'>Path not configured.</span>")
+        self.fetch_btn.setEnabled(False)
+        self.config_btn.setVisible(True)
+        return False
 
     def prompt_for_path(self) -> bool:
-        """Opens a folder dialog and validates the selection using the static method."""
-        current_path = self.gui_context.settings.get("update.path", "")
-        selected_path = QFileDialog.getExistingDirectory(self, "Select BlinkView Source Repository", current_path)
-
-        if not selected_path:
-            return False
-
-        selected_path = Path(selected_path).resolve()
-
-        # Use the STATIC method to validate before doing anything else
-        if not Updater.is_valid_repo(selected_path):
-            MessageBox.warning(
-                self,
-                "Invalid Repository",
-                "The selected folder is not a valid BlinkView source tree.\n"
-                "Expected to find .git, pyproject.toml, and the blinkview source.",
-            )
-            return False
-
-        # If valid, save and re-init
-        self.gui_context.settings.set("update.path", str(selected_path), scope="global")
-
-        try:
+        """Button callback to manually re-configure the repository path."""
+        # Use the static method logic so we don't repeat the loop/validation code
+        if self.ensure_update_path(self.gui_context.settings):
+            # Re-initialize the updater instance with the new path
             self.updater = Updater(self.gui_context.settings)
+            self._update_ui_after_init()
 
-            self.fetch_btn.setEnabled(True)
-            self.request_fetch()  # Automatically fetch after setting a valid path
+            # Immediately fetch if the path just changed
+            self.request_fetch()
             return True
-        except UpdateError as e:
-            MessageBox.critical(self, "Initialization Error", str(e))
-            return False
+        return False
+
+    def _update_ui_after_init(self):
+        """Helper to sync UI state after a successful Updater initialization."""
+        self.status_label.setText(f"<b>Current Version:</b> v{__version__}")
+        self.fetch_btn.setEnabled(True)
+        self.config_btn.setVisible(False)
+        self.updater.channel = str(self.gui_context.settings.get("update.channel", "stable")).lower()
+        self.list_local_versions()
 
     def request_fetch(self, is_auto=False):
         """Background task to get tags. Updater handles internal cooldowns."""
@@ -298,3 +297,50 @@ class UpdateWidget(QWidget):
     def _on_error(self, error_msg):
         self._set_loading(False)
         MessageBox.critical(self, "Update Error", error_msg)
+
+    @staticmethod
+    def ensure_update_path(settings) -> bool:
+        """
+        Static helper to ensure a valid repo path exists in settings.
+        Returns True if a valid path is found or selected, False if aborted.
+        """
+        from pathlib import Path
+
+        from qtpy.QtWidgets import QFileDialog
+
+        from blinkview.ui.widgets.message_box import MessageBox
+        from blinkview.utils.updater import Updater
+
+        path_str = settings.get("update.path", "")
+
+        # 1. Check if the current path is already valid
+        if path_str and Updater.is_valid_repo(Path(path_str)):
+            return True
+
+        # 2. If not, prompt the user
+        MessageBox.information(
+            None, "Setup Required", "BlinkView needs to know the location of its source repository to handle updates."
+        )
+
+        while True:
+            selected = QFileDialog.getExistingDirectory(None, "Select BlinkView Source Repository", path_str)
+
+            if not selected:
+                return False  # User canceled
+
+            selected_path = Path(selected).resolve()
+
+            if Updater.is_valid_repo(selected_path):
+                settings.set("update.path", str(selected_path), scope="global")
+                return True
+
+            # If invalid, ask again or let them quit
+            retry = MessageBox.question(
+                None,
+                "Invalid Repository",
+                "The selected folder is not a valid BlinkView source tree.\n"
+                "Do you want to try selecting a different folder?",
+                buttons=MessageBox.Btn.Yes | MessageBox.Btn.No,
+            )
+            if retry == MessageBox.Btn.No:
+                return False

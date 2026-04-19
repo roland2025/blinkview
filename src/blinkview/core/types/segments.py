@@ -22,5 +22,8 @@ class LogSegmentParams(NamedTuple):
     offsets: np.ndarray  # dtypes.OFFSET_TYPE
     lengths: np.ndarray  # dtypes.LEN_TYPE
     buffer: np.ndarray  # dtypes.BYTE
-    count: int
+
+    count: np.ndarray  # np.int64, shape=(1,)
+    msg_cursor: np.ndarray  # np.int64, shape=(1,)
+
     capacity: int

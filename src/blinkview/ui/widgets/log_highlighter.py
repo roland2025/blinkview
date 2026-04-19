@@ -39,8 +39,11 @@ class LogHighlighter(QSyntaxHighlighter):
 
     def highlightBlock(self, text):
         """Called automatically by Qt when a line needs rendering."""
+
         try:
             idx = self.level_index
+            if idx < 0:
+                return
             # Assuming the level is the 3rd 'word' in your string:
             # "17:28:35.459 ABC E asi: ..."
             parts = text.split(maxsplit=idx + 1)  # Split into at most idx+1 parts to avoid unnecessary splitting

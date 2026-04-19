@@ -31,6 +31,7 @@ class SearchableLogArea(QWidget):
 
         self.editor.setFont(QFont("Consolas", 10))
         self.editor.setMaximumBlockCount(maxlen)
+        self.editor.document().setDocumentMargin(0)
 
         # The Find Bar (Hidden by default)
         self.find_bar = QWidget()
@@ -160,6 +161,7 @@ class SearchableLogArea(QWidget):
 
             cursor.insertText(text_to_append)
         finally:
+            # pass
             self.editor.setUpdatesEnabled(True)
             self.editor.blockSignals(False)
 
@@ -275,6 +277,12 @@ class SearchableLogArea(QWidget):
 
     def refresh_highlights(self):
         """Visually renders three layers: Global Find, Manual Selection, and Current Match."""
+        if not self._find_text and not self._manual_text:
+            # If nothing is being searched, ensure selections are clear and do zero math
+            if self.editor.extraSelections():
+                self.editor.setExtraSelections([])
+            return
+
         if not self.editor.viewport():
             return
         doc = self.editor.document()

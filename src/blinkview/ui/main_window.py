@@ -12,9 +12,8 @@ from pathlib import Path
 from time import perf_counter, time
 from typing import Optional
 
-from PySide6.QtGui import QFont
 from qtpy.QtCore import Qt, QTimer, Signal, Slot
-from qtpy.QtGui import QAction, QIcon
+from qtpy.QtGui import QAction, QFont, QIcon
 from qtpy.QtWidgets import (
     QApplication,
     QComboBox,
@@ -36,6 +35,7 @@ from blinkview import __version__ as blinkview_version
 from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.config_manager import ConfigManager
 from blinkview.core.registry import Registry
+from blinkview.core.settings_manager import SettingsManager
 from blinkview.core.task_manager import TaskManager
 from blinkview.ui.cli_args import setup_gui_parser
 from blinkview.ui.gui_context import GUIContext
@@ -59,6 +59,7 @@ from blinkview.ui.widgets.title_bar import TitleBar
 from blinkview.ui.widgets.toast import ToastManager, ToastType
 from blinkview.ui.widgets.update_widget import UpdateWidget, check_post_update
 from blinkview.ui.windows.detached_tab_window import DetachedTabWindow
+from blinkview.utils.format_metric import format_metric
 from blinkview.utils.used_modules import print_used_modules
 
 
@@ -252,6 +253,9 @@ class BlinkMainWindow(QMainWindow):
 
         self.last_poll_time = perf_counter()
 
+        self._numba_compile_end = 0
+        self._numba_compile_start = 0
+
         # UI Poller (Runs here, updates the log window)
         self.gui_context.set_theme(StyleConfig())
 
@@ -305,16 +309,25 @@ class BlinkMainWindow(QMainWindow):
             self.last_poll_time = self.gui_context.registry.now_ns() + (self.timeout_fast) * 1_000_000
             # Set it to the future to avoid false lag detection on the first tick
             self.timer_fast.start(self.timeout_fast)
+            compile_time = (self._numba_compile_end - self._numba_compile_start) / 1_000_000_000.0
+            # msg = f"Compilation time: {compile_time:.1f} seconds"
+            compile_msg = ""
 
-            ToastManager.show("System ready", ToastType.SUCCESS, parent=self)
+            if compile_time > 2:
+                compile_msg = f" | {compile_time:.0f} sec"
+
+            ToastManager.show(f"System ready{compile_msg}", ToastType.SUCCESS, parent=self)
 
         QTimer.singleShot(100, start_fast_timer)
 
     def _start_stage_2(self):
         self.gui_context.registry.start()
+
+        self._numba_compile_end = self.gui_context.registry.now_ns()
         QTimer.singleShot(100, self._start_stage_3)
 
     def _start_stage_1(self):
+        self._numba_compile_start = self.gui_context.registry.now_ns()
         ToastManager.show("Compiling Numba kernels", ToastType.WARNING, duration=1.0, parent=self)
         QTimer.singleShot(200, self._start_stage_2)
 
@@ -535,11 +548,12 @@ class BlinkMainWindow(QMainWindow):
                 backlog = current_stats["total"]
                 capacity_pct = (backlog / current_stats["maxlen"]) * 100
 
-                current_rows, max_rows = registry.central.log_pool.get_counts()
+                current_rows, max_rows, max_sequence = registry.central.log_pool.get_counts()
 
                 # Update UI
                 # Formatting: "In: 150,000 msg/s | Out: 148,000 msg/s | Buffer: 12%"
-                msg = f"In: {in_mps} | Out: {out_mps} | Backlog: {backlog} ({capacity_pct:.1f}%) | pool: {current_rows} / {max_rows} ({current_rows / max_rows * 100:.1f}%)"
+                # msg = f"In: {in_mps} | Out: {out_mps} | Backlog: {backlog} ({capacity_pct:.1f}%) | pool: {current_rows} / {max_rows} ({current_rows / max_rows * 100:.1f}%)"
+                msg = f"{format_metric(in_mps)} | {current_rows / max_rows * 100:.1f}% of {format_metric(max_rows)} | {format_metric(max_sequence)}"
                 self.mps_label.setText(msg)
                 # self.logger_stats.debug(msg)
 
@@ -814,96 +828,3 @@ class BlinkMainWindow(QMainWindow):
 
         self.addToolBar(Qt.TopToolBarArea, toolbar)
         self.device_toolbars[source_id] = toolbar
-
-
-def run(args):
-    if "QT_API" not in os.environ:
-        os.environ["QT_API"] = "pyside6"
-
-    install_version: Optional[str] = None  # version to install when closing app
-
-    def set_update_version(ver):
-        nonlocal install_version
-        install_version = ver
-
-    try:
-        # Force Windows to show the custom icon in the taskbar
-        if sys.platform == "win32":
-            import ctypes
-
-            try:
-                myappid = f"ee.incubator.blinkview.{blinkview_version}"
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-            except Exception:
-                pass  # Fails gracefully on non-Windows systems
-
-        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-        app = QApplication(sys.argv)
-
-        app.setStyle("Fusion")
-        use_qdarktheme = True
-        if use_qdarktheme:
-            import qdarktheme
-
-            qdarktheme.setup_theme("dark", corner_shape="sharp")
-            custom_tooltips = """
-            QToolTip {
-                background-color: #1e1f22; /* Deep charcoal (PyCharm tooltip bg) */
-                color: #bcbec4;            /* Soft light gray text */
-                border: 1px solid #4e5157; /* Subtle border for definition */
-                padding: 5px;              /* Breathe room */
-                border-radius: 0px;        /* Sharp corners to match your 'sharp' setting */
-            }
-            """
-            app.setStyleSheet(app.styleSheet() + custom_tooltips)
-
-        # Set the global application icon
-        app.setWindowIcon(QIcon(str(Path(__file__).parent.parent / "assets" / "icon.png")))
-
-        registry = Registry(
-            session_name=args.session,
-            profile_name=args.profile,
-            log_dir=args.logdir,
-            config_path=args.config,
-        )
-
-        viewer = BlinkMainWindow(registry, set_update_version=set_update_version)
-        viewer.setWindowOpacity(0)
-        viewer.show()
-
-        def finalize_ui_restore():
-            # Because this runs AFTER app.exec() starts, Qt's geometry math will be flawless.
-            viewer.load_ui_state()
-
-            viewer.raise_()
-            viewer.activateWindow()
-            # Materialize the window in its perfect location
-            viewer.setWindowOpacity(1.0)
-
-        # Schedule the restoration to happen on the very first frame of the Event Loop
-        QTimer.singleShot(50, finalize_ui_restore)
-        exit_code = app.exec()
-
-        # print_used_modules()
-
-        sys.exit(exit_code)
-    finally:
-        if install_version is not None:
-            from blinkview.utils.updater import Updater
-
-            updater = Updater()
-            updater.install(install_version)
-
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="BlinkView - A Real-Time Telemetry Visualization Tool")
-    setup_gui_parser(parser)
-    args = parser.parse_args()
-    run(args)
-
-
-if __name__ == "__main__":
-    main()

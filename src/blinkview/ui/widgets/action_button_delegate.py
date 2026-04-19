@@ -10,6 +10,7 @@ from qtpy.QtGui import QBrush, QColor, QFont
 from qtpy.QtWidgets import QApplication, QStyle, QStyledItemDelegate, QStyleOptionButton
 
 from blinkview.ui.widgets.config.style_config import StyleConfig
+from blinkview.utils.log_level import LogLevel
 
 
 class ActionButtonDelegate(QStyledItemDelegate):
@@ -79,90 +80,105 @@ class TelemetryDelegate(QStyledItemDelegate):
             self._flash_brushes.append(QBrush(c))
 
     def paint(self, painter, option, index):
-        # Setup Source Model Access
-        theme = self.theme
-        model = index.model()
-        if hasattr(model, "mapToSource"):
-            source_index = model.mapToSource(index)
-            actual_model = model.sourceModel()
-        else:
-            source_index = index
-            actual_model = model
+        try:
+            # Setup Source Model Access
+            theme = self.theme
+            model = index.model()
+            if hasattr(model, "mapToSource"):
+                source_index = model.mapToSource(index)
+                actual_model = model.sourceModel()
+            else:
+                source_index = index
+                actual_model = model
 
-        state = actual_model._row_states[source_index.row()]
-        now = perf_counter()
+            from blinkview.ui.widgets.telemetry_model import TelemetryRowState
 
-        elapsed_since_arrival = now - state.last_arrival_time
-        is_stale = state.last_painted_row and (elapsed_since_arrival > theme.stale_threshold)
+            state: TelemetryRowState = actual_model._row_states[source_index.row()]
+            now = perf_counter()
 
-        # Use change time for the flash
-        elapsed_since_change = now - state.last_change_time
+            elapsed_since_arrival = now - state.last_arrival_time
+            is_stale = (state.last_painted_seq > 0) and (elapsed_since_arrival > theme.stale_threshold)
 
-        painter.save()
+            # Use change time for the flash
+            elapsed_since_change = now - state.last_change_time
 
-        col = index.column()
+            painter.save()
 
-        if col == TelemetryCol.VALUE:
-            painter.setFont(self.value_font)
-        else:
-            # Use the default font provided by the View/Option
-            painter.setFont(option.font)
+            col = index.column()
 
-        # --- DRAW BACKGROUND FLASH ---
-        if col == TelemetryCol.VALUE and elapsed_since_change < theme.fade_duration:
-            idx = int((elapsed_since_change / theme.fade_duration) * self.steps)
-            if 0 <= idx < self.steps:
-                painter.fillRect(option.rect, self._flash_brushes[idx])
+            if col == TelemetryCol.VALUE:
+                painter.setFont(self.value_font)
+            else:
+                # Use the default font provided by the View/Option
+                painter.setFont(option.font)
 
-        # --- CONFIGURE TEXT COLOR ---
-        if not state.last_painted_row or is_stale:
-            color = theme.color_text_stale
+            # --- DRAW BACKGROUND FLASH ---
+            # if col == TelemetryCol.VALUE and elapsed_since_change < theme.fade_duration:
+            #     idx = int((elapsed_since_change / theme.fade_duration) * self.steps)
+            #     if 0 <= idx < self.steps:
+            #         painter.fillRect(option.rect, self._flash_brushes[idx])
+            if col == TelemetryCol.VALUE and elapsed_since_change < theme.fade_duration:
+                # solid green with 100/255 opacity—adjust the alpha (100) as you like
+                painter.fillRect(option.rect, self._flash_brushes[0])
 
-        elif col == TelemetryCol.NAME:
-            color = theme.color_text_name
+            # --- CONFIGURE TEXT COLOR ---
+            if state.last_painted_seq == 0 or is_stale:
+                color = theme.color_text_stale
 
-        elif col == TelemetryCol.VALUE:
-            # Safe access to the level color
-            color = getattr(state.last_painted_row.level, "color", theme.color_text_default)
+            elif col == TelemetryCol.NAME:
+                color = theme.color_text_name
 
-        else:
-            color = self.theme.color_text_default
+            elif col == TelemetryCol.VALUE:
+                # Safe access to the level color
+                lvl_obj = LogLevel.from_value(state.last_painted_level)
+                # color = getattr(state.last_painted_row.level, "color", theme.color_text_default)
+                # color = getattr(lvl_obj, "color", theme.color_text_default)
+                color = QColor(lvl_obj.color)
 
-        # --- DRAW TEXT ---
-        # We use the 'option' to handle selection highlights and focus rects
-        painter.setPen(color)
+            else:
+                color = self.theme.color_text_default
 
-        # # Alignment logic
-        # alignment = Qt.AlignVCenter
-        # alignment |= (Qt.AlignLeft if col == TelemetryCol.VALUE else Qt.AlignCenter)
-        #
-        # # Calculate text rectangle with a small margin
-        # text_rect = option.rect.adjusted(5, 0, -5, 0)
-        # text = str(index.data(Qt.DisplayRole))
-        #
-        # painter.drawText(text_rect, alignment, text)
-        #
-        # painter.restore()
-        text_rect = option.rect.adjusted(5, 0, -5, 0)
+            # --- DRAW TEXT ---
+            # We use the 'option' to handle selection highlights and focus rects
+            painter.setPen(color)
 
-        # Default alignment
-        alignment = Qt.AlignVCenter
+            # # Alignment logic
+            # alignment = Qt.AlignVCenter
+            # alignment |= (Qt.AlignLeft if col == TelemetryCol.VALUE else Qt.AlignCenter)
+            #
+            # # Calculate text rectangle with a small margin
+            # text_rect = option.rect.adjusted(5, 0, -5, 0)
+            # text = str(index.data(Qt.DisplayRole))
+            #
+            # painter.drawText(text_rect, alignment, text)
+            #
+            # painter.restore()
+            text_rect = option.rect.adjusted(5, 0, -5, 0)
 
-        if col == TelemetryCol.NAME:
-            # Shift text based on depth
-            indent = state.module.depth * self.indent_width
-            text_rect.setLeft(text_rect.left() + indent)
-            alignment |= Qt.AlignLeft  # Trees must be left-aligned to look right
-        elif col == TelemetryCol.VALUE:
-            alignment |= Qt.AlignLeft
-        else:
-            alignment |= Qt.AlignCenter
+            # Default alignment
+            alignment = Qt.AlignVCenter
 
-        # --- DRAW TEXT ---
-        text = str(index.data(Qt.DisplayRole))
-        painter.drawText(text_rect, alignment, text)
+            if col == TelemetryCol.NAME:
+                # Shift text based on depth
+                indent = state.module.depth * self.indent_width
+                text_rect.setLeft(text_rect.left() + indent)
+                alignment |= Qt.AlignLeft  # Trees must be left-aligned to look right
+            elif col == TelemetryCol.VALUE:
+                alignment |= Qt.AlignLeft
+            else:
+                alignment |= Qt.AlignCenter
 
-        painter.restore()
+            # --- DRAW TEXT ---
+            text = str(index.data(Qt.DisplayRole))
+            painter.drawText(text_rect, alignment, text)
+
+            painter.restore()
+        except Exception as e:
+            # If ANYTHING fails here, we catch it instead of letting C++ kill the app
+            print(f"CRASH AVERTED IN DELEGATE: {e}")
+            import traceback
+
+            traceback.print_exc()
 
     def sizeHint(self, option, index):
         # Get the original size hint

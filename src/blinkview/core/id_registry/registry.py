@@ -7,6 +7,7 @@
 from threading import RLock
 from typing import Dict, List
 
+from blinkview.core import dtypes
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
 from blinkview.core.id_registry.tables import IndexedStringTable
@@ -52,15 +53,18 @@ class IDRegistry:
 
         self.level_map = LevelMap()
 
-        self.modules_table = IndexedStringTable(array_pool, initial_capacity=1024)
-        self.devices_table = IndexedStringTable(array_pool, initial_capacity=10)
-        self.levels_table = IndexedStringTable(array_pool, initial_capacity=10)
+        self.modules_table = IndexedStringTable(initial_capacity=1024)
+        self.devices_table = IndexedStringTable(initial_capacity=10)
+        self.levels_table = IndexedStringTable(initial_capacity=10, values_dtype=dtypes.VALUES_TYPE)
 
         self._init_level_maps()
 
     def _init_level_maps(self):
-        for lvl in LogLevel.LIST:
-            self.levels_table.register_name(lvl.value, lvl.name)
+        for i, lvl in enumerate(LogLevel.LIST):
+            # We use i as the sequential index, and lvl.value as the 'searchable' ID
+            self.levels_table.register_name(i, lvl.name, value=lvl.value)
+
+        self.levels_table.debug_print("LEVELS")
 
     def _generate_module_id(self) -> int:
         """Internal callback passed to DeviceIdentity."""

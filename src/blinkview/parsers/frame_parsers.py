@@ -20,7 +20,15 @@ from blinkview.core.types.modules import (
     FixedWidthConfig,
     ModuleTrackerState,
 )
-from blinkview.core.types.parsing import ParserConfig, ParserPipelineBundle
+from blinkview.core.types.parsing import (
+    CodecID,
+    EmptyUnifiedParserState,
+    ParserConfig,
+    ParserID,
+    ParserPipelineBundle,
+    UnifiedParserConfig,
+    UnifiedParserState,
+)
 from blinkview.ops.constants import EMPTY_STATE
 from blinkview.ops.generic import SkipWordsConfig, skip_words_parser
 from blinkview.ops.modules import parse_fixed_width_name, parse_module_tags_statemachine
@@ -85,10 +93,6 @@ class GenericFrameParser(FrameParser):
     parser_errors_hidden: bool
 
     def __init__(self):
-        from blinkview.ops.codecs import decode_newline_frame
-
-        self.decode = decode_newline_frame
-
         self.pipeline = []
 
         self.post_process = self.no_post_process
@@ -207,20 +211,34 @@ class ModuleNameParserBase(FrameSectionParser):
 
     def __init__(self):
         # This contains both the scalars (as 1-element arrays) and the buffers.
-        self.tracker_state = ModuleTrackerState(
-            # Scalars (wrapped in arrays so they are mutable by reference in NJIT)
-            count=np.zeros(1, dtypes.ID_TYPE),
-            bytes_cursor=np.zeros(1, dtypes.OFFSET_TYPE),
-            # Metadata buffers for unresolved names
-            starts=np.empty(self.TRACKER_CAPACITY, dtypes.OFFSET_TYPE),
-            lengths=np.empty(self.TRACKER_CAPACITY, dtypes.LEN_TYPE),
-            hashes=np.zeros(self.TRACKER_CAPACITY, dtypes.HASH_TYPE),
-            # The raw byte scratchpad
-            name_bytes=np.empty(self.TRACKER_CAPACITY * self.AVG_NAME_LEN, dtype=dtypes.BYTE),
+        # self.tracker_state = ModuleTrackerState(
+        #     # Scalars (wrapped in arrays so they are mutable by reference in NJIT)
+        #     count=np.zeros(1, dtypes.ID_TYPE),
+        #     bytes_cursor=np.zeros(1, dtypes.OFFSET_TYPE),
+        #     # Metadata buffers for unresolved names
+        #     starts=np.empty(self.TRACKER_CAPACITY, dtypes.OFFSET_TYPE),
+        #     lengths=np.empty(self.TRACKER_CAPACITY, dtypes.LEN_TYPE),
+        #     hashes=np.zeros(self.TRACKER_CAPACITY, dtypes.HASH_TYPE),
+        #     # The raw byte scratchpad
+        #     name_bytes=np.empty(self.TRACKER_CAPACITY * self.AVG_NAME_LEN, dtype=dtypes.BYTE),
+        # )
+
+        self.tracker_state = UnifiedParserState(
+            modules=ModuleTrackerState(
+                # Scalars (wrapped in arrays so they are mutable by reference in NJIT)
+                count=np.zeros(1, dtypes.ID_TYPE),
+                bytes_cursor=np.zeros(1, dtypes.OFFSET_TYPE),
+                # Metadata buffers for unresolved names
+                starts=np.empty(self.TRACKER_CAPACITY, dtypes.OFFSET_TYPE),
+                lengths=np.empty(self.TRACKER_CAPACITY, dtypes.LEN_TYPE),
+                hashes=np.zeros(self.TRACKER_CAPACITY, dtypes.HASH_TYPE),
+                # The raw byte scratchpad
+                name_bytes=np.empty(self.TRACKER_CAPACITY * self.AVG_NAME_LEN, dtype=dtypes.BYTE),
+            )
         )
 
     def post_process(self, batch) -> bool:
-        state = self.tracker_state
+        state = self.tracker_state.modules
         unresolved_count = state.count[0]
 
         if unresolved_count == 0:
@@ -284,14 +302,20 @@ class FixedWidthModuleNameParser(ModuleNameParserBase):
     def bundle(self):
         # 1. Build the immutable config snapshot
         # We pass only the search width and the current module registry
-        config = FixedWidthConfig(
-            width=self.max_length,
-            byte_map=self.shared.id_registry.modules_table.bundle(),
+
+        config = UnifiedParserConfig(
+            string_table=self.shared.id_registry.modules_table.bundle(),
+            module_config=DynamicWidthConfig(max_length=self.max_length),
         )
+
+        # config = FixedWidthConfig(
+        #     width=self.max_length,
+        #     byte_map=self.shared.id_registry.modules_table.bundle(),
+        # )
 
         # 2. Return the universal 3-tuple: (Function, Mutable State, Immutable Config)
         # self.tracker_state is the flattened state initialized in the base class
-        return parse_fixed_width_name, self.tracker_state, config
+        return ParserID.MOD_FIXED_WIDTH, self.tracker_state, config
 
 
 @configuration_property(
@@ -337,16 +361,26 @@ class ModuleNameNormalizer(ModuleNameParserBase):
     def bundle(self):
         # 1. Build the IMMUTABLE config snapshot
         # Note: 'tracker' is removed from here.
-        config = DynamicWidthConfig(
-            byte_map=self.shared.id_registry.modules_table.bundle(),
-            max_length=self.max_length,
-            max_depth=self.max_depth,
-            enable_brackets=self.enable_brackets,
-            enable_dot_separator=self.enable_dot_separator,
+        config = UnifiedParserConfig(
+            string_table=self.shared.id_registry.modules_table.bundle(),
+            module_config=DynamicWidthConfig(
+                max_length=self.max_length,
+                max_depth=self.max_depth,
+                enable_brackets=self.enable_brackets,
+                enable_dot_separator=self.enable_dot_separator,
+            ),
         )
 
+        # config = DynamicWidthConfig(
+        #     byte_map=self.shared.id_registry.modules_table.bundle(),
+        #     max_length=self.max_length,
+        #     max_depth=self.max_depth,
+        #     enable_brackets=self.enable_brackets,
+        #     enable_dot_separator=self.enable_dot_separator,
+        # )
+
         # 2. Return the universal 3-tuple: (Function, Mutable State, Immutable Config)
-        return parse_module_tags_statemachine, self.tracker_state, config
+        return ParserID.MOD_DYNAMIC_SM, self.tracker_state, config
 
 
 @FrameSectionParserFactory.register("timestamp")
@@ -381,8 +415,8 @@ class SkipWordsParser(FrameSectionParser):
 
     def bundle(self):
         # 1. Prepare the immutable config with the skip count
-        config = SkipWordsConfig(count=self.count)
-
+        # config = SkipWordsConfig(count=self.count)
+        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=self.count))
         # 2. Return the universal 3-tuple
         # We use EMPTY_STATE because we aren't extracting any module IDs
-        return skip_words_parser, EMPTY_STATE, config
+        return ParserID.SKIP_WORDS, EmptyUnifiedParserState, config

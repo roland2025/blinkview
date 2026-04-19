@@ -171,7 +171,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                         dummy_in.insert(time_ns(), b"N3 charger input        ")
                         # 3. Trigger the kernel
                         # This will block the thread while LLVM does its work
-                        _, _, _ = process_batch_kernel(
+                        _ = process_batch_kernel(
                             f_config,
                             f_state,
                             dummy_in.bundle(),
@@ -179,7 +179,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                             o_config,
                             dummy_out.bundle(),
                         )
-
+                        # print(f"SIGNATURE: {process_batch_kernel.signatures}")
                         self.logger.info("Kernels warmed up and cached.")
                 except Exception as e:
                     self.logger.exception("Exception during kernel compilation", e)
@@ -258,13 +258,9 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                         out_bundle = batch_out.bundle()
 
                         # 2. Run the Kernel
-                        new_size, new_cursor, out_is_full = process_batch_kernel(
+                        out_is_full = process_batch_kernel(
                             f_config, f_state, in_bundle, parser_bundle, o_config, out_bundle
                         )
-
-                        # 3. Sync state
-                        batch_out.size = new_size
-                        batch_out.msg_cursor = new_cursor
 
                         if parser.post_process(batch_out):
                             parser_bundle = parser.bundle()
@@ -274,6 +270,8 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                             flush()
 
                 # print(f"[parser] batch_out={batch_out}")
+                # for out in batch_out:
+                #     print(str(out))
                 # logger_out.debug(str(batch_out))
                 # for out in batch_out:
                 #     logger_out.trace(str(out))

@@ -10,7 +10,6 @@ import time
 import numpy as np
 
 from blinkview.core import dtypes
-from blinkview.utils.profile_memory import profile_memory
 
 
 class PooledArrayHandle:
@@ -63,6 +62,9 @@ class NumpyArrayPool:
 
     def _calc_slab_size(self, size_in_bytes):
         """Always returns the next power of two, regardless of pool limits."""
+        # Force conversion to Python int to support .bit_length()
+        size_in_bytes = int(size_in_bytes)
+
         if size_in_bytes <= self.min_bytes:
             return self.min_bytes
         # Round up to next power of 2
@@ -74,7 +76,7 @@ class NumpyArrayPool:
         """
         dt = np.dtype(dtype)
         # Calculate the required bytes internally
-        size_in_bytes = element_count * dt.itemsize
+        size_in_bytes = int(element_count) * dt.itemsize
 
         slab_size = self._calc_slab_size(size_in_bytes)
         bucket_key = (slab_size, dt)
