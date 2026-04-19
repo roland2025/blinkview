@@ -352,8 +352,15 @@ class LatestModuleValueTracker:
         # print(f"LatestModuleValueTracker: Reverse update completed in {duration:.4f} ms")
 
     def get_snapshot(self) -> ModuleSnapshot:
-        snap = self._current_snapshot
-        return snap.retain()
+        # 6. Lock-free retry loop to prevent the read-side RuntimeError race condition
+        while True:
+            snap = self._current_snapshot
+            try:
+                return snap.retain()
+            except RuntimeError:
+                # The background thread swapped and released this snapshot
+                # a microsecond before we called retain(). Try again.
+                continue
 
     def debug_print(self):
         """Helper to print the current active snapshot."""
