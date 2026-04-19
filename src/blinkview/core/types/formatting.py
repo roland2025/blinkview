@@ -8,7 +8,7 @@ from typing import NamedTuple
 
 
 class FormattingConfig(NamedTuple):
-    show_ts: bool
-    show_dev: bool
-    show_lvl: bool
-    show_mod: bool
+    show_ts: bool = True
+    show_dev: bool = True
+    show_lvl: bool = True
+    show_mod: bool = True

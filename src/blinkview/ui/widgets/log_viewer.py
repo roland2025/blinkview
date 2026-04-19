@@ -14,7 +14,6 @@ from qtpy.QtGui import QAction
 from qtpy.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.core import dtypes
-from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.batched_logrows import BatchedLogRows
 from blinkview.core.dtypes import ID_UNSPECIFIED, LEVEL_UNSPECIFIED, SEQ_NONE
 from blinkview.core.numpy_log import filter_segment

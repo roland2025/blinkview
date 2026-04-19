@@ -22,7 +22,7 @@ class PooledArrayHandle:
 
     def __init__(self, pool, array, bucket_key):
         self._pool = pool
-        self.array = array
+        self.array: np.ndarray = array
         self.bucket_key = bucket_key
         self._refcount = 1
         self._lock = threading.Lock()
@@ -49,6 +49,11 @@ class PooledArrayHandle:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.release()
+
+    @property
+    def capacity(self) -> int:
+        """Returns the total allocated size of the raw slab."""
+        return self.array.shape[0] if self.array is not None else 0
 
 
 class NumpyArrayPool:

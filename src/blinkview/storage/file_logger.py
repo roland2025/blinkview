@@ -4,17 +4,24 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from io import BytesIO, StringIO
 from pathlib import Path
-from struct import Struct
 from time import perf_counter
 from typing import Callable
 
+import numpy as np
+
+from ..core import dtypes
+from ..core.bindable import bindable
 from ..core.configurable import configuration_property
 from ..core.factory import BaseFactory
-from ..core.log_row import LogRow
+from ..core.numpy_batch_manager import PooledLogBatch
+from ..core.system_context import SystemContext
+from ..ops.formatting import (
+    estimate_batch_capacity,
+    format_binary_batch,
+    format_log_row_batch,
+)
 from ..subscribers.subscriber import BaseSubscriber
-from ..utils.time_utils import ISO8601TimestampFormatter
 
 
 class BaseFileLogger(BaseSubscriber):
@@ -89,15 +96,7 @@ class FileLogger(BaseFileLogger):
             self.file_handle.close()
             self.file_handle = None
 
-        is_binary = self.batch_processor.is_binary
-        mode = "ab" if is_binary else "a"
-
-        # Text mode needs newline control, Binary mode does not.
-        self.file_handle = self.file_path.open(
-            mode,
-            encoding="utf-8" if not is_binary else None,
-            newline="\n" if not is_binary else None,
-        )
+        self.file_handle = self.file_path.open("ab")
 
         current_file_size = self.file_path.stat().st_size
         self.shared.registry.file_manager.update_logger_stats(self, current_file_size, absolute=True)
@@ -112,13 +111,17 @@ class FileLogger(BaseFileLogger):
         if not self.file_handle:
             return 0
 
-        data = self.batch_processor.get_data()
-        if not data:
+        # get_data() now returns a zero-copy memoryview
+        data_view = self.batch_processor.get_data()
+        len_data = len(data_view)
+
+        if len_data == 0:
             return 0
 
-        self.file_handle.write(data)
+        # write() accepts memoryviews natively
+        self.file_handle.write(data_view)
         self.file_handle.flush()
-        len_data = len(data)
+
         self.shared.registry.file_manager.update_logger_stats(self, len_data)
         return len_data
 
@@ -132,7 +135,6 @@ class FileLogger(BaseFileLogger):
         queue_get = self.input_queue.get
         stop_is_set = self._stop_event.is_set
         process_batch = self.process_batch
-        current_size = self.batch_processor.current_size
 
         # Constants/Configuration
         max_batch = self.max_batch
@@ -142,23 +144,29 @@ class FileLogger(BaseFileLogger):
         # State tracking
         last_flush_ts = perf_counter()
 
+        # Instead of calling an external current_size func, we will track rows across batches
+        # until they hit max_batch, or flush_interval hits.
+        buffered_rows = 0
+
         try:
             while not stop_is_set():
                 batch = queue_get(timeout=0.1)
-                if batch is not None:
-                    with batch:
-                        continue  # TODO: remove this
-                        process_batch(batch)
-
                 now = perf_counter()
-                buf_size = current_size()
 
-                if buf_size > 0:
-                    if buf_size >= max_batch or (now - last_flush_ts) >= flush_interval:
-                        # _flush() should return the number of bytes written
+                if batch is not None:
+                    # using 'with' auto-releases the batch back to the NumpyArrayPool
+                    with batch:
+                        process_batch(batch)
+                        buffered_rows += batch.size
+
+                # Flush condition
+                if buffered_rows > 0:
+                    if buffered_rows >= max_batch or (now - last_flush_ts) >= flush_interval:
                         bytes_written = self._flush()
                         bytes_total += bytes_written
+
                         last_flush_ts = now
+                        buffered_rows = 0  # reset tracking
 
                         # Check for file rotation
                         if bytes_total >= max_file_size:
@@ -173,14 +181,58 @@ class FileLogger(BaseFileLogger):
     put: Callable[[list], None]
 
 
+@bindable
 class BaseBatchProcessor:
     is_binary: bool
     extension: str
+    shared: SystemContext
 
-    def process(self, batch):
-        # We don't mark this @abstractmethod so we can
-        # override it with a closure in __init__
+    def __init__(self):
+        self._buffer_size = 0
+        self._buffer = None
+        self._out_buffer = None
+        self._written_bytes = 0
+
+    def clear(self):
+        """Full reset: releases the pooled array and clears tracking."""
+        self._written_bytes = 0
+        self._buffer_size = 0
+        self._out_buffer = None
+        if self._buffer is not None:
+            self._buffer.release()
+        self._buffer = None
+
+    def __del__(self):
+        self.clear()
+
+    def _ensure_capacity(self, required_bytes: int):
+        """Checks if the current buffer can hold the data; grows if necessary."""
+        if self._buffer is None or required_bytes > self._buffer_size:
+            # We preserve the tracking variable to calculate growth,
+            # even though clear() nullifies the handle.
+            old_size = self._buffer_size
+            self.clear()
+
+            # Grow by 1.5x or exactly required
+            new_size = max(required_bytes, int(old_size * 1.5))
+
+            # Since 0 results in the minimum block (1 KiB), simple floor division works.
+            self._buffer = self.shared.array_pool.get(new_size, dtypes.BYTE)
+            self._out_buffer = self._buffer.array
+            self._buffer_size = self._buffer.capacity
+
+    def process(self, batch: PooledLogBatch):
+        """Implemented by subclasses."""
         pass
+
+    def get_data(self) -> memoryview:
+        """Returns a zero-copy view of the processed bytes and resets written counter."""
+        if self._written_bytes == 0:
+            return memoryview(b"")
+
+        view = memoryview(self._out_buffer)[: self._written_bytes]
+        self._written_bytes = 0
+        return view
 
 
 class BatchProcessorFactory(BaseFactory[BaseBatchProcessor]):
@@ -192,111 +244,44 @@ class BinaryBatchProcessor(BaseBatchProcessor):
     is_binary = True
     extension = "bin"
 
-    SYNC_WORD = 0xA5
-    FORMAT_VERSION = 0x01  # Our Reserved/Version byte
+    def process(self, batch: "PooledLogBatch"):
+        if batch.size == 0:
+            return
 
-    # Payload Type Mapping
-    TYPE_DATA = 0x01
-    TYPE_STATUS = 0x02
-    TYPE_ERROR = 0x03
+        bundle = batch.bundle()
 
-    def __init__(self):
-        self._buffer = BytesIO()
-        self.current_size = self._buffer.tell
+        # 1. Text Overhead (approx 120 bytes for TS, IDs, and delimiters)
+        required = estimate_batch_capacity(bundle, 120)
+        self._ensure_capacity(required)
 
-        # Pre-compile the structure (16 bytes total)
-        # < : Little-endian
-        # B, B, B, B : Sync, Type, Version, Reserved (1 byte each)
-        # I : Payload Length (4 bytes)
-        # Q : Timestamp NS (8 bytes)
-        header_struct = Struct("<BBBBIQ")
+        # 2. Registry state (SoA bundle)
+        registry = self.shared.id_registry.bundle()
 
-        # Localize methods/constants for speed
-        pack_into_buffer = header_struct.pack
-        write = self._buffer.write
-        sync = self.SYNC_WORD
-        msg_type = self.TYPE_DATA
-        version = self.FORMAT_VERSION
-
-        def process(batch):
-            for ts_ns, data in batch:
-                # Expecting (ts_ns, data)
-
-                write(
-                    pack_into_buffer(
-                        sync,
-                        msg_type,
-                        version,
-                        0,  # flags / reserved
-                        len(data),
-                        ts_ns,
-                    )
-                )
-                write(data)
-
-        self.process = process
-
-    def get_data(self, clear: bool = True) -> bytes:
-        """
-        Returns the accumulated bytes.
-        If clear=True, the internal buffer is reset.
-        """
-        data = self._buffer.getvalue()
-        if clear:
-            self.clear()
-        return data
-
-    def clear(self):
-        """Resets the buffer and the pointer."""
-        self._buffer.seek(0)
-        self._buffer.truncate(0)
+        # 3. Text Serialization Kernel
+        self._written_bytes = format_log_row_batch(self._out_buffer, bundle, registry, self._sec_state, self._ts_cache)
 
 
 @BatchProcessorFactory.register("log_row")
 class LogRowBatchProcessor(BaseBatchProcessor):
-    is_binary = False
+    is_binary = True
     extension = "log"
 
     def __init__(self):
         super().__init__()
-        self.time_formatter = ISO8601TimestampFormatter()
-        self.format_time = self.time_formatter.format
-        self._buffer = StringIO()
-        self.current_size = self._buffer.tell
-        self.bake()
 
-    def bake(self):
-        format_time = self.format_time
+        # State arrays allocated ONCE and reused across all batches
+        self._sec_state = np.full(1, -1, dtype=np.int64)
+        self._ts_cache = np.zeros(19, dtype=dtypes.BYTE)  # YYYY-MM-DDTHH:MM:SS
 
-        def fast_format(row: "LogRow"):
-            # 2026-03-13T12:47:01.402Z INFO C3X module_name: Message text
-            return (
-                f"{format_time(row.timestamp_ns)} {row.level.name_log} "
-                f"{row.module.device} {row.module.name}: {row.message}\n"
-            )
+    def process(self, batch: "PooledLogBatch"):
+        if batch.size == 0:
+            return
 
-        self.format = fast_format
+        bundle = batch.bundle()
 
-    def process(self, batch: list):
-        """
-        Formats and appends a batch of LogRows to the internal string buffer.
-        """
-        for row in batch:
-            self._buffer.write(self.format(row))
+        # 1. Binary Overhead (Strict 16 bytes for the protocol header)
+        required = estimate_batch_capacity(bundle, 16)
+        self._ensure_capacity(required)
 
-    def get_data(self, clear: bool = True) -> str:
-        """
-        Returns the accumulated log string.
-        If clear=True, the internal buffer is reset.
-        """
-        data = self._buffer.getvalue()
-        if clear:
-            self.clear()
-        return data
-
-    def clear(self):
-        """Resets the string buffer."""
-        self._buffer.seek(0)
-        self._buffer.truncate(0)
-
-    format: Callable[["LogRow"], str]
+        # 2. Binary Serialization Kernel
+        self._written_bytes = format_binary_batch(self._out_buffer, bundle)

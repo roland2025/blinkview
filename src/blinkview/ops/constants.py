@@ -29,6 +29,10 @@ CHAR_RBRACKET = 93  # ]
 CHAR_UNDERSCORE = 95  # _
 CHAR_NULL = 0
 
+CHAR_T = 84
+
+CHAR_Z = 90
+
 CHAR_QUESTION = 63  # '?'
 
 # Common Delimiters
