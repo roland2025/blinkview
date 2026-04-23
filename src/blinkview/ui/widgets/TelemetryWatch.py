@@ -9,10 +9,11 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import List, Optional, Union
 
-from PyQt6.QtCore import QTimer
-from qtpy.QtCore import QMimeData, Qt, Signal
+from PyQt6.QtGui import QPainter, QPalette
+from qtpy.QtCore import QMimeData, Qt, QTimer, Signal
 from qtpy.QtGui import QAction, QDrag, QFont, QPixmap
 from qtpy.QtWidgets import (
+    QApplication,
     QComboBox,
     QFormLayout,
     QFrame,
@@ -21,6 +22,7 @@ from qtpy.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -34,6 +36,7 @@ from blinkview.core import dtypes
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.core.log_row import LogRow
 from blinkview.ui.gui_context import GUIContext
+from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.message_box import MessageBox
 from blinkview.utils.generate_id import generate_id
 
@@ -131,6 +134,28 @@ class DragHandle(QLabel):
             drag.exec_(Qt.MoveAction)
 
 
+class FlashLabel(QLabel):
+    def __init__(self, msg, theme: StyleConfig, parent=None):
+        super().__init__(msg, parent)
+        self.color_flash_base = theme.color_flash_base
+        self.is_flashing = False
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+
+        # Binary check - no math inside the paint event
+        if self.is_flashing:
+            painter.fillRect(self.rect(), self.color_flash_base)
+
+        # Respect the color palette (text color)
+        painter.setPen(self.palette().color(QPalette.WindowText))
+
+        # 5px horizontal padding to match the table view look
+        rect = self.contentsRect().adjusted(5, 0, -5, 0)
+        painter.drawText(rect, self.alignment(), self.text())
+        painter.end()
+
+
 @dataclass(slots=True)
 class TelemetryEntry:
     """Base class for items in the telemetry list."""
@@ -168,6 +193,7 @@ class RowEntry(TelemetryEntry):
     value_label: Optional[QLabel] = None
     last_painted_seq: dtypes.SEQ_TYPE = dtypes.SEQ_NONE
     last_painted_msg: str = ""
+    last_change_time: float = 0.0
     type: str = "row"
 
     def to_dict(self) -> dict:
@@ -760,6 +786,8 @@ class TelemetryWatch(QWidget):
 
         self._clear_layout()
 
+        theme = self.gui_context.theme
+
         current_section_active = False
         is_hidden = False
 
@@ -1056,8 +1084,16 @@ class TelemetryWatch(QWidget):
                 mod_layout.addStretch()
             else:
                 msg = entry.last_painted_msg if entry.last_painted_msg else "---"
-                content = QLabel(msg)
+                content = FlashLabel(msg, theme)
                 content.setFont(self.font)
+                content.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+                content.setContextMenuPolicy(Qt.CustomContextMenu)
+                # We pass the entry and the widget itself so we can map the position correctly
+                content.customContextMenuRequested.connect(
+                    lambda pos, e=entry, w=content: self._show_row_context_menu(pos, e, w)
+                )
+
                 entry.value_label = content
 
             self.layout.addWidget(content, row, 2)
@@ -1210,6 +1246,8 @@ class TelemetryWatch(QWidget):
         if not tracker:
             return
 
+        theme = self.gui_context.theme
+
         # Acquire a single snapshot for the entire batch of entries
         with tracker.get_snapshot() as snap:
             for entry in self.entries:
@@ -1217,6 +1255,7 @@ class TelemetryWatch(QWidget):
                     continue
 
                 # Check all modules assigned to this row (for multi-module aggregation)
+                label = entry.value_label
                 best_seq = entry.last_painted_seq
                 new_msg = None
 
@@ -1233,6 +1272,15 @@ class TelemetryWatch(QWidget):
                     entry.last_painted_seq = best_seq
                     entry.last_painted_msg = new_msg
                     entry.value_label.setText(new_msg)
+                    entry.last_change_time = now
+
+                was_flashing = label.is_flashing
+                label.is_flashing = (now - entry.last_change_time) < theme.fade_duration
+
+                # 3. Only repaint if state changed OR we are currently in the 'ON' state
+                # (Ensures it stays lit for the full duration and turns off exactly once)
+                if label.is_flashing or was_flashing != label.is_flashing:
+                    label.update()
 
     @classmethod
     def new_watch(cls, name, parent: dict = None):
@@ -1407,3 +1455,79 @@ class TelemetryWatch(QWidget):
             tasks.run_task(devices.send_command, target, val_with_newline)
         except Exception as e:
             print(f"Error sending to '{target}': {e}")
+
+    def _show_row_context_menu(self, pos, entry: RowEntry, widget: QLabel):
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+
+        # Header
+        title = menu.addAction(f"Row: {entry.label}")
+        title.setEnabled(False)
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        menu.addSeparator()
+
+        # Action: Copy Value
+        copy_val = QAction("Copy Value", self)
+        copy_val.triggered.connect(lambda: QApplication.clipboard().setText(widget.text()))
+        menu.addAction(copy_val)
+
+        # Module-specific actions (if the row has modules assigned)
+        if entry.modules:
+            menu.addSeparator()
+
+            # Logic: If 1 module, show direct actions.
+            # If multiple, the actions apply to the "Group".
+            mod_count = len(entry.modules)
+            suffix = f" ({mod_count} Modules)" if mod_count > 1 else ""
+
+            actions = [
+                (f"View Logs{suffix}", "view_logs"),
+                (f"View Graph{suffix}", "view_graph"),
+                (None, None),
+                ("Copy Module Name(s)", "copy_names"),
+            ]
+
+            for label, action_id in actions:
+                if label is None:
+                    menu.addSeparator()
+                    continue
+
+                action = QAction(label, self)
+                action.triggered.connect(lambda checked=False, aid=action_id: self._handle_row_action(aid, entry))
+                menu.addAction(action)
+
+        # Execute menu (supports right-click -> drag -> release)
+        menu.exec_(widget.mapToGlobal(pos))
+
+    def _handle_row_action(self, action_id: str, entry: RowEntry):
+        """Dispatches actions for the modules assigned to a RowEntry."""
+        if not entry.modules:
+            return
+
+        match action_id:
+            case "view_logs":
+                # If multiple modules, we pick the first one as the primary
+                # or you could loop and open multiple windows.
+                # Here we follow the Table logic for the first module:
+                primary = entry.modules[0]
+                title = f"Logs: {entry.label}"
+                self.gui_context.create_widget(
+                    "LogViewerWidget",
+                    title,
+                    as_window=True,
+                    params={"filtered_module": primary, "filtered_module_children": False},
+                )
+
+            case "view_graph":
+                self.gui_context.create_widget(
+                    "TelemetryPlotter",
+                    f"Graph: {entry.label}",
+                    as_window=True,
+                    params={"modules": entry.modules},
+                )
+
+            case "copy_names":
+                names = ", ".join([m.name for m in entry.modules])
+                QApplication.clipboard().setText(names)

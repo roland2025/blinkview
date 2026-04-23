@@ -17,7 +17,7 @@ class StyleConfig:
     ui_update_rate_ms: int = 1000 // 60  # 10 FPS update rate
 
     # Brand / Visual Colors (must use default_factory for QColor)
-    color_flash_base: QColor = field(default_factory=lambda: QColor(0, 155, 0))
+    color_flash_base: QColor = field(default_factory=lambda: QColor(0, 155, 0, 50))
     color_text_name: QColor = field(default_factory=lambda: QColor(200, 200, 200))
     color_text_stale: QColor = field(default_factory=lambda: QColor(120, 120, 120))
     color_text_default: QColor = field(default_factory=lambda: QColor(255, 255, 255))

@@ -4,9 +4,11 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from enum import IntEnum, auto
 from time import perf_counter
 
-from qtpy.QtGui import QBrush, QColor, QFont
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QBrush, QColor, QFont, QPalette
 from qtpy.QtWidgets import QApplication, QStyle, QStyledItemDelegate, QStyleOptionButton
 
 from blinkview.ui.widgets.config.style_config import StyleConfig
@@ -36,14 +38,6 @@ class ActionButtonDelegate(QStyledItemDelegate):
                 self.callback(model.keys[index.row()])
             return True
         return False
-
-
-from enum import IntEnum, auto
-from time import perf_counter
-
-from qtpy.QtCore import Qt
-from qtpy.QtGui import QBrush, QColor, QPalette
-from qtpy.QtWidgets import QApplication, QStyle, QStyledItemDelegate
 
 
 class TelemetryCol(IntEnum):
