@@ -11,6 +11,7 @@ from blinkview.core.id_registry.types import StringTableParams
 from blinkview.core.numba_config import app_njit, literal_unroll
 from blinkview.core.types.modules import DynamicWidthConfig, FixedWidthConfig
 from blinkview.core.types.parsing import ParserID
+from blinkview.ops.codec_adb_long import parse_adb_level, parse_adb_pid_tid, parse_adb_tag, parse_adb_timestamp
 from blinkview.ops.generic import SkipWordsConfig, skip_words_parser
 from blinkview.ops.levels import parse_log_level
 from blinkview.ops.modules import parse_fixed_width_name, parse_module_tags_statemachine
@@ -28,6 +29,13 @@ _ID_MOD_DYNAMIC = ParserID.MOD_DYNAMIC_SM
 _ID_LEVEL_MAP = ParserID.LEVEL_NAME_MAP
 _ID_SKIP_WORDS = ParserID.SKIP_WORDS
 
+_ID_MOD_ADB_LONG = ParserID.MOD_ADB_LONG
+
+_ID_TS_ADB_LONG = ParserID.TS_ADB_LONG
+
+_ID_PID_TID_ADB_LONG = ParserID.PID_TID_ADB_LONG
+_ID_LEVEL_MAP_ADB_LONG = ParserID.LEVEL_MAP_ADB_LONG
+
 
 @app_njit()
 def execute_parser_pipeline(buffer, start_cursor, end_cursor, out_b, out_idx, parser_bundles):
@@ -42,18 +50,29 @@ def execute_parser_pipeline(buffer, start_cursor, end_cursor, out_b, out_idx, pa
         p_id = bundle[0]
         state = bundle[1]  # ALWAYS UnifiedParserState
         config = bundle[2]  # ALWAYS UnifiedParserConfig
+        if p_id == _ID_LEVEL_MAP:
+            cursor = parse_log_level(buffer, cursor, end_cursor, out_b, out_idx, state, config)
 
-        if p_id == _ID_MOD_FIXED:
+        elif p_id == _ID_MOD_FIXED:
             cursor = parse_fixed_width_name(buffer, cursor, end_cursor, out_b, out_idx, state, config)
 
         elif p_id == _ID_MOD_DYNAMIC:
             cursor = parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx, state, config)
 
-        elif p_id == _ID_LEVEL_MAP:
-            cursor = parse_log_level(buffer, cursor, end_cursor, out_b, out_idx, state, config)
-
         elif p_id == _ID_SKIP_WORDS:
             cursor = skip_words_parser(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+        elif p_id == _ID_TS_ADB_LONG:
+            cursor = parse_adb_timestamp(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+        elif p_id == _ID_PID_TID_ADB_LONG:
+            cursor = parse_adb_pid_tid(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+        elif p_id == _ID_LEVEL_MAP_ADB_LONG:
+            cursor = parse_adb_level(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+        elif p_id == _ID_MOD_ADB_LONG:
+            cursor = parse_adb_tag(buffer, cursor, end_cursor, out_b, out_idx, state, config)
 
         else:
             return -1

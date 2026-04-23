@@ -71,53 +71,57 @@ class Speedometer:
 
 class ThroughputAutoTuner:
     """
-    Uses a Speedometer to project required buffer sizes.
+    Uses a Speedometer to project required buffer sizes in bytes.
     Logs specifically when it recalculates resource projections.
     """
 
     def __init__(
         self,
         speedometer: Speedometer,
-        default_buffer_kb: int = 4,
+        default_buffer_bytes: int = 4096,
         msg_size_bytes: int = 32,
         safety_factor: float = 1.5,
         logger=None,
     ):
         self.speedo = speedometer
-        self.default_buffer_kb = default_buffer_kb
-        self.default_capacity = int((default_buffer_kb * 1024) / msg_size_bytes)
+        self.default_buffer_bytes = default_buffer_bytes
         self.msg_size_bytes = msg_size_bytes
         self.safety_factor = safety_factor
         self.logger = logger
 
-        self.estimated_buffer_kb = self.default_buffer_kb
+        # Capacity is derived from bytes
+        self.default_capacity = int(default_buffer_bytes / msg_size_bytes)
+
+        self.estimated_buffer_bytes = self.default_buffer_bytes
         self.estimated_capacity = self.default_capacity
 
     def update(self, bytes_in: int, msgs_in: int, target_window_sec: float) -> bool:
-        # Speedometer logs its own stats internally now
+        # Speedometer logs its own stats internally
         if self.speedo.update(bytes_in, msgs_in):
             bytes_needed = self.speedo.bytes_per_sec * target_window_sec * self.safety_factor
             msgs_needed = self.speedo.msgs_per_sec * target_window_sec * self.safety_factor
 
-            self.estimated_buffer_kb = max(self.default_buffer_kb, int(bytes_needed / 1024))
+            self.estimated_buffer_bytes = max(self.default_buffer_bytes, int(bytes_needed))
             self.estimated_capacity = max(self.default_capacity, int(msgs_needed))
 
             if self.logger:
-                # Log the TUNER state specifically (buffer/rows)
-                self.logger.debug(f"Tuner Projection: {self.estimated_buffer_kb}KB, {self.estimated_capacity} rows")
+                # Log state specifically; we can format to KB here for readability
+                kb = self.estimated_buffer_bytes / 1024
+                self.logger.debug(f"Tuner Projection: {kb:.1f} KB, {self.estimated_capacity} rows")
             return True
         return False
 
     def ensure_burst_capacity(self, current_batch_bytes: int):
-        required_kb = int((current_batch_bytes / 1024) * self.safety_factor)
-        if required_kb > self.estimated_buffer_kb:
-            self.estimated_buffer_kb = required_kb
-            self.estimated_capacity = int((self.estimated_buffer_kb * 1024) / self.msg_size_bytes)
+        required_bytes = int(current_batch_bytes * self.safety_factor)
+
+        if required_bytes > self.estimated_buffer_bytes:
+            self.estimated_buffer_bytes = required_bytes
+            self.estimated_capacity = int(self.estimated_buffer_bytes / self.msg_size_bytes)
+
             if self.logger:
-                self.logger.warning(f"Burst detected! Force-resized buffer to {self.estimated_buffer_kb}KB")
+                kb = self.estimated_buffer_bytes / 1024
+                self.logger.warning(f"Burst detected! Force-resized buffer projection to {kb:.1f} KB")
 
     def __str__(self) -> str:
-        return (
-            f"<ThroughputAutoTuner rows={self.estimated_capacity} "
-            f"buffer={self.estimated_buffer_kb}KB safety={self.safety_factor}x)>"
-        )
+        kb = self.estimated_buffer_bytes / 1024
+        return f"<ThroughputAutoTuner rows={self.estimated_capacity} buffer={kb:.1f} KB safety={self.safety_factor}x>"

@@ -4,19 +4,118 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import time
 from time import sleep
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
+from ..core import dtypes
+from ..core.configurable import configuration_property
 from ..core.limits import BATCH_MAXLEN
-from ..core.reusable_batch_pool import TimeDataEntry
+from ..core.numba_config import app_njit
+from ..core.numpy_batch_manager import PooledLogBatch
+from ..core.types.empty import EMPTY_BYTES
+from ..ops.segments import _nb_bundle_push
+from ..utils.throughput import Speedometer, ThroughputAutoTuner
+from .BaseReader import BaseReader, DeviceFactory
 
 if TYPE_CHECKING:
-    from can import Bus, CanError
+    from can import Bus, CanError, Message
 
-from ..core.configurable import configuration_property
-from ..core.log_row import LogRow
-from ..utils.log_level import LogLevel
-from .BaseReader import BaseReader, DeviceFactory
+
+@app_njit()
+def _nb_can_push(
+    bundle,
+    raw_timestamp: float,
+    offset_ns: int,
+    arb_id: int,
+    data: np.ndarray,  # Expects a uint8 view
+    is_ext: bool,
+    is_rem: bool,
+    is_err: bool,
+    is_fd: bool,
+    is_rx: bool,
+    brs: bool,
+    esi: bool,
+) -> bool:
+    # 1. Project Monotonic/Boot time to Epoch Nanoseconds
+    # $$T_{ns} = T_{offset} + \text{int}(T_{raw} \times 10^9)$$
+    ts_ns = offset_ns + int(raw_timestamp * 1_000_000_000)
+
+    # 2. Fast Bit-Packing for ext_u32_2
+    flags = 0
+    if is_ext:
+        flags |= 0x01  # Bit 0: Extended vs Standard
+    if is_rem:
+        flags |= 0x02  # Bit 1: Remote Frame
+    if is_err:
+        flags |= 0x04  # Bit 2: Error Frame
+    if is_fd:
+        flags |= 0x08  # Bit 3: CAN FD Frame
+    if is_rx:
+        flags |= 0x10  # Bit 4: Rx vs Tx
+    if brs:
+        flags |= 0x20  # Bit 5: Bit Rate Switch
+    if esi:
+        flags |= 0x40  # Bit 6: Error State Indicator
+
+    # 3. Direct push into the bundle
+    # level, module, device, seq are 0 for raw CAN ingress
+    return _nb_bundle_push(bundle, ts_ns, data, 0, 0, 0, 0, arb_id, flags, 0)
+
+
+class CanLogBatch(PooledLogBatch):
+    """
+    Specialized batch for CAN data.
+    Maps arbitration_id to ext_u32_1 and packed flags to ext_u32_2.
+    """
+
+    __slots__ = ()
+
+    def __init__(
+        self,
+        pool: Any,
+        req_capacity: int,
+        buffer_bytes: int,
+    ):
+        # Hardcode the schema for CAN data, ignoring other optional columns
+        super().__init__(
+            pool=pool,
+            req_capacity=req_capacity,
+            buffer_bytes=buffer_bytes,
+            has_ext_u32_1=True,  # CAN Address
+            has_ext_u32_2=True,  # CAN Flags (Packed)
+        )
+
+    def insert_can(self, msg: "Message", offset_ns: int) -> bool:
+        """
+        High-performance insertion of a python-can Message object.
+        Handles zero-copy buffer views, flag packing, and clock sync.
+        """
+        if not (b := self.bundle):
+            return False
+
+        # 1. Zero-copy view of data (Fixes the Element Size ValueError)
+        # Using np.uint8 explicitly
+        d_view = np.frombuffer(msg.data, dtype=dtypes.BYTE) if msg.data else EMPTY_BYTES
+
+        # 2. Extract hardware attributes safely
+        # We use getattr for FD flags to support non-FD drivers/interfaces
+        return _nb_can_push(
+            b,
+            msg.timestamp,
+            offset_ns,
+            msg.arbitration_id,
+            d_view,
+            msg.is_extended_id,
+            msg.is_remote_frame,
+            msg.is_error_frame,
+            msg.is_fd,
+            msg.is_rx,
+            msg.bitrate_switch,
+            msg.error_state_indicator,
+        )
 
 
 @DeviceFactory.register("can")
@@ -69,6 +168,7 @@ class CANReader(BaseReader):
 * Wraps the standard 'python-can' library for cross-platform compatibility.
 * Supports physical hardware interfaces (PCAN, IXXAT, SocketCAN) and virtual buses.
 * Batches raw can.Message objects with high-precision nanosecond timestamps.
+* Leverages high-performance PooledLogBatch with hardware address and flags attached via extension columns.
 * Gracefully handles bus errors and auto-reconnects if the physical adapter drops.
 """
 
@@ -76,13 +176,10 @@ class CANReader(BaseReader):
     interface: str
     channel: str
     bitrate: int
-    maxlen: int
     delay: int
-    log_rx_tx: bool
 
     def __init__(self):
         super().__init__()
-
         self.bus: "Bus" = None
 
     def run(self):
@@ -93,110 +190,110 @@ class CANReader(BaseReader):
         time_ns = self.shared.time_ns
         logger = self.logger
 
+        delay_s = self.delay / 1000.0
         delay_ns = int(self.delay * 1_000_000)
-        maxlen = self.maxlen
-        log_rx_tx = self.log_rx_tx
 
         logger.info(f"Starting CAN Reader Thread ({self.interface}:{self.channel} @ {self.bitrate}bps)")
 
-        pool_acquire = self.shared.pool.get(TimeDataEntry, self.__class__.__name__).acquire
+        _ts_offset_ns = None
 
-        batch = pool_acquire()
-        batch_append = batch.append
+        # Tuner setup: Estimating an average CAN message payload of 8 bytes
+        stats = Speedometer(logger=self.logger.child("stats"))
+        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=8, logger=self.logger.child("tuner"))
 
-        last_flush_time = time_ns()
+        pool_create = self.shared.array_pool.create
 
-        if log_rx_tx:
-            mod_rx = self.local.device_id.get_module("_reader.rx")
-            batch_rx_log = []
-            push_log = self.local.push_log
+        def batch_acquire():
+            # Dynamically pull configuration from the tuner's latest projections
+            # Request ext_u32_1 for CAN Address and ext_u32_2 for CAN Flags
+            return pool_create(CanLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
 
+        batch = None
         bus = None
 
-        def flush():
-            nonlocal batch, last_flush_time, batch_append
-            if log_rx_tx:
-                nonlocal batch_rx_log
-
-            if batch.size:
-                last_flush_time = time_ns()
-
-                if log_rx_tx and batch_rx_log:
-                    push_log(batch_rx_log)
-                    batch_rx_log = []
-                with batch:
-                    self.distribute(batch)
-
-                batch = pool_acquire()
-                batch_append = batch.append
-
-        while not stop_is_set():
-            if bus is None:
-                try:
-                    bus = Bus(interface=self.interface, channel=self.channel, bitrate=self.bitrate)
-                    logger.info("CAN bus connected successfully.")
-                except Exception as e:
-                    logger.error(f"Failed to open CAN bus '{self.channel}'.", e)
-                    sleep(1.0)
-                    continue
-
-                _recv = bus.recv  # Localize for performance
-
-            try:
-                now = time_ns()
-
-                # Dynamic Timeout Calculation
-                if batch:
-                    # How much time until we MUST flush?
-                    remaining_ns = (last_flush_time + delay_ns) - now
-                    # Convert to seconds.
-                    # Max 0.05s so we still wake up frequently to check stop_is_set()
-                    # Min 0.0s so we don't pass negative timeouts to python-can
-                    timeout_s = max(0.0, min(0.05, remaining_ns / 1_000_000_000.0))
-                else:
-                    # No batch pending, just wake up periodically to check stop flag
-                    timeout_s = 0.05
-
-                msg = _recv(timeout=timeout_s)
-
-                # Update time AFTER the blocking call
-                now = time_ns()
-
-                if msg:
-                    # print(f"[CAN] {now} {msg}")
-                    batch_append(now, msg)
-
-                    if log_rx_tx:
-                        hex_data = msg.data.hex().upper() if msg.data else ""
-                        log_msg = f"ID: {msg.arbitration_id:04X} DLC: {msg.dlc} DATA: {hex_data}"
-                        batch_rx_log.append(LogRow(now, LogLevel.TRACE, mod_rx, log_msg))
-
-                    if batch.size >= maxlen:
-                        flush()
+        try:
+            while not stop_is_set():
+                if bus is None:
+                    try:
+                        bus = Bus(interface=self.interface, channel=self.channel, bitrate=self.bitrate)
+                        logger.info("CAN bus connected successfully.")
+                    except Exception as e:
+                        logger.error(f"Failed to open CAN bus '{self.channel}'.", e)
+                        sleep(1.0)
                         continue
 
-                # Time-based flush check
-                # Because of our precise timeout calculation above, if msg is None,
-                # we will wake up exactly when this condition evaluates to True.
-                if batch and (now - last_flush_time >= delay_ns):
-                    flush()
+                    _recv = bus.recv  # Localize for performance
 
-            except CanError as e:
-                logger.error("CAN Bus Error detected.", e)
-                if bus:
-                    bus.shutdown()
-                bus = None
-                sleep(1.0)
+                if batch is None:
+                    batch = batch_acquire()
 
-            except Exception as e:
-                logger.error("Unexpected error in CAN read loop.", e)
-                if bus:
-                    bus.shutdown()
-                bus = None
-                sleep(1.0)
+                try:
+                    now = time_ns()
 
-        # Cleanup on exit
-        if bus:
-            bus.shutdown()
-            logger.info("CAN bus shut down.")
-        flush()
+                    # Dynamic Timeout Calculation
+                    if batch.size > 0:
+                        # How much time until we MUST flush?
+                        remaining_ns = (batch.start_ts + delay_ns) - now
+                        timeout_s = max(0.0, min(0.2, remaining_ns / 1_000_000_000.0))
+                    else:
+                        # No batch pending, just wake up periodically to check stop flag
+                        timeout_s = 0.2
+
+                    msg = _recv(timeout=timeout_s)
+
+                    # Update time AFTER the blocking call
+                    now = time_ns()
+
+                    if msg:
+                        # 1. One-time Clock Sync Logic
+                        if _ts_offset_ns is None:
+                            import time
+
+                            if msg.timestamp < 1_000_000_000:  # Uptime
+                                _ts_offset_ns = time_ns() - int(time.monotonic() * 1e9)
+                            else:  # Epoch
+                                _ts_offset_ns = 0
+
+                        # 2. Clean, high-level insertion
+                        if not batch.insert_can(msg, _ts_offset_ns):
+                            with batch:
+                                self.distribute(batch)
+                                tuner.update(batch.msg_cursor, batch.size, delay_s)
+                            batch = batch_acquire()
+                            batch.insert_can(msg, _ts_offset_ns)
+
+                    # Time-based flush check
+                    if batch.size > 0 and (now - batch.start_ts >= delay_ns):
+                        with batch:
+                            self.distribute(batch)
+                            tuner.update(batch.msg_cursor, batch.size, delay_s)
+                        batch = None
+
+                except CanError as e:
+                    logger.error("CAN Bus Error detected.", e)
+                    if bus:
+                        bus.shutdown()
+                    bus = None
+                    sleep(1.0)
+
+                except Exception as e:
+                    logger.error("Unexpected error in CAN read loop.", e)
+                    if bus:
+                        bus.shutdown()
+                    bus = None
+                    sleep(1.0)
+
+        except Exception as e:
+            logger.exception("Fatal error in CAN Reader loop", e)
+        finally:
+            # Final Cleanup
+            if batch is not None:
+                if len(batch) > 0:
+                    with batch:
+                        self.distribute(batch)
+                else:
+                    batch.release()
+
+            if bus:
+                bus.shutdown()
+                logger.info("CAN bus shut down.")

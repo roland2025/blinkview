@@ -321,15 +321,16 @@ class BlinkMainWindow(QMainWindow):
         QTimer.singleShot(100, start_fast_timer)
 
     def _start_stage_2(self):
+        self._numba_compile_start = self.gui_context.registry.now_ns()
+
         self.gui_context.registry.start()
 
         self._numba_compile_end = self.gui_context.registry.now_ns()
         QTimer.singleShot(100, self._start_stage_3)
 
     def _start_stage_1(self):
-        self._numba_compile_start = self.gui_context.registry.now_ns()
         ToastManager.show("Compiling Numba kernels", ToastType.WARNING, duration=1.0, parent=self)
-        QTimer.singleShot(200, self._start_stage_2)
+        QTimer.singleShot(333, self._start_stage_2)
 
     def load_ui_state(self):
         self.gui_context.gui_state.load_ui_state(
@@ -685,14 +686,6 @@ class BlinkMainWindow(QMainWindow):
                 toolbar.deleteLater()
                 print(f"[UI] Removed toolbar for: {source_id}")
 
-        # Handle Additions (New in config AND toggled to Enabled)
-        for source_id, config in sources_config.items():
-            is_enabled = config.get("enabled", False)
-
-            if is_enabled and source_id not in self.device_toolbars:
-                self.create_device_control_toolbar(source_id, config.get("name", source_id))
-                print(f"[UI] Created toolbar for: {source_id}")
-
     def show_watch_menu(self):
         """Triggered by the button click."""
         # Create the temporary menu
@@ -771,60 +764,3 @@ class BlinkMainWindow(QMainWindow):
         name = conf.get("name", "Default")
 
         self.create_widget("TelemetryWatch", f"Watch {name}", params={"id": watch_id})
-
-    def create_device_control_toolbar(self, source_id, device_name):
-        """Generates a dedicated toolbar for a specific device with command history."""
-        toolbar = QToolBar(f"Control: {device_name}")
-        toolbar.setObjectName(f"toolbar_{source_id}")
-
-        toolbar.addWidget(QLabel(f" <b>{device_name}:</b> "))
-
-        # Create Editable ComboBox instead of LineEdit
-        command_input = QComboBox()
-        command_input.setEditable(True)
-        command_input.setInsertPolicy(QComboBox.NoInsert)  # We'll handle insertion manually to control duplicates
-        command_input.lineEdit().setPlaceholderText("Enter command...")
-        command_input.setMinimumWidth(200)
-        toolbar.addWidget(command_input)
-
-        btn_send = QPushButton("Send")
-
-        def handle_send():
-            val = command_input.currentText().strip()
-            if not val:
-                return
-
-            # Manage History Logic
-            # Remove item if it exists to move it to the top (prevent duplicates)
-            existing_index = command_input.findText(val)
-            if existing_index >= 0:
-                command_input.removeItem(existing_index)
-
-            # Insert at the top
-            command_input.insertItem(0, val)
-            command_input.setCurrentIndex(0)
-
-            # Optional: Limit history to 10 items
-            if command_input.count() > 10:
-                command_input.removeItem(10)
-
-            # Execution Logic
-            val_with_newline = f"{val}\n"
-            try:
-                tasks = self.gui_context.registry.system_ctx.tasks
-                devices = self.gui_context.registry.sources
-                tasks.run_task(devices.send_command, source_id, val_with_newline)
-            except Exception as e:
-                print(f"Error sending to '{device_name}': {e}")
-
-            # Clear current text for next command
-            command_input.setEditText("")
-
-            # Connect signals
-
-        command_input.lineEdit().returnPressed.connect(handle_send)
-        btn_send.clicked.connect(handle_send)
-        toolbar.addWidget(btn_send)
-
-        self.addToolBar(Qt.TopToolBarArea, toolbar)
-        self.device_toolbars[source_id] = toolbar

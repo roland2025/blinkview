@@ -5,46 +5,31 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from threading import Lock
-from typing import NamedTuple
+from typing import Any, Optional
 
 import numpy as np
 
 from blinkview.core import dtypes
+from blinkview.core.dtypes import SEQ_NONE
+from blinkview.core.types.empty import EMPTY_ID, EMPTY_LEVEL, EMPTY_SEQ
 from blinkview.core.types.log_batch import LogBundle
+from blinkview.ops.segments import _nb_bundle_extend, _nb_bundle_push
 
 
 class PooledLogBatch:
     """
-    A high-performance, slotted transport object for logs.
-    Dynamically acquires power-of-two columnar arrays from a central NumpyArrayPool.
+    Unified high-performance transport and storage object for logs.
+    Handles both transient log batches and long-term circular buffer segments.
     """
 
-    EMPTY_U8 = np.empty(0, dtype=dtypes.BYTE)
-    EMPTY_U16 = np.empty(0, dtype=dtypes.ID_TYPE)
-    EMPTY_U64 = np.empty(0, dtype=dtypes.SEQ_TYPE)
-
     __slots__ = (
-        "capacity",
-        "_size_arr",
-        "_cursor_arr",
+        "metadata",  # Flexible slot for segment_seq or other IDs
+        "bundle",  # The unified LogBundle source of truth
         "_pool",
         "_ref_count",
         "_lock",
         "in_use",
-        "has_levels",
-        "has_modules",
-        "has_devices",
-        "has_sequences",
-        # Un-sliced raw slabs
-        "timestamps",
-        "offsets",
-        "lengths",
-        "buffer",
-        "levels",
-        "modules",
-        "devices",
-        "sequences",
-        # Internal handles to return memory to the pool
+        # Memory handles for the central pool
         "_ts_h",
         "_off_h",
         "_len_h",
@@ -53,175 +38,216 @@ class PooledLogBatch:
         "_mod_h",
         "_dev_h",
         "_seq_h",
+        # Heterogeneous Extension Handles
+        "_ext_u32_1_h",
+        "_ext_u32_2_h",
+        "_ext_u64_1_h",
     )
 
     def __init__(
         self,
-        pool,
+        pool: Any,
         req_capacity: int,
-        req_buffer_kb: int,
+        buffer_bytes: int,
         has_levels: bool = False,
         has_modules: bool = False,
         has_devices: bool = False,
         has_sequences: bool = False,
+        has_ext_u32_1: bool = False,
+        has_ext_u32_2: bool = False,
+        has_ext_u64_1: bool = False,
+        metadata: Any = None,
     ):
         self._pool = pool
-
-        self._size_arr = np.zeros(1, dtype=np.int64)
-        self._cursor_arr = np.zeros(1, dtype=np.int64)
-
+        self.metadata = metadata
         self._ref_count = 1
         self._lock = Lock()
         self.in_use = True
 
-        # Initialize handles and views to None
         self._ts_h = self._off_h = self._len_h = self._buf_h = None
         self._lvl_h = self._mod_h = self._dev_h = self._seq_h = None
-        self.timestamps = self.offsets = self.lengths = self.buffer = None
-        self.levels = self.modules = self.devices = self.sequences = None
+        self._ext_u32_1_h = self._ext_u32_2_h = self._ext_u64_1_h = None
+        self.bundle: Optional[LogBundle] = None
 
-        self.has_levels = has_levels
-        self.has_modules = has_modules
-        self.has_devices = has_devices
-        self.has_sequences = has_sequences
-
-        self._allocate(req_capacity, req_buffer_kb)
-
-    def _allocate(self, req_capacity, req_buffer_kb):
-        """Acquires memory slabs and automatically infers true capacity."""
-
-        acquire = self._pool.acquire
-
-        # Mandatory Columns
-        self._ts_h = acquire(req_capacity, dtype=dtypes.TS_TYPE)
-        self.timestamps = self._ts_h.array
-        self.capacity = len(self.timestamps)  # Use true power-of-two capacity
-
-        self._off_h = acquire(self.capacity, dtype=dtypes.OFFSET_TYPE)
-        self.offsets = self._off_h.array
-
-        self._len_h = acquire(self.capacity, dtype=dtypes.LEN_TYPE)
-        self.lengths = self._len_h.array
-
-        self._buf_h = acquire(req_buffer_kb * 1024, dtype=dtypes.BYTE)
-        self.buffer = self._buf_h.array
-
-        # Optional Columns using centralized dtypes
-        if self.has_levels:
-            self._lvl_h = acquire(self.capacity, dtype=dtypes.LEVEL_TYPE)
-            self.levels = self._lvl_h.array
-
-        if self.has_modules:
-            self._mod_h = acquire(self.capacity, dtype=dtypes.ID_TYPE)
-            self.modules = self._mod_h.array
-
-        if self.has_devices:
-            self._dev_h = acquire(self.capacity, dtype=dtypes.ID_TYPE)
-            self.devices = self._dev_h.array
-
-        if self.has_sequences:
-            self._seq_h = acquire(self.capacity, dtype=dtypes.SEQ_TYPE)
-            self.sequences = self._seq_h.array
-
-    @property
-    def size(self):
-        return self._size_arr[0]
-
-    @size.setter
-    def size(self, value):
-        self._size_arr[0] = value
-
-    @property
-    def msg_cursor(self):
-        return self._cursor_arr[0]
-
-    @msg_cursor.setter
-    def msg_cursor(self, value):
-        self._cursor_arr[0] = value
-
-    def bundle(self):
-        return LogBundle(
-            timestamps=self.timestamps,
-            offsets=self.offsets,
-            lengths=self.lengths,
-            buffer=self.buffer,
-            levels=self.levels if self.has_levels else self.EMPTY_U8,
-            modules=self.modules if self.has_modules else self.EMPTY_U16,
-            devices=self.devices if self.has_devices else self.EMPTY_U16,
-            sequences=self.sequences if self.has_sequences else self.EMPTY_U64,
-            size=self._size_arr,
-            msg_cursor=self._cursor_arr,
-            has_levels=self.has_levels,
-            has_modules=self.has_modules,
-            has_devices=self.has_devices,
-            has_sequences=self.has_sequences,
+        self._allocate(
+            req_capacity,
+            buffer_bytes,
+            has_levels,
+            has_modules,
+            has_devices,
+            has_sequences,
+            has_ext_u32_1,
+            has_ext_u32_2,
+            has_ext_u64_1,
         )
 
-    def clear(self):
-        """O(1) reset."""
-        self._size_arr[0] = 0
-        self._cursor_arr[0] = 0
+    def _allocate(
+        self,
+        req_capacity,
+        buffer_bytes,
+        has_levels,
+        has_modules,
+        has_devices,
+        has_sequences,
+        has_ext_u32_1,
+        has_ext_u32_2,
+        has_ext_u64_1,
+    ):
+        acquire = self._pool.acquire
 
-    def insert(
-        self, ts_ns: int, msg_bytes: bytes = b"", level: int = 0, module: int = 0, device: int = 0, seq: int = 0
+        # 1. Mandatory Columns
+        self._ts_h = acquire(req_capacity, dtype=dtypes.TS_TYPE)
+        ts_arr = self._ts_h.array
+        true_cap = len(ts_arr)
+
+        self._off_h = acquire(true_cap, dtype=dtypes.OFFSET_TYPE)
+        self._len_h = acquire(true_cap, dtype=dtypes.LEN_TYPE)
+        self._buf_h = acquire(buffer_bytes, dtype=dtypes.BYTE)
+
+        # 2. Optional Columns - Consistent handle storage
+        if has_levels:
+            self._lvl_h = acquire(true_cap, dtype=dtypes.LEVEL_TYPE)
+            lvl_arr = self._lvl_h.array
+        else:
+            lvl_arr = EMPTY_LEVEL
+
+        if has_modules:
+            self._mod_h = acquire(true_cap, dtype=dtypes.ID_TYPE)
+            mod_arr = self._mod_h.array
+        else:
+            mod_arr = EMPTY_ID
+
+        if has_devices:
+            self._dev_h = acquire(true_cap, dtype=dtypes.ID_TYPE)
+            dev_arr = self._dev_h.array
+        else:
+            dev_arr = EMPTY_ID
+
+        if has_sequences:
+            self._seq_h = acquire(true_cap, dtype=dtypes.SEQ_TYPE)
+            seq_arr = self._seq_h.array
+        else:
+            seq_arr = EMPTY_SEQ
+
+        # 3. Independent Heterogeneous Extension Columns
+        if has_ext_u32_1:
+            self._ext_u32_1_h = acquire(true_cap, dtype=dtypes.UINT32)
+            arr_u32_1 = self._ext_u32_1_h.array
+        else:
+            arr_u32_1 = np.empty(0, dtype=np.uint32)
+
+        if has_ext_u32_2:
+            self._ext_u32_2_h = acquire(true_cap, dtype=dtypes.UINT32)
+            arr_u32_2 = self._ext_u32_2_h.array
+        else:
+            arr_u32_2 = np.empty(0, dtype=np.uint32)
+
+        if has_ext_u64_1:
+            self._ext_u64_1_h = acquire(true_cap, dtype=dtypes.UINT64)
+            arr_u64_1 = self._ext_u64_1_h.array
+        else:
+            arr_u64_1 = np.empty(0, dtype=np.uint64)
+
+        # 4. Counters & Baking
+        self.bundle = LogBundle(
+            timestamps=ts_arr,
+            levels=lvl_arr,
+            modules=mod_arr,
+            devices=dev_arr,
+            sequences=seq_arr,
+            offsets=self._off_h.array,
+            lengths=self._len_h.array,
+            buffer=self._buf_h.array,
+            # Extensions
+            ext_u32_1=arr_u32_1,
+            ext_u32_2=arr_u32_2,
+            ext_u64_1=arr_u64_1,
+            # Metadata
+            size=np.zeros(1, dtype=np.int64),
+            msg_cursor=np.zeros(1, dtype=np.int64),
+            capacity=true_cap,
+            has_levels=has_levels,
+            has_modules=has_modules,
+            has_devices=has_devices,
+            has_sequences=has_sequences,
+            has_ext_u32_1=has_ext_u32_1,
+            has_ext_u32_2=has_ext_u32_2,
+            has_ext_u64_1=has_ext_u64_1,
+        )
+
+    @property
+    def size(self) -> int:
+        return int(b.size[0]) if (b := self.bundle) else 0
+
+    @property
+    def capacity(self) -> int:
+        return b.capacity if (b := self.bundle) else 0
+
+    def clear(self, new_metadata: Any = None):
+        """O(1) reset of counters and optional metadata update."""
+        if b := self.bundle:
+            b.size[0] = 0
+            b.msg_cursor[0] = 0
+        if new_metadata is not None:
+            self.metadata = new_metadata
+
+    @property
+    def msg_cursor(self) -> int:
+        return int(b.msg_cursor[0]) if (b := self.bundle) else 0
+
+    def insert_any(
+        self,
+        ts_ns: int,
+        msg_data: Any,
+        level: int = 0,
+        module: int = 0,
+        device: int = 0,
+        seq: int = 0,
+        ext_u32_1: int = 0,
+        ext_u32_2: int = 0,
+        ext_u64_1: int = 0,
     ) -> bool:
         """
-        Starts a new log entry. If msg_bytes is provided, it acts as the initial chunk.
+        Inserts data from any buffer-compatible object (bytes, bytearray, memoryview, ndarray).
+        Uses np.frombuffer to create a zero-copy view for the Numba kernel.
         """
-        if self.size >= self.capacity:
+        if not (b := self.bundle):
             return False
 
-        msg_len = len(msg_bytes)
-        if self.msg_cursor + msg_len > len(self.buffer):
+        data_view = np.frombuffer(msg_data, dtype=dtypes.BYTE)
+
+        return _nb_bundle_push(b, ts_ns, data_view, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1)
+
+    def insert(
+        self,
+        ts_ns: int,
+        msg_bytes: bytes,
+        level: int = 0,
+        module: int = 0,
+        device: int = 0,
+        seq: int = 0,
+        ext_u32_1: int = 0,
+        ext_u32_2: int = 0,
+        ext_u64_1: int = 0,
+    ) -> bool:
+        """
+        Inserts a new log record into the bundle via optimized Numba kernel.
+        """
+        if not (b := self.bundle):
             return False
 
-        idx = self.size
-
-        # Mandatory columns
-        self.timestamps[idx] = ts_ns
-        self.offsets[idx] = self.msg_cursor
-        self.lengths[idx] = msg_len
-
-        # Optional columns
-        if self.has_levels:
-            self.levels[idx] = level
-        if self.has_modules:
-            self.modules[idx] = module
-        if self.has_devices:
-            self.devices[idx] = device
-        if self.has_sequences:
-            self.sequences[idx] = seq
-
-        # Fast contiguous buffer write (if message provided)
-        if msg_len > 0:
-            self.buffer[self.msg_cursor : self.msg_cursor + msg_len] = np.frombuffer(msg_bytes, dtype=dtypes.BYTE)
-            self.msg_cursor += msg_len
-
-        self.size += 1
-        return True
+        return _nb_bundle_push(b, ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1)
 
     def append(self, msg_bytes: bytes) -> bool:
-        """
-        Continues the message data for the MOST RECENTLY inserted entry.
-        """
-        if self.size == 0:
-            # Cannot append to a record that hasn't been started with 'insert'
+        if not (b := self.bundle):
             return False
+        return _nb_bundle_extend(b, msg_bytes)
 
-        msg_len = len(msg_bytes)
-        if self.msg_cursor + msg_len > len(self.buffer):
+    def append_any(self, msg_data: Any) -> bool:
+        if not (b := self.bundle):
             return False
-
-        # Target the last entry
-        idx = self.size - 1
-
-        # Write to buffer
-        self.buffer[self.msg_cursor : self.msg_cursor + msg_len] = np.frombuffer(msg_bytes, dtype=dtypes.BYTE)
-
-        # Update the length for the current record and move cursor
-        self.lengths[idx] += msg_len
-        self.msg_cursor += msg_len
-        return True
+        data_view = np.frombuffer(msg_data, dtype=dtypes.BYTE)
+        return _nb_bundle_extend(b, data_view)
 
     def retain(self):
         with self._lock:
@@ -232,46 +258,41 @@ class PooledLogBatch:
 
     def release(self):
         with self._lock:
-            if self._ref_count <= 0:
-                return
-
             self._ref_count -= 1
             if self._ref_count > 0:
                 return
-
             self.clear()
             self.in_use = False
+            self.bundle = None
 
-            # Return heavy arrays to NumpyArrayPool
             if self._ts_h:
                 self._ts_h.release()
-                self._ts_h = None
             if self._off_h:
                 self._off_h.release()
-                self._off_h = None
             if self._len_h:
                 self._len_h.release()
-                self._len_h = None
             if self._buf_h:
                 self._buf_h.release()
-                self._buf_h = None
-
             if self._lvl_h:
                 self._lvl_h.release()
-                self._lvl_h = None
             if self._mod_h:
                 self._mod_h.release()
-                self._mod_h = None
             if self._dev_h:
                 self._dev_h.release()
-                self._dev_h = None
             if self._seq_h:
                 self._seq_h.release()
-                self._seq_h = None
 
-            # Nullify views to prevent use-after-free
-            self.timestamps = self.offsets = self.lengths = self.buffer = None
-            self.levels = self.modules = self.devices = self.sequences = None
+            # Extension release
+            if self._ext_u32_1_h:
+                self._ext_u32_1_h.release()
+            if self._ext_u32_2_h:
+                self._ext_u32_2_h.release()
+            if self._ext_u64_1_h:
+                self._ext_u64_1_h.release()
+
+            self._ts_h = self._off_h = self._len_h = self._buf_h = None
+            self._lvl_h = self._mod_h = self._dev_h = self._seq_h = None
+            self._ext_u32_1_h = self._ext_u32_2_h = self._ext_u64_1_h = None
 
     def __len__(self):
         return self.size
@@ -282,41 +303,139 @@ class PooledLogBatch:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.release()
 
-    def buffer_len(self):
+    def buffer_capacity(self):
         with self._lock:
-            return len(self.buffer) if self.buffer is not None else 0
+            b = self.bundle
+            return len(b.buffer) if b is not None and b.buffer is not None else 0
 
     def __repr__(self):
         with self._lock:
-            buffer_len = len(self.buffer) if self.buffer is not None else 0
-            return f"PooledLogBatch(id={id(self):x} size={self.size} capacity={self.capacity}, buffer_used={self.msg_cursor}/{buffer_len}, ref={self._ref_count})"
+            b = self.bundle
+            if b is None:
+                return f"PooledLogBatch(id={id(self):x} state=released)"
+
+            buffer_len = len(b.buffer) if b.buffer is not None else 0
+            return f"PooledLogBatch(id={id(self):x} size={b.size[0]} capacity={b.capacity}, buffer_used={b.msg_cursor[0]}/{buffer_len}, ref={self._ref_count})"
 
     __str__ = __repr__
 
     def __iter__(self):
-        timestamps, offsets, lens, buffer = self.timestamps, self.offsets, self.lengths, self.buffer
-        levels, modules, devices, sequences = self.levels, self.modules, self.devices, self.sequences
+        b = self.bundle
+        if b is None:
+            return
 
-        for i in range(self.size):
-            offset = offsets[i]
-            msg_bytes = buffer[offset : offset + lens[i]].tobytes()
+        # 1. Localize the count
+        count = b.size[0]
+        if count == 0:
+            return
+
+        # 2. Localize all Array references
+        # Pulling these out of the 'b' object once
+        timestamps = b.timestamps
+        offsets = b.offsets
+        lengths = b.lengths
+        buffer = b.buffer
+
+        levels = b.levels
+        modules = b.modules
+        devices = b.devices
+        sequences = b.sequences
+
+        ext_u32_1 = b.ext_u32_1
+        ext_u32_2 = b.ext_u32_2
+        ext_u64_1 = b.ext_u64_1
+
+        # 3. Localize Flags
+        has_lvls = b.has_levels
+        has_mods = b.has_modules
+        has_devs = b.has_devices
+        has_seqs = b.has_sequences
+        has_u32_1 = b.has_ext_u32_1
+        has_u32_2 = b.has_ext_u32_2
+        has_u64_1 = b.has_ext_u64_1
+
+        # 4. High-speed Loop
+        for i in range(count):
+            off = offsets[i]
+            # .tobytes() creates a copy; if you just need to read,
+            # consider yielding a memoryview/slice instead.
+            msg = buffer[off : off + lengths[i]]
 
             yield (
                 timestamps[i],
-                msg_bytes,
-                levels[i] if levels is not None else None,
-                modules[i] if modules is not None else None,
-                devices[i] if devices is not None else None,
-                sequences[i] if sequences is not None else None,
+                msg,
+                levels[i] if has_lvls else None,
+                modules[i] if has_mods else None,
+                devices[i] if has_devs else None,
+                sequences[i] if has_seqs else None,
+                ext_u32_1[i] if has_u32_1 else None,
+                ext_u32_2[i] if has_u32_2 else None,
+                ext_u64_1[i] if has_u64_1 else None,
+            )
+
+    def iter_human(self):
+        b = self.bundle
+        if b is None:
+            return
+
+        # 1. Localize the count
+        count = b.size[0]
+        if count == 0:
+            return
+
+        # 2. Localize all Array references
+        # Pulling these out of the 'b' object once
+        timestamps = b.timestamps
+        offsets = b.offsets
+        lengths = b.lengths
+        buffer = b.buffer
+
+        levels = b.levels
+        modules = b.modules
+        devices = b.devices
+        sequences = b.sequences
+
+        ext_u32_1 = b.ext_u32_1
+        ext_u32_2 = b.ext_u32_2
+        ext_u64_1 = b.ext_u64_1
+
+        # 3. Localize Flags
+        has_lvls = b.has_levels
+        has_mods = b.has_modules
+        has_devs = b.has_devices
+        has_seqs = b.has_sequences
+        has_u32_1 = b.has_ext_u32_1
+        has_u32_2 = b.has_ext_u32_2
+        has_u64_1 = b.has_ext_u64_1
+
+        # 4. High-speed Loop
+        for i in range(count):
+            off = offsets[i]
+            # .tobytes() creates a copy; if you just need to read,
+            # consider yielding a memoryview/slice instead.
+            msg = buffer[off : off + lengths[i]].tobytes()
+
+            yield (
+                int(timestamps[i]),
+                msg,
+                int(levels[i]) if has_lvls else None,
+                int(modules[i]) if has_mods else None,
+                int(devices[i]) if has_devs else None,
+                int(sequences[i]) if has_seqs else None,
+                int(ext_u32_1[i]) if has_u32_1 else None,
+                int(ext_u32_2[i]) if has_u32_2 else None,
+                int(ext_u64_1[i]) if has_u64_1 else None,
             )
 
     def iter_time_messages(self):
-        timestamps, offsets, lens, buffer = self.timestamps, self.offsets, self.lengths, self.buffer
-        for i in range(self.size):
-            offset = offsets[i]
-            msg_bytes = buffer[offset : offset + lens[i]].tobytes()
-            # msg_view = memoryview(buffer[offset : offset + lens[i]])
-            yield timestamps[i], msg_bytes
+        b = self.bundle
+        if b is None:
+            return
+
+        for i in range(b.size[0]):
+            offset = b.offsets[i]
+            msg_bytes = b.buffer[offset : offset + b.lengths[i]].tobytes()
+            yield b.timestamps[i], msg_bytes
 
     @property
     def start_ts(self) -> int:
@@ -325,16 +444,23 @@ class PooledLogBatch:
         If empty, returns max int64 so time-delta checks safely fail.
         """
         # 9223372036854775807 is (2**63 - 1), the max for int64
-        return self.timestamps[0] if self.size > 0 else 9223372036854775807
+        b = self.bundle
+        return b.timestamps[0] if b is not None and b.size[0] > 0 else 9223372036854775807
 
     def __getitem__(self, index):
         """
         Allows indexed access to log rows.
         Returns the same tuple format as __iter__.
         """
+        b = self.bundle
+        if b is None:
+            raise RuntimeError("Cannot access elements of a released batch.")
+
+        current_size = b.size[0]
+
         # 1. Handle Slicing (e.g., batch[1:5])
         if isinstance(index, slice):
-            indices = range(*index.indices(self.size))
+            indices = range(*index.indices(current_size))
             return [self[i] for i in indices]
 
         # 2. Handle Integer Indexing
@@ -343,21 +469,47 @@ class PooledLogBatch:
 
         # Support negative indexing (e.g., -1 for the last row)
         if index < 0:
-            index += self.size
+            index += current_size
 
-        if index < 0 or index >= self.size:
+        if index < 0 or index >= current_size:
             raise IndexError("PooledLogBatch index out of range")
 
         # 3. Extract Row Data (SoA to AoS conversion)
-        offset = self.offsets[index]
-        length = self.lengths[index]
-        msg_bytes = self.buffer[offset : offset + length].tobytes()
+        offset = b.offsets[index]
+        length = b.lengths[index]
+        msg_bytes = b.buffer[offset : offset + length].tobytes()
 
         return (
-            self.timestamps[index],
+            b.timestamps[index],
             msg_bytes,
-            self.levels[index] if self.has_levels else None,
-            self.modules[index] if self.has_modules else None,
-            self.devices[index] if self.has_devices else None,
-            self.sequences[index] if self.has_sequences else None,
+            b.levels[index] if b.has_levels else None,
+            b.modules[index] if b.has_modules else None,
+            b.devices[index] if b.has_devices else None,
+            b.sequences[index] if b.has_sequences else None,
+            b.ext_u32_1[index] if b.has_ext_u32_1 else None,
+            b.ext_u32_2[index] if b.has_ext_u32_2 else None,
+            b.ext_u64_1[index] if b.has_ext_u64_1 else None,
         )
+
+    def get_device(self) -> int:
+        """
+        Returns the device ID of the first message in the batch.
+        Defaults to 0 if the batch is empty or device tracking is disabled.
+        """
+        b = self.bundle
+        # Note: b.size[0] is used because 'size' is a 1-element numpy array
+        if b and b.has_devices and b.size[0] > 0:
+            return int(b.devices[0])
+        return 0
+
+    @property
+    def last_sequence_id(self) -> dtypes.SEQ_TYPE:
+        if (b := self.bundle) and (sz := b.size[0]) > 0:
+            return b.sequences[sz - 1]
+        return SEQ_NONE
+
+    @property
+    def first_sequence_id(self) -> dtypes.SEQ_TYPE:
+        if (b := self.bundle) and b.size[0] > 0:
+            return b.sequences[0]
+        return SEQ_NONE

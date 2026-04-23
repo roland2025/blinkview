@@ -54,7 +54,6 @@ def app_njit(**kwargs):
     if "nogil" not in kwargs:
         kwargs["nogil"] = NUMBA_ENABLE_NOGIL
 
-    # Add these as "soft" defaults
     if "fastmath" not in kwargs:
         kwargs["fastmath"] = True  # Usually safe and highly beneficial for plotting
     if "boundscheck" not in kwargs:

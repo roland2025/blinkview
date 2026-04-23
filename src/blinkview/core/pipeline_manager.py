@@ -6,26 +6,20 @@
 
 from threading import Lock
 from types import SimpleNamespace
-from typing import Dict, Type
+from typing import Dict
 
-from ..io.BaseReader import BaseReader, DeviceFactory
-from ..parsers.parser import BaseParser, ParserFactory, ParserThread
-from ..utils.log_level import LogLevel
+from ..parsers.parser import BaseParser
 from .bindable import bindable
-from .central_storage import CentralFactory
-from .configurable import configurable, configuration_property
+from .configurable import configurable
 from .constants import SysCat
-from .device_identity import DeviceIdentity, ModuleIdentity
-from .log_row import LogRow
-from .logger import PrintLogger, SystemLogger
-from .registry import Registry
-from .reorder_buffer import ReorderFactory
 from .system_context import SystemContext
 
 
 @configurable
 @bindable
 class PipelineManager:
+    shared: SystemContext
+
     def __init__(self):
         self.lock = Lock()
 

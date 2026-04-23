@@ -4,20 +4,18 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import Any, Callable, NamedTuple, Tuple
+from typing import NamedTuple, Tuple
 
 import numpy as np
 
-from blinkview.core import dtypes
 from blinkview.core.id_registry.types import EmptyStringTableParams, StringTableParams
+from blinkview.core.types.empty import ZERO_UTC_OFFSET
 from blinkview.core.types.modules import (
     DynamicWidthConfig,
     EmptyDynamicWidthConfig,
     EmptyModuleTrackerState,
     ModuleTrackerState,
 )
-
-# blinkview/core/types/parsing.py
 
 
 class ParserID:
@@ -35,14 +33,22 @@ class ParserID:
     TS_ISO8601 = CAT_TEMPORAL + 2
     TS_CUSTOM_STRFTIME = CAT_TEMPORAL + 3
 
+    TS_ADB_LONG = CAT_TEMPORAL + 4
+
     # --- 200: Identity ---
     MOD_FIXED_WIDTH = CAT_IDENTITY + 0
     MOD_DYNAMIC_SM = CAT_IDENTITY + 1
     MOD_BRACKETED = CAT_IDENTITY + 2
+    MOD_ADB_LONG = CAT_IDENTITY + 3
+
     DEVICE_ID_STATIC = CAT_IDENTITY + 10
+
+    PID_TID_ADB_LONG = CAT_IDENTITY + 20
 
     # --- 300: Classification ---
     LEVEL_NAME_MAP = CAT_CLASSIFICATION + 0
+
+    LEVEL_MAP_ADB_LONG = CAT_CLASSIFICATION + 2
 
     # --- 400: Structural ---
     SKIP_WORDS = CAT_STRUCTURAL + 0
@@ -53,9 +59,15 @@ class CodecID:
     NEWLINE = 10
     COBS = 20
     SLIP = 30
+    ADB_LONG = 40
 
     # 99 is reserved for custom/plugin decoders
     PLUGIN = 99
+
+
+STATE_COMPLETE = 0
+STATE_INCOMPLETE = 1
+STATE_ERROR = 2
 
 
 class ParserConfig(NamedTuple):
@@ -96,8 +108,16 @@ class LogOutput(NamedTuple):
     has_seq: bool
 
 
+class TimeParserState(NamedTuple):
+    utc_offset: np.ndarray = ZERO_UTC_OFFSET  # int64[:]  # utc seconds
+
+
+EmptyTimeParserState = TimeParserState()
+
+
 class UnifiedParserState(NamedTuple):
     modules: ModuleTrackerState = EmptyModuleTrackerState
+    timestamp: TimeParserState = EmptyTimeParserState
 
 
 EmptyUnifiedParserState = UnifiedParserState()
@@ -115,6 +135,9 @@ class UnifiedParserConfig(NamedTuple):
 
     # --- Module Name Defaults ---
     module_config: DynamicWidthConfig = EmptyDynamicWidthConfig
+
+
+EmptyUnifiedParserConfig = UnifiedParserConfig()
 
 
 class ParserPipelineBundle(NamedTuple):

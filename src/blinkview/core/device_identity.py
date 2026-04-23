@@ -118,7 +118,7 @@ class DeviceIdentity:
             pass
 
         if not self._VALID_NAME_REGEX.match(path):
-            raise ValueError(f"Invalid path: '{path}'")
+            raise ValueError(f"Invalid path: {path.encode()}")
 
         parts = path.split(".")
 

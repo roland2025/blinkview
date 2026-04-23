@@ -52,8 +52,8 @@ class FixedWidthConfig(NamedTuple):
 class DynamicWidthConfig(NamedTuple):
     max_length: int = 0
     max_depth: int = 0
-    enable_brackets: bool = 0
-    enable_dot_separator: bool = 0
+    enable_brackets: bool = False
+    enable_dot_separator: bool = False
 
 
 EmptyDynamicWidthConfig = DynamicWidthConfig()

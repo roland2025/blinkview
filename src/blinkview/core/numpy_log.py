@@ -6,7 +6,6 @@
 
 from collections import deque
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
 from threading import Lock
 from typing import Iterable, Optional
 
@@ -15,13 +14,11 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.dtypes import SEQ_NONE
-from blinkview.core.id_registry import IDRegistry
-from blinkview.core.log_row import LogRow
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.log_batch import TelemetryBatch
-from blinkview.core.types.segments import LogSegmentParams
-from blinkview.ops.segments import copy_batch_to_segment, filter_segment
+from blinkview.ops.segments import copy_batch_to_segment
 from blinkview.ops.telemetry import (
+    count_module_occurrences_backwards,
     extract_telemetry_segment_to_end,
     peek_segment_channels_backwards,
 )
@@ -34,9 +31,9 @@ class SegmentSnapshot:
     Ensures memory isn't recycled while a query is running.
     """
 
-    def __init__(self, segments_iter: Iterable["LogSegment"]):
+    def __init__(self, segments_iter: Iterable[PooledLogBatch]):
         # Single pass: consumes the iterator, retains segments, and builds the final list
-        self.segments: list["LogSegment"] = [seg.retain() for seg in segments_iter]
+        self.segments: list[PooledLogBatch] = [seg.retain() for seg in segments_iter]
 
     def __enter__(self):
         return self.segments
@@ -46,245 +43,41 @@ class SegmentSnapshot:
             seg.release()
 
 
-class LogSegment:
-    __slots__ = (
-        "segment_seq",
-        "capacity",
-        "_count_arr",
-        "_cursor_arr",
-        "_pool",
-        "_ref_count",
-        "_lock",
-        "_bundle",  # The only thing holding the array references
-        "_ts_h",
-        "_lvl_h",
-        "_mod_h",
-        "_dev_h",
-        "_seq_h",
-        "_off_h",
-        "_len_h",
-        "_buf_h",
+def insert_truncated_error(
+    batch: "PooledLogBatch", ts_ns: int, module: int, device: int, seq: int, msg_bytes: bytes, limit: int = 512
+) -> bool:
+    """
+    Standalone utility to force a log into a batch with truncation.
+    Decoupled from the PooledLogBatch class to keep the primitive lean.
+    """
+    suffix = b" ... [TRUNCATED]"
+
+    if len(msg_bytes) > limit:
+        # Precision slice to ensure total length is exactly 'limit'
+        msg_bytes = msg_bytes[: limit - len(suffix)] + suffix
+
+    # Note: LogLevel.ERROR.value should be imported from your constants
+    return batch.insert(
+        ts_ns=ts_ns, level=LogLevel.ERROR.value, module=module, device=device, seq=seq, msg_bytes=msg_bytes
     )
-
-    def __init__(self, pool, segment_seq: int, req_capacity: int, req_buffer_mb: int):
-        self._pool = pool
-        self.segment_seq = segment_seq
-        self._count_arr = np.zeros(1, dtype=np.int64)
-        self._cursor_arr = np.zeros(1, dtype=np.int64)
-        self._ref_count = 1  # Created with 1 ref (held by the CircularLogPool)
-        self._lock = Lock()
-
-        # Acquire arrays natively from the global pool using element count
-        self._ts_h = self._pool.acquire(req_capacity, dtype=dtypes.TS_TYPE)
-
-        self.capacity = len(self._ts_h.array)
-
-        self._lvl_h = self._pool.acquire(self.capacity, dtype=dtypes.LEVEL_TYPE)
-
-        self._mod_h = self._pool.acquire(self.capacity, dtype=dtypes.ID_TYPE)
-
-        self._dev_h = self._pool.acquire(self.capacity, dtype=dtypes.ID_TYPE)
-
-        self._seq_h = self._pool.acquire(self.capacity, dtype=dtypes.SEQ_TYPE)
-
-        self._off_h = self._pool.acquire(self.capacity, dtype=dtypes.OFFSET_TYPE)
-
-        self._len_h = self._pool.acquire(self.capacity, dtype=dtypes.LEN_TYPE)
-
-        # 1 MB = 1024 * 1024 bytes (elements for uint8)
-        self._buf_h = self._pool.acquire(req_buffer_mb * 1024 * 1024, dtype=dtypes.BYTE)
-        self._bundle = LogSegmentParams(
-            self._ts_h.array,
-            self._lvl_h.array,
-            self._mod_h.array,
-            self._dev_h.array,
-            self._seq_h.array,
-            self._off_h.array,
-            self._len_h.array,
-            self._buf_h.array,
-            self._count_arr,
-            self._cursor_arr,
-            self.capacity,
-        )
-
-    def bundle(self) -> LogSegmentParams:
-        """Returns a baked snapshot. Re-baked only if the row count has changed."""
-        return self._bundle
-
-    @property
-    def count(self):
-        return self._count_arr[0]
-
-    @property
-    def msg_cursor(self):
-        return self._cursor_arr[0]
-
-    def clear_and_recycle(self, new_segment_seq: int):
-        """O(1) reset to reuse the existing memory slabs for the next rotation."""
-        self.segment_seq = new_segment_seq
-        self._count_arr[0] = 0
-        self._cursor_arr[0] = 0
-
-    def insert(self, ts_ns: int, level: int, module: int, device: int, seq: int, msg_bytes: bytes) -> bool:
-        # 1. Grab a local reference to the bundle
-        # This avoids repeated 'self._bundle' attribute lookups in the hot path.
-        b = self._bundle
-
-        # 2. Extract current state from the shared arrays
-        count = b.count[0]
-        cursor = b.msg_cursor[0]
-
-        # 3. Capacity Checks
-        if count >= b.capacity:
-            return False
-
-        msg_len = len(msg_bytes)
-        if cursor + msg_len > len(b.buffer):
-            return False
-
-        # 4. Direct Write to Arrays
-        # We use 'count' as our index
-        b.timestamps[count] = ts_ns
-        b.levels[count] = level
-        b.modules[count] = module
-        b.devices[count] = device
-        b.sequence_ids[count] = seq
-        b.offsets[count] = cursor
-        b.lengths[count] = msg_len
-
-        # 5. Buffer Copy
-        b.buffer[cursor : cursor + msg_len] = np.frombuffer(msg_bytes, dtype=dtypes.BYTE)
-
-        # 6. Update shared counters
-        # These updates are immediately visible to the Numba kernels
-        # because they share the same memory reference.
-        b.msg_cursor[0] += msg_len
-        b.count[0] += 1
-
-        return True
-
-    @property
-    def last_sequence_id(self) -> dtypes.SEQ_TYPE:
-        """Returns the sequence ID of the last log, or SEQ_NONE if empty."""
-        cnt = self.count
-        # Using SEQ_NONE (0) ensures uint64 consistency for Numba
-        return self._bundle.sequence_ids[cnt - 1] if cnt > 0 else SEQ_NONE
-
-    def retain(self):
-        """Increments reference count for query/telemetry processing."""
-        with self._lock:
-            if self._ref_count <= 0:
-                raise RuntimeError("Cannot retain a segment already released to pool.")
-            self._ref_count += 1
-        return self
-
-    def release(self):
-        """Decrements reference count. If 0, returns all arrays to the global pool."""
-        with self._lock:
-            self._ref_count -= 1
-            if self._ref_count > 0:
-                return
-
-        # This drops the "baked" references to the NumPy arrays.
-        self._bundle = None
-
-        for h in (
-            self._ts_h,
-            self._lvl_h,
-            self._mod_h,
-            self._dev_h,
-            self._seq_h,
-            self._off_h,
-            self._len_h,
-            self._buf_h,
-        ):
-            if h is not None:
-                h.release()
-
-        # 3. Batch-clear the slots to prevent double-release/leaks
-        self._ts_h = self._lvl_h = self._mod_h = self._dev_h = None
-        self._seq_h = self._off_h = self._len_h = self._buf_h = None
-
-    def insert_batch_chunk(self, batch: "PooledLogBatch", start_idx: int, start_seq_id: int) -> int:
-        """
-        Appends a chunk of the batch starting from `start_idx`.
-        Assigns sequentially increasing IDs starting from `start_seq_id`.
-        Returns the number of rows successfully appended.
-        """
-
-        # We pass self.msg_cursor explicitly as it is the only dynamic write-head
-        rows_copied = copy_batch_to_segment(self._bundle, batch.bundle(), start_idx, start_seq_id)
-
-        return rows_copied
-
-    def insert_truncated_error(self, ts_ns: int, module: int, device: int, seq: int, msg_bytes: bytes):
-        """Forces a message into the buffer by truncating it to 512 chars."""
-        limit = 512
-        suffix = b" ... [TRUNCATED]"
-
-        # Ensure the total length is exactly 'limit'
-        if len(msg_bytes) > limit:
-            truncated_msg = msg_bytes[: limit - len(suffix)] + suffix
-        else:
-            truncated_msg = msg_bytes
-
-        print(
-            f"WARNING append_truncated_error: Original length {len(msg_bytes)} exceeds limit. Truncated to {len(truncated_msg)} bytes. msg={truncated_msg}"
-        )
-
-        return self.insert(ts_ns, LogLevel.ERROR.value, module, device, seq, truncated_msg)
-
-    def debug_print(self):
-        """Prints the log segment rows in a compact, scannable format."""
-        b = self._bundle
-        count = b.count[0]
-        cursor = b.msg_cursor[0]
-
-        print(f"--- LogSegment Dump (seq={self.segment_seq} count={count}/{b.capacity} cursor={cursor}) ---")
-
-        for i in range(count):
-            # Access everything via the bundle local reference
-            ts = b.timestamps[i]
-            lvl = b.levels[i]
-            mod = b.modules[i]
-            dev = b.devices[i]
-            seq = b.sequence_ids[i]
-            off = b.offsets[i]
-            n_len = b.lengths[i]
-
-            # Extract message from the byte buffer
-            raw_bytes = b.buffer[off : off + n_len].tobytes()
-            try:
-                msg = raw_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                msg = f"ERR:{raw_bytes!r}"
-
-            print(
-                f"idx={i:<4} ts={ts:<15} lvl={lvl:<2} mod={mod:<3} "
-                f"dev={dev:<3} seq={seq:<6} off={off:<8} len={n_len:<4} "
-                f'msg="{msg}"'
-            )
-
-        print("--- End Dump ---")
 
 
 class CircularLogPool:
-    def __init__(self, global_pool, max_pieces: int = 16, final_buffer_mb: int = 32):
+    def __init__(self, global_pool: NumpyArrayPool, max_pieces: int = 16, final_buffer_bytes: int = 32 * 1024 * 1024):
         self._global_pool = global_pool
         self.max_pieces = max_pieces
-        self.final_buffer_mb = final_buffer_mb
+        self.final_buffer_bytes = final_buffer_bytes
 
-        self.buffer_mb = 1
+        # Initial "probe" settings (1MB)
+        self.current_buffer_bytes = 1024 * 1024
         initial_chars_per_log = 32
-        self.segment_capacity = (1 * 1024 * 1024) // initial_chars_per_log
+        self.segment_capacity = self.current_buffer_bytes // initial_chars_per_log
 
-        self.segments: deque[LogSegment] = deque()
+        self.segments: deque[PooledLogBatch] = deque()
         self.segment_counter = 0
-        self.active_segment: Optional[LogSegment] = None
+        self.active_segment: Optional[PooledLogBatch] = None
 
-        # Start at 0 (Sentinel). The first log will be 0 + 1 = 1.
         self.sequence: dtypes.SEQ_TYPE = SEQ_NONE
-
         self._lock = Lock()
         self._optimized = False
 
@@ -294,10 +87,6 @@ class CircularLogPool:
         return self.sequence
 
     def _rotate_segment(self):
-        # No lock here because _rotate_segment is called from
-        # append/batch_append which already hold the lock.
-
-        # 1. HEURISTIC FIX: Use msg_cursor
         if not self._optimized and self.active_segment is not None:
             self._apply_real_world_heuristics()
 
@@ -305,7 +94,17 @@ class CircularLogPool:
             oldest = self.segments.popleft()
             oldest.release()
 
-        new_segment = self._global_pool.create(LogSegment, self.segment_counter, self.segment_capacity, self.buffer_mb)
+        # Create using standard PooledLogBatch (Unified class)
+        new_segment = self._global_pool.create(
+            PooledLogBatch,
+            req_capacity=self.segment_capacity,
+            buffer_bytes=self.current_buffer_bytes,
+            metadata=self.segment_counter,
+            has_levels=True,
+            has_modules=True,
+            has_devices=True,
+            has_sequences=True,
+        )
 
         self.segments.append(new_segment)
         self.active_segment = new_segment
@@ -313,173 +112,90 @@ class CircularLogPool:
 
     def _apply_real_world_heuristics(self):
         seg = self.active_segment
-        if seg.count > 0:
-            # FIX: Changed bytes_used to msg_cursor
-            avg_bytes_per_msg = seg.msg_cursor / seg.count
+        if seg and seg.size > 0:
+            avg_bytes_per_msg = seg.msg_cursor / seg.size
+            self.current_buffer_bytes = self.final_buffer_bytes
 
-            self.buffer_mb = self.final_buffer_mb
-
-            # Calculate capacity based on the 32MB target
-            potential_capacity = int((self.buffer_mb * 1024 * 1024) / avg_bytes_per_msg)
-
-            # Sanity check: cap the capacity so we don't allocate
-            # millions of rows of metadata if logs are 1 byte each.
+            # Calculate capacity based on the target byte size
+            potential_capacity = int(self.current_buffer_bytes / avg_bytes_per_msg)
             self.segment_capacity = max(1000, min(potential_capacity, 500_000))
-
             self._optimized = True
 
-    def insert(self, ts_ns: int, level: int, module: int, device: int, seq: int, msg_bytes: bytes):
-        with self._lock:
-            success = self.active_segment.insert(ts_ns, level, module, device, seq, msg_bytes)
-            if not success:
-                self._rotate_segment()
-                self.active_segment.insert(ts_ns, level, module, device, seq, msg_bytes)
+    # def insert(self, ts_ns: int, level: int, module: int, device: int, seq: int, msg_bytes: bytes):
+    #     with self._lock:
+    #         # Type safety check for the IDE
+    #         if not self.active_segment:
+    #             return
+    #
+    #         success = self.active_segment.insert(ts_ns, msg_bytes, level, module, device, seq)
+    #         if not success:
+    #             self._rotate_segment()
+    #             self.active_segment.insert(ts_ns, msg_bytes, level, module, device, seq)
 
     def get_reversed_snapshot(self) -> SegmentSnapshot:
-        """Returns a snapshot ordered from newest to oldest."""
         with self._lock:
-            # reversed() is an O(1) operation that returns an iterator.
-            # SegmentSnapshot consumes it instantly.
             return SegmentSnapshot(reversed(self.segments))
 
     def get_snapshot(self) -> SegmentSnapshot:
-        """Returns a snapshot ordered from oldest to newest."""
         with self._lock:
-            # Drop the list() cast. Just pass the raw iterable.
             return SegmentSnapshot(self.segments)
 
     def get_counts(self) -> tuple[int, int, int]:
         with self._lock:
-            current_total = sum(seg.count for seg in self.segments)
-
-            # FIX: Use the LATEST segment's capacity for the max estimate,
-            # otherwise the 1MB probe segment will make your UI look
-            # like the buffer is 100% full immediately.
+            current_total = sum(seg.size for seg in self.segments)
             active_cap = self.active_segment.capacity if self.active_segment else self.segment_capacity
             max_total = self.max_pieces * active_cap
             return current_total, max_total, int(self.sequence)
 
     def release_all(self):
-        """Gracefully shutdown and return all memory to the global pool."""
         with self._lock:
             while self.segments:
-                seg = self.segments.popleft()
-                seg.release()
+                self.segments.popleft().release()
+            self.active_segment = None
 
-    def batch_append(self, batch: "PooledLogBatch"):
-        if batch.size == 0:
+    def batch_append(self, batch: PooledLogBatch):
+        if (size := batch.size) == 0:
             return
 
         with self._lock:
             rows_written = 0
+            b_src = batch.bundle
+            if not b_src:
+                return
 
-            # print(f"[log_pool] batch={batch}")
-            # for ts, msg, lvl, mod, dev, seq in batch:
-            #     print(f"ts={ts} lvl={lvl} mod={mod} dev={dev} seq={seq} msg={msg}")
-
-            while rows_written < batch.size:
-                # Fast Path: Numba handles the bulk
-                copied = self.active_segment.insert_batch_chunk(batch, rows_written, self.sequence)
-
-                # self.active_segment.debug_print()
+            while rows_written < size:
+                # Fast Path: Symmetrical Copy (Bundle to Bundle)
+                copied = copy_batch_to_segment(self.active_segment.bundle, b_src, rows_written, self.sequence)
 
                 rows_written += copied
                 self.sequence += copied
 
-                # Slow Path: Rotation or Truncation
-                if rows_written < batch.size:
-                    next_msg_len = batch.lengths[rows_written]
+                if rows_written < size:
+                    # Check for toxic logs (exceeds current segment buffer)
+                    next_msg_len = b_src.lengths[rows_written]
+                    toxic_threshold = min(self.current_buffer_bytes, 1024 * 1024)
 
-                    # Logic: If it can't fit in a segment OR it's just objectively
-                    # huge (e.g., > 1MB), we treat it as toxic and truncate to 512.
-                    toxic_threshold = self.buffer_mb * 1024 * 1024
-
-                    if next_msg_len > toxic_threshold or next_msg_len > 1024 * 1024:
+                    if next_msg_len > toxic_threshold:
                         self._rotate_segment()
 
+                        # Use the unified insert_truncated_error method
                         ts, raw_msg, _, mod, dev, _ = batch[rows_written]
-
-                        self.sequence += 1
-                        self.active_segment.insert_truncated_error(ts, mod, dev, self.sequence, raw_msg)
+                        insert_truncated_error(self.active_segment, ts, mod, dev, self.sequence, raw_msg)
 
                         rows_written += 1
                         self.sequence += 1
-
-                        # if self.logger:
-                        #     self.logger.error(f"Toxic log detected ({next_msg_len} bytes). Truncated to 512 chars.")
                     else:
-                        # Normal rotation for a normal-sized log
                         self._rotate_segment()
 
     def clear(self):
-        """
-        Wipes all log data, resets sequence counters, and prepares
-        the pool for fresh data. Useful for removing 'warm-up' dummy data.
-        """
         with self._lock:
-            # 1. Release all currently held segments back to the global array pool
-            # This is safer than just zeroing indices because it ensures
-            # no "residue" remains in the memory slabs.
             while self.segments:
-                seg = self.segments.popleft()
-                seg.release()
+                self.segments.popleft().release()
 
-            # 2. Reset global counters
             self.segment_counter = 0
             self.sequence = SEQ_NONE
             self.active_segment = None
-
-            # 3. Re-initialize with a single fresh segment
             self._rotate_segment()
-
-
-#
-# def query_pool(id_registry: IDRegistry, pool: CircularLogPool, target_modules: list[int] = None, **filters):
-#     """Generator that yields populated LogRow objects from all segments."""
-#
-#     get_level = LogLevel.from_value
-#     module_from_int = id_registry.module_from_int
-#
-#     # List to numpy for Numba compatibility
-#     if target_modules:
-#         tm_arr = np.array(target_modules, dtype=dtypes.ID_TYPE)
-#     else:
-#         tm_arr = np.empty(0, dtype=dtypes.ID_TYPE)
-#
-#     # Grab the sequence filter from kwargs
-#     start_seq = filters.get("start_seq", SEQ_NONE)
-#
-#     with pool.get_snapshot() as segments:
-#         for segment in segments:
-#             if segment.count == 0:
-#                 continue
-#
-#             b = segment.bundle()
-#
-#             matched_idx = filter_segment(
-#                 b,
-#                 target_modules_arr=tm_arr,
-#                 start_seq=start_seq,  # Wire this in!
-#                 start_ts=filters.get("start_ts", -1),
-#                 end_ts=filters.get("end_ts", -1),
-#                 target_level=filters.get("target_level", 0xFF),
-#                 target_module=filters.get("target_module", 0xFFFF),
-#                 target_device=filters.get("target_device", 0xFFFF),
-#             )
-#
-#             for idx in matched_idx:
-#                 # Use names from LogSegmentParams (the bundle)
-#                 offset = b.offsets[idx]
-#                 length = b.lengths[idx]
-#                 msg = b.buffer[offset : offset + length].tobytes().decode("utf-8")
-#
-#                 yield LogRow(
-#                     timestamp_ns=b.timestamps[idx],
-#                     level=get_level(b.levels[idx]),
-#                     module=module_from_int(b.modules[idx]),
-#                     message=msg,
-#                     seq=b.sequence_ids[idx],
-#                 )
 
 
 def allocate_telemetry_workspace(num_channels: int) -> np.ndarray:
@@ -537,16 +253,16 @@ def fetch_telemetry_arrays(
                 if curr_write_idx <= 0:
                     break
                 segment_last_sequence_id = segment.last_sequence_id
-                if segment.count == 0 or segment_last_sequence_id <= start_seq:
+                if segment.size == 0 or segment_last_sequence_id <= start_seq:
                     break
 
                 if new_watermark == start_seq:
                     new_watermark = segment_last_sequence_id
 
                 curr_write_idx = extract_telemetry_segment_to_end(
-                    segment.bundle(),
+                    segment.bundle,
                     target_module_int,
-                    start_seq,
+                    dtypes.SEQ_TYPE(start_seq),
                     num_channels,
                     out_times,
                     out_times_int64,
@@ -573,41 +289,53 @@ def get_telemetry_anchor(
     temp_floats: np.ndarray,
     view_capacity: int = 5000,
 ) -> tuple[dtypes.SEQ_TYPE, int]:
-    """
-    Finds the latest sequence ID and calculates where the fetcher should start
-    to fill exactly 'view_capacity' points.
-    """
-    # Ensure all inputs are strictly typed as uint64 to lock Numba signatures
     lks = dtypes.SEQ_TYPE(last_known_seq)
-    cap = dtypes.SEQ_TYPE(view_capacity)
+    remaining = int(view_capacity)
+    detected_channels = 0
+    final_anchor = lks
 
     with pool.get_reversed_snapshot() as segments:
         for segment in segments:
-            if segment.count == 0:
-                continue
-
-            # Skip segment if it's strictly older than what we already have
-            # (unless we're starting from scratch where lks == SEQ_NONE)
-            if segment.last_sequence_id <= lks and lks != SEQ_NONE:
+            # Skip segment if it's strictly older than our high-water mark
+            if segment.size == 0 or (segment.last_sequence_id <= lks and lks != SEQ_NONE):
                 break
 
-            # peek_segment_channels_backwards now returns SEQ_NONE (0) instead of -1
-            found_seq, channels = peek_segment_channels_backwards(segment.bundle(), target_module_int, lks, temp_floats)
+            bundle = segment.bundle
+            # --- PHASE 1: DISCOVERY ---
+            if detected_channels == 0:
+                head_seq, channels = peek_segment_channels_backwards(bundle, target_module_int, lks, temp_floats)
 
-            if channels > 0:
-                # --- UNSIGNED UNDERFLOW PROTECTION ---
-                # In uint64: 3000 - 5000 = 18 quintillion.
-                # We must gate the subtraction.
-                if found_seq > cap:
-                    requested_start = found_seq - cap
+                if head_seq != SEQ_NONE:
+                    detected_channels = channels
+                    # Start counting backwards from the head_seq we just found
+                    found_in_seg, earliest = count_module_occurrences_backwards(
+                        bundle, target_module_int, head_seq, remaining
+                    )
+                    remaining -= found_in_seg
+                    final_anchor = earliest
                 else:
-                    requested_start = SEQ_NONE
+                    # Nothing in this segment for this module, try the next (older) one
+                    continue
 
-                # Apply the high-water mark: never go back further than
-                # the data we've already committed to the UI.
-                optimized_start = max(lks, requested_start)
+            # --- PHASE 2: ANCHORING ---
+            else:
+                found_in_seg, earliest = count_module_occurrences_backwards(
+                    bundle, target_module_int, segment.last_sequence_id, remaining
+                )
 
-                return optimized_start, channels
+                # CRITICAL FIX: Only update the anchor if we actually found points
+                if found_in_seg > 0:
+                    remaining -= found_in_seg
+                    final_anchor = earliest
 
-    # If no new telemetry found, stay exactly where we are
-    return lks, 0
+            # --- EXIT CONDITIONS ---
+            # 1. We found enough points to fill the view
+            if remaining <= 0:
+                break
+
+            # 2. We've reached data we already have in the UI
+            if segment.first_sequence_id <= lks and lks != SEQ_NONE:
+                break
+
+    # Return the earliest sequence ID found that satisfies the capacity
+    return max(lks, final_anchor), detected_channels

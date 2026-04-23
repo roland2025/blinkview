@@ -70,23 +70,27 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
         factory_build = self.shared.factories.build
 
-        frame_ctx = SimpleNamespace(
-            get_logger=self.logger.child_creator("decoder"),
-            device_id=self.local.device_id,
-        )
-        self.logger.debug(f"frame_decoder config: {self.frame_decoder}")
-        self._frame_codec = factory_build(
-            "frame_decoder", self.frame_decoder, system_ctx=self.shared, local_ctx=frame_ctx
-        )
+        frame_decoder = getattr(self, "frame_decoder", None)
+        self.logger.debug(f"frame_decoder config: {frame_decoder}")
+        if frame_decoder is not None:
+            frame_ctx = SimpleNamespace(
+                get_logger=self.logger.child_creator("decoder"),
+                device_id=self.local.device_id,
+            )
+            self._frame_codec = factory_build(
+                "frame_decoder", self.frame_decoder, system_ctx=self.shared, local_ctx=frame_ctx
+            )
 
-        parser_ctx = SimpleNamespace(
-            get_logger=self.logger.child_creator("parser"),
-            device_id=self.local.device_id,
-        )
-        self.logger.debug(f"frame_parser config: {self.frame_parser}")
-        self._frame_parser = factory_build(
-            "frame_parser", self.frame_parser, system_ctx=self.shared, local_ctx=parser_ctx
-        )
+        frame_parser = getattr(self, "frame_parser", None)
+        self.logger.debug(f"frame_parser config: {frame_parser}")
+        if frame_parser is not None:
+            parser_ctx = SimpleNamespace(
+                get_logger=self.logger.child_creator("parser"),
+                device_id=self.local.device_id,
+            )
+            self._frame_parser = factory_build(
+                "frame_parser", frame_parser, system_ctx=self.shared, local_ctx=parser_ctx
+            )
 
         self.numba_needs_compile = True
         self.thread_needs_restart = True
@@ -120,8 +124,8 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             codec = self._frame_codec
 
             f_config = codec.bundle()
-            frame_state = FrameState(pool, ceil(codec.frame_length_maximum / 1024))
-            f_state = frame_state.bundle()
+            frame_state = FrameState(pool, codec.frame_length_maximum)
+            f_state = frame_state.bundle
 
             o_config = OutputConfig(compact_buffer=getattr(self, "compact_buffer", True))
 
@@ -143,7 +147,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 return pool_create(
                     PooledLogBatch,
                     tuner_out.estimated_capacity,
-                    tuner_out.estimated_buffer_kb,
+                    max(tuner_out.estimated_buffer_bytes, codec.frame_length_maximum),
                     has_levels=True,
                     has_modules=True,
                     has_devices=True,
@@ -174,10 +178,10 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                         _ = process_batch_kernel(
                             f_config,
                             f_state,
-                            dummy_in.bundle(),
+                            dummy_in.bundle,
                             parser_bundle,
                             o_config,
-                            dummy_out.bundle(),
+                            dummy_out.bundle,
                         )
                         # print(f"SIGNATURE: {process_batch_kernel.signatures}")
                         self.logger.info("Kernels warmed up and cached.")
@@ -212,6 +216,10 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                     # logger_in.debug(str(batch_in))
 
                     # print(f"[parser] batch_in={batch_in}")
+
+                    # print(f"[parser] batch_in={batch_in}")
+                    # for out in batch_in:
+                    #     print(str(out))
                     batch_size_bytes = batch_in.msg_cursor
 
                     # =====================================================================
@@ -222,7 +230,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
                     # If we have an active batch that is too small for our new burst estimate,
                     # flush it immediately to force a massive batch allocation.
-                    if batch_out and batch_out.buffer_len() < (tuner_out.estimated_buffer_kb * 1024):
+                    if batch_out and batch_out.buffer_capacity() < tuner_out.estimated_buffer_bytes:
                         flush()
 
                     # TODO: check if we have enough room in current batch?
@@ -236,7 +244,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
                     # ... process in_batch and assemble your PooledLogBatch ...
                     # 1. Bundle up our SoA (Structure of Arrays) views
-                    in_bundle = batch_in.bundle()
+                    in_bundle = batch_in.bundle
                     in_size = batch_in.size
 
                     # Initialization for the state machine
@@ -248,14 +256,14 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                     while f_state.in_idx[0] < in_size or out_is_full:
                         if batch_out and (
                             batch_out.size >= batch_out.capacity
-                            or batch_out.msg_cursor >= (batch_out.buffer_len() * 0.9)
+                            or batch_out.msg_cursor >= (batch_out.buffer_capacity() * 0.9)
                         ):
                             flush()
 
                         if batch_out is None:
                             batch_out = batch_acquire()
 
-                        out_bundle = batch_out.bundle()
+                        out_bundle = batch_out.bundle
 
                         # 2. Run the Kernel
                         out_is_full = process_batch_kernel(
@@ -277,7 +285,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 #     logger_out.trace(str(out))
 
                 # --- Check for Flush ---
-                if batch_out.size >= batch_out.capacity or batch_out.msg_cursor >= (batch_out.buffer_len() * 0.9):
+                if batch_out.size >= batch_out.capacity or batch_out.msg_cursor >= (batch_out.buffer_capacity() * 0.9):
                     flush()
 
             flush()

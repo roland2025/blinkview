@@ -8,7 +8,7 @@ from blinkview.core.numba_config import app_njit
 from blinkview.core.types.frames import FrameConfig, FrameStateParams
 from blinkview.core.types.log_batch import LogBundle
 from blinkview.core.types.output import OutputConfig
-from blinkview.core.types.parsing import ParserPipelineBundle
+from blinkview.core.types.parsing import STATE_ERROR, STATE_INCOMPLETE, ParserPipelineBundle
 from blinkview.ops.frame_dispatch import dispatch_frame_decoder
 from blinkview.ops.pipeline import execute_parser_pipeline
 from blinkview.ops.strings import squash_spaces_inplace, trim_spaces
@@ -16,14 +16,14 @@ from blinkview.ops.strings import squash_spaces_inplace, trim_spaces
 
 @app_njit()
 def process_batch_kernel(
-    f_cfg: FrameConfig,
+    f_cfg,
     f_state: FrameStateParams,
-    in_b: LogBundle,
-    parser: ParserPipelineBundle,
-    o_cfg: OutputConfig,
-    out_b: LogBundle,
+    in_b,
+    parser,
+    o_cfg,
+    out_b,
 ):
-    # --- Local Variable Cache ---
+    # --- 1. Load State from length-1 arrays ---
     curr_write = f_state.offset[0]
     in_idx = f_state.in_idx[0]
     read_offset = f_state.in_offset[0]
@@ -39,7 +39,6 @@ def process_batch_kernel(
     frame_length_max = f_cfg.length_max
     frame_length_fixed = f_cfg.length_fixed
     frame_length = f_cfg.length
-    filter_trim_r = f_cfg.filter_trim_r
     report_frame_error = f_cfg.report_error
 
     # Parser/Output Configs
@@ -56,33 +55,22 @@ def process_batch_kernel(
 
     out_cap = out_b.timestamps.shape[0]
     out_buf_cap = out_b.buffer.shape[0]
-
     report_errors = report_frame_error or report_parser_error
-    parser_bundles = parser.pipeline
     out_full = False
 
-    # --- Main Processing Loop ---
+    # --- 2. Main Chunking Loop ---
     while in_idx < in_size:
         in_len = in_b.lengths[in_idx]
         in_off = in_b.offsets[in_idx]
         ts_in = in_b.timestamps[in_idx]
 
-        # We scan from where we left off in this chunk
-        # Manual scan replaces np.where to avoid allocations and enable SIMD
         for scan_idx in range(read_offset, in_len):
             byte = in_b.buffer[in_off + scan_idx]
 
-            # Check for Delimiter
             if byte == frame_delimiter:
-                # Calculate trim for \r if enabled
-                trim_r = 0
-                if filter_trim_r:
-                    if (scan_idx > read_offset) and (in_b.buffer[in_off + scan_idx - 1] == 13):
-                        trim_r = 1
-
                 chunk_len = (scan_idx - read_offset) + 1
 
-                # Capacity Check
+                # Check Output Capacity
                 if in_frame:
                     if (curr_out_idx >= out_cap) or (curr_out_cursor + curr_write + chunk_len > out_buf_cap):
                         out_full = True
@@ -92,20 +80,21 @@ def process_batch_kernel(
                 target_start = 0
                 target_end = 0
                 process_frame = False
+                is_zero_copy = False
                 error_code = 0
 
-                # Routing Logic
+                # Determine if we can Zero-Copy or if we must Buffer
                 if in_frame and curr_write == 0 and chunk_len <= frame_length_max:
-                    # ZERO-COPY PATH
+                    # FAST PATH: Clean frame, entirely contained in this chunk
                     target_buf = in_b.buffer
                     target_start = in_off + read_offset
-                    target_end = target_start + chunk_len - 1 - trim_r
+                    target_end = target_start + chunk_len
                     process_frame = True
+                    is_zero_copy = True
                 else:
-                    # STITCH PATH
                     if in_frame:
                         if curr_write + chunk_len <= frame_length_max:
-                            # Use slice copy for speed
+                            # BUFFER PATH: Append chunk to persistent frame buffer
                             f_buf[curr_write : curr_write + chunk_len] = in_b.buffer[
                                 in_off + read_offset : in_off + read_offset + chunk_len
                             ]
@@ -113,73 +102,85 @@ def process_batch_kernel(
 
                             target_buf = f_buf
                             target_start = 0
-                            target_end = curr_write - 1 - trim_r
+                            target_end = curr_write
                             process_frame = True
                         else:
-                            in_frame = False  # Frame too long, mute until next delim
+                            # Frame exceeded max length, drop it
+                            in_frame = False
                     else:
-                        in_frame = True  # Was muted, now resyncing
+                        # Recovering from dropped frame state
+                        in_frame = True
                         curr_write = 0
 
-                # Process the frame if routing was successful
                 if process_frame:
-                    out_b.timestamps[curr_out_idx] = ts_in
-                    out_b.levels[curr_out_idx] = default_level
-                    out_b.modules[curr_out_idx] = default_module
-
-                    # 1. Frame Decoding (Hard-inlined)
-                    final_cursor = dispatch_frame_decoder(
-                        target_buf, target_start, target_end, out_b.buffer, curr_out_cursor, f_cfg
+                    decoder_state, final_cursor, bytes_consumed = dispatch_frame_decoder(
+                        target_buf, target_start, target_end, out_b.buffer, curr_out_cursor, f_cfg, f_state
                     )
 
-                    total_frame_length = final_cursor - curr_out_cursor
+                    if decoder_state == STATE_INCOMPLETE:
+                        if is_zero_copy:
+                            f_buf[0:chunk_len] = in_b.buffer[in_off + read_offset : in_off + scan_idx + 1]
+                            curr_write = chunk_len
 
-                    # 2. Validation
-                    is_valid_frame = False
-                    if total_frame_length > 0:
-                        if frame_length_fixed != 0:
-                            is_valid_frame = total_frame_length == frame_length
-                        else:
-                            is_valid_frame = total_frame_length >= frame_length_min
+                        read_offset = scan_idx + 1
+                        continue
 
-                    if not is_valid_frame:
-                        if report_frame_error:
-                            error_code = 1
+                    elif decoder_state == STATE_ERROR:
+                        error_code = 1
+                        total_frame_length = final_cursor - curr_out_cursor
+                        bytes_consumed = target_end - target_start  # Consume bad chunk fully
+
                     else:
-                        # 3. Parser Pipeline
-                        msg_start = execute_parser_pipeline(
-                            out_b.buffer, curr_out_cursor, final_cursor, out_b, curr_out_idx, parser_bundles
-                        )
+                        # STATE_COMPLETE
+                        out_b.timestamps[curr_out_idx] = ts_in
+                        out_b.levels[curr_out_idx] = default_level
+                        out_b.modules[curr_out_idx] = default_module
 
-                        if msg_start == -1:
-                            if report_parser_error:
-                                error_code = 2
-                        else:
-                            # 4. Sanitization
-                            if filter_squash_spaces:
-                                msg_start, final_cursor = squash_spaces_inplace(out_b.buffer, msg_start, final_cursor)
+                        total_frame_length = final_cursor - curr_out_cursor
+
+                        is_valid_frame = False
+                        if total_frame_length > 0:
+                            if frame_length_fixed != 0:
+                                is_valid_frame = total_frame_length == frame_length
                             else:
-                                msg_start, final_cursor = trim_spaces(out_b.buffer, msg_start, final_cursor)
+                                is_valid_frame = total_frame_length >= frame_length_min
 
-                            payload_length = final_cursor - msg_start
+                        if not is_valid_frame:
+                            if report_frame_error:
+                                error_code = 1
+                        else:
+                            msg_start = execute_parser_pipeline(
+                                out_b.buffer, curr_out_cursor, final_cursor, out_b, curr_out_idx, parser.pipeline
+                            )
 
-                            if payload_length > 0:
-                                if compact_buffer:
-                                    # Copy-back for compaction
-                                    if msg_start > curr_out_cursor:
-                                        for k in range(payload_length):
-                                            out_b.buffer[curr_out_cursor + k] = out_b.buffer[msg_start + k]
-                                    out_b.offsets[curr_out_idx] = curr_out_cursor
-                                    out_b.lengths[curr_out_idx] = payload_length
-                                    curr_out_cursor += payload_length
+                            if msg_start == -1:
+                                if report_parser_error:
+                                    error_code = 2
+                            else:
+                                if filter_squash_spaces:
+                                    msg_start, final_cursor = squash_spaces_inplace(
+                                        out_b.buffer, msg_start, final_cursor
+                                    )
                                 else:
-                                    out_b.offsets[curr_out_idx] = msg_start
-                                    out_b.lengths[curr_out_idx] = payload_length
-                                    curr_out_cursor = final_cursor
+                                    msg_start, final_cursor = trim_spaces(out_b.buffer, msg_start, final_cursor)
 
-                                curr_out_idx += 1
+                                payload_length = final_cursor - msg_start
 
-                    # Handle Errors
+                                if payload_length > 0:
+                                    if compact_buffer:
+                                        if msg_start > curr_out_cursor:
+                                            for k in range(payload_length):
+                                                out_b.buffer[curr_out_cursor + k] = out_b.buffer[msg_start + k]
+                                        out_b.offsets[curr_out_idx] = curr_out_cursor
+                                        out_b.lengths[curr_out_idx] = payload_length
+                                        curr_out_cursor += payload_length
+                                    else:
+                                        out_b.offsets[curr_out_idx] = msg_start
+                                        out_b.lengths[curr_out_idx] = payload_length
+                                        curr_out_cursor = final_cursor
+
+                                    curr_out_idx += 1
+
                     if report_errors and error_code > 0:
                         out_b.offsets[curr_out_idx] = curr_out_cursor
                         out_b.lengths[curr_out_idx] = total_frame_length
@@ -188,14 +189,27 @@ def process_batch_kernel(
                         curr_out_cursor += total_frame_length
                         curr_out_idx += 1
 
-                # Reset for next search in this chunk
-                curr_write = 0
+                    # --- SHIFT UNCONSUMED BYTES (HEADER 2) ---
+                    unconsumed = (target_end - target_start) - bytes_consumed
+                    if unconsumed > 0:
+                        # Copy loop handles both zero-copy and self-overlapping shifts cleanly
+                        for k in range(unconsumed):
+                            f_buf[k] = target_buf[target_start + bytes_consumed + k]
+                        curr_write = unconsumed
+                        in_frame = True
+                    else:
+                        curr_write = 0
+                        # We only reset in_frame if we are truly empty
+                        # (Handled by chunking loop logic above)
+
                 read_offset = scan_idx + 1
 
         if out_full:
             break
 
-        # Handle data remaining after the last delimiter in the chunk
+        # --- 3. Handle Batch Tail-End Carryover ---
+        # Data remaining after the last delimiter in the current chunk batch.
+        # We carry this over into the persistent buffer for the next batch.
         remaining = in_len - read_offset
         if remaining > 0 and in_frame:
             if curr_write + remaining <= frame_length_max:
@@ -207,15 +221,13 @@ def process_batch_kernel(
         in_idx += 1
         read_offset = 0
 
-    # Final Block Fill
+    # --- 4. Final Updates & State Persistence ---
     if curr_out_idx > start_out_idx:
         out_b.devices[start_out_idx:curr_out_idx] = device_id
-
-        # USE INDEX [0] TO UPDATE BY REFERENCE
         out_b.size[0] = curr_out_idx
         out_b.msg_cursor[0] = curr_out_cursor
 
-        # SAVE STATE BACK TO THE TUPLE (already using [0] here, which is correct)
+    # Save state back to the struct's ndarrays
     f_state.offset[0] = curr_write
     f_state.in_idx[0] = in_idx
     f_state.in_offset[0] = read_offset

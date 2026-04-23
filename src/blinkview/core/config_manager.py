@@ -119,7 +119,7 @@ class ConfigManager:
 
     def apply_patch(self, path: str, patch: list):
         """Applies patch and notifies affected subscribers."""
-        print(f"[ConfigManager] Patching {path} with {len(patch)}")
+        print(f"[ConfigManager] Patching {path} with '{patch}'")
         if not patch:
             return
 
@@ -128,10 +128,20 @@ class ConfigManager:
                 # Promote relative paths to absolute paths for the global data
                 base_path = "" if path == "/" else path.rstrip("/")
                 global_patch = []
+
                 for op in patch:
                     new_op = op.copy()
-                    rel_path = new_op["path"]
-                    new_op["path"] = f"{base_path}{rel_path}" if rel_path.startswith("/") else f"{base_path}/{rel_path}"
+
+                    # We must prefix BOTH 'path' and 'from' (for move/copy ops)
+                    for key in ("path", "from"):
+                        if key in new_op:
+                            rel_path = new_op[key]
+                            # Handle leading slash consistency
+                            if rel_path.startswith("/"):
+                                new_op[key] = f"{base_path}{rel_path}"
+                            else:
+                                new_op[key] = f"{base_path}/{rel_path}"
+
                     global_patch.append(new_op)
 
                 # Apply the patch

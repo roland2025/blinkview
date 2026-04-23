@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 from blinkview.core.id_registry import IDRegistry
 from blinkview.core.module_snapshot import LatestModuleValueTracker
 from blinkview.core.reorderer import Reorder
-from blinkview.parsers import frame_decoders, frame_parsers
+from blinkview.parsers import adb_decoder, frame_decoders, frame_parsers
 
 from ..io import *
 from ..io.BaseReader import DeviceFactory
@@ -63,8 +63,8 @@ class Registry:
 
         self.log_lock = RLock()
         self.log_batch: Optional[PooledLogBatch] = None
-        self.log_buffer_kb = 4
-        self.log_capacity = self.log_buffer_kb * 1024 / 32  # 32 chars per msg
+        self.log_buffer_bytes = 4096
+        self.log_capacity = self.log_buffer_bytes * 1024 / 32  # 32 chars per msg
 
         self.time_utils = TimeUtils()
         self.now = self.time_utils.now
@@ -155,21 +155,6 @@ class Registry:
 
         self.system_device = self.id_registry.get_device("SYSTEM")
         self.log_device_id = self.system_device.id
-
-        # estimated_buffer_kb = 4
-        # estimated_capacity = estimated_buffer_kb * 1024 / 32  # 32 chars per msg
-        #
-        # def batch_acquire():
-        #     return np_pool.create(
-        #         PooledLogBatch,
-        #         estimated_capacity,
-        #         estimated_buffer_kb,
-        #         has_levels=True,
-        #         has_modules=True,
-        #         has_devices=True,
-        #     )
-        #
-        # self.pool_acquire_logrows = self.system_ctx.pool.get(tag="LogRows").acquire
 
         self.sources = None
 
@@ -688,7 +673,7 @@ class Registry:
         batch = self.system_ctx.array_pool.create(
             PooledLogBatch,
             self.log_capacity,
-            self.log_buffer_kb,
+            self.log_buffer_bytes,
             has_levels=True,
             has_modules=True,
             has_devices=True,

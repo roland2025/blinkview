@@ -39,7 +39,7 @@ class NumbaWarmupHelper:
 
         # 1. Initialize dummy infrastructure
         self.registry = IDRegistry(self.array_pool)
-        self.log_pool = CircularLogPool(self.array_pool, 4, 1)
+        self.log_pool = CircularLogPool(self.array_pool, 4, 1024 * 16)
 
         self.tracker = LatestModuleValueTracker(
             self.log_pool, self.registry.modules_table, self.array_pool, self.time_ns
@@ -57,7 +57,7 @@ class NumbaWarmupHelper:
         return self.array_pool.create(
             PooledLogBatch,
             capacity,
-            (capacity * 64) // 1024,
+            capacity * 64,
             has_levels=True,
             has_modules=True,
             has_devices=True,
@@ -115,7 +115,7 @@ class NumbaWarmupHelper:
                 #     f"target_device={type(t_dev)}({t_dev}))"
                 # )
                 indices = filter_segment(
-                    segment.bundle(),
+                    segment.bundle,
                     target_modules_arr=tm_arr,
                     start_seq=s_seq,
                     target_level=t_lvl,
@@ -126,12 +126,12 @@ class NumbaWarmupHelper:
                 if indices.size > 0:
                     # Trigger: Size Estimation Kernel
                     req_bytes = estimate_log_batch_size(
-                        indices, segment.bundle(), self.registry.bundle(), self.format_cfg
+                        indices, segment.bundle, self.registry.bundle(), self.format_cfg
                     )
                     # Trigger: Formatting Kernel
                     with self.array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
                         format_log_batch(
-                            handle.array, indices, segment.bundle(), self.registry.bundle(), self.format_cfg, 0
+                            handle.array, indices, segment.bundle, self.registry.bundle(), self.format_cfg, 0
                         )
 
     def exercise_telemetry_kernels(self):

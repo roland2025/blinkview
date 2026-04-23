@@ -16,9 +16,9 @@ from qtpy.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLay
 from blinkview.core import dtypes
 from blinkview.core.batched_logrows import BatchedLogRows
 from blinkview.core.dtypes import ID_UNSPECIFIED, LEVEL_UNSPECIFIED, SEQ_NONE
-from blinkview.core.numpy_log import filter_segment
 from blinkview.core.types.formatting import FormattingConfig
 from blinkview.ops.formatting import estimate_log_batch_size, format_log_batch
+from blinkview.ops.segments import filter_segment
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
 from blinkview.ui.widgets.log_highlighter import LogHighlighter
@@ -28,6 +28,7 @@ from blinkview.ui.widgets.telemetry_table import TelemetryTable
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
 from blinkview.utils.time_utils import ConsoleTimestampFormatter
+from blinkview.utils.utc_offset import get_local_utc_offset_seconds
 
 
 class LogViewerWidget(QWidget):
@@ -430,7 +431,7 @@ QToolButton[filterEnabled="true"] {
         reg = self.gui_context.id_registry
         pool = self.gui_context.registry.central.log_pool
 
-        tz_offset_sec = int(datetime.now().astimezone().utcoffset().total_seconds())
+        tz_offset_sec = get_local_utc_offset_seconds()
 
         # Get Numba-friendly byte maps
 
@@ -457,7 +458,7 @@ QToolButton[filterEnabled="true"] {
             for segment in segments:
                 segment_last_sequence_id = segment.last_sequence_id
                 # Quick skip: segment is empty or already fully seen
-                if segment.count == 0 or segment_last_sequence_id <= self.latest_seq_seen:
+                if segment.size == 0 or segment_last_sequence_id <= self.latest_seq_seen:
                     continue
                 # Find matching indices in this segment
                 # print(
@@ -469,7 +470,7 @@ QToolButton[filterEnabled="true"] {
                 #     f"target_device={type(t_device)}({t_device}))"
                 # )
                 indices = filter_segment(
-                    segment.bundle(),
+                    segment.bundle,
                     target_modules_arr=tm_arr,
                     start_seq=self.latest_seq_seen,
                     target_level=target_level,
@@ -482,19 +483,19 @@ QToolButton[filterEnabled="true"] {
                     # reg.levels_table.debug_print("LEVELS")
                     # reg.modules_table.debug_print("MODULES")
                     # reg.devices_table.debug_print("DEVICES")
-                    req_bytes = estimate_log_batch_size(indices, segment.bundle(), reg.bundle(), format_cfg)
+                    req_bytes = estimate_log_batch_size(indices, segment.bundle, reg.bundle(), format_cfg)
 
                     # 2. Acquire pooled memory (zero allocation from OS)
                     with array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
                         # 3. Format into pool
                         bytes_written = format_log_batch(
-                            handle.array, indices, segment.bundle(), reg.bundle(), format_cfg, tz_offset_sec
+                            handle.array, indices, segment.bundle, reg.bundle(), format_cfg, tz_offset_sec
                         )
 
                         # 4. Final conversion to string
                         # .tobytes() on a slice is necessary for decode,
                         # but it's much faster than incremental string building.
-                        full_string_batch += handle.array[:bytes_written].tobytes().decode("utf-8")
+                        full_string_batch += handle.array[:bytes_written].tobytes().decode("utf-8", errors="replace")
 
                     total_new_rows += indices.size
                     self.latest_seq_seen = max(self.latest_seq_seen, segment_last_sequence_id)

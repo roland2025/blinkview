@@ -248,17 +248,14 @@ class BinaryBatchProcessor(BaseBatchProcessor):
         if batch.size == 0:
             return
 
-        bundle = batch.bundle()
+        bundle = batch.bundle
 
-        # 1. Text Overhead (approx 120 bytes for TS, IDs, and delimiters)
-        required = estimate_batch_capacity(bundle, 120)
+        # 1. Binary Overhead (Strict 16 bytes for the protocol header)
+        required = estimate_batch_capacity(bundle, 16)
         self._ensure_capacity(required)
 
-        # 2. Registry state (SoA bundle)
-        registry = self.shared.id_registry.bundle()
-
-        # 3. Text Serialization Kernel
-        self._written_bytes = format_log_row_batch(self._out_buffer, bundle, registry, self._sec_state, self._ts_cache)
+        # 2. Binary Serialization Kernel
+        self._written_bytes = format_binary_batch(self._out_buffer, bundle)
 
 
 @BatchProcessorFactory.register("log_row")
@@ -277,11 +274,14 @@ class LogRowBatchProcessor(BaseBatchProcessor):
         if batch.size == 0:
             return
 
-        bundle = batch.bundle()
+        bundle = batch.bundle
 
-        # 1. Binary Overhead (Strict 16 bytes for the protocol header)
-        required = estimate_batch_capacity(bundle, 16)
+        # 1. Text Overhead (approx 120 bytes for TS, IDs, and delimiters)
+        required = estimate_batch_capacity(bundle, 120)
         self._ensure_capacity(required)
 
-        # 2. Binary Serialization Kernel
-        self._written_bytes = format_binary_batch(self._out_buffer, bundle)
+        # 2. Registry state (SoA bundle)
+        registry = self.shared.id_registry.bundle()
+
+        # 3. Text Serialization Kernel
+        self._written_bytes = format_log_row_batch(self._out_buffer, bundle, registry, self._sec_state, self._ts_cache)

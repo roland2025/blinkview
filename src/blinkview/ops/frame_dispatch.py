@@ -5,32 +5,41 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from blinkview.core.numba_config import app_njit
-from blinkview.core.types.parsing import CodecID
+from blinkview.core.types.parsing import STATE_COMPLETE, CodecID
+from blinkview.ops.codec_adb_long import decode_adb_long_frame
 from blinkview.ops.codecs import decode_cobs_frame, decode_newline_frame, decode_slip_frame
 
 _ID_NONE = CodecID.NONE
 _ID_NEWLINE = CodecID.NEWLINE
 _ID_COBS = CodecID.COBS
 _ID_SLIP = CodecID.SLIP
+
+_ID_ADB_LONG = CodecID.ADB_LONG
+
 _ID_PLUGIN = CodecID.PLUGIN
 
 
 @app_njit(inline="always")
-def dispatch_frame_decoder(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg):
+def dispatch_frame_decoder(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg, f_state):
     d_id = f_cfg.decode_id
 
     # Use the extracted local constants instead of CodecID.NEWLINE
     if d_id == _ID_NEWLINE:
-        return decode_newline_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
+        return decode_newline_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg, f_state)
 
-    elif d_id == _ID_COBS:
-        return decode_cobs_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
+    # elif d_id == _ID_COBS:
+    #     return decode_cobs_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
+    #
+    # elif d_id == _ID_SLIP:
+    #     return decode_slip_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
 
-    elif d_id == _ID_SLIP:
-        return decode_slip_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
+    elif d_id == _ID_ADB_LONG:
+        return decode_adb_long_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg, f_state)
+
     #
     # elif d_id == _ID_PLUGIN:
     #     plugin_func = f_cfg.decode_func
     #     return plugin_func(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
 
-    return target_end + 1
+    bytes_consumed = target_end - target_start
+    return STATE_COMPLETE, out_cursor, bytes_consumed

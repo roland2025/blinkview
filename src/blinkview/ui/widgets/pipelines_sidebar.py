@@ -11,7 +11,7 @@ from qtpy.QtWidgets import (
     QPushButton,
 )
 
-from blinkview.parsers.parser import ParserThread
+from blinkview.core.base_daemon import BaseDaemon
 from blinkview.ui.widgets.base_list_item import BaseListItemWidget
 from blinkview.ui.widgets.base_sidebar_widget import BaseSidebarWidget
 
@@ -57,4 +57,4 @@ class PipelinesSidebarWidget(BaseSidebarWidget):
         )
 
     def generate_daemon_config(self, name: str, item_type: str, parent_config: dict):
-        return ParserThread.new_daemon(name, item_type, prefix="pipe", parent=parent_config)
+        return BaseDaemon.new_daemon(name, item_type, prefix="pipe", parent=parent_config)

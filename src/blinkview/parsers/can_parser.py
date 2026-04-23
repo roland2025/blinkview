@@ -6,256 +6,235 @@
 
 from typing import TYPE_CHECKING
 
+from ..core.device_identity import DeviceIdentity
+from ..core.numpy_batch_manager import PooledLogBatch
+from ..utils.log_level import LogLevel
+from ..utils.paths import resolve_config_path
+from ..utils.throughput import Speedometer, ThroughputAutoTuner
+
 if TYPE_CHECKING:
     from can import Message
 
-from blinkview.core.device_identity import DeviceIdentity
-from blinkview.core.log_row import LogRow
-from blinkview.parsers.assembler import BaseAssembler
-from blinkview.parsers.can_bus import CanAssemblerFactory, CanParserFactory
-from blinkview.utils.log_level import LogLevel
-
 from ..core.configurable import configuration_property
-from ..io.BaseReader import DeviceFactory
-from .cantools_decoder import can_msg_to_str
 from .parser import BaseParser, ParserFactory
 
 
-@CanAssemblerFactory.register("cantools")
+@ParserFactory.register("cantools")
 @configuration_property(
-    "prepend_msg_name",
+    "dbc_file",
+    type="string",
+    required=True,
+    ui_type="file",
+    ui_file_filter="DBC Files (*.dbc);;All Files (*)",
+    description="Absolute or relative path to the .dbc database file.",
+)
+@configuration_property(
+    "strict",
     type="boolean",
     default=False,
-    description="If enabled, groups signals under their DBC message name (e.g., 'BMS_Status_1.voltage'). If disabled, signals are flat (e.g., 'voltage').",
-)
-class CantoolsToLogRow(BaseAssembler):
-    __doc__ = "Converts msgpack-encoded log lines into LogRow objects. Expects the msgpack format to be: (created, levelno, name, msg)."
-
-    def __init__(self):
-        super().__init__()
-
-    def apply_config(self, config: dict):
-        changed = super().apply_config(config)
-        self._bake()
-        return changed
-
-    def _bake(self):
-        # Cache frequently used objects locally
-        INFO = LogLevel.INFO
-        LogRowCtor = LogRow
-        prepend = self.prepend_msg_name
-
-        def fast_parse(created: int, dev_id: DeviceIdentity, line: tuple):
-            can_id, msg_name, signals = line  # Unpack the tuple returned by the decoder
-            res = []
-
-            for signal_name, signal_value in signals.items():
-                # For each signal, create a LogRow. The module can be determined by the message name or CAN ID.
-                if prepend:
-                    signal_name = f"{msg_name}.{signal_name}"
-                module = dev_id.get_module(signal_name)
-                if isinstance(signal_value, float):
-                    signal_value = f"{signal_value:.3f}"
-                else:
-                    signal_value = str(signal_value)
-                res.append(LogRowCtor(created, INFO, module, signal_value))
-
-            return res
-
-        self.process = fast_parse
-
-    def process(self, timestamp, dev_id, line):
-        raise RuntimeError("ID Registry must be set before parsing.")
-
-
-from time import perf_counter
-from typing import Any
-
-from ..core.configurable import (
-    configuration_property,
-    on_config_change,
-    override_property,
-)
-from ..core.log_row import LogRow
-from ..utils.log_level import LogLevel
-
-
-@configuration_property(
-    "decode",
-    type="object",
+    required=True,
     ui_order=10,
-    _factory="can_decode",
-    _factory_default="cantools",
-    description="Decodes raw can.Message objects into structured data (e.g., via Cantools/DBC or struct unpack).",
+    description="If true, raises an error for unknown CAN IDs. Overrides ignore_unknown.",
 )
 @configuration_property(
-    "transform",
-    type="object",
-    ui_order=11,
-    _factory="can_transform",
-    _factory_default="default",
-    description="Data transformation steps to apply to the decoded CAN payload.",
+    "ignore_unknown",
+    type="boolean",
+    default=False,
+    required=True,
+    description="If true, silently ignores messages not defined in the DBC file by dropping them.",
 )
-@configuration_property(
-    "assembler",
-    title="Message parser",
-    type="object",
-    ui_order=12,
-    _factory="can_assembler",
-    _factory_default="cantools",
-    default={"type": "cantools"},
-    description="Assembles transformed CAN data into final LogRow objects, automatically routing to the correct module based on CAN ID.",
-)
-@configuration_property("sources_", type="string", required=True, _reference="/sources", default="")
-@ParserFactory.register("cantools")
-class CANparser(BaseParser):
-    __doc__ = """The specialized pipeline for processing discrete CAN bus frames.
+class CantoolsParser(BaseParser):
+    __doc__ = """Decodes raw CAN frames into physical values using a DBC file.
 
-* Directly accepts python-can Message objects.
-* Bypasses byte-stream splitting for maximum performance.
-* Routes payloads through decoding (e.g., DBC file parsing) and transformations.
-* Assembles the final data into LogRow objects mapped to specific CAN IDs.
+* Reads batches of raw CAN data from the upstream CANReader.
+* Maps hardware addresses (ext_u32_1) to DBC definitions.
+* Decodes the payload and formats it into readable log messages.
+"""
 
-Because CAN frames are already discrete packets, this parser avoids the overhead of buffer management and string encoding, making it ideal for high-frequency vehicle telemetry."""
+    dbc_file: str
+    strict: bool
+    ignore_unknown: bool
 
     def __init__(self):
         super().__init__()
-
-        self._decoder = None
-        self._decode = None
-
-        self._transformer = None
-        self._transform = None
-
-        self._assembler = None
-        self._assemble = None
+        self.db = None
+        self.process = None
 
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
-        self.logger.info(f"Applying CAN parser config: {config}")
-        factory_build = self.shared.factories.build
 
-        decoder_cfg = config.get("decode")
-        if decoder_cfg:
-            self._decoder = factory_build("can_decode", decoder_cfg, self.shared)
-            self._decode = self._decoder.process
-        else:
-            self._decode = None
-            self._decoder = None
+        if getattr(self, "dbc_file", None):
+            try:
+                self.logger.info(f"Loading DBC file: {self.dbc_file}")
+                from cantools import database
 
-        transformer_cfg = config.get("transform", {})
-        if transformer_cfg:
-            self._transformer = factory_build("can_transform", transformer_cfg, system_ctx=self.shared)
-            self._transform = self._transformer.process
-        else:
-            self._transform = None
-            self._transformer = None
+                self.db = database.load_file(resolve_config_path(self.dbc_file))
+            except Exception as e:
+                self.logger.error(f"Failed to load DBC file: {self.dbc_file}", e)
+                self.db = None
 
-        assembler_cfg = config.get("assembler", {})
-        if assembler_cfg:
-            self._assembler = factory_build("can_assembler", assembler_cfg, system_ctx=self.shared)
-            self._assemble = self._assembler.process
-        else:
-            self._assembler = None
-            self._assemble = None
+        # --- Pre-bake Logic ---
+        msg_map = {msg.frame_id: msg for msg in self.db.messages} if self.db else {}
+        strict = getattr(self, "strict", False)
+        ignore_unknown = getattr(self, "ignore_unknown", False)
 
-        self.thread_needs_restart = True
+        def fast_process(can_id: int, data: bytes) -> tuple[str, dict]:
+            msg_def = msg_map.get(can_id)
+
+            if msg_def is not None:
+                try:
+                    return msg_def.name, msg_def.decode(data)
+                except Exception as e:
+                    return "ERROR", {"error": f"{data.hex()} | Decoding error: {str(e)}"}
+
+            # --- Handle Unknown IDs ---
+            if strict:
+                raise ValueError(f"Unknown CAN ID: {can_id}")
+
+            if ignore_unknown:
+                return "IGNORED", None
+
+            return "UNMAPPED", {"unmapped": data.hex()}
+
+        self.process = fast_process
         return changed
-
-    @on_config_change("name")
-    def name_changed(self, name, old):
-        self.logger.info(f"Device name changed from '{old}' to '{name}'")
-        dev_id: DeviceIdentity = self.local.device_id
-        dev_id.name = name
 
     def run(self):
-        self.logger.info("Starting CAN parser thread")
+        try:
+            self.logger.info("Starting Cantools parser thread")
+            get = self.input_queue.get
 
-        # Localize lookups for the hot loop
-        get = self.input_queue.get
-        max_batch = self.max_batch
-        max_timeout = self.delay / 1000.0
-        stop_is_set = self._stop_event.is_set
-        device_identity = self.local.device_id
+            # Using 50ms as a safe default delay if not specifically overridden
+            max_timeout = getattr(self, "delay", 50) / 1000.0
+            stop_is_set = self._stop_event.is_set
 
-        parsed_batch = []
-        last_flush_time = perf_counter()
+            device: DeviceIdentity = self.local.device_id
 
-        # Fallback modules if no assembler is defined
-        module_can = device_identity.get_module("bus")
-        module_unknown = None
+            device_id_int = device.id
 
-        can_msg_to_str_ = can_msg_to_str
+            get_device_module = device.get_module
 
-        def flush():
-            nonlocal parsed_batch, last_flush_time
-            if parsed_batch:
-                self.distribute(parsed_batch)
-                parsed_batch = []
-                last_flush_time = perf_counter()
+            module_unknown_id_int = get_device_module("unknown")
 
-        while not stop_is_set():
-            # if the queue is empty and max_timeout was exceeded during processing.
-            time_remaining = max(0.01, (last_flush_time + max_timeout) - perf_counter())
+            log_level_error_int = LogLevel.ERROR.value
+            log_level_info_int = LogLevel.INFO.value
 
-            try:
-                batch = get(timeout=time_remaining)
-                # print(f"Got batch of {len(batch)} CAN messages from queue.")
-            except Exception:  # Queue Empty
-                batch = None
+            pool_create = self.shared.array_pool.create
 
-            if not batch:
-                if parsed_batch:
+            # --- Auto-Tuning Trackers ---
+            speed_in = Speedometer(logger=self.logger.child("stats_in"))
+            speed_out = Speedometer(logger=self.logger.child("stats_out"))
+            tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.child("tuner_out"))
+
+            def batch_acquire():
+                return pool_create(
+                    PooledLogBatch,
+                    tuner_out.estimated_capacity,
+                    tuner_out.estimated_buffer_bytes,
+                    has_levels=True,
+                    has_modules=True,
+                    has_devices=True,
+                )
+
+            batch_out = None
+
+            def flush():
+                nonlocal batch_out
+                if batch_out is not None and batch_out.size > 0:
+                    with batch_out:
+                        tuner_out.update(batch_out.msg_cursor, batch_out.size, target_window_sec=max_timeout)
+                        self.distribute(batch_out)
+                batch_out = None
+
+            decode = self.process
+
+            while not stop_is_set():
+                batch_in = get(timeout=max_timeout)
+
+                if not batch_in:
                     flush()
-                last_flush_time = perf_counter()
-                continue
+                    continue
 
-            for timestamp_ns, can_msg in batch:
-                can_msg_original: "Message" = can_msg  # Keep the original message for error reporting
-                # print(f"Received CAN message: {can_msg} at {timestamp_ns}")
+                with batch_in:
+                    speed_in.batch(batch_in)
 
-                try:
-                    # Decode (e.g., apply cantools DBC mapping to dict)
-                    if self._decode is not None:
-                        can_msg = self._decode(can_msg)
-                        # self.logger.trace(f"decoded: {timestamp_ns}: {can_msg}")
+                    # print(f"[cantools] batch_in={batch_in}")
+                    # for ts, msg, _, _, _, _, addr, flags, _ in batch_in:
+                    #     print(f"  ts={ts} addr={addr:04X} flags={flags:02X} data='{msg.tobytes().hex()}'")
 
-                    # Transform (e.g., math operations on specific fields)
-                    if self._transform is not None:
-                        can_msg = self._transform(timestamp_ns, can_msg_original.arbitration_id, can_msg)
+                    # Estimate burst size (assume decoded string takes ~80-120 bytes max)
+                    estimated_out_bytes = batch_in.size * 128
+                    tuner_out.ensure_burst_capacity(estimated_out_bytes)
 
-                    # Assemble (Map to LogRow and specific ModuleIdentity)
-                    if self._assemble is not None:
-                        can_msg = self._assemble(timestamp_ns, device_identity, can_msg)
-                        # self.logger.trace(f"assembled: {timestamp_ns}: {can_msg}")
-                    else:
-                        can_msg = LogRow(
-                            timestamp_ns,
-                            LogLevel.INFO,
-                            module_can,
-                            can_msg_to_str_(can_msg_original),
-                        )
+                    if batch_out and batch_out.buffer_capacity() < tuner_out.estimated_buffer_bytes:
+                        flush()
 
-                    if isinstance(can_msg, list):
-                        parsed_batch.extend(can_msg)
-                    else:
-                        parsed_batch.append(can_msg)
+                    if batch_out is None:
+                        batch_out = batch_acquire()
 
-                except Exception as e:
-                    if module_unknown is None:
-                        module_unknown = device_identity.get_module("_unknown")
-                    parsed_batch.append(
-                        LogRow(
-                            timestamp_ns,
-                            LogLevel.ERROR,
-                            module_unknown,
-                            can_msg_to_str_(can_msg_original),
-                        )
-                    )
+                    # 1. Localize input array references
+                    b_in = batch_in.bundle
+                    size = batch_in.size
+                    ts = b_in.timestamps
+                    offsets = b_in.offsets
+                    lengths = b_in.lengths
+                    buf = b_in.buffer
 
-            # Time or Size-based flush check
-            if len(parsed_batch) >= max_batch or (perf_counter() - last_flush_time >= max_timeout):
-                flush()
+                    # Extension column coming from CANReader
+                    can_ids = b_in.ext_u32_1
 
-        # Flush any remaining batch on exit
-        flush()
+                    # 2. Extract, Decode, and Insert Loop
+                    for i in range(size):
+                        can_id = can_ids[i]
+                        off = offsets[i]
+                        length = lengths[i]
+                        data = buf[off : off + length].tobytes()
+
+                        # print(f"  parse ts={ts[i]} can_id={can_id:04X} data='{data.hex()}'")
+
+                        try:
+                            msg_name, decoded_dict = decode(can_id, data)
+
+                            if decoded_dict is None:  # ignored
+                                continue
+
+                            # Format dictionary to readable string
+                            if "error" in decoded_dict or "unmapped" in decoded_dict:
+                                out_bytes = f"[{can_id:04X}] {msg_name} | {decoded_dict}".encode()
+                                # if not batch_out.insert(
+                                #     ts[i], out_bytes, log_level_error_int, module_unknown_id_int, device_id_int
+                                # ):
+                                #     # Batch out is full, flush and acquire new
+                                #     flush()
+                                #     batch_out = batch_acquire()
+                                # batch_out.insert(ts[i], out_bytes, log_level_info_int, module_id_int, device_id_int)
+                            else:
+                                for k, v in decoded_dict.items():
+                                    module_id_int = get_device_module(k).id
+                                    out_bytes = str(v).encode()
+
+                                    # print(f"  parsed k={k} v={v} data={out_bytes}")
+                                    if not batch_out.insert(
+                                        ts[i], out_bytes, log_level_info_int, module_id_int, device_id_int
+                                    ):
+                                        # Batch out is full, flush and acquire new
+                                        flush()
+                                        batch_out = batch_acquire()
+                                        batch_out.insert(
+                                            ts[i], out_bytes, log_level_info_int, module_id_int, device_id_int
+                                        )
+
+                        except Exception as e:
+                            self.logger.warning(f"Error processing CAN frame {can_id:04X}: {e}")
+
+                # --- Check for Flush Thresholds ---
+                if batch_out and (
+                    batch_out.size >= batch_out.capacity or batch_out.msg_cursor >= (batch_out.buffer_capacity() * 0.9)
+                ):
+                    flush()
+
+            # Final flush on exit
+            flush()
+
+        except Exception as e:
+            self.logger.exception("run failure", e)

@@ -127,15 +127,13 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         # 2. Stats and Auto-Tuning Setup
         # We set msg_size_bytes to 20 to maintain your ~50 chunks/KB density preference
         stats = Speedometer(logger=self.logger.child("stats"))
-        tuner = ThroughputAutoTuner(
-            speedometer=stats, default_buffer_kb=4, msg_size_bytes=20, logger=self.logger.child("tuner")
-        )
+        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=20, logger=self.logger.child("tuner"))
 
         pool_create = self.shared.array_pool.create
 
         def batch_acquire():
             # Dynamically pull configuration from the tuner's latest projections
-            return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_kb)
+            return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
 
         batch = None
         ser = None
@@ -172,9 +170,9 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                             batch.insert(now, first_byte)
 
                         # 6. Drain remaining burst and Append
-                        in_waiting = ser.in_waiting
-                        if in_waiting > 0:
-                            rest = _read(in_waiting)
+                        waiting = ser.in_waiting
+                        if waiting > 0:
+                            rest = _read(waiting)
                             if not batch.append(rest):
                                 with batch:
                                     self.distribute(batch)
@@ -222,7 +220,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             from serial import serial_for_url
 
             # Use PySerial's URL handler (handles socket://, rfc2217://, hwgrep://, etc.)
-            ser = serial_for_url(self.url, baudrate=self.baudrate, timeout=0.01, inter_byte_timeout=0.01)
+            ser = serial_for_url(self.url, baudrate=self.baudrate, timeout=0.1, inter_byte_timeout=0.01)
             self.serial = ser
 
             # --- ESP32 DTR/RTS Logic ---
@@ -239,11 +237,11 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 self.logger.error("Failed to set buffer size. This may not be supported on all platforms.", e)
                 pass
 
-            self.logger.info(f"Connected")
+            self.logger.info("Connected")
 
             return ser
         except Exception as e:
-            self.logger.error(f"Failed to open serial port.", e)
+            self.logger.error("Failed to open serial port.", e)
 
     def send_data(self, data: bytes):
         if self.serial and self.serial.is_open:

@@ -236,11 +236,11 @@ class ConfigNode(QObject):
             return
 
         # Construct the RFC 6902 JSON patch to remove this specific path
-        patch = [{"op": "remove", "path": self.active_path}]
+        patch = [{"op": "remove", "path": ""}]  # Remove 'self'
 
         # Send the patch to the root ("/") so the active_path resolves correctly
         if self.send_fn is not None:
-            self.send_fn("/", patch)
+            self.send_fn(self.active_path, patch)
 
         # Clean up the node locally since it will no longer exist in the backend
         self.manager.broadcast_deletion(self.active_path)

@@ -23,7 +23,7 @@ class IndexedStringTable:
     def __init__(
         self,
         initial_capacity: int = 1024,
-        buffer_size_kb: int = 128,
+        buffer_size_bytes: int = 128 * 1024,
         values_dtype: Optional[Any] = None,
     ):
         # Initialize with standard numpy arrays
@@ -35,7 +35,7 @@ class IndexedStringTable:
         if values_dtype is not None:
             self._values = np.empty(initial_capacity, dtype=values_dtype)
 
-        self._buffer = np.empty(buffer_size_kb * 1024, dtype=dtypes.BYTE)
+        self._buffer = np.empty(buffer_size_bytes, dtype=dtypes.BYTE)
 
         self.cursor = 0
         self.count = 0

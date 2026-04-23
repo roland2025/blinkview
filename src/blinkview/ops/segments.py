@@ -9,15 +9,14 @@ import numpy as np
 from blinkview.core.dtypes import ID_UNSPECIFIED, LEVEL_UNSPECIFIED, SEQ_NONE, TS_UNSPECIFIED
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.log_batch import LogBundle
-from blinkview.core.types.segments import LogSegmentParams
 
 
 @app_njit()
-def copy_batch_to_segment(segment: LogSegmentParams, batch: LogBundle, batch_start_idx: int, start_seq_id: int):
+def copy_batch_to_segment(segment: LogBundle, batch: LogBundle, batch_start_idx: int, start_seq_id: int):
     # 1. READ INTERNAL STATE
     # We read the current write-head and count from the shared arrays
     seg_cursor = segment.msg_cursor[0]
-    current_seg_count = segment.count[0]
+    current_seg_count = segment.size[0]
 
     rows_to_copy = 0
     bytes_to_copy = 0
@@ -62,11 +61,11 @@ def copy_batch_to_segment(segment: LogSegmentParams, batch: LogBundle, batch_sta
     # 5. SHIFT OFFSETS & SEQUENCE IDS
     for i in range(rows_to_copy):
         segment.offsets[s_start + i] = seg_cursor + (batch.offsets[b_start + i] - b_byte_start)
-        segment.sequence_ids[s_start + i] = start_seq_id + i + 1
+        segment.sequences[s_start + i] = start_seq_id + i + 1
 
     # --- THE KEY UPDATE ---
     # Update the counters in-place before exiting
-    segment.count[0] += rows_to_copy
+    segment.size[0] += rows_to_copy
     segment.msg_cursor[0] += bytes_to_copy
 
     return rows_to_copy
@@ -74,7 +73,7 @@ def copy_batch_to_segment(segment: LogSegmentParams, batch: LogBundle, batch_sta
 
 @app_njit()
 def filter_segment(
-    segment,
+    segment: LogBundle,
     target_modules_arr,
     start_seq=SEQ_NONE,  # Ensure this is here
     start_ts=TS_UNSPECIFIED,
@@ -84,12 +83,12 @@ def filter_segment(
     target_device=ID_UNSPECIFIED,
 ):
 
-    count = segment.count[0]
+    count = segment.size[0]
     timestamps = segment.timestamps
     levels = segment.levels
     modules = segment.modules
     devices = segment.devices
-    seqs = segment.sequence_ids
+    seqs = segment.sequences
 
     target_modules_size = target_modules_arr.size
 
@@ -128,3 +127,89 @@ def filter_segment(
         match_count += 1
 
     return matching_indices[:match_count]
+
+
+@app_njit()
+def _nb_bundle_push(bundle, ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1):
+    # 1. Early Exit & Pre-flight
+    size_ptr = bundle.size
+    idx = size_ptr[0]
+    if idx >= bundle.capacity:
+        return False
+
+    msg_len = len(msg_bytes)
+    cursor_ptr = bundle.msg_cursor
+    cursor = cursor_ptr[0]
+
+    # Localize the buffer pointer for SIMD throughput
+    bundle_buffer = bundle.buffer
+
+    if cursor + msg_len > len(bundle_buffer):
+        return False
+
+    # 2. Metadata Writes (Structure of Arrays)
+    bundle.timestamps[idx] = ts_ns
+    bundle.offsets[idx] = cursor
+    bundle.lengths[idx] = msg_len
+
+    # Core Optional Columns
+    if bundle.has_levels:
+        bundle.levels[idx] = level
+    if bundle.has_modules:
+        bundle.modules[idx] = module
+    if bundle.has_devices:
+        bundle.devices[idx] = device
+    if bundle.has_sequences:
+        bundle.sequences[idx] = seq
+
+    # Heterogeneous Extension Columns
+    if bundle.has_ext_u32_1:
+        bundle.ext_u32_1[idx] = ext_u32_1
+    if bundle.has_ext_u32_2:
+        bundle.ext_u32_2[idx] = ext_u32_2
+    if bundle.has_ext_u64_1:
+        bundle.ext_u64_1[idx] = ext_u64_1
+
+    # 3. Vectorized Copy with Hoisted Pointer
+    if msg_len > 0:
+        for i in range(msg_len):
+            bundle_buffer[cursor + i] = msg_bytes[i]
+
+        cursor_ptr[0] += msg_len
+
+    size_ptr[0] += 1
+    return True
+
+
+@app_njit()
+def _nb_bundle_extend(bundle, msg_bytes):
+    # 1. Access size and ensure there's something to append to
+    size_ptr = bundle.size
+    size = size_ptr[0]
+    if size == 0:
+        return False
+
+    msg_len = len(msg_bytes)
+    cursor_ptr = bundle.msg_cursor
+    cursor = cursor_ptr[0]
+
+    # Pointer Hoisting
+    bundle_buffer = bundle.buffer
+
+    if cursor + msg_len > len(bundle_buffer):
+        return False
+
+    # 2. Target the last entry in the SoA
+    idx = size - 1
+
+    # 3. Explicit Loop for Vectorized Copy
+    if msg_len > 0:
+        for i in range(msg_len):
+            bundle_buffer[cursor + i] = msg_bytes[i]
+
+        # Update metadata: increment the length of the LAST message
+        # and move the global buffer cursor
+        bundle.lengths[idx] += msg_len
+        cursor_ptr[0] += msg_len
+
+    return True

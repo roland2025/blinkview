@@ -21,14 +21,17 @@ VALUES_TYPE = np.uint32
 LEVEL_TYPE = np.uint8
 SEQ_TYPE = np.uint64
 
+UINT32 = np.uint32
+UINT64 = np.uint64
+
 # Unified naming for processed telemetry arrays
 PLOT_TS_TYPE = np.float64  # Transformed timestamps (seconds)
 PLOT_VAL_TYPE = np.float64  # Extracted numeric values
 
 # Sentinel: No data, uninitialized, or ignore
-SEQ_NONE = SEQ_TYPE(0)
+SEQ_NONE: SEQ_TYPE = SEQ_TYPE(0)
 # The very first ID assigned to a log
-SEQ_START = SEQ_TYPE(1)
+SEQ_START: SEQ_TYPE = SEQ_TYPE(1)
 
 LEVEL_UNSPECIFIED = LEVEL_TYPE(0xFF)
 

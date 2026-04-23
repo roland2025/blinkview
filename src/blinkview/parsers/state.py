@@ -6,37 +6,40 @@
 
 import numpy as np
 
+from blinkview.core import dtypes
 from blinkview.core.types.frames import FrameStateParams
 
 
 class FrameState:
-    def __init__(self, pool, size_kb=4):
-        self._pool_handle = pool.acquire(size_kb * 1024, dtype=np.uint8)
-        self.buffer = self._pool_handle.array
+    __slots__ = ("_pool_handle", "bundle")
 
-        self.write_offset = np.zeros(1, dtype=np.int64)
-        self.in_idx = np.zeros(1, dtype=np.int64)
-        self.in_offset = np.zeros(1, dtype=np.int64)
-        self.in_frame = np.zeros(1, dtype=np.bool_)
+    def __init__(self, pool, size_bytes=4096):
+        self._pool_handle = pool.acquire(size_bytes, dtype=dtypes.BYTE)
+
+        # Initialize the bundle directly.
+        # All trackers live here; 'self' only keeps the reference.
+        self.bundle = FrameStateParams(
+            buffer=self._pool_handle.array,
+            offset=np.zeros(1, dtype=np.int64),
+            in_idx=np.zeros(1, dtype=np.int64),
+            in_offset=np.zeros(1, dtype=np.int64),
+            in_frame=np.zeros(1, dtype=np.bool_),
+        )
 
     def reset_batch_trackers(self):
-        """Resets the trackers for a new incoming batch."""
-        self.in_idx[0] = 0
-        self.in_offset[0] = 0
+        """Resets trackers using walrus to avoid redundant self.bundle lookups."""
+        b = self.bundle  # Capture local reference
+        b.in_idx[0] = 0
+        b.in_offset[0] = 0
 
     def clear_stitch_state(self):
-        """Clears any incomplete frame data (used after warmup or connection loss)."""
-        self.in_frame[0] = False
-        self.write_offset[0] = 0
+        """Clears state using walrus to minimize attribute access overhead."""
+        if b := self.bundle:
+            b.in_frame[0] = False
+            b.offset[0] = 0
 
     def release(self):
+        """Release the memory back to the pool."""
+        self.bundle = None
         self._pool_handle.release()
-
-    def bundle(self):
-        return FrameStateParams(
-            buffer=self.buffer,
-            offset=self.write_offset,
-            in_idx=self.in_idx,
-            in_offset=self.in_offset,
-            in_frame=self.in_frame,
-        )
+        self._pool_handle = None

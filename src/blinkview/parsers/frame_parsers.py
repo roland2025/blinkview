@@ -13,6 +13,7 @@ from blinkview.core import dtypes
 from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable, configuration_property
 from blinkview.core.factory import BaseFactory
+from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.system_context import SystemContext
 from blinkview.core.types.modules import (
     MODULE_TEMP_ID_BASE,
@@ -26,6 +27,7 @@ from blinkview.core.types.parsing import (
     ParserConfig,
     ParserID,
     ParserPipelineBundle,
+    TimeParserState,
     UnifiedParserConfig,
     UnifiedParserState,
 )
@@ -33,6 +35,7 @@ from blinkview.ops.constants import EMPTY_STATE
 from blinkview.ops.generic import SkipWordsConfig, skip_words_parser
 from blinkview.ops.modules import parse_fixed_width_name, parse_module_tags_statemachine
 from blinkview.utils.log_level import LogLevel
+from blinkview.utils.utc_offset import get_local_utc_offset_seconds
 
 
 @configurable
@@ -210,18 +213,6 @@ class ModuleNameParserBase(FrameSectionParser):
     AVG_NAME_LEN = 64
 
     def __init__(self):
-        # This contains both the scalars (as 1-element arrays) and the buffers.
-        # self.tracker_state = ModuleTrackerState(
-        #     # Scalars (wrapped in arrays so they are mutable by reference in NJIT)
-        #     count=np.zeros(1, dtypes.ID_TYPE),
-        #     bytes_cursor=np.zeros(1, dtypes.OFFSET_TYPE),
-        #     # Metadata buffers for unresolved names
-        #     starts=np.empty(self.TRACKER_CAPACITY, dtypes.OFFSET_TYPE),
-        #     lengths=np.empty(self.TRACKER_CAPACITY, dtypes.LEN_TYPE),
-        #     hashes=np.zeros(self.TRACKER_CAPACITY, dtypes.HASH_TYPE),
-        #     # The raw byte scratchpad
-        #     name_bytes=np.empty(self.TRACKER_CAPACITY * self.AVG_NAME_LEN, dtype=dtypes.BYTE),
-        # )
 
         self.tracker_state = UnifiedParserState(
             modules=ModuleTrackerState(
@@ -237,7 +228,7 @@ class ModuleNameParserBase(FrameSectionParser):
             )
         )
 
-    def post_process(self, batch) -> bool:
+    def post_process(self, batch: PooledLogBatch) -> bool:
         state = self.tracker_state.modules
         unresolved_count = state.count[0]
 
@@ -248,7 +239,7 @@ class ModuleNameParserBase(FrameSectionParser):
         registry = self.shared.id_registry.modules_table
         initial_count = registry.count  # Assuming .count represents registered items
 
-        active_modules = batch.modules[: batch.size]
+        active_modules = batch.bundle.modules[: batch.size]
         get_module = self.local.device_id.get_module
 
         for i in range(unresolved_count):
@@ -260,13 +251,19 @@ class ModuleNameParserBase(FrameSectionParser):
             module_name_str = name_bytes.tobytes().decode("ascii")
 
             # get_module handles the discovery/registration logic
-            mod_obj = get_module(module_name_str)
+            try:
+                mod_id = get_module(module_name_str).id
+            except Exception:
+                import traceback
+
+                traceback.print_exc()
+                mod_id = get_module("unknown").id
 
             # 2. Vectorized Swap: Replace the placeholder ID with the real one
             # Using temp_id = BASE + i ensures we only swap the specific
             # instance parsed in this chunk.
             temp_id = MODULE_TEMP_ID_BASE + i
-            active_modules[active_modules == temp_id] = mod_obj.id
+            active_modules[active_modules == temp_id] = mod_id
 
         # 3. Reset State for the next chunk
         state.count[0] = 0
@@ -307,11 +304,6 @@ class FixedWidthModuleNameParser(ModuleNameParserBase):
             string_table=self.shared.id_registry.modules_table.bundle(),
             module_config=DynamicWidthConfig(max_length=self.max_length),
         )
-
-        # config = FixedWidthConfig(
-        #     width=self.max_length,
-        #     byte_map=self.shared.id_registry.modules_table.bundle(),
-        # )
 
         # 2. Return the universal 3-tuple: (Function, Mutable State, Immutable Config)
         # self.tracker_state is the flattened state initialized in the base class
@@ -371,21 +363,19 @@ class ModuleNameNormalizer(ModuleNameParserBase):
             ),
         )
 
-        # config = DynamicWidthConfig(
-        #     byte_map=self.shared.id_registry.modules_table.bundle(),
-        #     max_length=self.max_length,
-        #     max_depth=self.max_depth,
-        #     enable_brackets=self.enable_brackets,
-        #     enable_dot_separator=self.enable_dot_separator,
-        # )
-
         # 2. Return the universal 3-tuple: (Function, Mutable State, Immutable Config)
         return ParserID.MOD_DYNAMIC_SM, self.tracker_state, config
 
 
 @FrameSectionParserFactory.register("timestamp")
 class TimestampParser(FrameSectionParser):
-    pass
+    def __init__(self):
+        super().__init__()
+        self.state = UnifiedParserState(timestamp=TimeParserState(np.zeros(1, dtypes.TS_TYPE)))
+
+        utc_offset_seconds = get_local_utc_offset_seconds()
+
+        self.state.timestamp.utc_offset[0] = dtypes.TS_TYPE(utc_offset_seconds)
 
 
 #

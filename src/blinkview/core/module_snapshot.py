@@ -13,11 +13,10 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.numba_config import app_njit
-from blinkview.core.types.segments import LogSegmentParams
+from blinkview.core.types.log_batch import LogBundle
 
 if TYPE_CHECKING:
     from blinkview.core.id_registry.tables import IndexedStringTable
-    from blinkview.core.id_registry.types import StringTableParams
     from blinkview.core.numpy_log import CircularLogPool
 
 
@@ -60,7 +59,7 @@ def _copy_snapshot_state(
 
 @app_njit()
 def _update_master_arrays_reverse(
-    seg_b: LogSegmentParams,
+    seg_b: LogBundle,
     snap_b: ModuleSnapshotParams,
     module_count: int,
     last_known_seq: int,
@@ -70,39 +69,52 @@ def _update_master_arrays_reverse(
     Scans a segment from back-to-front.
     Returns True if we hit the 'last_known_seq' (time to stop everything).
     """
-    row_count = seg_b.count[0]
+    row_count = seg_b.size[0]
+    seg_b_modules = seg_b.modules
+    seg_b_timestamps = seg_b.timestamps
+    seg_b_levels = seg_b.levels
+    seg_b_lengths = seg_b.lengths
+    seg_b_offsets = seg_b.offsets
+    seg_b_buffer = seg_b.buffer
+    seg_b_sequences = seg_b.sequences
+
+    snap_b_timestamps = snap_b.timestamps
+    snap_b_sequence_ids = snap_b.sequence_ids
+    snap_b_levels = snap_b.levels
+    snap_b_lengths = snap_b.lengths
+    snap_b_buffer = snap_b.buffer
 
     for i in range(row_count - 1, -1, -1):
-        seq = seg_b.sequence_ids[i]
+        seq = seg_b_sequences[i]
 
         if is_initialized and seq <= last_known_seq:
             return True
 
-        mod_id = seg_b.modules[i]
+        mod_id = seg_b_modules[i]
         # Protect against out-of-bounds or newly registered modules
         # not yet accounted for in this update cycle
         if mod_id >= module_count:
             continue
 
-        if seq > snap_b.sequence_ids[mod_id]:
-            snap_b.timestamps[mod_id] = seg_b.timestamps[i]
-            snap_b.sequence_ids[mod_id] = seq
-            snap_b.levels[mod_id] = seg_b.levels[i]
+        if seq > snap_b_sequence_ids[mod_id]:
+            snap_b_timestamps[mod_id] = seg_b_timestamps[i]
+            snap_b_sequence_ids[mod_id] = seq
+            snap_b_levels[mod_id] = seg_b_levels[i]
 
-            m_len = seg_b.lengths[i]
+            m_len = seg_b_lengths[i]
             # Cap at 511 to guarantee room for the 0-terminator
             if m_len > 511:
                 m_len = 511
 
-            s_off = seg_b.offsets[i]
+            s_off = seg_b_offsets[i]
             m_off = mod_id * 512  # Computed on the fly
 
             # Copy the message payload
-            snap_b.buffer[m_off : m_off + m_len] = seg_b.buffer[s_off : s_off + m_len]
-            snap_b.lengths[mod_id] = m_len
+            snap_b_buffer[m_off : m_off + m_len] = seg_b_buffer[s_off : s_off + m_len]
+            snap_b_lengths[mod_id] = m_len
 
             # Always 0-terminate the string, regardless of original length
-            snap_b.buffer[m_off + m_len] = 0
+            snap_b_buffer[m_off + m_len] = 0
 
     return False
 
@@ -248,6 +260,7 @@ class LatestModuleValueTracker:
         "_initialized",
         "last_known_seq",
         "_current_snapshot",
+        "_update_lock",
     )
 
     def __init__(
@@ -261,7 +274,9 @@ class LatestModuleValueTracker:
 
         self._initialized = False
 
-        self.last_known_seq = np.uint64(0)
+        self.last_known_seq = dtypes.SEQ_TYPE(0)
+
+        self._update_lock = Lock()
 
         m_bundle = self._module_table.bundle()
         initial_capacity = max(1024, m_bundle.count)
@@ -280,83 +295,83 @@ class LatestModuleValueTracker:
         return ModuleSnapshot(ts_h, seq_h, lvl_h, lens_h, buf_h, count, last_known_seq)
 
     def update(self):
-        start = self.time_ns()
+        with self._update_lock:
+            start = self.time_ns()
 
-        # 1. Localize frequently accessed attributes
-        lks = self.last_known_seq  # Localize high-water mark
-        initialized = self._initialized
+            # 1. Localize frequently accessed attributes
+            lks = self.last_known_seq  # Localize high-water mark
+            initialized = self._initialized
 
-        m_bundle = self._module_table.bundle()
-        current_count = m_bundle.count
+            m_bundle = self._module_table.bundle()
+            current_count = m_bundle.count
 
-        old_snap = self._current_snapshot
-        old_b = old_snap.bundle()
+            old_snap = self._current_snapshot
+            old_b = old_snap.bundle()
 
-        capacity = old_b.capacity
-        if current_count > capacity:
-            capacity = max(current_count, capacity * 2)
+            capacity = old_b.capacity
+            if current_count > capacity:
+                capacity = max(current_count, capacity * 2)
 
-        # 2. Allocate a fresh snapshot from the pool
-        # Using localized 'lks'
-        new_snap = self._allocate_snapshot(capacity, current_count, lks)
-        new_b = new_snap.bundle()
+            # 2. Allocate a fresh snapshot from the pool
+            # Using localized 'lks'
+            new_snap = self._allocate_snapshot(capacity, current_count, lks)
+            new_b = new_snap.bundle()
 
-        # 3. Copy state from the old snapshot via Numba
-        _copy_snapshot_state(old_b, new_b)
+            # 3. Copy state from the old snapshot via Numba
+            _copy_snapshot_state(old_b, new_b)
 
-        # Use local 'lks' as the baseline for the new burst
-        new_high_water = lks
+            # Use local 'lks' as the baseline for the new burst
+            new_high_water = lks
 
-        # 4. Process logs into the newly acquired arrays
-        with self._log_pool.get_reversed_snapshot() as segments:
-            for segment in segments:
-                if segment.count == 0:
-                    continue
+            # 4. Process logs into the newly acquired arrays
+            with self._log_pool.get_reversed_snapshot() as segments:
+                for segment in segments:
+                    if segment.size == 0:
+                        continue
 
-                # Check the segment header before diving into the kernel
-                seg_last_seq = segment.last_sequence_id
-                if seg_last_seq <= lks:
-                    break
+                    # Check the segment header before diving into the kernel
+                    seg_last_seq = segment.last_sequence_id
+                    if seg_last_seq <= lks:
+                        break
 
-                if seg_last_seq > new_high_water:
-                    new_high_water = seg_last_seq
+                    if seg_last_seq > new_high_water:
+                        new_high_water = seg_last_seq
 
-                seg_b = segment.bundle()
+                    seg_b = segment.bundle
 
-                # Kernel uses the localized baseline
-                hit_boundary = _update_master_arrays_reverse(
-                    seg_b,
-                    new_b,
-                    current_count,
-                    lks,
-                    initialized,
-                )
+                    # Kernel uses the localized baseline
+                    hit_boundary = _update_master_arrays_reverse(
+                        seg_b,
+                        new_b,
+                        current_count,
+                        lks,
+                        initialized,
+                    )
 
-                if hit_boundary:
-                    break
+                    if hit_boundary:
+                        break
 
-        # 5. Finalize State
-        new_snap.last_known_seq = new_high_water
-        self._initialized = True
+            # 5. Finalize State
+            new_snap.last_known_seq = new_high_water
+            self._initialized = True
 
-        # 6. Atomic Swap
-        self._current_snapshot = new_snap
+            # 6. Atomic Swap
+            self._current_snapshot = new_snap
 
-        # Publicly announce the new high-water mark
-        self.last_known_seq = new_high_water
+            # Publicly announce the new high-water mark
+            self.last_known_seq = new_high_water
 
-        old_snap.release()
+            old_snap.release()
 
-        end = self.time_ns()
-        duration = (end - start) / 1e6
-        # print(f"LatestModuleValueTracker: Reverse update completed in {duration:.4f} ms")
+            end = self.time_ns()
+            duration = (end - start) / 1e6
+            # print(f"LatestModuleValueTracker: Reverse update completed in {duration:.4f} ms")
 
     def get_snapshot(self) -> ModuleSnapshot:
         # 6. Lock-free retry loop to prevent the read-side RuntimeError race condition
         while True:
-            snap = self._current_snapshot
             try:
-                return snap.retain()
+                return self._current_snapshot.retain()
             except RuntimeError:
                 # The background thread swapped and released this snapshot
                 # a microsecond before we called retain(). Try again.

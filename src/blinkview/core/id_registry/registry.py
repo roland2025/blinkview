@@ -55,7 +55,9 @@ class IDRegistry:
 
         self.modules_table = IndexedStringTable(initial_capacity=1024)
         self.devices_table = IndexedStringTable(initial_capacity=10)
-        self.levels_table = IndexedStringTable(initial_capacity=10, values_dtype=dtypes.VALUES_TYPE)
+        self.levels_table = IndexedStringTable(
+            initial_capacity=10, buffer_size_bytes=128, values_dtype=dtypes.VALUES_TYPE
+        )
 
         self._init_level_maps()
 

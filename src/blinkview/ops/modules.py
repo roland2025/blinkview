@@ -209,15 +209,39 @@ def parse_module_tags_statemachine(
         else:
             tag_data_start = curr
             scan_ptr = curr
+            valid_word_tag = True
 
             while scan_ptr < end_cursor:
                 char = buffer[scan_ptr]
-                # Break on whitespace or colon
-                if is_whitespace(char) or char == CHAR_COLON:
+
+                # Break on whitespace boundaries
+                if is_whitespace(char):
                     break
+
+                if char == CHAR_COLON:
+                    # LOOKAHEAD: A colon only terminates a tag if it's the last character.
+                    # If the next character is not whitespace (or EOF), the colon is INSIDE the word.
+                    if scan_ptr + 1 < end_cursor and not is_whitespace(buffer[scan_ptr + 1]):
+                        valid_word_tag = False
+                    break
+
+                # ENFORCEMENT: Only allow standard identifier characters.
+                if not (
+                    (48 <= char <= 57)  # 0-9
+                    or (65 <= char <= 90)  # A-Z
+                    or (97 <= char <= 122)  # a-z
+                    or char == 95
+                    or char == 45  # _ or -
+                    or char == 46
+                    or char == 47  # . or /
+                ):
+                    valid_word_tag = False
+                    break
+
                 scan_ptr += 1
 
-            if scan_ptr < end_cursor and buffer[scan_ptr] == CHAR_COLON:
+            # Only accept if it's purely valid chars AND stopped cleanly on a final colon
+            if valid_word_tag and tag_data_start < scan_ptr < end_cursor and buffer[scan_ptr] == CHAR_COLON:
                 tag_len = scan_ptr - tag_data_start
                 move_cursor_to = scan_ptr + 1
                 found_current_tag = True
@@ -251,7 +275,7 @@ def parse_module_tags_statemachine(
         return -1
 
     logical_len = write_ptr - write_start
-    final_len = normalize_name_inplace(tracker.name_bytes, write_start, logical_len)
+    final_len = int(normalize_name_inplace(tracker.name_bytes, write_start, logical_len))
 
     if final_len <= 0:
         return -1

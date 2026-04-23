@@ -46,9 +46,20 @@ class LogHighlighter(QSyntaxHighlighter):
                 return
             # Assuming the level is the 3rd 'word' in your string:
             # "17:28:35.459 ABC E asi: ..."
-            parts = text.split(maxsplit=idx + 1)  # Split into at most idx+1 parts to avoid unnecessary splitting
+            start = 0
+            for _ in range(self.level_index):
+                start = text.find(" ", start) + 1
+                if start == 0:  # Space not found
+                    return
+
+            # Find the end of the level token
+            end = text.find(" ", start)
+            if end == -1:
+                end = len(text)
+
+            level_token = text[start:end]
             # if len(parts) > idx:
-            fmt = self.formats[parts[idx]]
+            fmt = self.formats[level_token]
             self.setFormat(0, len(text), fmt)
         except (KeyError, IndexError):
             # If the expected level part is missing or not recognized, we can skip formatting

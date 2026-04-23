@@ -11,7 +11,6 @@ from blinkview.core.id_registry.types import RegistryParams, StringTableParams
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.formatting import FormattingConfig
 from blinkview.core.types.log_batch import LogBundle
-from blinkview.core.types.segments import LogSegmentParams
 from blinkview.ops.constants import (
     CHAR_COLON,
     CHAR_DASH,
@@ -76,7 +75,7 @@ def update_iso8601_timestamp_cache(total_sec: int, ts_cache: np.ndarray):
 @app_njit()
 def estimate_log_batch_size(
     indices: np.ndarray,
-    segment: LogSegmentParams,
+    segment: LogBundle,
     tables: RegistryParams,
     cfg: FormattingConfig,
 ) -> int:
@@ -180,7 +179,7 @@ def find_id_index(val_arr: np.ndarray, count: int, target_id: int) -> int:
 def format_log_batch(
     out: np.ndarray,
     indices: np.ndarray,
-    segment: LogSegmentParams,
+    segment: LogBundle,
     tables: RegistryParams,
     cfg: FormattingConfig,
     tz_offset_sec: int,

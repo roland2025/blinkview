@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-__version__ = "0.7.0"
+__version__ = "0.8.0.dev0"
 __author__ = "Roland Uuesoo"
 
 import os

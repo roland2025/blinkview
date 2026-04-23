@@ -9,8 +9,7 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.numba_config import app_njit
-from blinkview.core.types.log_batch import TelemetryBatch
-from blinkview.core.types.segments import LogSegmentParams
+from blinkview.core.types.log_batch import LogBundle, TelemetryBatch
 from blinkview.core.types.telemetry import TelemetryBufferBundle
 
 
@@ -113,7 +112,7 @@ def extract_floats_from_bytes(buffer, offset, length, out_array):
 
 @app_njit()
 def extract_telemetry_segment_to_end(
-    segment: LogSegmentParams,
+    segment: LogBundle,
     target_module: int,
     start_seq: dtypes.SEQ_TYPE,
     num_channels: int,
@@ -128,10 +127,10 @@ def extract_telemetry_segment_to_end(
     Returns the updated write_idx.
     """
     # Metadata for the segment
-    count = segment.count[0]
+    count = segment.size[0]
     timestamps = segment.timestamps
     modules = segment.modules
-    seqs = segment.sequence_ids
+    seqs = segment.sequences
     msg_offsets = segment.offsets
     msg_lens = segment.lengths
     msg_buffer = segment.buffer
@@ -144,7 +143,7 @@ def extract_telemetry_segment_to_end(
 
         # Stop if we hit the watermark (data we already have)
         seq = seqs[i]
-        if seq <= start_seq and start_seq != SEQ_NONE:
+        if seq <= start_seq != SEQ_NONE:
             break
 
         if modules[i] != target_module:
@@ -170,53 +169,65 @@ def extract_telemetry_segment_to_end(
 
 
 @app_njit()
-def peek_segment_channels(seg: LogSegmentParams, target_module: int, start_seq: int):
-    """
-    Scans forward to find the first log from target_module that contains floats.
-    """
-    # Pre-allocate a generous temp buffer
-    temp_floats = np.empty(256, dtype=np.float64)
-
-    for i in range(seg.count):
-        if seg.modules[i] == target_module and seg.sequence_ids[i] > start_seq:
-            offset = seg.offsets[i]
-            length = seg.lengths[i]
-
-            # Use the inline extractor we moved here earlier
-            extracted_count = extract_floats_from_bytes(seg.buffer, offset, length, temp_floats)
-
-            if extracted_count > 0:
-                return extracted_count
-
-    return 0
-
-
-@app_njit()
 def peek_segment_channels_backwards(
-    seg: LogSegmentParams, target_module: int, start_seq: dtypes.SEQ_TYPE, temp_floats: np.ndarray
+    seg: LogBundle, target_module: int, start_seq: dtypes.SEQ_TYPE, temp_floats: np.ndarray
 ):
     """
     Scans BACKWARDS to find the LATEST log from target_module containing telemetry.
     Returns: (found_sequence_id, channel_count)
     """
-    seg_count = seg.count[0]
+    sequences = seg.sequences
+    modules = seg.modules
+    offsets = seg.offsets
+    lengths = seg.lengths
+    seg_count = seg.size[0]
     for i in range(seg_count - 1, -1, -1):
         # Early exit: if this log is already older than our filter, stop scanning
-        if seg.sequence_ids[i] <= start_seq:
+        if sequences[i] <= start_seq:
             break
 
-        if seg.modules[i] == target_module:
-            # Use the actual attribute names from your LogSegmentParams
-            offset = seg.offsets[i]
-            length = seg.lengths[i]
+        if modules[i] == target_module:
+            offset = offsets[i]
+            length = lengths[i]
 
             extracted_count = extract_floats_from_bytes(seg.buffer, offset, length, temp_floats)
 
             if extracted_count > 0:
                 # We found the latest valid telemetry entry
-                return seg.sequence_ids[i], extracted_count
+                return sequences[i], extracted_count
 
     return SEQ_NONE, 0
+
+
+@app_njit()
+def count_module_occurrences_backwards(
+    seg: LogBundle, target_module: int, start_seq: dtypes.SEQ_TYPE, limit: int
+) -> tuple[int, dtypes.SEQ_TYPE]:
+    """
+    Counts module entries backwards from a starting sequence.
+    Returns: (count_found, earliest_seq_id)
+    """
+    found = 0
+    earliest_seq = start_seq
+    seg_count = seg.size[0]
+
+    sequences = seg.sequences
+    modules = seg.modules
+
+    # We iterate backwards through the segment
+    for i in range(seg_count - 1, -1, -1):
+        # We only care about logs older or equal to our starting point
+        if sequences[i] > start_seq:
+            continue
+
+        if modules[i] == target_module:
+            found += 1
+            earliest_seq = sequences[i]
+
+            if found >= limit:
+                break
+
+    return found, earliest_seq
 
 
 @app_njit()

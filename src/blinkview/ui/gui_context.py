@@ -107,10 +107,16 @@ class GUIContext(QObject):
 
     def on_update(self):
         """Dispatches the update signal to all registered views for a fast sync."""
-        self.telemetry_model.apply_updates()
+        try:
+            self.telemetry_model.apply_updates()
+        except Exception as e:
+            self.logger.exception("Error telemetry_model.apply_updates", e)
         if self.updatable:
             for updatable in self.updatable:
-                updatable.apply_updates()
+                try:
+                    updatable.apply_updates()
+                except Exception as e:
+                    self.logger.exception("Error updatable", e)
 
     def add_updatable(self, updatable):
         """Registers a view/component to receive update signals."""

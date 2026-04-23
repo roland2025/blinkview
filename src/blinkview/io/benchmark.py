@@ -157,7 +157,7 @@ class Benchmark(BaseReader):
                     logger.info("Warming up benchmark JIT kernels...")
                     # Create a tiny dummy batch (1 chunk, 1KB buffer)
                     with pool_create(PooledLogBatch, 1, 1) as dummy_batch:
-                        _ = _blast_benchmark_cache(dummy_batch.bundle(), time_ns(), 1, c_buf, c_offs, c_lens, c_items)
+                        _ = _blast_benchmark_cache(dummy_batch.bundle, time_ns(), 1, c_buf, c_offs, c_lens, c_items)
                     logger.info("Benchmark kernels warmed up.")
                 except Exception as e:
                     logger.exception("Failed to warm up benchmark kernels", e)
@@ -243,11 +243,10 @@ class Benchmark(BaseReader):
                 if in_flight < effective_max_backlog:
                     chunks = max(1, msgs_per_tick // rows_per_bytes)
                     estimated_bytes = sum(c_lens[i % c_items] for i in range(chunks))
-                    buf_kb = max(1, (estimated_bytes // 1024) + 1)
 
-                    batch = pool_create(PooledLogBatch, chunks, buf_kb)
+                    batch = pool_create(PooledLogBatch, chunks, estimated_bytes)
                     written_bytes = _blast_benchmark_cache(
-                        batch.bundle(), current_time, chunks, c_buf, c_offs, c_lens, c_items
+                        batch.bundle, current_time, chunks, c_buf, c_offs, c_lens, c_items
                     )
 
                     interval_bytes += written_bytes

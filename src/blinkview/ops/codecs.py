@@ -5,6 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from blinkview.core.numba_config import app_njit
+from blinkview.core.types.parsing import STATE_COMPLETE
 
 
 @app_njit()
@@ -36,9 +37,16 @@ def process_byte_filters(val, ansi_state, filter_ansi, filter_printable):
 
 
 @app_njit(inline="always")
-def decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
-    # 1. O(1) Trailing Carriage Return Strip
-    # Fixes the issue where \r trips the filter scanner on every single frame
+def decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg, f_state):
+    # For standard newline frames, we always consume the entire chunk up to the \n
+    bytes_consumed = end - start
+
+    # 'end' is exclusive. f_buf[end - 1] is the delimiter (\n).
+    true_end = end - 1
+
+    # Strip trailing \r if configured
+    if f_cfg.filter_trim_r and true_end > start and f_buf[true_end - 1] == 13:
+        true_end -= 1
 
     buf_cap = out_buf.shape[0]
     cursor = out_cursor
@@ -46,44 +54,34 @@ def decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
     filter_ansi = f_cfg.filter_ansi
     filter_printable = f_cfg.filter_printable
 
-    # Determine safe loop bounds once
     available = buf_cap - cursor
-    frame_len = end - start
+    frame_len = true_end - start
     process_len = frame_len if frame_len < available else available
 
     if process_len <= 0:
-        return cursor
+        return STATE_COMPLETE, cursor, bytes_consumed
 
-    # 2. OPTIMISTIC FAST PATH SCAN
-    # Read-only loop to check if we can safely bypass the heavy filters
     needs_filtering = False
 
     if filter_printable:
-        # If printable is ON, it automatically catches ESC (27) and \r (13)
         for i in range(start, start + process_len):
             if not (32 <= f_buf[i] <= 126):
                 needs_filtering = True
                 break
     elif filter_ansi:
-        # Only scan specifically for ESC if the printable filter is OFF
         for i in range(start, start + process_len):
             if f_buf[i] == 27:
                 needs_filtering = True
                 break
 
-    # 3. VECTORIZED BLOCK COPY
-    # If the payload is clean, let LLVM do a high-speed memory copy
     if not needs_filtering:
         out_buf[cursor : cursor + process_len] = f_buf[start : start + process_len]
-        return cursor + process_len
+        return STATE_COMPLETE, cursor + process_len, bytes_consumed
 
-    # 4. SLOW PATH: Flattened Fused Filtering
-    # Only triggered if unexpected garbage or ANSI codes are detected
     ansi_state = 0
     for i in range(start, start + process_len):
         val = f_buf[i]
 
-        # ANSI Check
         if filter_ansi:
             if ansi_state == 0:
                 if val == 27:
@@ -100,7 +98,6 @@ def decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
                     ansi_state = 0
                 continue
 
-        # Printable Check
         if filter_printable:
             if not (32 <= val <= 126):
                 continue
@@ -108,7 +105,7 @@ def decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
         out_buf[cursor] = val
         cursor += 1
 
-    return cursor
+    return STATE_COMPLETE, cursor, bytes_consumed
 
 
 @app_njit()

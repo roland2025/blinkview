@@ -204,16 +204,18 @@ class Reorder(BaseReorder):
                     self.logger.info("Warming up Reorder kernel (Hybrid Merge)...")
                     with (
                         pool_create(
-                            PooledLogBatch, 10, 1, has_levels=True, has_modules=True, has_devices=True
+                            PooledLogBatch, 10, 1024, has_levels=True, has_modules=True, has_devices=True
                         ) as dummy_in,
                         pool_create(
-                            PooledLogBatch, 10, 1, has_levels=True, has_modules=True, has_devices=True
+                            PooledLogBatch, 10, 1024, has_levels=True, has_modules=True, has_devices=True
                         ) as dummy_out,
                     ):
                         dummy_in.insert(time_ns(), b"warmup", level=0, module=0, device=0)
 
+                        dummy_in_b = dummy_in.bundle
+
                         warmup_chunks = NumbaList()
-                        warmup_chunks.append(MergeChunk(dummy_in.bundle(), 0, 1))
+                        warmup_chunks.append(MergeChunk(dummy_in_b, 0, 1))
 
                         # Create small dummy scratchpads for the hybrid kernel warmup
                         w_ts_scr = np.zeros(1, dtype=dtypes.TS_TYPE)
@@ -222,12 +224,12 @@ class Reorder(BaseReorder):
                         w_sort_scr = np.zeros(1, dtype=np.uint32)
 
                         # --- Explicitly warm up the helper functions ---
-                        _find_split_idx(dummy_in.timestamps, 0, dummy_in.size, time_ns())
-                        _sum_lengths(dummy_in.lengths, 0, 1)
+                        _find_split_idx(dummy_in_b.timestamps, 0, dummy_in.size, time_ns())
+                        _sum_lengths(dummy_in_b.lengths, 0, 1)
 
                         # Warm up the Hybrid Merge & Copy kernel
                         _hybrid_merge_and_copy(
-                            warmup_chunks, w_ts_scr, w_b_idx_scr, w_r_idx_scr, w_sort_scr, dummy_out.bundle()
+                            warmup_chunks, w_ts_scr, w_b_idx_scr, w_r_idx_scr, w_sort_scr, dummy_out.bundle
                         )
 
                     self.logger.info("Reorder kernel warmed up and cached.")
@@ -257,8 +259,7 @@ class Reorder(BaseReorder):
                     batches_to_ingest.append(b)
 
                 for b in batches_to_ingest:
-                    dev_id = b.devices[0] if b.has_devices and b.size > 0 else 0
-                    device_queues[dev_id].append(QueuedBatch(b, np.zeros(1, dtype=np.uint32)))
+                    device_queues[b.get_device()].append(QueuedBatch(b, np.zeros(1, dtype=np.uint32)))
 
                 # 2. Determine "Ready" Chunks
                 safe_ts = now - delay_ns
@@ -278,16 +279,16 @@ class Reorder(BaseReorder):
                             if cursor >= batch.size:
                                 batches_to_release.append(queue.popleft().batch)
                                 continue
-
-                            idx = int(_find_split_idx(batch.timestamps, cursor, batch.size, safe_ts))
+                            batch_bundle = batch.bundle
+                            idx = int(_find_split_idx(batch_bundle.timestamps, cursor, batch.size, safe_ts))
 
                             if idx > 0:
                                 s = cursor
                                 e = cursor + idx
 
-                                ready_chunks.append(MergeChunk(batch.bundle(), s, e))
+                                ready_chunks.append(MergeChunk(batch_bundle, s, e))
                                 total_ready_rows += idx
-                                total_ready_bytes += int(_sum_lengths(batch.lengths, s, e))
+                                total_ready_bytes += int(_sum_lengths(batch_bundle.lengths, s, e))
 
                                 qb.cursor[0] = e
                                 if qb.cursor[0] == batch.size:
@@ -304,9 +305,9 @@ class Reorder(BaseReorder):
                         ):
                             flush()
                             cap = max(tuner_out.estimated_capacity, total_ready_rows)
-                            buf_kb = max(tuner_out.estimated_buffer_kb, (total_ready_bytes // 1024) + 1)
+                            buf_bytes = max(tuner_out.estimated_buffer_bytes, total_ready_bytes)
                             batch_out = pool_create(
-                                PooledLogBatch, cap, buf_kb, has_levels=True, has_modules=True, has_devices=True
+                                PooledLogBatch, cap, buf_bytes, has_levels=True, has_modules=True, has_devices=True
                             )
 
                         h_ts = None
@@ -327,7 +328,7 @@ class Reorder(BaseReorder):
                             sort_order = h_sort.array[:total_ready_rows]
 
                             _hybrid_merge_and_copy(
-                                ready_chunks, ts_scr, b_idx_scr, r_idx_scr, sort_order, batch_out.bundle()
+                                ready_chunks, ts_scr, b_idx_scr, r_idx_scr, sort_order, batch_out.bundle
                             )
 
                             flush()

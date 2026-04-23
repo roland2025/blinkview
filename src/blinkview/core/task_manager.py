@@ -35,7 +35,6 @@ class TaskManager:
 
     def run_periodic(self, interval_seconds: float, func: Callable, *args, **kwargs) -> str:
         """Registers a task and wakes the scheduler to recalculate its sleep time."""
-
         import uuid
 
         task_id = str(uuid.uuid4())
@@ -47,8 +46,8 @@ class TaskManager:
                 "args": args,
                 "kwargs": kwargs,
                 "next_run": time.time() + interval_seconds,
+                "is_running": False,
             }
-            # Interrupt the scheduler's sleep so it knows about the new task
             self._condition.notify()
 
         return task_id
@@ -73,7 +72,23 @@ class TaskManager:
                 # Dispatch due tasks and update their next run times
                 for task in self._periodic_tasks.values():
                     if now >= task["next_run"]:
-                        self.executor.submit(task["func"], *task["args"], **task["kwargs"])
+                        # Only submit if the previous run has finished
+                        if not task.get("is_running"):
+                            task["is_running"] = True
+
+                            future = self.executor.submit(task["func"], *task["args"], **task["kwargs"])
+
+                            # Define a callback to clear the flag when the future completes
+                            # Note: default arguments are used to capture the current 'task' reference
+                            def make_done_callback(t=task):
+                                def callback(f):
+                                    t["is_running"] = False
+
+                                return callback
+
+                            future.add_done_callback(make_done_callback())
+
+                        # Advance the next run time regardless, so it checks again next tick
                         task["next_run"] = now + task["interval"]
 
                 # Find the earliest upcoming task
@@ -85,12 +100,10 @@ class TaskManager:
 
                 # Sleep until the next task is due, or until interrupted
                 if next_wakeup is None:
-                    # No tasks registered. Sleep indefinitely until .notify() is called
                     self._condition.wait()
                 else:
                     sleep_time = next_wakeup - time.time()
                     if sleep_time > 0:
-                        # Sleep exactly `sleep_time` seconds, unless interrupted
                         self._condition.wait(timeout=sleep_time)
 
     def shutdown(self, wait=True):

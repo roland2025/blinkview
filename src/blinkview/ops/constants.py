@@ -19,6 +19,8 @@ CHAR_LOWER_Z = 122
 CHAR_ZERO = 48
 CHAR_NINE = 57
 
+CHAR_TILDE = 126  # Upper bound for standard printable ASCII
+
 # ASCII Character Constants
 CHAR_TAB = 9  # \t
 CHAR_SPACE = 32  # ' '
@@ -28,6 +30,7 @@ CHAR_LBRACKET = 91  # [
 CHAR_RBRACKET = 93  # ]
 CHAR_UNDERSCORE = 95  # _
 CHAR_NULL = 0
+CHAR_NBSP = 160  # Non-breaking space
 
 CHAR_T = 84
 
@@ -41,6 +44,8 @@ CHAR_DASH = 45  # -
 CHAR_SLASH = 47  # /
 CHAR_BACKSLASH = 92  # \
 CHAR_ESC = 27  # ANSI Escape
+
+CHAR_RS = 30  # 0x1E (Record Separator) used for internal newlines
 
 # Line Endings
 CHAR_LF = 10  # \n (Line Feed)
