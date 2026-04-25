@@ -8,6 +8,7 @@ from typing import NamedTuple, Tuple
 
 import numpy as np
 
+from blinkview.core import dtypes
 from blinkview.core.id_registry.types import EmptyStringTableParams, StringTableParams
 from blinkview.core.types.empty import ZERO_UTC_OFFSET
 from blinkview.core.types.modules import (
@@ -108,8 +109,77 @@ class LogOutput(NamedTuple):
     has_seq: bool
 
 
+U8 = np.uint8
+I64 = dtypes.INT64
+
+SYNC_ENABLED_OFF = np.zeros(1, dtype=U8)
+SYNC_ACTIVE_UNUSED = np.zeros(1, dtype=I64)
+SYNC_OFFSET_ZERO = np.zeros(2, dtype=I64)
+SYNC_REF_ZERO = np.zeros(2, dtype=I64)
+SYNC_RATIO_ONE = np.ones(2, dtype=I64)
+
+
+class SyncState(NamedTuple):
+    enabled: np.ndarray = SYNC_ENABLED_OFF
+    active_idx: np.ndarray = SYNC_ACTIVE_UNUSED
+    offset: np.ndarray = SYNC_OFFSET_ZERO
+    ref_time: np.ndarray = SYNC_REF_ZERO
+    drift_m: np.ndarray = SYNC_RATIO_ONE
+    drift_d: np.ndarray = SYNC_RATIO_ONE
+
+
+UnusedSyncState = SyncState()
+
+
+def create_default_sync(now_ns: int, start_enabled: bool = False):
+    """
+    Factory for a device that MIGHT sync later.
+    Anchors the initial state to the provided PC timestamp.
+    """
+    identity_drift = 1_000_000_000
+
+    # If enabled immediately, offset must match ref_time to prevent
+    # the '1970 epoch bug'.
+    initial_offset = now_ns if start_enabled else 0
+
+    return SyncState(
+        enabled=np.array([1 if start_enabled else 0], dtype=U8),
+        active_idx=np.array([0], dtype=I64),
+        # PC anchor time
+        offset=np.array([initial_offset, initial_offset], dtype=I64),
+        # Phone anchor time
+        ref_time=np.array([now_ns, now_ns], dtype=I64),
+        drift_m=np.array([identity_drift, identity_drift], dtype=I64),
+        drift_d=np.array([identity_drift, identity_drift], dtype=I64),
+    )
+
+
+def prime_sync_state(sync: SyncState, phone_ns: int, pc_ns: int):
+    """
+    Forcefully anchors the sync state to a coarse baseline.
+    Ensures math is identity (1:1) until the high-precision syncer takes over.
+    """
+    # 1. Set Anchors (NumPy handles int -> int64 casting here)
+    sync.ref_time[:] = [phone_ns, phone_ns]
+    sync.offset[:] = [pc_ns, pc_ns]
+
+    # 2. Reset Drift to Identity (1.0 ratio)
+    # Using 1,000,000,000 matches the 'ppb_scale' in the Numba kernel
+    identity_val = 1_000_000_000
+    sync.drift_m[:] = [identity_val, identity_val]
+    sync.drift_d[:] = [identity_val, identity_val]
+
+    # 3. Reset Active Index
+    sync.active_idx[0] = 0
+
+    # 4. Enable the Bridge
+    # Setting uint8 array to 1 (True)
+    sync.enabled[0] = 1
+
+
 class TimeParserState(NamedTuple):
     utc_offset: np.ndarray = ZERO_UTC_OFFSET  # int64[:]  # utc seconds
+    sync: SyncState = UnusedSyncState
 
 
 EmptyTimeParserState = TimeParserState()

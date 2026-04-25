@@ -30,7 +30,7 @@ else:
     simplefilter("ignore", category=NumbaExperimentalFeatureWarning)
 
 
-def app_njit(**kwargs):
+def app_njit(*args, **kwargs):
     """
     Custom Numba JIT decorator with fallback support.
     Usage: @app_njit(fallback=my_python_func)
@@ -62,6 +62,6 @@ def app_njit(**kwargs):
     def decorator(func):
         from numba import njit
 
-        return njit(**kwargs)(func)
+        return njit(*args, **kwargs)(func)
 
     return decorator

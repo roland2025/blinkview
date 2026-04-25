@@ -4,7 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable
 
 from ..core.device_identity import DeviceIdentity
 from ..core.numpy_batch_manager import PooledLogBatch
@@ -17,6 +18,13 @@ if TYPE_CHECKING:
 
 from ..core.configurable import configuration_property
 from .parser import BaseParser, ParserFactory
+
+
+@dataclass(slots=True)
+class DBCMsgInfo:
+    name: str
+    decode: Callable
+    signal_map: dict[str, int]
 
 
 @ParserFactory.register("cantools")
@@ -58,7 +66,7 @@ class CantoolsParser(BaseParser):
     def __init__(self):
         super().__init__()
         self.db = None
-        self.process = None
+        self._msg_info_map = {}
 
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
@@ -74,29 +82,21 @@ class CantoolsParser(BaseParser):
                 self.db = None
 
         # --- Pre-bake Logic ---
-        msg_map = {msg.frame_id: msg for msg in self.db.messages} if self.db else {}
-        strict = getattr(self, "strict", False)
-        ignore_unknown = getattr(self, "ignore_unknown", False)
+        self._msg_info_map.clear()
 
-        def fast_process(can_id: int, data: bytes) -> tuple[str, dict]:
-            msg_def = msg_map.get(can_id)
+        if self.db:
+            get_device_module = self.local.device_id.get_module
 
-            if msg_def is not None:
-                try:
-                    return msg_def.name, msg_def.decode(data)
-                except Exception as e:
-                    return "ERROR", {"error": f"{data.hex()} | Decoding error: {str(e)}"}
+            for msg in self.db.messages:
+                # Pre-calculate the module IDs exclusively for this message's signals
+                local_signal_map = {signal.name: get_device_module(signal.name).id for signal in msg.signals}
 
-            # --- Handle Unknown IDs ---
-            if strict:
-                raise ValueError(f"Unknown CAN ID: {can_id}")
+                self._msg_info_map[msg.frame_id] = DBCMsgInfo(
+                    name=msg.name, decode=msg.decode, signal_map=local_signal_map
+                )
 
-            if ignore_unknown:
-                return "IGNORED", None
+                print(f"{msg.name}: {local_signal_map}")
 
-            return "UNMAPPED", {"unmapped": data.hex()}
-
-        self.process = fast_process
         return changed
 
     def run(self):
@@ -114,7 +114,11 @@ class CantoolsParser(BaseParser):
 
             get_device_module = device.get_module
 
-            module_unknown_id_int = get_device_module("unknown")
+            module_unknown_id_int = get_device_module("unknown").id
+
+            info_map_get = self._msg_info_map.get
+            strict = getattr(self, "strict", False)
+            ignore_unknown = getattr(self, "ignore_unknown", False)
 
             log_level_error_int = LogLevel.ERROR.value
             log_level_info_int = LogLevel.INFO.value
@@ -145,8 +149,6 @@ class CantoolsParser(BaseParser):
                         tuner_out.update(batch_out.msg_cursor, batch_out.size, target_window_sec=max_timeout)
                         self.distribute(batch_out)
                 batch_out = None
-
-            decode = self.process
 
             while not stop_is_set():
                 batch_in = get(timeout=max_timeout)
@@ -187,45 +189,55 @@ class CantoolsParser(BaseParser):
                     for i in range(size):
                         can_id = can_ids[i]
                         off = offsets[i]
-                        length = lengths[i]
-                        data = buf[off : off + length].tobytes()
+                        data = buf[off : off + lengths[i]].tobytes()
 
-                        # print(f"  parse ts={ts[i]} can_id={can_id:04X} data='{data.hex()}'")
+                        msg_info = info_map_get(can_id)
 
-                        try:
-                            msg_name, decoded_dict = decode(can_id, data)
+                        if msg_info is not None:
+                            try:
+                                decoded = msg_info.decode(data)
+                                local_sig_map = msg_info.signal_map
 
-                            if decoded_dict is None:  # ignored
-                                continue
-
-                            # Format dictionary to readable string
-                            if "error" in decoded_dict or "unmapped" in decoded_dict:
-                                out_bytes = f"[{can_id:04X}] {msg_name} | {decoded_dict}".encode()
-                                # if not batch_out.insert(
-                                #     ts[i], out_bytes, log_level_error_int, module_unknown_id_int, device_id_int
-                                # ):
-                                #     # Batch out is full, flush and acquire new
-                                #     flush()
-                                #     batch_out = batch_acquire()
-                                # batch_out.insert(ts[i], out_bytes, log_level_info_int, module_id_int, device_id_int)
-                            else:
-                                for k, v in decoded_dict.items():
-                                    module_id_int = get_device_module(k).id
+                                for k, v in decoded.items():
+                                    mod_id = local_sig_map[k]
                                     out_bytes = str(v).encode()
 
-                                    # print(f"  parsed k={k} v={v} data={out_bytes}")
                                     if not batch_out.insert(
-                                        ts[i], out_bytes, log_level_info_int, module_id_int, device_id_int
+                                        ts[i], out_bytes, log_level_info_int, mod_id, device_id_int
                                     ):
-                                        # Batch out is full, flush and acquire new
                                         flush()
                                         batch_out = batch_acquire()
-                                        batch_out.insert(
-                                            ts[i], out_bytes, log_level_info_int, module_id_int, device_id_int
-                                        )
+                                        batch_out.insert(ts[i], out_bytes, log_level_info_int, mod_id, device_id_int)
 
-                        except Exception as e:
-                            self.logger.warning(f"Error processing CAN frame {can_id:04X}: {e}")
+                            except Exception as e:
+                                out_bytes = (
+                                    f"[{can_id:04X}] {msg_info.name} | {data.hex()} | Decoding error: {e}".encode()
+                                )
+
+                                if not batch_out.insert(
+                                    ts[i], out_bytes, log_level_error_int, module_unknown_id_int, device_id_int
+                                ):
+                                    flush()
+                                    batch_out = batch_acquire()
+                                    batch_out.insert(
+                                        ts[i], out_bytes, log_level_error_int, module_unknown_id_int, device_id_int
+                                    )
+
+                        else:
+                            # --- Unmapped ID Handling ---
+                            if strict:
+                                raise ValueError(f"Unknown CAN ID: {can_id}")
+
+                            if not ignore_unknown:
+                                out_bytes = f"[{can_id:04X}] UNMAPPED | {data.hex()}".encode()
+                                if not batch_out.insert(
+                                    ts[i], out_bytes, log_level_info_int, module_unknown_id_int, device_id_int
+                                ):
+                                    flush()
+                                    batch_out = batch_acquire()
+                                    batch_out.insert(
+                                        ts[i], out_bytes, log_level_info_int, module_unknown_id_int, device_id_int
+                                    )
 
                 # --- Check for Flush Thresholds ---
                 if batch_out and (

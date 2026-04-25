@@ -31,6 +31,7 @@ class PooledLogBatch:
         "in_use",
         # Memory handles for the central pool
         "_ts_h",
+        "_rx_ts_h",
         "_off_h",
         "_len_h",
         "_buf_h",
@@ -64,7 +65,7 @@ class PooledLogBatch:
         self._lock = Lock()
         self.in_use = True
 
-        self._ts_h = self._off_h = self._len_h = self._buf_h = None
+        self._ts_h = self._rx_ts_h = self._off_h = self._len_h = self._buf_h = None
         self._lvl_h = self._mod_h = self._dev_h = self._seq_h = None
         self._ext_u32_1_h = self._ext_u32_2_h = self._ext_u64_1_h = None
         self.bundle: Optional[LogBundle] = None
@@ -99,6 +100,8 @@ class PooledLogBatch:
         self._ts_h = acquire(req_capacity, dtype=dtypes.TS_TYPE)
         ts_arr = self._ts_h.array
         true_cap = len(ts_arr)
+
+        self._rx_ts_h = acquire(req_capacity, dtype=dtypes.TS_TYPE)
 
         self._off_h = acquire(true_cap, dtype=dtypes.OFFSET_TYPE)
         self._len_h = acquire(true_cap, dtype=dtypes.LEN_TYPE)
@@ -151,6 +154,7 @@ class PooledLogBatch:
         # 4. Counters & Baking
         self.bundle = LogBundle(
             timestamps=ts_arr,
+            rx_timestamps=self._rx_ts_h.array,
             levels=lvl_arr,
             modules=mod_arr,
             devices=dev_arr,
@@ -198,6 +202,7 @@ class PooledLogBatch:
     def insert_any(
         self,
         ts_ns: int,
+        rx_ts_ns: int,
         msg_data: Any,
         level: int = 0,
         module: int = 0,
@@ -216,11 +221,14 @@ class PooledLogBatch:
 
         data_view = np.frombuffer(msg_data, dtype=dtypes.BYTE)
 
-        return _nb_bundle_push(b, ts_ns, data_view, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1)
+        return _nb_bundle_push(
+            b, ts_ns, rx_ts_ns, data_view, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
+        )
 
     def insert(
         self,
         ts_ns: int,
+        rx_ts_ns: int,
         msg_bytes: bytes,
         level: int = 0,
         module: int = 0,
@@ -236,7 +244,9 @@ class PooledLogBatch:
         if not (b := self.bundle):
             return False
 
-        return _nb_bundle_push(b, ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1)
+        return _nb_bundle_push(
+            b, ts_ns, rx_ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
+        )
 
     def append(self, msg_bytes: bytes) -> bool:
         if not (b := self.bundle):
@@ -267,6 +277,9 @@ class PooledLogBatch:
 
             if self._ts_h:
                 self._ts_h.release()
+
+            if self._rx_ts_h:
+                self._rx_ts_h.release()
             if self._off_h:
                 self._off_h.release()
             if self._len_h:
@@ -290,7 +303,7 @@ class PooledLogBatch:
             if self._ext_u64_1_h:
                 self._ext_u64_1_h.release()
 
-            self._ts_h = self._off_h = self._len_h = self._buf_h = None
+            self._ts_h = self._rx_ts_h = self._off_h = self._len_h = self._buf_h = None
             self._lvl_h = self._mod_h = self._dev_h = self._seq_h = None
             self._ext_u32_1_h = self._ext_u32_2_h = self._ext_u64_1_h = None
 

@@ -527,7 +527,7 @@ class TelemetryPlotter(QWidget):
 
         # Track the vertical row index in the GraphicsLayout
         current_row = 0
-        LEFT_AXIS_WIDTH = 50
+        LEFT_AXIS_WIDTH = 65
         # --- 1. Setup Overview Plot (Conditional) ---
         if self.show_overview:
             self.overview_plot = self.graph_view.addPlot(

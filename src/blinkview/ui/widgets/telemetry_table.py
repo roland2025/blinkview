@@ -272,6 +272,10 @@ class TelemetryTable(QWidget):
 
         self.gui_context.telemetry_model.layout_changed.connect(self.auto_size_columns_delayed)
 
+        self.resize_timer = QTimer(self)
+        self.resize_timer.setSingleShot(True)
+        self.resize_timer.timeout.connect(self.auto_size_columns)
+
         if state:
             self.restore(state)
         else:
@@ -343,7 +347,7 @@ class TelemetryTable(QWidget):
         }
 
     def auto_size_columns_delayed(self):
-        QTimer.singleShot(50, lambda: self.auto_size_columns())
+        self.resize_timer.start(50)
 
     def auto_size_columns(self):
         """

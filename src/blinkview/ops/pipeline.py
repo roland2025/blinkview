@@ -11,7 +11,13 @@ from blinkview.core.id_registry.types import StringTableParams
 from blinkview.core.numba_config import app_njit, literal_unroll
 from blinkview.core.types.modules import DynamicWidthConfig, FixedWidthConfig
 from blinkview.core.types.parsing import ParserID
-from blinkview.ops.codec_adb_long import parse_adb_level, parse_adb_pid_tid, parse_adb_tag, parse_adb_timestamp
+from blinkview.ops.codec_adb_long import (
+    parse_adb_level,
+    parse_adb_pid_tid,
+    parse_adb_tag,
+    parse_adb_timestamp_iso,
+    parse_adb_timestamp_monotonic,
+)
 from blinkview.ops.generic import SkipWordsConfig, skip_words_parser
 from blinkview.ops.levels import parse_log_level
 from blinkview.ops.modules import parse_fixed_width_name, parse_module_tags_statemachine
@@ -63,7 +69,7 @@ def execute_parser_pipeline(buffer, start_cursor, end_cursor, out_b, out_idx, pa
             cursor = skip_words_parser(buffer, cursor, end_cursor, out_b, out_idx, state, config)
 
         elif p_id == _ID_TS_ADB_LONG:
-            cursor = parse_adb_timestamp(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+            cursor = parse_adb_timestamp_monotonic(buffer, cursor, end_cursor, out_b, out_idx, state, config)
 
         elif p_id == _ID_PID_TID_ADB_LONG:
             cursor = parse_adb_pid_tid(buffer, cursor, end_cursor, out_b, out_idx, state, config)

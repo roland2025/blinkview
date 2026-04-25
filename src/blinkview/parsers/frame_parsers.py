@@ -30,6 +30,7 @@ from blinkview.core.types.parsing import (
     TimeParserState,
     UnifiedParserConfig,
     UnifiedParserState,
+    UnusedSyncState,
 )
 from blinkview.ops.constants import EMPTY_STATE
 from blinkview.ops.generic import SkipWordsConfig, skip_words_parser
@@ -114,6 +115,7 @@ class GenericFrameParser(FrameParser):
         pipeline: List[FrameSectionParser] = []
         local_ctx = SimpleNamespace(
             device_id=self.local.device_id,
+            sync_state=self.local.sync_state,
         )
         for step_cfg in config.get("steps", []):
             step = self.shared.factories.build(
@@ -371,11 +373,19 @@ class ModuleNameNormalizer(ModuleNameParserBase):
 class TimestampParser(FrameSectionParser):
     def __init__(self):
         super().__init__()
-        self.state = UnifiedParserState(timestamp=TimeParserState(np.zeros(1, dtypes.TS_TYPE)))
+        self.state = None
+
+    def apply_config(self, config: dict):
+        changed = super().apply_config(config)
+
+        sync_state = getattr(self.local, "sync_state", UnusedSyncState)
+        self.state = UnifiedParserState(timestamp=TimeParserState(sync=sync_state))
 
         utc_offset_seconds = get_local_utc_offset_seconds()
 
         self.state.timestamp.utc_offset[0] = dtypes.TS_TYPE(utc_offset_seconds)
+
+        return changed
 
 
 #

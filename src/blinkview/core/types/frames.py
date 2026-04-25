@@ -11,6 +11,7 @@ import numpy as np
 
 class FrameStateParams(NamedTuple):
     buffer: np.ndarray
+    ts_buffer: np.ndarray  # int64[:] (NEW: 1:1 parallel mapping)
     offset: np.ndarray
     in_idx: np.ndarray
     in_offset: np.ndarray

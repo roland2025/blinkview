@@ -73,7 +73,14 @@ class AdbLongTimestamp(TimestampParser):
     def __init__(self):
         super().__init__()
 
+        self._bundle = None
+
+    def apply_config(self, config: dict):
+        changed = super().apply_config(config)
+
         self._bundle = ParserID.TS_ADB_LONG, self.state, EmptyUnifiedParserConfig
+
+        return changed
 
     def bundle(self):
         return self._bundle

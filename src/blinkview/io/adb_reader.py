@@ -4,15 +4,20 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import os
-import shutil
+import datetime
+import statistics
 import subprocess
-from pathlib import Path
-from time import sleep
+from threading import Lock
+from time import perf_counter, sleep
 
 from ..core.configurable import configuration_property, override_property
 from ..core.numpy_batch_manager import PooledLogBatch
+from ..core.time_sync_engine import TimeSyncEngine
+from ..core.types.parsing import SyncState
+from ..parsers.binary_parser import BinaryParser
+from ..utils.adb import detect_adb_path
 from ..utils.throughput import Speedometer, ThroughputAutoTuner
+from .adb_time_syncer import AdbTimeSyncer
 from .BaseReader import BaseReader, DeviceFactory
 
 
@@ -80,11 +85,26 @@ ensuring high throughput without pipeline stalls."""
 
         self._process = None
 
+        self._shell = None  # The persistent command shell
+        self._shell_lock = Lock()
+
+        self._syncer = None
+        self._syncer_task_id = None
+        self._syncer_engine = None
+        self.sleep_offset_ns = 0
+
+        self._last_error_log_ns = 0
+
     def run(self):
         # 1. Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
         time_ns = self.shared.time_ns
         logger = self.logger
+
+        # Backoff configuration (All in Nanoseconds)
+        current_backoff_ns = 1_000_000_000  # Start at 1s
+        max_backoff_ns = 5_000_000_000  # Cap at Xs
+        next_reconnect_ns = 0
 
         # Tuner configuration
         delay_s = self.delay / 1000.0
@@ -106,9 +126,31 @@ ensuring high throughput without pipeline stalls."""
             while not stop_is_set():
                 # 3. Subprocess Lifecycle Management
                 if self._process is None:
-                    self.open()
-                    if self._process is None:
-                        sleep(1.0)
+                    now = time_ns()
+
+                    if now >= next_reconnect_ns:
+                        self.open()
+
+                        # IF OPEN FAILED: We MUST continue to avoid the crash below
+                        if self._process is None:
+                            next_reconnect_ns = now + current_backoff_ns
+
+                            current_backoff_ns = min(int(current_backoff_ns * 1.5), max_backoff_ns)
+                            # Only log as INFO every once in a while to keep the terminal clean
+                            if current_backoff_ns == max_backoff_ns:
+                                logger.debug("Device not found. Polling at max frequency...")
+                            else:
+                                logger.info(f"Device not found. Retrying in {current_backoff_ns / 1e9:.1f}s...")
+
+                            # Stay responsive to stop_is_set while waiting for next attempt
+                            sleep(0.2)
+                            continue
+                        else:
+                            # Connection Successful! Reset backoff
+                            current_backoff_ns = 1_000_000_000
+                    else:
+                        # We are in the backoff wait period
+                        sleep(0.2)
                         continue
 
                 # We localize the read method for performance
@@ -130,7 +172,7 @@ ensuring high throughput without pipeline stalls."""
 
                         # 2. Attempt high-resolution insertion
                         # This returns False if we hit array capacity OR buffer capacity
-                        if not batch.insert(now, chunk):
+                        if not batch.insert(now, now, chunk):
                             # 3. Batch is full: Flush and Acquire new
                             with batch:
                                 self.distribute(batch)
@@ -140,7 +182,7 @@ ensuring high throughput without pipeline stalls."""
 
                             # Re-attempt the insert into the fresh batch
                             # (Assuming chunk < total batch capacity)
-                            batch.insert(now, chunk)
+                            batch.insert(now, now, chunk)
 
                         # 4. Batching Window Check
                         # Now every chunk has a unique timestamp in the bundle,
@@ -174,61 +216,74 @@ ensuring high throughput without pipeline stalls."""
 
             self._cleanup_process()
 
-    def _detect_adb_path(self) -> str:
-        """
-        Locates the ADB executable. Uses explicit string casting for
-        compatibility with Python < 3.12 on Windows.
-        """
-        # 1. Check system PATH
-        # Even if shutil.which("adb") works with a literal string,
-        # we'll stay consistent.
-        system_adb = shutil.which("adb")
-        if system_adb:
-            return str(system_adb)
-
-        # 2. Check Windows Sdk location
-        local_app_data = os.getenv("LOCALAPPDATA")
-        if local_app_data:
-            # We build the Path object...
-            sdk_adb = Path(local_app_data) / "Android" / "Sdk" / "platform-tools" / "adb.exe"
-
-            # ...but we check existence and return as a STRING
-            if sdk_adb.exists():
-                return str(sdk_adb)
-
-        # 3. Final fallback
-        return "adb"
-
     def open(self):
-        adb_bin = self._detect_adb_path()
+        adb_bin = detect_adb_path()
+        time_ns = self.shared.time_ns
+        now_ns = time_ns()
 
         try:
-            # Build the base command (e.g., ['adb'] or ['C:\\...\\adb.exe'])
             base_cmd = [adb_bin]
             if self.device_id:
                 base_cmd.extend(["-s", self.device_id])
 
-            # 1. Pre-clear logs if requested
-            if self.clear_log or True:
-                self.logger.info(f"Clearing device logs ({adb_bin} logcat -c)...")
-                # capture_output=True prevents clear-log errors from polluting your stream
-                subprocess.run([*base_cmd, "logcat", "-c"], check=False, capture_output=True)
+            # 1. Start Persistent Shell FIRST (Necessary for the Anchor)
+            self.logger.debug("Opening ADB shell...")
+            self._shell = subprocess.Popen(
+                [*base_cmd, "shell"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
 
-            # 2. Build the main streaming command
-            cmd = [*base_cmd, "logcat", "-v", "long", "-v", "year"]
+            # Give it a moment to fail
+            sleep(0.1)
+            if self._shell.poll() is not None:
+                # If we're here, the shell died immediately
+                _, err = self._shell.communicate()
+                err_msg = err.strip() if err else "No devices found"
+                raise ConnectionError(err_msg)
+
+            # 3. Locate Parser and SyncState immediately
+            # We need to prime the SyncState before starting the logcat process
+            target_parser = None
+            sync_state_obj = None
+            for sub in self.subscribers:
+                if isinstance(sub, BinaryParser):
+                    target_parser = sub
+                    sync_state_obj = sub.sync_state
+                    break
+
+            if sync_state_obj:
+                # 4. Initialize High-Precision Engine
+                if self._syncer_engine is None:
+                    self._syncer_engine = TimeSyncEngine(sync_state_obj, self.logger)
+                else:
+                    self._syncer_engine.soft_reset()
+
+                # Start with sync DISABLED.
+                # The parser will use rx_timestamp (PC time) until the first pong.
+                sync_state_obj.enabled[0] = 0
+
+                # [LEGACY ANCHORING]
+                # If you ever want to re-enable coarse startup sync,
+                # call self._perform_legacy_coarse_sync(sync_state_obj) here.
+
+                # 5. Clear logs if requested (Now safe to do since shell is open)
+            # if self.clear_log or True:
+            #     self.logger.info("Clearing device logs...")
+            #     subprocess.run([*base_cmd, "logcat", "-c"], check=False, capture_output=True)
+
+            # We use 'monotonic' to get hardware-level crystal time
+            cmd = [*base_cmd, "logcat", "-v", "long", "-v", "monotonic", "-v", "nsec", "-T", "1"]
 
             if self.logcat_args:
                 cmd.extend(self.logcat_args.split())
-
             if self.filters:
                 cmd.extend(self.filters.split())
 
-            self.logger.info(f"Opening ADB stream: {' '.join(cmd)}")
-
-            # 3. Start subprocess
-            # stdout=PIPE is required for reading the stream
-            # stderr=STDOUT merges errors (like 'device not found') into the stdout for easy handling
-            # bufsize=0 ensures we get data in real-time (unbuffered)
+            self.logger.debug(f"Opening Monotonic ADB stream: {' '.join(cmd)}")
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -237,30 +292,87 @@ ensuring high throughput without pipeline stalls."""
                 bufsize=-1,
             )
 
-            self.logger.info("ADB Connected")
+            # 7. Finalize Environment
+            self._refresh_process_ids()
+            is_app_running = self.ensure_blinksync_running()
 
-            # Return the stdout handle so the 'run' loop can use its .read1 method
+            # 8. Start Syncer (High-Precision vs. Fallback)
+            if target_parser and self._syncer_engine:
+                if self._syncer_task_id is not None:
+                    self.shared.tasks.stop_periodic(self._syncer_task_id)
+
+                if is_app_running:
+                    # High-Precision: App-based pings
+                    self._syncer = AdbTimeSyncer(
+                        self,
+                        self._syncer_engine,
+                        self.logger.child("syncer"),
+                        time_ns,
+                        self.shared.registry.central.log_pool,
+                        target_parser,
+                    )
+                    self._syncer_task_id = self.shared.tasks.run_periodic(0.1, self._syncer.handler)
+                else:
+                    # Fallback: Periodic shell-based re-anchoring
+                    self.logger.warning("Falling back to Best-Effort Shell Sync (App not found).")
+                    self._syncer_task_id = self.shared.tasks.run_periodic(5.0, self._shell_sync_handler)
+
+            self.logger.info("ADB Connected")
+            self._last_error_log_ns = 0  # Reset so the next failure is 'Red' immediately
             return self._process.stdout
 
         except Exception as e:
-            self.logger.error(f"Failed to start ADB process using: {adb_bin}", e)
+            # --- SUPPRESSION LOGIC ---
+            # We only show the ERROR level every 30 seconds
+            if (now_ns - self._last_error_log_ns) > 30_000_000_000:
+                self.logger.error(f"ADB Connection failed: {e}")
+                self._last_error_log_ns = now_ns
+            else:
+                # Keep it quiet in the meantime
+                self.logger.debug(f"Retrying ADB... ({e})")
+
             self._cleanup_process()
             return None
 
     def _cleanup_process(self):
-        """Safely terminates the ADB subprocess."""
+        """
+        Safely terminates both the Logcat stream and the persistent
+        command shell subprocesses.
+        """
+        # 1. Handle the Logcat Stream
         if self._process is not None:
-            self.logger.info("Terminating ADB subprocess...")
+            self.logger.debug("Terminating ADB Logcat subprocess...")
+            self._finalize_subprocess(self._process)
+            self._process = None
+
+        # 2. Handle the Persistent Shell
+        if self._shell is not None:
+            self.logger.debug("Terminating persistent ADB shell...")
+            # Try to be polite and exit the shell first
             try:
-                self._process.terminate()
-                self._process.wait(timeout=2.0)
+                if self._shell.stdin:
+                    self._shell.stdin.write("exit\n")
+                    self._shell.stdin.flush()
             except Exception:
-                try:
-                    self._process.kill()
-                except Exception as e:
-                    self.logger.error(f"Failed to kill ADB process: {e}")
-            finally:
-                self._process = None
+                pass
+
+            self._finalize_subprocess(self._shell)
+            self._shell = None
+
+        if self._syncer_task_id is not None:
+            self.shared.tasks.stop_periodic(self._syncer_task_id)
+
+    def _finalize_subprocess(self, proc: subprocess.Popen):
+        """Helper to terminate, wait, and eventually kill a process."""
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                self.logger.warning(f"Process {proc.pid} didn't stop in time. Killing...")
+                proc.kill()
+        except Exception as e:
+            self.logger.error(f"Error while finalizing process {proc.pid}: {e}")
 
     def reset_device(self):
         """
@@ -277,3 +389,289 @@ ensuring high throughput without pipeline stalls."""
             self.logger.info("Reboot command sent.")
         except Exception as e:
             self.logger.error(f"Failed to reboot device: {e}")
+
+    def send_data(self, data: str):
+        """
+        Sends a command string to the persistent ADB shell and waits for completion.
+        This prevents 'Pipe Pollution' by ensuring all output is consumed.
+        """
+        # Simply delegate to query and ignore the return list.
+        # The sentinel inside query() acts as a synchronization barrier.
+        _ = self.query(data)
+
+    def query(self, cmd: str) -> list[str]:
+        """
+        Sends a command and waits for the output.
+        Uses a sentinel to know when the command is finished.
+        """
+        if self._shell is None:
+            return []
+
+        sentinel = "__BlinkSync_Done__"
+        results = []
+
+        with self._shell_lock:
+            # Send the command + the sentinel
+            self._shell.stdin.write(f"{cmd}; echo {sentinel}\n")
+            self._shell.stdin.flush()
+
+            # Read line by line until we hit the sentinel
+            for line in self._shell.stdout:
+                clean_line = line.strip()
+                if clean_line == sentinel:
+                    break
+                if clean_line:
+                    results.append(clean_line)
+
+        return results
+
+    def _refresh_process_ids(self):
+        """Uses the persistent shell to map all process names to PIDs."""
+        # Use ps -A -o NAME,PID for modern Android compatibility
+        lines = self.query("ps -A -o NAME,PID")
+
+        pids: dict[str, int] = {}
+
+        # We skip the header 'NAME PID' if it exists in the output
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 2:
+                name = parts[0]
+                try:
+                    # The PID is usually the second column
+                    pid = int(parts[1])
+                    pids[name] = pid
+                    # print(f"AdbReader name={name} pid={pid}")
+                except ValueError:
+                    continue
+
+        self._process_ids = pids
+        self.logger.info(f"Captured {len(self._process_ids)} application PIDs via shell.")
+
+    def get_name_from_pid(self, pid: int) -> str | None:
+        """
+        Reads /proc/[pid]/cmdline to find the package name.
+        """
+        # cmdline contains the name followed by a null byte (\0)
+        # 'tr' or 'cat' works, but cat is standard.
+        res = self.query(f"cat /proc/{pid}/cmdline")
+
+        if res:
+            # Android processes often have the name as the first null-terminated string.
+            # We strip any trailing null characters.
+            name = res[0].strip("\x00")
+            if name:
+                self._process_ids[name] = pid  # Sync our internal map
+                return name
+        return None
+
+    def get_pid_from_name(self, package_name: str) -> int | None:
+        """
+        Uses 'ps' to find the PID of a specific package.
+        """
+        # -A: all processes
+        # -o PID,NAME: only return the columns we care about
+        # grep: find our specific package
+        lines = self.query(f"ps -A -o PID,NAME | grep {package_name}")
+
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    # In 'PID NAME' format, PID is index 0
+                    pid = int(parts[0])
+                    name = parts[1]
+
+                    # Ensure it's an exact match, not just a substring
+                    if name == package_name:
+                        self._process_ids[name] = pid
+                        return pid
+                except ValueError:
+                    continue
+        return None
+
+    def ensure_blinksync_running(self, timeout_s=3.0, interval_s=0.05):
+        """
+        Checks if blinksync is running. If not, starts it and polls
+        until the PID appears or we hit the timeout.
+        """
+        pkg = "ee.incubator.blinksync"
+
+        # 1. Quick check using walrus operator
+        if pid := self.get_pid_from_name(pkg):
+            self.logger.info(f"Blinksync already active (PID: {pid})")
+            return True
+
+        # 2. Trigger the launch
+        self.logger.info("Blinksync not detected. Triggering launch...")
+        self.query(f"am start -n {pkg}/.MainActivity")
+
+        # 3. Active Wait (Polling)
+        start_time = perf_counter()
+        deadline = start_time + timeout_s
+
+        while perf_counter() < deadline:
+            if new_pid := self.get_pid_from_name(pkg):
+                elapsed_ms = (perf_counter() - start_time) * 1000
+                self.logger.info(f"Blinksync started in {elapsed_ms:.0f}ms (PID: {new_pid})")
+                return True
+
+            sleep(interval_s)
+
+        self.logger.error(f"Blinksync failed to spawn after {timeout_s}s. Check device state.")
+        return False
+
+    def _get_best_coarse_anchor(self, num_tries: int = 3) -> tuple[int, int, int]:
+        time_ns = self.shared.time_ns
+        best_rtt = 2**63 - 1
+        best_phone_ns = 0
+        best_pc_ns = 0
+
+        self.logger.info(f"Synchronizing coarse monotonic baseline (tries={num_tries})...")
+
+        for i in range(num_tries):
+            t0 = time_ns()
+            # /proc/uptime returns: "1733138.75 3456.78" (uptime_seconds idle_seconds)
+            res = self.query("cat /proc/uptime")
+            t1 = time_ns()
+
+            if res:
+                parts = res[0].split()
+                if parts:
+                    try:
+                        # Parse the float and convert to nanoseconds
+                        phone_time_sec = float(parts[0])
+                        phone_time = int(phone_time_sec * 1_000_000_000)
+                        rtt = t1 - t0
+
+                        if rtt < best_rtt:
+                            best_rtt = rtt
+                            best_phone_ns = phone_time
+                            best_pc_ns = t0 + (rtt // 2)
+                    except ValueError:
+                        continue
+
+        if best_phone_ns == 0:
+            self.logger.warning("Coarse anchor failed. Falling back to PC-only identity.")
+            now = time_ns()
+            return now, now, 0
+
+        return best_phone_ns, best_pc_ns, best_rtt
+
+    def _get_target_sync_state(self) -> SyncState | None:
+        """Scans subscribers to find the BinaryParser's SyncState object."""
+        for sub in self.subscribers:
+            # We look for the BinaryParser specifically as it's our primary consumer
+            if isinstance(sub, BinaryParser):
+                return sub.sync_state
+        return None
+
+    def _init_sync_engine(self, sync_state: SyncState):
+        """Initializes or resets the high-precision math engine."""
+        if self._syncer_engine is None:
+            self.logger.info("Initializing new TimeSyncEngine")
+            self._syncer_engine = TimeSyncEngine(sync_state, self.logger)
+        else:
+            self.logger.info("Warm-starting existing TimeSyncEngine")
+            # Soft reset clears RTT history but keeps our new coarse anchors
+            self._syncer_engine.soft_reset()
+
+    def _calculate_sleep_offset_ns(self, num_samples: int = 7) -> int:
+        """
+        Calculates the sleep offset by taking multiple samples using a clean,
+        silent chained shell command.
+        """
+        offsets = []
+
+        # Chained command that silences stderr and filters for only the numbers
+        cmd = (
+            'BOOT=$(cat /proc/uptime 2>/dev/null | cut -d" " -f1); '
+            r'MONO=$(logcat -v monotonic -v nsec -t 1 2>/dev/null | grep -oE "[0-9]+\.[0-9]{9}" | head -n 1); '
+            'echo "$BOOT $MONO"'
+        )
+
+        self.logger.info(f"Synchronizing sleep offset (samples={num_samples})...")
+
+        for i in range(num_samples):
+            res = self.query(cmd)
+
+            if res and len(res[0].split()) == 2:
+                try:
+                    boot_s, mono_s = res[0].split()
+                    boot_ns = int(float(boot_s) * 1_000_000_000)
+                    mono_ns = int(float(mono_s) * 1_000_000_000)
+
+                    offsets.append(boot_ns - mono_ns)
+                except (ValueError, IndexError):
+                    continue
+
+        if not offsets:
+            self.logger.error("Failed to capture any valid sleep offset samples.")
+            return 0
+
+        # Median kills the outliers if the shell was slow on one specific sample
+        stable_offset = int(statistics.median(offsets))
+
+        # Optional: Log the jitter to see how 'clean' the phone is behaving
+        jitter_ms = (max(offsets) - min(offsets)) / 1_000_000.0
+        self.logger.info(f"Offset synced: {stable_offset / 1e9:.6f}s (Jitter: {jitter_ms:.3f}ms)")
+
+        return stable_offset
+
+    def _shell_sync_handler(self):
+        """
+        Fallback syncer that uses the ADB shell to 'ping' the device.
+        Lacks microsecond precision but prevents long-term drift.
+        """
+        # 1. Capture PC Transmit Time
+        t_tx = self.shared.time_ns()
+
+        # 2. Get Phone time via Shell (This is the 'Pong')
+        # We fetch BOOT and MONO in one shot to minimize internal jitter
+        res = self.query(
+            'B=$(cat /proc/uptime 2>/dev/null | cut -d" " -f1); '
+            r'M=$(logcat -v monotonic -v nsec -t 1 2>/dev/null | grep -oE "[0-9]+\.[0-9]{9}" | head -n 1); '
+            'echo "$B $M"'
+        )
+
+        # 3. Capture PC Receive Time
+        t_rx = self.shared.time_ns()
+
+        if res and len(res[0].split()) == 2:
+            try:
+                boot_s, mono_s = res[0].split()
+                phone_boot = int(float(boot_s) * 1_000_000_000)
+                phone_mono = int(float(mono_s) * 1_000_000_000)
+
+                # 4. Feed the engine as if it were a pong
+                # The 'pc_rx' is our t_rx, but we treat the phone_mono
+                # as occurring exactly at the midpoint of t_tx and t_rx.
+                self._syncer_engine.feed(pc_tx=t_tx, phone_mono=phone_mono, phone_boot=phone_boot, pc_rx=t_rx)
+            except (ValueError, IndexError):
+                pass
+
+    # --- LEGACY / REFERENCE METHODS (DO NOT DELETE) ---
+
+    def _perform_legacy_coarse_sync(self, sync_state_obj):
+        """
+        Original logic to guess the clock offset before the first ping.
+        Keeping this here for reference or for boot-date calculation.
+        """
+        try:
+            phone_boot_ns, pc_ns, rtt = self._get_best_coarse_anchor(num_tries=5)
+            sleep_offset = self._calculate_sleep_offset_ns(num_samples=7)
+            phone_mono_ns = phone_boot_ns - sleep_offset
+
+            # Forensic Boot Date Calculation
+            boot_time_sec = (pc_ns - phone_boot_ns) / 1e9
+            dt = datetime.datetime.fromtimestamp(boot_time_sec).astimezone()
+            self.logger.info(f"Legacy Anchor Found. Approx Phone Boot: {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+
+            # Prime the bridge
+            sync_state_obj.ref_time[:] = [phone_mono_ns, phone_mono_ns]
+            sync_state_obj.offset[:] = [pc_ns, pc_ns]
+            sync_state_obj.drift_m[:] = [10**9, 10**9]
+            sync_state_obj.drift_d[:] = [10**9, 10**9]
+            sync_state_obj.enabled[0] = 1
+        except Exception:
+            self.logger.debug("Legacy coarse sync skipped.")

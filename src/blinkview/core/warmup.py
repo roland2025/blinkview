@@ -17,9 +17,11 @@ from blinkview.core.numpy_log import (
     get_telemetry_anchor,
 )
 from blinkview.core.types.formatting import FormattingConfig
+from blinkview.core.types.parsing import create_default_sync
 from blinkview.ops.formatting import estimate_log_batch_size, format_log_batch
-from blinkview.ops.segments import filter_segment
+from blinkview.ops.segments import filter_segment, nb_find_next_module_match
 from blinkview.ops.telemetry import minmax_downsample_inplace, slice_and_downsample_linear
+from blinkview.ops.timestamps import nb_project_synced_ns
 from blinkview.utils.log_level import LogLevel
 
 
@@ -75,12 +77,15 @@ class NumbaWarmupHelper:
                 time_now = self.time_ns()
                 batch.insert(
                     time_now + i,
+                    time_now + i,
                     b"ADC: -1.234, 5.678 ; 100 -0.001",
                     log_level,
                     self.floats_mod.id,
                     self.floats_mod.device.id,
                 )
-            batch.insert(self.time_ns(), b"System Hot", log_level, self.warmup_mod.id, self.warmup_mod.device.id)
+            batch.insert(
+                self.time_ns(), self.time_ns(), b"System Hot", log_level, self.warmup_mod.id, self.warmup_mod.device.id
+            )
             print("Batch Append and Log Filtering/Formatting.")
             # Trigger: Batch Append Logic
             self.log_pool.batch_append(batch)
@@ -186,6 +191,55 @@ class NumbaWarmupHelper:
             num_bins=num_bins,
         )
 
+    def exercise_timesync_kernels(self):
+        """Triggers compilation for the TimeSyncEngine, Projection, and String Parsing."""
+        from blinkview.core.types.parsing import SyncState
+
+        from ..core.time_sync_engine import TimeSyncEngine
+
+        print("exercise_timesync_kernels...")
+
+        # 1. Setup Mock State
+        now_ns = self.time_ns()
+        # Initialize a real SyncState object
+        sync_state = create_default_sync(now_ns, start_enabled=True)
+        engine = TimeSyncEngine(sync_state)
+
+        # 2. Exercise: nb_sync_kernel (via Engine.feed)
+        # We simulate a few pings to exercise the statistical window and drift math
+        mock_pc_tx = now_ns
+        mock_phone_mono = 1_000_000_000  # 1 second uptime
+        mock_pc_rx = now_ns + 30_000_000  # 30ms RTT
+
+        # Ping 1: Initial anchor
+        engine.feed(mock_pc_tx, mock_phone_mono, mock_phone_mono, mock_pc_rx)
+
+        # Ping 2: Jitter check and drift accumulation
+        engine.feed(
+            mock_pc_tx + 1_000_000_000,
+            mock_phone_mono + 1_000_000_000,
+            mock_phone_mono + 1_000_000_000,
+            mock_pc_rx + 1_000_000_000,
+        )
+
+        # Trigger: soft_reset (exercises scalar clearing)
+        engine.soft_reset()
+
+        # 4. Exercise: nb_project_synced_ns
+        # Tests the linear projection and 64-bit overflow safety guards
+
+        with self.log_pool.get_snapshot() as segments:
+            for segment in segments:
+                b = segment.bundle
+                nb_find_next_module_match(b, dtypes.ID_TYPE(self.warmup_mod.id), SEQ_NONE)
+                break
+
+        # print(f"DEBUG: {nb_find_next_module_match.__name__} signatures:")
+        # for sig in nb_find_next_module_match.signatures:
+        #     print(f"  - {sig}")
+
+        print("TimeSync kernels warmed.")
+
     def run_all(self):
         """Execute the full warmup suite."""
         try:
@@ -200,6 +254,8 @@ class NumbaWarmupHelper:
 
             print("exercise_telemetry_kernels...")
             self.exercise_telemetry_kernels()
+
+            self.exercise_timesync_kernels()
         finally:
             # Clean up dummy data
             self.log_pool.release_all()

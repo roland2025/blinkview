@@ -39,6 +39,7 @@ from .system_context import SystemContext
 from .task_manager import TaskManager
 
 if TYPE_CHECKING:
+    from .central_storage import CentralStorage
     from .pipeline_manager import PipelineManager
 
 
@@ -165,7 +166,7 @@ class Registry:
 
         self._is_running = False
 
-        self.central = None
+        self.central: "CentralStorage" = None
         self.reorder = None
 
         self.module_value_tracker: LatestModuleValueTracker = None
@@ -688,11 +689,11 @@ class Registry:
             if batch is None:
                 batch = self.log_create_batch()
             encoded = msg.encode()
-            if not batch.insert(timestamp, encoded, level_id, module_id, self.log_device_id):
+            if not batch.insert(timestamp, timestamp, encoded, level_id, module_id, self.log_device_id):
                 # batch full, flush and create new batch
                 self.flush_log_queue()
                 batch = self.log_create_batch()
-                batch.insert(timestamp, encoded, level_id, module_id, self.log_device_id)
+                batch.insert(timestamp, timestamp, encoded, level_id, module_id, self.log_device_id)
 
     def get_warmup(self):
         if self.warmup_helper is None:

@@ -11,6 +11,7 @@ from blinkview.core.configurable import configuration_property, on_config_change
 from blinkview.core.device_identity import DeviceIdentity
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.output import OutputConfig
+from blinkview.core.types.parsing import SyncState, create_default_sync
 from blinkview.ops.dispatch import process_batch_kernel
 from blinkview.parsers.frame_decoders import FrameDecoder
 from blinkview.parsers.frame_parsers import GenericFrameParser
@@ -63,10 +64,17 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         self._assembler = None
         self._assemble = None
 
+        self.sync_state: SyncState = None
+
         self.numba_needs_compile = True
 
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
+
+        if self.sync_state is None:
+            self.sync_state: SyncState = create_default_sync(self.shared.time_ns())
+
+            print(f"BinaryParser initial sync state: {self.sync_state}")
 
         factory_build = self.shared.factories.build
 
@@ -87,6 +95,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             parser_ctx = SimpleNamespace(
                 get_logger=self.logger.child_creator("parser"),
                 device_id=self.local.device_id,
+                sync_state=self.sync_state,
             )
             self._frame_parser = factory_build(
                 "frame_parser", frame_parser, system_ctx=self.shared, local_ctx=parser_ctx
@@ -167,12 +176,12 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                         batch_acquire_input() as dummy_in,
                         batch_acquire() as dummy_out,
                     ):
-                        dummy_in.insert(time_ns(), b"       0.00 V     -0.010 mA \n")
-                        dummy_in.insert(time_ns(), b"N1 main reg input          0.00 V     -0.010 mA \n")
-                        dummy_in.insert(time_ns(), b"N2 ASI switch")
-                        dummy_in.insert(time_ns(), b"              0.00 V")
-                        dummy_in.insert(time_ns(), b"     -0.014 mA \n")
-                        dummy_in.insert(time_ns(), b"N3 charger input        ")
+                        dummy_in.insert(time_ns(), time_ns(), b"       0.00 V     -0.010 mA \n")
+                        dummy_in.insert(time_ns(), time_ns(), b"N1 main reg input          0.00 V     -0.010 mA \n")
+                        dummy_in.insert(time_ns(), time_ns(), b"N2 ASI switch")
+                        dummy_in.insert(time_ns(), time_ns(), b"              0.00 V")
+                        dummy_in.insert(time_ns(), time_ns(), b"     -0.014 mA \n")
+                        dummy_in.insert(time_ns(), time_ns(), b"N3 charger input        ")
                         # 3. Trigger the kernel
                         # This will block the thread while LLVM does its work
                         _ = process_batch_kernel(

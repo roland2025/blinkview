@@ -11,15 +11,18 @@ from blinkview.core.types.frames import FrameStateParams
 
 
 class FrameState:
-    __slots__ = ("_pool_handle", "bundle")
+    __slots__ = ("_pool_handle", "_ts_handle", "bundle")
 
     def __init__(self, pool, size_bytes=4096):
         self._pool_handle = pool.acquire(size_bytes, dtype=dtypes.BYTE)
+
+        self._ts_handle = pool.acquire(size_bytes, dtype=dtypes.TS_TYPE)
 
         # Initialize the bundle directly.
         # All trackers live here; 'self' only keeps the reference.
         self.bundle = FrameStateParams(
             buffer=self._pool_handle.array,
+            ts_buffer=self._ts_handle.array,
             offset=np.zeros(1, dtype=np.int64),
             in_idx=np.zeros(1, dtype=np.int64),
             in_offset=np.zeros(1, dtype=np.int64),
@@ -43,3 +46,6 @@ class FrameState:
         self.bundle = None
         self._pool_handle.release()
         self._pool_handle = None
+
+        self._ts_handle.release()
+        self._ts_handle = None

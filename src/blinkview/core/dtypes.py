@@ -23,6 +23,7 @@ SEQ_TYPE = np.uint64
 
 UINT32 = np.uint32
 UINT64 = np.uint64
+INT64 = np.int64
 
 # Unified naming for processed telemetry arrays
 PLOT_TS_TYPE = np.float64  # Transformed timestamps (seconds)

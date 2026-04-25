@@ -4,7 +4,11 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import numpy as np
+
+from blinkview.core import dtypes
 from blinkview.core.numba_config import app_njit
+from blinkview.core.types.parsing import SyncState
 
 
 @app_njit(inline="always")
@@ -42,3 +46,23 @@ def parse_iso8601_to_ns(buffer, start, offset_sec):
     res_ns += ms * 1_000_000
 
     return res_ns - (offset_sec * 1_000_000_000)
+
+
+@app_njit(inline="always")
+def nb_project_synced_ns(raw_ns, rx_ns, sync: SyncState):
+    # If the app hasn't provided a high-precision anchor yet,
+    # we use the PC's arrival time so the logs appear in 'roughly' the right place.
+    if not sync.enabled[0]:
+        return rx_ns
+
+    i = sync.active_idx[0]
+    target_anchor = sync.ref_time[i]
+    pc_anchor = sync.offset[i]
+
+    # Calculate distance from anchor and apply hardware drift
+    delta = np.int64(raw_ns) - target_anchor
+
+    # Use float64 for the drift math to prevent integer overflow during scaling
+    drift = np.float64(sync.drift_m[i]) / np.float64(sync.drift_d[i])
+
+    return dtypes.TS_TYPE(pc_anchor + np.int64(np.float64(delta) * drift))

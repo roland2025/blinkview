@@ -4,6 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import numpy as np
+
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.log_batch import LogBundle
 from blinkview.core.types.parsing import STATE_COMPLETE, STATE_INCOMPLETE, UnifiedParserState
@@ -25,11 +27,11 @@ from blinkview.ops.constants import (
 )
 from blinkview.ops.discovery import resolve_module_id
 from blinkview.ops.modules import normalize_name_inplace
-from blinkview.ops.timestamps import parse_iso8601_to_ns
+from blinkview.ops.timestamps import nb_project_synced_ns, parse_iso8601_to_ns
 
 
 @app_njit(inline="always")
-def is_adb_long_header(buffer, cursor, limit):
+def is_adb_long_header_iso(buffer, cursor, limit):
     """
     Validates if the sequence starting at `cursor` is a valid ADB Long Header.
     Matches the rigid punctuation skeleton of: [ YYYY-MM-DD HH:MM:SS.
@@ -59,21 +61,53 @@ def is_adb_long_header(buffer, cursor, limit):
 
 
 @app_njit(inline="always")
+def is_adb_long_header_monotonic(buffer, cursor, limit):
+    """
+    Validates monotonic ADB Long Header: '[ 1726228.928'
+    Matches a '[' followed by a space and at least one digit.
+    """
+    # Monotonic headers are shorter, but we need at least 5 bytes to be sure
+    # (e.g., "[ 0.0]")
+    if limit - cursor < 5:
+        return False
+
+    # Check for '[ '
+    if buffer[cursor] != 91 or buffer[cursor + 1] != 32:
+        return False
+
+    # Check that the next char is a digit
+    val = buffer[cursor + 2]
+    if not (48 <= val <= 57):
+        return False
+
+    return True
+
+
+@app_njit(inline="always")
 def decode_adb_long_frame(f_buf, start, end, out_buf, out_cursor, f_cfg, f_state):
 
     # print(f"Raw Frame Slice: {f_buf[start:end].tobytes()}")
     # --- 1. ORACLE BOUNDARY CHECK ---
-    second_header_idx = -1
+    search_start = start + 2 if is_adb_long_header_monotonic(f_buf, start, end) else start
 
-    search_start = start
-    if is_adb_long_header(f_buf, start, end):
-        search_start = start + 22
+    second_header_idx = -1
 
     for i in range(search_start, end):
         if f_buf[i] == CHAR_LF:
-            if is_adb_long_header(f_buf, i + 1, end):
+            if is_adb_long_header_monotonic(f_buf, i + 1, end):
                 second_header_idx = i + 1  # Point exactly to the '[' of the next header
                 break
+
+    # search_start = start
+    # if is_adb_long_header_iso(f_buf, start, end):
+    #     search_start = start + 22
+    #
+    # second_header_idx = -1
+    # for i in range(search_start, end):
+    #     if f_buf[i] == CHAR_LF:
+    #         if is_adb_long_header_iso(f_buf, i + 1, end):
+    #             second_header_idx = i + 1  # Point exactly to the '[' of the next header
+    #             break
 
     if second_header_idx == -1:
         # Return 0 bytes consumed for STATE_INCOMPLETE
@@ -363,7 +397,49 @@ def parse_adb_tag(
 
 
 @app_njit(inline="always")
-def parse_adb_timestamp(
+def parse_monotonic_to_ns(buffer, start, end):
+    """
+    Parses 'seconds.nanoseconds' (e.g., 733314.258789939) into total nanoseconds.
+    Compatible with -v nsec (9 digits) and standard logcat (3 digits).
+    """
+    cursor = start
+    val_ns = np.int64(0)
+
+    # 1. Parse whole seconds (find the decimal point)
+    while cursor < end:
+        b = buffer[cursor]
+        if b == 46:  # Decimal point '.'
+            cursor += 1
+            break
+        # Ignore leading brackets '[' or spaces if present in the buffer
+        if 48 <= b <= 57:
+            val_ns = val_ns * 10 + (b - 48)
+        cursor += 1
+
+    # Shift seconds into the nanosecond domain
+    val_ns = val_ns * np.int64(1_000_000_000)
+
+    # 2. Parse fractions (up to 9 decimal places for nanoseconds)
+    # The first digit after '.' is 100,000,000 ns (100ms)
+    # The ninth digit after '.' is 1 ns
+    multiplier = np.int64(100_000_000)
+
+    while cursor < end:
+        b = buffer[cursor]
+        if b < 48 or b > 57:  # Stop at space, ']', or end of segment
+            break
+
+        if multiplier > 0:
+            val_ns += np.int64(b - 48) * multiplier
+            multiplier //= 10
+
+        cursor += 1
+
+    return val_ns
+
+
+@app_njit(inline="always")
+def parse_adb_timestamp_iso(
     buffer,
     start_cursor,
     end_cursor,
@@ -379,7 +455,9 @@ def parse_adb_timestamp(
 
     # Call the generic ISO parser
     # We pass 'start_cursor + 2' to skip the '[ '
-    out_b.timestamps[out_idx] = parse_iso8601_to_ns(buffer, start_cursor + 2, state.timestamp.utc_offset[0])
+    out_b.timestamps[out_idx] = nb_project_synced_ns(
+        parse_iso8601_to_ns(buffer, start_cursor + 2, state.timestamp.utc_offset[0]), state.timestamp.sync
+    )
 
     # Move cursor past timestamp (index 25) and skip whitespace to find PID
     cursor = start_cursor + 25
@@ -389,5 +467,44 @@ def parse_adb_timestamp(
             cursor += 1
         else:
             break
+
+    return cursor
+
+
+@app_njit(inline="always")
+def parse_adb_timestamp_monotonic(
+    buffer,
+    start_cursor,
+    end_cursor,
+    out_b: LogBundle,
+    out_idx,
+    state: UnifiedParserState,
+    config,
+):
+    # Basic validation of start
+    if start_cursor + 5 > end_cursor or buffer[start_cursor] != 91:
+        return -1
+
+    # Find the end of the timestamp (the space after the number)
+    ts_end = -1
+    for i in range(start_cursor + 2, end_cursor):
+        if buffer[i] == 32:  # Space
+            ts_end = i
+            break
+
+    if ts_end == -1:
+        return -1
+
+    # Parse and Project
+    raw_ns = parse_monotonic_to_ns(buffer, start_cursor + 2, ts_end)
+
+    # This is the 'now' timestamp the AdbReader captured when it read the chunk.
+    rx_ns = out_b.rx_timestamps[out_idx]
+    out_b.timestamps[out_idx] = nb_project_synced_ns(raw_ns, rx_ns, state.timestamp.sync)
+
+    # Move cursor past the timestamp and skip whitespace to reach the PID
+    cursor = ts_end
+    while cursor < end_cursor and (buffer[cursor] == 32 or buffer[cursor] == 9):
+        cursor += 1
 
     return cursor

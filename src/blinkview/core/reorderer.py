@@ -105,6 +105,7 @@ def _hybrid_merge_and_copy(chunks, ts_scr, b_idx_scr, r_idx_scr, sort_order, out
         src_bundle = chunks[b_id].bundle
 
         # Copy mandatory columns
+        out_bundle.rx_timestamps[out_idx] = src_bundle.rx_timestamps[r_id]
         out_bundle.timestamps[out_idx] = src_bundle.timestamps[r_id]
         src_off = src_bundle.offsets[r_id]
         src_len = src_bundle.lengths[r_id]
@@ -210,7 +211,8 @@ class Reorder(BaseReorder):
                             PooledLogBatch, 10, 1024, has_levels=True, has_modules=True, has_devices=True
                         ) as dummy_out,
                     ):
-                        dummy_in.insert(time_ns(), b"warmup", level=0, module=0, device=0)
+                        ts = time_ns()
+                        dummy_in.insert(ts, ts, b"warmup", level=0, module=0, device=0)
 
                         dummy_in_b = dummy_in.bundle
 

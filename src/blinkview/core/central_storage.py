@@ -4,6 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from typing import Optional
+
 from ..utils.throughput import Speedometer
 from .base_daemon import BaseDaemon
 from .batch_queue import BatchQueue
@@ -48,7 +50,7 @@ class CentralStorage(BaseCentralStorage):
 
         self.put = self.input_queue.put
 
-        self.log_pool = None
+        self.log_pool: Optional[CircularLogPool] = None
 
     def apply_config(self, config: dict):
         changed = super().apply_config(config)

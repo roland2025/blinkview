@@ -11,6 +11,8 @@ import numpy as np
 
 class LogBundle(NamedTuple):
     timestamps: np.ndarray  # dtypes.TS_TYPE (int64)
+    rx_timestamps: np.ndarray  # System/PC Arrival Time #dtypes.TS_TYPE (int64)
+
     offsets: np.ndarray  # dtypes.OFFSET_TYPE (uint32)
     lengths: np.ndarray  # dtypes.LEN_TYPE (uint32)
     buffer: np.ndarray  # dtypes.BYTE (uint8)

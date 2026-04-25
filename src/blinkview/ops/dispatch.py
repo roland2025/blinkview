@@ -9,6 +9,7 @@ from blinkview.core.types.frames import FrameConfig, FrameStateParams
 from blinkview.core.types.log_batch import LogBundle
 from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import STATE_ERROR, STATE_INCOMPLETE, ParserPipelineBundle
+from blinkview.ops.buffers import nb_move_buf, nb_report_error, nb_sync_push, nb_sync_shift_leftovers
 from blinkview.ops.frame_dispatch import dispatch_frame_decoder
 from blinkview.ops.pipeline import execute_parser_pipeline
 from blinkview.ops.strings import squash_spaces_inplace, trim_spaces
@@ -29,6 +30,7 @@ def process_batch_kernel(
     read_offset = f_state.in_offset[0]
     in_frame = f_state.in_frame[0]
     f_buf = f_state.buffer
+    f_ts_buf = f_state.ts_buffer
 
     in_size = in_b.size[0]
     p_cfg = parser.config
@@ -94,10 +96,9 @@ def process_batch_kernel(
                 else:
                     if in_frame:
                         if curr_write + chunk_len <= frame_length_max:
-                            # BUFFER PATH: Append chunk to persistent frame buffer
-                            f_buf[curr_write : curr_write + chunk_len] = in_b.buffer[
-                                in_off + read_offset : in_off + read_offset + chunk_len
-                            ]
+                            src_view = in_b.buffer[in_off + read_offset : in_off + read_offset + chunk_len]
+                            nb_sync_push(f_buf, f_ts_buf, curr_write, src_view, ts_in, chunk_len)
+
                             curr_write += chunk_len
 
                             target_buf = f_buf
@@ -119,20 +120,43 @@ def process_batch_kernel(
 
                     if decoder_state == STATE_INCOMPLETE:
                         if is_zero_copy:
-                            f_buf[0:chunk_len] = in_b.buffer[in_off + read_offset : in_off + scan_idx + 1]
+                            src_view = in_b.buffer[in_off + read_offset : in_off + scan_idx + 1]
+                            nb_sync_push(f_buf, f_ts_buf, 0, src_view, ts_in, chunk_len)
                             curr_write = chunk_len
 
                         read_offset = scan_idx + 1
                         continue
 
                     elif decoder_state == STATE_ERROR:
-                        error_code = 1
-                        total_frame_length = final_cursor - curr_out_cursor
-                        bytes_consumed = target_end - target_start  # Consume bad chunk fully
+                        # Only report if we have slot capacity
+                        if report_errors and curr_out_idx < out_cap:
+                            # Calculate how much of the source was mangled
+                            mangled_len = target_end - target_start
+
+                            curr_out_cursor = nb_report_error(
+                                out_b, curr_out_idx, curr_out_cursor,
+                                target_buf, target_start, mangled_len,
+                                p_cfg.level_error, p_cfg.module_unknown
+                            )
+                            curr_out_idx += 1
+
+                        # Crucial: Only consume what was used, don't flush the whole chunk
+                        bytes_consumed = target_end - target_start
 
                     else:
                         # STATE_COMPLETE
-                        out_b.timestamps[curr_out_idx] = ts_in
+                        if is_zero_copy:
+                            # Fast path: Everything was in the current chunk
+                            frame_ts = ts_in
+                        else:
+                            # Buffer path: Read the timestamp of the exact byte
+                            # that the decoder identified as the start of the message.
+                            # (If your decoder returns msg_start, use that instead of 0)
+                            frame_ts = f_ts_buf[0]
+
+                        out_b.rx_timestamps[curr_out_idx] = frame_ts
+                        out_b.timestamps[curr_out_idx] = frame_ts
+
                         out_b.levels[curr_out_idx] = default_level
                         out_b.modules[curr_out_idx] = default_module
 
@@ -169,8 +193,8 @@ def process_batch_kernel(
                                 if payload_length > 0:
                                     if compact_buffer:
                                         if msg_start > curr_out_cursor:
-                                            for k in range(payload_length):
-                                                out_b.buffer[curr_out_cursor + k] = out_b.buffer[msg_start + k]
+                                            nb_move_buf(out_b.buffer, msg_start, curr_out_cursor, payload_length)
+
                                         out_b.offsets[curr_out_idx] = curr_out_cursor
                                         out_b.lengths[curr_out_idx] = payload_length
                                         curr_out_cursor += payload_length
@@ -192,15 +216,13 @@ def process_batch_kernel(
                     # --- SHIFT UNCONSUMED BYTES (HEADER 2) ---
                     unconsumed = (target_end - target_start) - bytes_consumed
                     if unconsumed > 0:
-                        # Copy loop handles both zero-copy and self-overlapping shifts cleanly
-                        for k in range(unconsumed):
-                            f_buf[k] = target_buf[target_start + bytes_consumed + k]
+                        nb_sync_shift_leftovers(
+                            f_buf, f_ts_buf, target_buf, target_start + bytes_consumed, ts_in, is_zero_copy, unconsumed
+                        )
                         curr_write = unconsumed
                         in_frame = True
                     else:
                         curr_write = 0
-                        # We only reset in_frame if we are truly empty
-                        # (Handled by chunking loop logic above)
 
                 read_offset = scan_idx + 1
 
@@ -213,7 +235,8 @@ def process_batch_kernel(
         remaining = in_len - read_offset
         if remaining > 0 and in_frame:
             if curr_write + remaining <= frame_length_max:
-                f_buf[curr_write : curr_write + remaining] = in_b.buffer[in_off + read_offset : in_off + in_len]
+                src_view = in_b.buffer[in_off + read_offset : in_off + in_len]
+                nb_sync_push(f_buf, f_ts_buf, curr_write, src_view, ts_in, remaining)
                 curr_write += remaining
             else:
                 in_frame = False

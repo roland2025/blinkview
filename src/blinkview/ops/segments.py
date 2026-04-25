@@ -5,8 +5,9 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import numpy as np
+from numba import types, uint32, uint64
 
-from blinkview.core.dtypes import ID_UNSPECIFIED, LEVEL_UNSPECIFIED, SEQ_NONE, TS_UNSPECIFIED
+from blinkview.core.dtypes import ID_TYPE, ID_UNSPECIFIED, LEVEL_UNSPECIFIED, SEQ_NONE, SEQ_TYPE, TS_UNSPECIFIED
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.log_batch import LogBundle
 
@@ -47,6 +48,7 @@ def copy_batch_to_segment(segment: LogBundle, batch: LogBundle, batch_start_idx:
     b_byte_end = b_byte_start + bytes_to_copy
 
     # 4. BLOCK COPIES
+    segment.rx_timestamps[s_start:s_end] = batch.rx_timestamps[b_start:b_end]
     segment.timestamps[s_start:s_end] = batch.timestamps[b_start:b_end]
     segment.lengths[s_start:s_end] = batch.lengths[b_start:b_end]
     segment.buffer[seg_cursor : seg_cursor + bytes_to_copy] = batch.buffer[b_byte_start:b_byte_end]
@@ -130,7 +132,32 @@ def filter_segment(
 
 
 @app_njit()
-def _nb_bundle_push(bundle, ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1):
+def nb_find_next_module_match(segment: LogBundle, target_module, start_seq):
+    """
+    Returns (seq_id, array_index) as (uint64, uint64).
+    If not found, returns (0, 0).
+    """
+    count = segment.size[0]
+    seqs = segment.sequences
+    modules = segment.modules
+
+    for i in range(count):
+        # start_seq=0 (SEQ_NONE) allows the first record (ID 1) to pass
+        if start_seq != 0 and seqs[i] <= start_seq:
+            continue
+
+        if modules[i] == target_module:
+            # Found! Return both as uint64
+            return seqs[i], np.uint64(i)
+
+    # Not found: return the "Zero Tuple"
+    return np.uint64(0), np.uint64(0)
+
+
+@app_njit()
+def _nb_bundle_push(
+    bundle: LogBundle, ts_ns, rx_ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
+):
     # 1. Early Exit & Pre-flight
     size_ptr = bundle.size
     idx = size_ptr[0]
@@ -149,6 +176,7 @@ def _nb_bundle_push(bundle, ts_ns, msg_bytes, level, module, device, seq, ext_u3
 
     # 2. Metadata Writes (Structure of Arrays)
     bundle.timestamps[idx] = ts_ns
+    bundle.rx_timestamps[idx] = rx_ts_ns
     bundle.offsets[idx] = cursor
     bundle.lengths[idx] = msg_len
 
