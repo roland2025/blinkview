@@ -128,15 +128,20 @@ def process_batch_kernel(
                         continue
 
                     elif decoder_state == STATE_ERROR:
+                        mangled_len = target_end - target_start
                         # Only report if we have slot capacity
-                        if report_errors and curr_out_idx < out_cap:
+                        if report_errors and curr_out_idx < out_cap and mangled_len > 0:
                             # Calculate how much of the source was mangled
-                            mangled_len = target_end - target_start
 
                             curr_out_cursor = nb_report_error(
-                                out_b, curr_out_idx, curr_out_cursor,
-                                target_buf, target_start, mangled_len,
-                                p_cfg.level_error, p_cfg.module_unknown
+                                out_b,
+                                curr_out_idx,
+                                curr_out_cursor,
+                                target_buf,
+                                target_start,
+                                mangled_len,
+                                p_cfg.level_error,
+                                p_cfg.module_unknown,
                             )
                             curr_out_idx += 1
 
@@ -162,50 +167,56 @@ def process_batch_kernel(
 
                         total_frame_length = final_cursor - curr_out_cursor
 
-                        is_valid_frame = False
-                        if total_frame_length > 0:
+                        # 1. Early Exit: If the frame is empty, don't waste cycles
+                        if total_frame_length <= 0:
+                            error_code = 0  # Ensure no phantom errors
+                        else:
+                            # 2. Validation Check
                             if frame_length_fixed != 0:
                                 is_valid_frame = total_frame_length == frame_length
                             else:
                                 is_valid_frame = total_frame_length >= frame_length_min
 
-                        if not is_valid_frame:
-                            if report_frame_error:
-                                error_code = 1
-                        else:
-                            msg_start = execute_parser_pipeline(
-                                out_b.buffer, curr_out_cursor, final_cursor, out_b, curr_out_idx, parser.pipeline
-                            )
-
-                            if msg_start == -1:
-                                if report_parser_error:
-                                    error_code = 2
+                            # 3. Decision Path
+                            if not is_valid_frame:
+                                if report_frame_error:
+                                    error_code = 1
                             else:
-                                if filter_squash_spaces:
-                                    msg_start, final_cursor = squash_spaces_inplace(
-                                        out_b.buffer, msg_start, final_cursor
-                                    )
+                                # Happy Path: Execute Pipeline
+                                msg_start = execute_parser_pipeline(
+                                    out_b.buffer, curr_out_cursor, final_cursor, out_b, curr_out_idx, parser.pipeline
+                                )
+
+                                if msg_start == -1:
+                                    if report_parser_error:
+                                        error_code = 2
                                 else:
-                                    msg_start, final_cursor = trim_spaces(out_b.buffer, msg_start, final_cursor)
-
-                                payload_length = final_cursor - msg_start
-
-                                if payload_length > 0:
-                                    if compact_buffer:
-                                        if msg_start > curr_out_cursor:
-                                            nb_move_buf(out_b.buffer, msg_start, curr_out_cursor, payload_length)
-
-                                        out_b.offsets[curr_out_idx] = curr_out_cursor
-                                        out_b.lengths[curr_out_idx] = payload_length
-                                        curr_out_cursor += payload_length
+                                    # 4. Post-Processing (Trimming/Squashing)
+                                    if filter_squash_spaces:
+                                        msg_start, final_cursor = squash_spaces_inplace(
+                                            out_b.buffer, msg_start, final_cursor
+                                        )
                                     else:
-                                        out_b.offsets[curr_out_idx] = msg_start
-                                        out_b.lengths[curr_out_idx] = payload_length
-                                        curr_out_cursor = final_cursor
+                                        msg_start, final_cursor = trim_spaces(out_b.buffer, msg_start, final_cursor)
 
-                                    curr_out_idx += 1
+                                    payload_length = final_cursor - msg_start
 
-                    if report_errors and error_code > 0:
+                                    # 5. Commit to Output
+                                    if payload_length > 0:
+                                        if compact_buffer:
+                                            if msg_start > curr_out_cursor:
+                                                nb_move_buf(out_b.buffer, msg_start, curr_out_cursor, payload_length)
+                                            out_b.offsets[curr_out_idx] = curr_out_cursor
+                                            out_b.lengths[curr_out_idx] = payload_length
+                                            curr_out_cursor += payload_length
+                                        else:
+                                            out_b.offsets[curr_out_idx] = msg_start
+                                            out_b.lengths[curr_out_idx] = payload_length
+                                            curr_out_cursor = final_cursor
+
+                                        curr_out_idx += 1
+
+                    if report_errors and error_code > 0 and total_frame_length > 0:
                         out_b.offsets[curr_out_idx] = curr_out_cursor
                         out_b.lengths[curr_out_idx] = total_frame_length
                         out_b.levels[curr_out_idx] = p_cfg.level_error

@@ -151,7 +151,25 @@ def nb_find_next_module_match(segment: LogBundle, target_module, start_seq):
             return seqs[i], np.uint64(i)
 
     # Not found: return the "Zero Tuple"
-    return np.uint64(0), np.uint64(0)
+    return SEQ_NONE, np.uint64(0)
+
+
+@app_njit()
+def nb_find_next_module_index(segment: LogBundle, target_module, start_idx):
+    """
+    Returns (seq_id, array_index) as (uint64, uint64).
+    If not found, returns (0, 0).
+    """
+    count = segment.size[0]
+    modules = segment.modules
+
+    for i in range(start_idx, count):
+        if modules[i] == target_module:
+            # Found! Return both as uint64
+            return True, np.uint64(i)
+
+    # Not found: return the "Zero Tuple"
+    return False, np.uint64(0)
 
 
 @app_njit()

@@ -15,6 +15,7 @@ from ..core.device_identity import DeviceIdentity
 from ..core.factory import BaseFactory
 from ..core.logger import SystemLogger
 from ..core.reusable_batch_pool import BatchPool
+from ..core.time_sync_engine import TimeSyncEngine
 from ..utils.log_level import LogLevel
 from ..utils.settings_updater import update_object_from_config
 

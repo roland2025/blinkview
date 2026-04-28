@@ -17,7 +17,6 @@ from ..core.types.parsing import SyncState
 from ..parsers.binary_parser import BinaryParser
 from ..utils.adb import detect_adb_path
 from ..utils.throughput import Speedometer, ThroughputAutoTuner
-from .adb_time_syncer import AdbTimeSyncer
 from .BaseReader import BaseReader, DeviceFactory
 
 
@@ -40,12 +39,12 @@ from .BaseReader import BaseReader, DeviceFactory
     default="",
     description="Additional arguments for logcat formatting (e.g., '-v color', '-v long').",
 )
-@configuration_property(
-    "clear_log",
-    type="boolean",
-    default=False,
-    description="If true, executes 'adb logcat -c' to clear the device log buffer before streaming begins.",
-)
+# @configuration_property(
+#     "clear_log",
+#     type="boolean",
+#     default=False,
+#     description="If true, executes 'adb logcat -c' to clear the device log buffer before streaming begins.",
+# )
 @configuration_property(
     "delay",
     type="integer",
@@ -89,8 +88,7 @@ ensuring high throughput without pipeline stalls."""
         self._shell_lock = Lock()
 
         self._syncer = None
-        self._syncer_task_id = None
-        self._syncer_engine = None
+
         self.sleep_offset_ns = 0
 
         self._last_error_log_ns = 0
@@ -196,12 +194,12 @@ ensuring high throughput without pipeline stalls."""
                         # If read1 returns empty bytes, the subprocess reached EOF (ADB died)
                         logger.warning("ADB process stream ended. Restarting...")
                         self._cleanup_process()
-                        sleep(1.0)
+                        next_reconnect_ns = time_ns() + current_backoff_ns
 
                 except Exception as e:
                     logger.error(f"ADB read error: {e}")
                     self._cleanup_process()
-                    sleep(1.0)
+                    next_reconnect_ns = time_ns() + current_backoff_ns
 
         except Exception as e:
             logger.exception("Fatal error in ADB Reader loop", e)
@@ -245,32 +243,7 @@ ensuring high throughput without pipeline stalls."""
                 err_msg = err.strip() if err else "No devices found"
                 raise ConnectionError(err_msg)
 
-            # 3. Locate Parser and SyncState immediately
-            # We need to prime the SyncState before starting the logcat process
-            target_parser = None
-            sync_state_obj = None
-            for sub in self.subscribers:
-                if isinstance(sub, BinaryParser):
-                    target_parser = sub
-                    sync_state_obj = sub.sync_state
-                    break
-
-            if sync_state_obj:
-                # 4. Initialize High-Precision Engine
-                if self._syncer_engine is None:
-                    self._syncer_engine = TimeSyncEngine(sync_state_obj, self.logger)
-                else:
-                    self._syncer_engine.soft_reset()
-
-                # Start with sync DISABLED.
-                # The parser will use rx_timestamp (PC time) until the first pong.
-                sync_state_obj.enabled[0] = 0
-
-                # [LEGACY ANCHORING]
-                # If you ever want to re-enable coarse startup sync,
-                # call self._perform_legacy_coarse_sync(sync_state_obj) here.
-
-                # 5. Clear logs if requested (Now safe to do since shell is open)
+            # 5. Clear logs if requested (Now safe to do since shell is open)
             # if self.clear_log or True:
             #     self.logger.info("Clearing device logs...")
             #     subprocess.run([*base_cmd, "logcat", "-c"], check=False, capture_output=True)
@@ -294,28 +267,6 @@ ensuring high throughput without pipeline stalls."""
 
             # 7. Finalize Environment
             self._refresh_process_ids()
-            is_app_running = self.ensure_blinksync_running()
-
-            # 8. Start Syncer (High-Precision vs. Fallback)
-            if target_parser and self._syncer_engine:
-                if self._syncer_task_id is not None:
-                    self.shared.tasks.stop_periodic(self._syncer_task_id)
-
-                if is_app_running:
-                    # High-Precision: App-based pings
-                    self._syncer = AdbTimeSyncer(
-                        self,
-                        self._syncer_engine,
-                        self.logger.child("syncer"),
-                        time_ns,
-                        self.shared.registry.central.log_pool,
-                        target_parser,
-                    )
-                    self._syncer_task_id = self.shared.tasks.run_periodic(0.1, self._syncer.handler)
-                else:
-                    # Fallback: Periodic shell-based re-anchoring
-                    self.logger.warning("Falling back to Best-Effort Shell Sync (App not found).")
-                    self._syncer_task_id = self.shared.tasks.run_periodic(5.0, self._shell_sync_handler)
 
             self.logger.info("ADB Connected")
             self._last_error_log_ns = 0  # Reset so the next failure is 'Red' immediately
@@ -333,6 +284,9 @@ ensuring high throughput without pipeline stalls."""
 
             self._cleanup_process()
             return None
+
+    def is_connected(self):
+        return self.enabled and self._shell and self._process
 
     def _cleanup_process(self):
         """
@@ -359,8 +313,8 @@ ensuring high throughput without pipeline stalls."""
             self._finalize_subprocess(self._shell)
             self._shell = None
 
-        if self._syncer_task_id is not None:
-            self.shared.tasks.stop_periodic(self._syncer_task_id)
+        # if self._syncer_task_id is not None:
+        #     self.shared.tasks.stop_periodic(self._syncer_task_id)
 
     def _finalize_subprocess(self, proc: subprocess.Popen):
         """Helper to terminate, wait, and eventually kill a process."""
@@ -490,37 +444,6 @@ ensuring high throughput without pipeline stalls."""
                     continue
         return None
 
-    def ensure_blinksync_running(self, timeout_s=3.0, interval_s=0.05):
-        """
-        Checks if blinksync is running. If not, starts it and polls
-        until the PID appears or we hit the timeout.
-        """
-        pkg = "ee.incubator.blinksync"
-
-        # 1. Quick check using walrus operator
-        if pid := self.get_pid_from_name(pkg):
-            self.logger.info(f"Blinksync already active (PID: {pid})")
-            return True
-
-        # 2. Trigger the launch
-        self.logger.info("Blinksync not detected. Triggering launch...")
-        self.query(f"am start -n {pkg}/.MainActivity")
-
-        # 3. Active Wait (Polling)
-        start_time = perf_counter()
-        deadline = start_time + timeout_s
-
-        while perf_counter() < deadline:
-            if new_pid := self.get_pid_from_name(pkg):
-                elapsed_ms = (perf_counter() - start_time) * 1000
-                self.logger.info(f"Blinksync started in {elapsed_ms:.0f}ms (PID: {new_pid})")
-                return True
-
-            sleep(interval_s)
-
-        self.logger.error(f"Blinksync failed to spawn after {timeout_s}s. Check device state.")
-        return False
-
     def _get_best_coarse_anchor(self, num_tries: int = 3) -> tuple[int, int, int]:
         time_ns = self.shared.time_ns
         best_rtt = 2**63 - 1
@@ -557,24 +480,6 @@ ensuring high throughput without pipeline stalls."""
             return now, now, 0
 
         return best_phone_ns, best_pc_ns, best_rtt
-
-    def _get_target_sync_state(self) -> SyncState | None:
-        """Scans subscribers to find the BinaryParser's SyncState object."""
-        for sub in self.subscribers:
-            # We look for the BinaryParser specifically as it's our primary consumer
-            if isinstance(sub, BinaryParser):
-                return sub.sync_state
-        return None
-
-    def _init_sync_engine(self, sync_state: SyncState):
-        """Initializes or resets the high-precision math engine."""
-        if self._syncer_engine is None:
-            self.logger.info("Initializing new TimeSyncEngine")
-            self._syncer_engine = TimeSyncEngine(sync_state, self.logger)
-        else:
-            self.logger.info("Warm-starting existing TimeSyncEngine")
-            # Soft reset clears RTT history but keeps our new coarse anchors
-            self._syncer_engine.soft_reset()
 
     def _calculate_sleep_offset_ns(self, num_samples: int = 7) -> int:
         """

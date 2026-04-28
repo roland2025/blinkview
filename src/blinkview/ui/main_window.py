@@ -62,6 +62,20 @@ from blinkview.ui.windows.detached_tab_window import DetachedTabWindow
 from blinkview.utils.format_metric import format_metric
 from blinkview.utils.used_modules import print_used_modules
 
+# Enable GC debugging to see when collections happen
+# gc.set_debug(gc.DEBUG_STATS)
+#
+#
+# # Or, even better, use a callback to see exactly how long it took
+# def gc_callback(phase, info):
+#     if phase == "stop":
+#         # info contains: 'generation', 'collected', 'uncollectable'
+#         # If generation == 2, this is your 25ms spike
+#         print(f"GC event: gen={info['generation']} took time!")
+#
+#
+# gc.callbacks.append(gc_callback)
+
 
 class BlinkMainWindow(QMainWindow):
     def __init__(self, registry, set_update_version=None):

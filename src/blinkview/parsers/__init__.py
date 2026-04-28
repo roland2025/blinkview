@@ -4,15 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from . import (
-    assembler,
-    binary_parser,
-    can_bus,
-    can_parser,
-    cantools_decoder,
-    key_value,
-    parser,
-    transformer,
-)
+from . import assembler, binary_parser, can_bus, can_parser, cantools_decoder, key_value, parser, transformer
 
 __all__ = ["parser", "transformer", "assembler", "can_bus"]

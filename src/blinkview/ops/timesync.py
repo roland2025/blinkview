@@ -15,6 +15,8 @@ from blinkview.core.types.parsing import SyncState
 INT64_MAX = 9_223_372_036_854_775_807
 ONE_SEC_NS = 1_000_000_000
 
+MAX_RTT_SKIPS = 20
+
 IDX_BEST_RTT = 0
 IDX_FIRST_PH = 1
 IDX_FIRST_PC = 2
@@ -36,11 +38,13 @@ class EngineState(NamedTuple):
 
 
 @app_njit()
-def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sync: SyncState):
+def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sync: SyncState, anchor_is_boot: bool):
+    if pc_rx <= pc_tx:
+        return False, 0.0, 0.0, 0.0
+
     sc = engine.scalars
     ppb_hist = engine.ppb_hist
     rtt_hist = engine.rtt_hist
-
     best_rtt = sc[IDX_BEST_RTT]
     s_count = sc[IDX_SAMPLE_COUNT]
     skips = sc[IDX_SKIPS]
@@ -65,7 +69,12 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
             allowance = 15_000_000
             dynamic_ceiling = best_rtt + allowance
         else:
-            allowance = max(5_000_000, int(last_std_ns * 3))
+            # 1. Calculate a dynamic floor based on the link's actual speed (e.g., 50% of best_rtt)
+            # We also include a tiny 0.5ms absolute failsafe so we never lock up on perfect links.
+            dynamic_floor = max(500_000, int(best_rtt * 0.5))
+
+            # 2. Use the greater of the $3\sigma$ variance OR the dynamic floor
+            allowance = max(dynamic_floor, int(last_std_ns * 3))
             base_anchor = max(last_mean_ns, best_rtt)
             dynamic_ceiling = base_anchor + allowance
 
@@ -73,9 +82,11 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
 
         if not is_acceptable:
             skips += 1
-            if skips >= 3:
+            if skips >= MAX_RTT_SKIPS:
                 best_rtt = int(rtt)
                 skips = 0
+        else:
+            skips = 0
 
     sc[IDX_BEST_RTT] = best_rtt
     sc[IDX_SKIPS] = skips
@@ -136,7 +147,9 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
     first_boot = sc[IDX_FIRST_PH]
     first_pc_offset = sc[IDX_FIRST_PC]
 
-    if s_count > 5:
+    rtt_is_clean = (int(rtt) - best_rtt) <= 2_000_000
+
+    if s_count > 5 and rtt_is_clean:
         if first_boot == 0:
             first_boot = phone_boot
             first_pc_offset = new_offset  # Store anchored offset, NOT pc_tx
@@ -167,7 +180,15 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
     write_idx = 1 - act_arr[0]
 
     sync.offset[write_idx] = new_offset
-    sync.ref_time[write_idx] = phone_mono  # MONO is mapped to the new_offset for Phase
+
+    # --- DYNAMIC ANCHORING ---
+    if anchor_is_boot:
+        # For Zephyr: LOG_X uses RTC (boot)
+        sync.ref_time[write_idx] = phone_boot
+    else:
+        # For Android: LOG_X uses nanoTime (mono)
+        sync.ref_time[write_idx] = phone_mono
+
     sync.drift_m[write_idx] = ppb_scale + avg_ppb
     sync.drift_d[write_idx] = ppb_scale
 

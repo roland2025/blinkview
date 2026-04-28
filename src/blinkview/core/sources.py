@@ -189,4 +189,4 @@ class SourcesManager:
             return
         # if source has send_data
         if hasattr(source, "send_data"):
-            source.send_data(command.encode())
+            source.send_data(command)

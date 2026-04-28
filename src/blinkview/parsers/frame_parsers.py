@@ -23,6 +23,7 @@ from blinkview.core.types.modules import (
 )
 from blinkview.core.types.parsing import (
     CodecID,
+    EmptyUnifiedParserConfig,
     EmptyUnifiedParserState,
     ParserConfig,
     ParserID,
@@ -420,3 +421,20 @@ class SkipWordsParser(FrameSectionParser):
         # 2. Return the universal 3-tuple
         # We use EMPTY_STATE because we aren't extracting any module IDs
         return ParserID.SKIP_WORDS, EmptyUnifiedParserState, config
+
+
+@FrameSectionParserFactory.register("timestamp_zephyr_uptime_formatted")
+class ZephyrUptimeFormattedParser(TimestampParser):
+    def __init__(self):
+        super().__init__()
+        self._bundle = None
+
+    def apply_config(self, config: dict):
+        changed = super().apply_config(config)
+
+        self._bundle = ParserID.TS_ZEPHYR_UPTIME_FORMATTED, self.state, EmptyUnifiedParserConfig
+
+        return changed
+
+    def bundle(self):
+        return self._bundle

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from blinkview.core.configurable import configuration_property, on_config_change, override_property
 from blinkview.core.device_identity import DeviceIdentity
 from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.core.time_sync_engine import TimeSyncEngine
 from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import SyncState, create_default_sync
 from blinkview.ops.dispatch import process_batch_kernel
@@ -126,6 +127,8 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             pool_create = pool.create
 
             batch_out = None
+            batch_out_time = 0  # Track when the batch was created
+            max_timeout_ns = int(max_timeout * 1e9)  # Nanosecond equivalent for fast math
 
             _len = len
             _str = str
@@ -203,65 +206,49 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             # --- [END] WARM UP ---
 
             def flush():
-                nonlocal batch_out
+                nonlocal batch_out, batch_out_time
                 if batch_out is not None and batch_out.size > 0:
                     with batch_out:
-                        # 3. Update tuner_out with the TARGET window
-                        # This projects sizing for the next batch correctly
                         tuner_out.update(batch_out.msg_cursor, batch_out.size, target_window_sec=max_timeout)
                         self.distribute(batch_out)
                 batch_out = None
+                batch_out_time = 0
 
             while not stop_is_set():
-                batch_in = get(timeout=max_timeout)
+                # 1. Calculate dynamic timeout based on batch age
+                if batch_out is not None:
+                    elapsed_ns = time_ns() - batch_out_time
+                    remaining_timeout = max(0.0, max_timeout - (elapsed_ns / 1e9))
+                    current_timeout = remaining_timeout
+                else:
+                    current_timeout = max_timeout
+
+                batch_in = get(timeout=current_timeout)
 
                 if not batch_in:
-                    # No data
+                    # No data arrived within the remaining time window
                     flush()
-                    # last_bps_time = time_ns()
                     continue
 
                 with batch_in:
-                    # logger_in.debug(str(batch_in))
-
-                    # print(f"[parser] batch_in={batch_in}")
-
-                    # print(f"[parser] batch_in={batch_in}")
-                    # for out in batch_in:
-                    #     print(str(out))
                     batch_size_bytes = batch_in.msg_cursor
-
-                    # =====================================================================
-                    # BURST SAFETY: Ensure our planned allocation can at least hold the
-                    # payload we are holding in our hands right now.
-                    # =====================================================================
                     tuner_out.ensure_burst_capacity(batch_size_bytes)
 
-                    # If we have an active batch that is too small for our new burst estimate,
-                    # flush it immediately to force a massive batch allocation.
                     if batch_out and batch_out.buffer_capacity() < tuner_out.estimated_buffer_bytes:
                         flush()
 
-                    # TODO: check if we have enough room in current batch?
-
-                    # --- Lazy Allocation ---
+                    # 2. Record creation time when a new batch is acquired
                     if batch_out is None:
                         batch_out = batch_acquire()
+                        batch_out_time = time_ns()  # Start the clock
 
-                    # --- Throughput Calculation ---
                     speed_in.batch(batch_in)
-
-                    # ... process in_batch and assemble your PooledLogBatch ...
-                    # 1. Bundle up our SoA (Structure of Arrays) views
                     in_bundle = batch_in.bundle
                     in_size = batch_in.size
 
-                    # Initialization for the state machine
                     frame_state.reset_batch_trackers()
                     out_is_full = True
 
-                    # Continue looping until the input batch is fully consumed AND
-                    # all resulting complete frames are extracted from the f_buf
                     while f_state.in_idx[0] < in_size or out_is_full:
                         if batch_out and (
                             batch_out.size >= batch_out.capacity
@@ -269,12 +256,13 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                         ):
                             flush()
 
+                        # 3. Record creation time during inner loop acquisitions too
                         if batch_out is None:
                             batch_out = batch_acquire()
+                            batch_out_time = time_ns()  # Start the clock
 
                         out_bundle = batch_out.bundle
 
-                        # 2. Run the Kernel
                         out_is_full = process_batch_kernel(
                             f_config, f_state, in_bundle, parser_bundle, o_config, out_bundle
                         )
@@ -282,19 +270,11 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                         if parser.post_process(batch_out):
                             parser_bundle = parser.bundle()
 
-                        # 5. Flush immediately if the kernel paused because the output is full
                         if out_is_full:
                             flush()
 
-                # print(f"[parser] batch_out={batch_out}")
-                # for out in batch_out:
-                #     print(str(out))
-                # logger_out.debug(str(batch_out))
-                # for out in batch_out:
-                #     logger_out.trace(str(out))
-
-                # --- Check for Flush ---
-                if batch_out.size >= batch_out.capacity or batch_out.msg_cursor >= (batch_out.buffer_capacity() * 0.9):
+                # 4. Final age check: Did the batch expire while we were processing the dribble?
+                if batch_out is not None and (time_ns() - batch_out_time) >= max_timeout_ns:
                     flush()
 
             flush()

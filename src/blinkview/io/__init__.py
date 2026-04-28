@@ -4,6 +4,17 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from . import adb_reader, benchmark, binary_file_reader, can_bus, logging, rtt, tcp_server, uart
+from . import (
+    adb_reader,
+    adb_time_syncer,
+    benchmark,
+    binary_file_reader,
+    can_bus,
+    logging,
+    rtt,
+    serial_time_syncer,
+    tcp_server,
+    uart,
+)
 
 # __all__ = ['uart']

@@ -22,10 +22,11 @@ from blinkview.ops.timesync import (
 
 
 class TimeSyncEngine:
-    __slots__ = ("sync", "engine", "logger", "logger_sync")
+    __slots__ = ("sync", "engine", "logger", "logger_sync", "anchor_is_boot")
 
-    def __init__(self, sync_state: SyncState, logger=None):
+    def __init__(self, sync_state: SyncState, anchor_is_boot: bool = False, logger=None):
         self.sync = sync_state
+        self.anchor_is_boot = anchor_is_boot
         self.logger = logger
         # Create child logger only if parent exists
         self.logger_sync = logger.child("sync") if logger else None
@@ -34,13 +35,13 @@ class TimeSyncEngine:
         scalars[IDX_BEST_RTT] = np.iinfo(np.int64).max
 
         self.engine = EngineState(
-            scalars=scalars, ppb_hist=np.zeros(15, dtype=np.int64), rtt_hist=np.zeros(100, dtype=np.uint64)
+            scalars=scalars, ppb_hist=np.zeros(15, dtype=np.int64), rtt_hist=np.zeros(50, dtype=np.uint64)
         )
 
     def feed(self, pc_tx: int, phone_mono: int, phone_boot: int, pc_rx: int) -> bool:
         # Pass phone_boot to the kernel
         success, quality, mean_ms, stddev_ms = nb_sync_kernel(
-            pc_tx, phone_mono, phone_boot, pc_rx, self.engine, self.sync
+            pc_tx, phone_mono, phone_boot, pc_rx, self.engine, self.sync, self.anchor_is_boot
         )
 
         if success:
@@ -53,7 +54,9 @@ class TimeSyncEngine:
                 )
         else:
             if log := self.logger:
-                log.debug(f"Skipped jittery pong. q={quality:.3f} (mean={mean_ms:.3f}ms, std={stddev_ms:.3f}ms)")
+                log.debug(
+                    f"Skipped jittery pong. rtt={(pc_rx - pc_tx) / 1e6} q={quality:.3f} (mean={mean_ms:.3f}ms, std={stddev_ms:.3f}ms)"
+                )
 
         return success
 

@@ -7,10 +7,7 @@
 from time import sleep
 
 from ..core.configurable import configuration_property, override_property
-from ..core.log_row import LogRow
 from ..core.numpy_batch_manager import PooledLogBatch
-from ..core.reusable_batch_pool import TimeDataEntry
-from ..utils.log_level import LogLevel
 from ..utils.throughput import Speedometer, ThroughputAutoTuner
 from .BaseReader import BaseReader, DeviceFactory
 
@@ -124,6 +121,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         delay_s = self.delay / 1000.0
         delay_ns = int(self.delay * 1_000_000)
 
+        last_set_timeout = None
+
         # 2. Stats and Auto-Tuning Setup
         # We set msg_size_bytes to 20 to maintain your ~50 chunks/KB density preference
         stats = Speedometer(logger=self.logger.child("stats"))
@@ -154,13 +153,26 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                     batch = batch_acquire()
 
                 try:
+                    now = time_ns()
+                    if batch is None or batch.start_ts == 0:
+                        new_timeout = 0.1  # Idle: Wait up to 100ms for the first byte
+                    else:
+                        # Calculate remaining time in the window
+                        elapsed_ns = now - batch.start_ts
+                        remaining_ns = (delay_ns / 2) - elapsed_ns
+
+                        new_timeout = max(0.001, remaining_ns / 1_000_000_000.0)
+
+                    if new_timeout != last_set_timeout:
+                        ser.timeout = new_timeout
+                        last_set_timeout = new_timeout
+
                     # 5. Read Lead Byte (Establish Arrival Timestamp)
                     first_byte = _read(1)
+                    now = time_ns()
                     if first_byte:
-                        now = time_ns()
-
                         # Start record
-                        if not batch.insert(now, first_byte):
+                        if not batch.insert(now, now, first_byte):
                             with batch:
                                 self.distribute(batch)
                                 # Update tuner with the results of the finished batch
@@ -173,6 +185,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                         waiting = ser.in_waiting
                         if waiting > 0:
                             rest = _read(waiting)
+                            # print(f"{self.__class__.__name__}: read {time()} ... {first_byte + rest}")
                             if not batch.append(rest):
                                 with batch:
                                     self.distribute(batch)
@@ -181,12 +194,11 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                                 batch = batch_acquire()
                                 batch.insert(now, rest)
 
-                        # 7. Batching Window Check
-                        if (now - batch.start_ts) >= delay_ns:
-                            with batch:
-                                self.distribute(batch)
-                                tuner.update(batch.msg_cursor, batch.size, delay_s)
-                            batch = None
+                    if batch is not None and (now - batch.start_ts) >= delay_ns:
+                        with batch:
+                            self.distribute(batch)
+                            tuner.update(batch.msg_cursor, batch.size, delay_s)
+                        batch = None
 
                 except Exception as e:
                     logger.error(f"Serial read error: {e}")
@@ -213,6 +225,14 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
     def open(self):
         try:
+            from ..parsers.binary_parser import BinaryParser
+
+            time_ns = self.shared.time_ns
+
+            # sync_state = self._init_sync_engine(anchor_is_boot=True)
+
+            target_parser = next((s for s in self.subscribers if isinstance(s, BinaryParser)), None)
+
             BUF_SIZE = 64 * 1024  # 64KB buffer for incoming serial data
 
             self.logger.info(f"Opening '{self.url}' at {self.baudrate} baud")
@@ -220,7 +240,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             from serial import serial_for_url
 
             # Use PySerial's URL handler (handles socket://, rfc2217://, hwgrep://, etc.)
-            ser = serial_for_url(self.url, baudrate=self.baudrate, timeout=0.1, inter_byte_timeout=0.01)
+            ser = serial_for_url(self.url, baudrate=self.baudrate, timeout=self.delay / 1000.0, inter_byte_timeout=0.01)
             self.serial = ser
 
             # --- ESP32 DTR/RTS Logic ---
@@ -243,10 +263,11 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         except Exception as e:
             self.logger.error("Failed to open serial port.", e)
 
-    def send_data(self, data: bytes):
+    def send_data(self, data: str):
         if self.serial and self.serial.is_open:
             try:
-                self.serial.write(data)
+                # print(f"{self.__class__.__name__}: send {time()} ... {data}")
+                self.serial.write(data.encode())
             except Exception as e:
                 self.logger.exception("Failed to send data", e)
 

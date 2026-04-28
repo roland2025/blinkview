@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from threading import Event, Lock, Thread
-from time import sleep
+from time import sleep, time
 from types import SimpleNamespace
 from typing import Iterable, List
 
@@ -206,6 +206,11 @@ class BaseDaemon:
     def distribute(self, batch: ReusableBatch):
         with self._subscribers_lock:
             subs = list(self.subscribers)
+
+        # ts = time()
+        # cls_name = self.__class__.__name__
+        # for b in batch.iter_human():
+        #     print(f"{cls_name}: dist {ts} ... {b}")
 
         for sub in subs:
             sub.put(batch)

@@ -15,12 +15,12 @@ from blinkview.ops.codec_adb_long import (
     parse_adb_level,
     parse_adb_pid_tid,
     parse_adb_tag,
-    parse_adb_timestamp_iso,
     parse_adb_timestamp_monotonic,
 )
-from blinkview.ops.generic import SkipWordsConfig, skip_words_parser
+from blinkview.ops.generic import skip_words_parser
 from blinkview.ops.levels import parse_log_level
 from blinkview.ops.modules import parse_fixed_width_name, parse_module_tags_statemachine
+from blinkview.ops.zephyr_timestamp import nb_parse_zephyr_uptime_formatted
 
 # --- Extract Categories for Numba ---
 _CAT_IDENTITY = ParserID.CAT_IDENTITY
@@ -38,6 +38,7 @@ _ID_SKIP_WORDS = ParserID.SKIP_WORDS
 _ID_MOD_ADB_LONG = ParserID.MOD_ADB_LONG
 
 _ID_TS_ADB_LONG = ParserID.TS_ADB_LONG
+_ID_TS_ZEPHYR_UPTIME_FORMATTED = ParserID.TS_ZEPHYR_UPTIME_FORMATTED
 
 _ID_PID_TID_ADB_LONG = ParserID.PID_TID_ADB_LONG
 _ID_LEVEL_MAP_ADB_LONG = ParserID.LEVEL_MAP_ADB_LONG
@@ -70,6 +71,9 @@ def execute_parser_pipeline(buffer, start_cursor, end_cursor, out_b, out_idx, pa
 
         elif p_id == _ID_TS_ADB_LONG:
             cursor = parse_adb_timestamp_monotonic(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+        elif p_id == _ID_TS_ZEPHYR_UPTIME_FORMATTED:
+            cursor = nb_parse_zephyr_uptime_formatted(buffer, cursor, end_cursor, out_b, out_idx, state, config)
 
         elif p_id == _ID_PID_TID_ADB_LONG:
             cursor = parse_adb_pid_tid(buffer, cursor, end_cursor, out_b, out_idx, state, config)
