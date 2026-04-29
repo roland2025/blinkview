@@ -49,20 +49,85 @@ def parse_iso8601_to_ns(buffer, start, offset_sec):
 
 
 @app_njit(inline="always")
+def nb_apply_drift_projection(raw_ns, anchor_raw, anchor_rx, drift_m, drift_d):
+    """
+    Core math to project an MCU timestamp to PC time using an anchor and a drift ratio.
+    """
+    delta = np.int64(raw_ns) - np.int64(anchor_raw)
+    drift = np.float64(drift_m) / np.float64(drift_d)
+
+    return dtypes.TS_TYPE(np.int64(anchor_rx) + np.int64(np.float64(delta) * drift))
+
+
+@app_njit(inline="always")
+def nb_auto_sync_fallback(raw_ns, rx_ns, sync: SyncState):
+    is_init = sync.auto_init[0]
+    last_raw = sync.auto_last_raw[0]
+    last_out = sync.auto_anchor_rx[0]
+    current_offset = np.int64(rx_ns) - np.int64(raw_ns)
+
+    # 1. Initialization / Reboot
+    if not is_init or raw_ns < last_raw:
+        sync.auto_init[0] = 1
+        sync.auto_last_raw[0] = raw_ns
+        sync.auto_anchor_rx[0] = rx_ns
+        sync.auto_window_min_offset[0] = current_offset
+        sync.auto_warmup_cnt[0] = 512  # Reset warmup on reboot
+        return dtypes.TS_TYPE(rx_ns)
+
+    # 2. Track Minimum Offset (Baseline)
+    min_offset = sync.auto_window_min_offset[0]
+    if current_offset < min_offset:
+        min_offset = current_offset
+    else:
+        min_offset += 1000  # 1us leaky bucket
+    sync.auto_window_min_offset[0] = min_offset
+
+    # 3. Hardware Spacing
+    delta_raw = np.int64(raw_ns) - np.int64(last_raw)
+    predicted_rx = last_out + delta_raw
+
+    # 4. Phase-Locked Loop (PLL) Correction
+    ideal_rx = np.int64(raw_ns) + min_offset
+    error = ideal_rx - predicted_rx
+
+    # --- DUAL-STAGE CORRECTION ---
+    if sync.auto_warmup_cnt[0] > 0:
+        divisor = 16  # Fast Lock: ~70 logs to 99% convergence
+        sync.auto_warmup_cnt[0] -= 1
+    else:
+        divisor = 256  # Stable Track: Resists jitter, handles drift
+
+    correction = error // divisor
+
+    # Slew Rate Limiter (CRITICAL for fast-sync)
+    # Even with aggressive correction, we protect the micro-spacing
+    # of logs within a burst by capping the shift to 50% of the gap.
+    max_adj = delta_raw // 2
+    if correction < -max_adj:
+        correction = -max_adj
+    elif correction > max_adj:
+        correction = max_adj
+
+    corrected_rx = predicted_rx + correction
+
+    # 5. Monotonicity Guard
+    if corrected_rx <= last_out:
+        corrected_rx = last_out + 1000
+
+    # Persist state
+    sync.auto_last_raw[0] = raw_ns
+    sync.auto_anchor_rx[0] = corrected_rx
+
+    return dtypes.TS_TYPE(corrected_rx)
+
+
+@app_njit(inline="always")
 def nb_project_synced_ns(raw_ns, rx_ns, sync: SyncState):
-    # If the app hasn't provided a high-precision anchor yet,
-    # we use the PC's arrival time so the logs appear in 'roughly' the right place.
+    # Delegate to Auto-Sync if hardware sync isn't ready
     if not sync.enabled[0]:
-        return rx_ns
+        return nb_auto_sync_fallback(raw_ns, rx_ns, sync)
 
+    # Delegate to Formal Sync
     i = sync.active_idx[0]
-    target_anchor = sync.ref_time[i]
-    pc_anchor = sync.offset[i]
-
-    # Calculate distance from anchor and apply hardware drift
-    delta = np.int64(raw_ns) - target_anchor
-
-    # Use float64 for the drift math to prevent integer overflow during scaling
-    drift = np.float64(sync.drift_m[i]) / np.float64(sync.drift_d[i])
-
-    return dtypes.TS_TYPE(pc_anchor + np.int64(np.float64(delta) * drift))
+    return nb_apply_drift_projection(raw_ns, sync.ref_time[i], sync.offset[i], sync.drift_m[i], sync.drift_d[i])

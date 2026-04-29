@@ -112,33 +112,62 @@ class SystemLogger(BaseLogger):
 
 
 class PrintLogger(BaseLogger):
-    __slots__ = ("ctx",)
+    __slots__ = ("ctx", "queue_put", "time_ns")
 
-    def __init__(self, category: str, owner_name: str = None, queue_put=None, time_ns=None):
+    def __init__(self, category: str, owner_name: str = None, queue_put=None, time_ns=None, _internal_ctx: str = None):
         """
         Dummy Logger: Bypasses Registry/Queue and prints directly to console.
+        Supports hierarchical child loggers.
         """
-        # Create a context string for the print output
-        ctx = f"{category}"
-        if owner_name:
-            ctx += f".{owner_name}"
+        # Determine the context string (inherited if internal, otherwise built)
+        if _internal_ctx:
+            self.ctx = _internal_ctx
+        else:
+            ctx = f"{category}"
+            if owner_name:
+                ctx += f".{owner_name}"
+            self.ctx = ctx
 
-        self.ctx = ctx
+        # Store references to allow child logger creation
+        self.queue_put = queue_put
+        self.time_ns = time_ns
 
         from time import localtime, strftime
 
+        # Localize variables for the fast_log closure
         strftime_ = strftime
         localtime_ = localtime
         print_ = print
+        ctx_ = self.ctx
+        q_put = self.queue_put
+        t_ns = self.time_ns
 
-        # The 'dummy' fast_log replaces the registry-based one
         def fast_log(msg: str, level_name: LevelIdentity):
-            # Format: [TIME] LEVEL [CATEGORY.OWNER] MESSAGE
-            # Using .2f for seconds to keep it readable
+            # Format: [TIME] LEVEL SYSTEM [CONTEXT] MESSAGE
             t = strftime_("%H:%M:%S", localtime_())
-            print_(f"{t} {level_name} SYSTEM {ctx} \t{msg}")
+            print_(f"{t} {level_name} SYSTEM {ctx_} \t{msg}")
 
-            if queue_put is not None and time_ns is not None:
-                queue_put((time_ns(), ctx, level_name, msg))
+            if q_put is not None and t_ns is not None:
+                q_put((t_ns(), ctx_, level_name, msg))
 
         self.log = fast_log
+
+    def child(self, name: str) -> "PrintLogger":
+        """
+        Creates a new PrintLogger instance with an appended context path.
+        """
+        new_path = f"{self.ctx}.{name}"
+        return PrintLogger(
+            category="", owner_name="", queue_put=self.queue_put, time_ns=self.time_ns, _internal_ctx=new_path
+        )
+
+    def child_creator(self, name: str) -> Callable[[], "PrintLogger"]:
+        """
+        Returns a callable that creates a child logger with the specified name.
+        Useful for deferred initialization.
+        """
+
+        def creator():
+            return self.child(name)
+
+        return creator

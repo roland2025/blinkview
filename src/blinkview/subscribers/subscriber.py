@@ -23,3 +23,7 @@ class BaseSubscriber(BaseDaemon):
 
 class SubscriberFactory(BaseFactory[BaseSubscriber]):
     pass
+
+
+class TimeSyncerFactory(BaseFactory[SubscriberFactory]):
+    pass

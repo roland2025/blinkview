@@ -62,12 +62,9 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         self._frame_codec: FrameDecoder = None
         self._frame_parser: GenericFrameParser = None
 
-        self._assembler = None
-        self._assemble = None
-
         self.sync_state: SyncState = None
 
-        self.numba_needs_compile = True
+        self.numba_needs_compile = False
 
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
@@ -102,7 +99,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 "frame_parser", frame_parser, system_ctx=self.shared, local_ctx=parser_ctx
             )
 
-        self.numba_needs_compile = True
+        self.numba_needs_compile = False
         self.thread_needs_restart = True
 
         return changed

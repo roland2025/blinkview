@@ -14,6 +14,7 @@ from blinkview.core.id_registry import IDRegistry
 from blinkview.core.module_snapshot import LatestModuleValueTracker
 from blinkview.core.reorderer import Reorder
 from blinkview.parsers import adb_decoder, frame_decoders, frame_parsers
+from blinkview.subscribers import subscriber
 
 from ..io import *
 from ..io.BaseReader import DeviceFactory
@@ -78,6 +79,7 @@ class Registry:
         factories.register("central", CentralFactory)
         factories.register("source", DeviceFactory)
         factories.register("parser", parser.ParserFactory)
+        factories.register("time_sync", subscriber.TimeSyncerFactory)
         factories.register("pipeline_transformer", transformer.TransformerFactory)
         factories.register("pipeline_assembler", assembler.AssemblerFactory)
         factories.register("pipeline_printable", transformer.PipelinePrintableFactory)
@@ -131,6 +133,9 @@ class Registry:
         self.session_name = session_name
 
         self.warmup_helper = None
+
+        self.warmup_success = False
+        self.warmup_error = None
 
         # ==========================================
         # LAYER 2: Storage & Sinks
@@ -405,13 +410,19 @@ class Registry:
             return
 
         try:
+            self.warmup_success = False
             self.logger.warn("NUMBA: compiling kernels")
 
             self.get_warmup().run_all()
 
             self.logger.warn("NUMBA: compiling done")
+            self.warmup_success = True
         except Exception as e:
+            self.warmup_error = str(e)
+            self.warmup_success = False
             self.logger.exception("Error during compiling kernels", e)
+        finally:
+            self.warmup_helper = None
 
         self.logger.warn(f"--- Starting Session: {self.session_name} ---")
 
@@ -699,7 +710,7 @@ class Registry:
         if self.warmup_helper is None:
             from blinkview.core.warmup import NumbaWarmupHelper
 
-            self.warmup_helper = NumbaWarmupHelper(self.system_ctx.array_pool, self.time_utils.now_ns)
+            self.warmup_helper = NumbaWarmupHelper(self.system_ctx)
         return self.warmup_helper
 
 

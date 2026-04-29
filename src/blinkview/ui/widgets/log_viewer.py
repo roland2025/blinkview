@@ -452,7 +452,7 @@ QToolButton[filterEnabled="true"] {
         total_new_rows = 0
         full_string_batch = ""
 
-        format_cfg = FormattingConfig(self.show_ts, self.show_dev, self.show_lvl, self.show_mod)
+        format_cfg = FormattingConfig(self.show_ts, self.show_dev, self.show_lvl, self.show_mod, 9)
 
         with pool.get_snapshot() as segments:
             for segment in segments:

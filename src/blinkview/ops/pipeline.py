@@ -30,63 +30,98 @@ _CAT_SANITIZATION = ParserID.CAT_SANITIZATION
 _CAT_PLUGIN = ParserID.CAT_PLUGIN_V1
 
 # --- Extract Specific IDs for Numba ---
-_ID_MOD_FIXED = ParserID.MOD_FIXED_WIDTH
-_ID_MOD_DYNAMIC = ParserID.MOD_DYNAMIC_SM
-_ID_LEVEL_MAP = ParserID.LEVEL_NAME_MAP
-_ID_SKIP_WORDS = ParserID.SKIP_WORDS
+MOD_FIXED_WIDTH = ParserID.MOD_FIXED_WIDTH
+MOD_DYNAMIC_SM = ParserID.MOD_DYNAMIC_SM
+LEVEL_NAME_MAP = ParserID.LEVEL_NAME_MAP
+SKIP_WORDS = ParserID.SKIP_WORDS
 
-_ID_MOD_ADB_LONG = ParserID.MOD_ADB_LONG
+MOD_ADB_LONG = ParserID.MOD_ADB_LONG
 
-_ID_TS_ADB_LONG = ParserID.TS_ADB_LONG
-_ID_TS_ZEPHYR_UPTIME_FORMATTED = ParserID.TS_ZEPHYR_UPTIME_FORMATTED
+TS_ADB_LONG = ParserID.TS_ADB_LONG
+TS_ZEPHYR_UPTIME_FORMATTED = ParserID.TS_ZEPHYR_UPTIME_FORMATTED
 
-_ID_PID_TID_ADB_LONG = ParserID.PID_TID_ADB_LONG
-_ID_LEVEL_MAP_ADB_LONG = ParserID.LEVEL_MAP_ADB_LONG
+PID_TID_ADB_LONG = ParserID.PID_TID_ADB_LONG
+LEVEL_MAP_ADB_LONG = ParserID.LEVEL_MAP_ADB_LONG
+
+
+@app_njit(inline="always")  # Force inline just to be absolutely certain, though Numba usually does this automatically
+def _process_bundle(buffer, cursor, end_cursor, out_b, out_idx, bundle):
+    p_id = bundle[0]
+    state = bundle[1]  # ALWAYS UnifiedParserState
+    config = bundle[2]  # ALWAYS UnifiedParserConfig
+
+    if p_id == LEVEL_NAME_MAP:
+        return parse_log_level(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == MOD_FIXED_WIDTH:
+        return parse_fixed_width_name(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == MOD_DYNAMIC_SM:
+        return parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == SKIP_WORDS:
+        return skip_words_parser(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == TS_ADB_LONG:
+        return parse_adb_timestamp_monotonic(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == TS_ZEPHYR_UPTIME_FORMATTED:
+        return nb_parse_zephyr_uptime_formatted(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == PID_TID_ADB_LONG:
+        return parse_adb_pid_tid(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == LEVEL_MAP_ADB_LONG:
+        return parse_adb_level(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == MOD_ADB_LONG:
+        return parse_adb_tag(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    # Fallback if an unknown p_id is passed
+    return -1
 
 
 @app_njit()
-def execute_parser_pipeline(buffer, start_cursor, end_cursor, out_b, out_idx, parser_bundles):
+def execute_parser_pipeline_(buffer, start_cursor, end_cursor, out_b, out_idx, parser_bundles):
     # parser_bundles is now a standard homogeneous List or Tuple
     if len(parser_bundles) == 0:
         return start_cursor
 
     cursor = start_cursor
 
-    # for bundle in literal_unroll(parser_bundles): # 20% faster
-    for bundle in parser_bundles:  # 20% slower
-        p_id = bundle[0]
-        state = bundle[1]  # ALWAYS UnifiedParserState
-        config = bundle[2]  # ALWAYS UnifiedParserConfig
-        if p_id == _ID_LEVEL_MAP:
-            cursor = parse_log_level(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+    for bundle in literal_unroll(parser_bundles):  # 20% faster
+        # for bundle in parser_bundles:  # 20% slower
+        cursor = _process_bundle(buffer, cursor, end_cursor, out_b, out_idx, bundle)
 
-        elif p_id == _ID_MOD_FIXED:
-            cursor = parse_fixed_width_name(buffer, cursor, end_cursor, out_b, out_idx, state, config)
-
-        elif p_id == _ID_MOD_DYNAMIC:
-            cursor = parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx, state, config)
-
-        elif p_id == _ID_SKIP_WORDS:
-            cursor = skip_words_parser(buffer, cursor, end_cursor, out_b, out_idx, state, config)
-
-        elif p_id == _ID_TS_ADB_LONG:
-            cursor = parse_adb_timestamp_monotonic(buffer, cursor, end_cursor, out_b, out_idx, state, config)
-
-        elif p_id == _ID_TS_ZEPHYR_UPTIME_FORMATTED:
-            cursor = nb_parse_zephyr_uptime_formatted(buffer, cursor, end_cursor, out_b, out_idx, state, config)
-
-        elif p_id == _ID_PID_TID_ADB_LONG:
-            cursor = parse_adb_pid_tid(buffer, cursor, end_cursor, out_b, out_idx, state, config)
-
-        elif p_id == _ID_LEVEL_MAP_ADB_LONG:
-            cursor = parse_adb_level(buffer, cursor, end_cursor, out_b, out_idx, state, config)
-
-        elif p_id == _ID_MOD_ADB_LONG:
-            cursor = parse_adb_tag(buffer, cursor, end_cursor, out_b, out_idx, state, config)
-
-        else:
+        if cursor == -1:
             return -1
 
+    return cursor
+
+
+@app_njit()
+def execute_parser_pipeline(buffer, start_cursor, end_cursor, out_b, out_idx, parser_bundles):
+    # parser_bundles is now a standard homogeneous List or Tuple
+    length = len(parser_bundles)
+    if length == 0:
+        return start_cursor
+
+    cursor = start_cursor
+
+    if length > 0:
+        cursor = _process_bundle(buffer, cursor, end_cursor, out_b, out_idx, parser_bundles[0])
+        if cursor == -1:
+            return -1
+    if length > 1:
+        cursor = _process_bundle(buffer, cursor, end_cursor, out_b, out_idx, parser_bundles[1])
+        if cursor == -1:
+            return -1
+    if length > 2:
+        cursor = _process_bundle(buffer, cursor, end_cursor, out_b, out_idx, parser_bundles[2])
+        if cursor == -1:
+            return -1
+    if length > 3:
+        cursor = _process_bundle(buffer, cursor, end_cursor, out_b, out_idx, parser_bundles[3])
         if cursor == -1:
             return -1
 

@@ -4,11 +4,14 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from types import SimpleNamespace
+
 import numpy as np
 
 from blinkview.core import dtypes
 from blinkview.core.buffers import ModuleBuffer
 from blinkview.core.dtypes import SEQ_NONE
+from blinkview.core.logger import PrintLogger, SystemLogger
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.numpy_log import (
     allocate_discovery_workspace,
@@ -16,12 +19,19 @@ from blinkview.core.numpy_log import (
     fetch_telemetry_arrays,
     get_telemetry_anchor,
 )
+from blinkview.core.system_context import SystemContext
 from blinkview.core.types.formatting import FormattingConfig
+from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import create_default_sync
+from blinkview.ops.dispatch import process_batch_kernel
 from blinkview.ops.formatting import estimate_log_batch_size, format_log_batch
-from blinkview.ops.segments import filter_segment, nb_find_next_module_match
+from blinkview.ops.segments import filter_segment, nb_find_next_module_index, nb_find_next_module_match
 from blinkview.ops.telemetry import minmax_downsample_inplace, slice_and_downsample_linear
 from blinkview.ops.timestamps import nb_project_synced_ns
+from blinkview.parsers.frame_decoders import FrameDecoder
+from blinkview.parsers.frame_parsers import GenericFrameParser
+from blinkview.parsers.state import FrameState
+from blinkview.storage.file_logger import BinaryBatchProcessor, LogRowBatchProcessor
 from blinkview.utils.log_level import LogLevel
 
 
@@ -31,9 +41,11 @@ class NumbaWarmupHelper:
     for logging, telemetry, and registry kernels.
     """
 
-    def __init__(self, array_pool, time_ns_func):
-        self.array_pool = array_pool
-        self.time_ns = time_ns_func
+    def __init__(self, shared: SystemContext):
+        self.array_pool = shared.array_pool
+        self.time_ns = shared.time_ns
+
+        self.logger = PrintLogger("warmup")
 
         from blinkview.core.id_registry import IDRegistry
         from blinkview.core.module_snapshot import LatestModuleValueTracker
@@ -54,6 +66,20 @@ class NumbaWarmupHelper:
         # Default config for formatting kernels
         self.format_cfg = FormattingConfig(True, True, True, True)
 
+        self.shared = SystemContext(
+            time_ns=self.time_ns,
+            registry=None,
+            id_registry=self.registry,
+            factories=shared.factories,
+            tasks=shared.tasks,
+            settings=shared.settings,
+            pool=shared.pool,
+            array_pool=shared.array_pool,
+        )
+
+        self._frame_codec: FrameDecoder = None
+        self._frame_parser: GenericFrameParser = None
+
     def get_pooled_log_batch(self, capacity=256):
         """Helper to acquire a pooled batch for data insertion."""
         return self.array_pool.create(
@@ -67,6 +93,7 @@ class NumbaWarmupHelper:
 
     def exercise_logging_kernels(self):
         """Triggers compilation for Batch Append and Log Filtering/Formatting."""
+        print("exercise_logging_kernels...")
         log_level = LogLevel.INFO.value
 
         with self.get_pooled_log_batch(1024) as batch:
@@ -92,6 +119,9 @@ class NumbaWarmupHelper:
 
     def exercise_tracker_kernels(self):
         """Triggers compilation for Module Snapshot tracking and state copying."""
+
+        print("exercise_tracker_kernels...")
+
         # Trigger: _copy_snapshot_state and _update_master_arrays_reverse
         # This requires data to be in the pool (provided by exercise_logging_kernels)
         self.tracker.update()
@@ -103,6 +133,9 @@ class NumbaWarmupHelper:
 
     def exercise_formatting_kernels(self):
         # Trigger: Filtering and Formatting Logic
+
+        print("exercise_formatting_kernels...")
+
         tm_arr = np.array([self.floats_mod.id, self.warmup_mod.id], dtype=dtypes.ID_TYPE)
         s_seq = dtypes.SEQ_TYPE(0)  # uint64
         t_lvl = dtypes.LEVEL_UNSPECIFIED  # uint8
@@ -141,6 +174,9 @@ class NumbaWarmupHelper:
 
     def exercise_telemetry_kernels(self):
         """Triggers compilation for telemetry discovery and extraction."""
+
+        print("exercise_telemetry_kernels...")
+
         discovery_ws = allocate_discovery_workspace()
 
         # Trigger: Anchor discovery
@@ -232,6 +268,8 @@ class NumbaWarmupHelper:
             for segment in segments:
                 b = segment.bundle
                 nb_find_next_module_match(b, dtypes.ID_TYPE(self.warmup_mod.id), SEQ_NONE)
+
+                nb_find_next_module_index(b, dtypes.ID_TYPE(self.warmup_mod.id), dtypes.SEQ_TYPE(SEQ_NONE))
                 break
 
         # print(f"DEBUG: {nb_find_next_module_match.__name__} signatures:")
@@ -240,19 +278,143 @@ class NumbaWarmupHelper:
 
         print("TimeSync kernels warmed.")
 
+    def exercise_parsing_pipeline_config(self, frame_config, parser_config):
+        print("exercise_parsing_pipeline...")
+        try:
+            factory_build = self.shared.factories.build
+
+            device_id = self.warmup_mod.device
+
+            time_ns = self.shared.time_ns
+
+            pool = self.shared.array_pool
+            pool_create = pool.create
+
+            frame_ctx = SimpleNamespace(
+                get_logger=self.logger.child_creator("decoder"),
+                device_id=device_id,
+            )
+            self._frame_codec = factory_build(
+                "frame_decoder", frame_config, system_ctx=self.shared, local_ctx=frame_ctx
+            )
+
+            parser_ctx = SimpleNamespace(
+                get_logger=self.logger.child_creator("parser"),
+                device_id=device_id,
+                sync_state=create_default_sync(self.shared.time_ns()),
+            )
+            self._frame_parser = factory_build(
+                "frame_parser", parser_config, system_ctx=self.shared, local_ctx=parser_ctx
+            )
+
+            codec = self._frame_codec
+
+            f_config = codec.bundle()
+            frame_state = FrameState(pool, codec.frame_length_maximum)
+            f_state = frame_state.bundle
+
+            o_config = OutputConfig(compact_buffer=True)
+
+            parser = self._frame_parser
+            parser_bundle = parser.bundle()
+
+            def batch_acquire():
+                return pool_create(
+                    PooledLogBatch,
+                    4096,
+                    codec.frame_length_maximum,
+                    has_levels=True,
+                    has_modules=True,
+                    has_devices=True,
+                )
+
+            def batch_acquire_input():
+                return pool_create(PooledLogBatch, 128, 4)  # 128 items, 4 kB buffer for the dummy batch
+
+            # 1. Create a dummy input batch
+            # We need a small buffer and at least one 'row' entry
+            with (
+                batch_acquire_input() as dummy_in,
+                batch_acquire() as dummy_out,
+            ):
+                dummy_in: PooledLogBatch
+                dummy_in.insert(time_ns(), time_ns(), b"       0.00 V     -0.010 mA \n")
+                dummy_in.insert(time_ns(), time_ns(), b"N1 main reg input          0.00 V     -0.010 mA \n")
+                dummy_in.insert(time_ns(), time_ns(), b"N2 ASI switch")
+                dummy_in.insert(time_ns(), time_ns(), b"              0.00 V")
+                dummy_in.insert(time_ns(), time_ns(), b"     -0.014 mA \n")
+                dummy_in.insert(time_ns(), time_ns(), b"N3 charger input        ")
+                dummy_in.append(b" ")
+
+                dummy_in.append_any(b" ")
+                # 3. Trigger the kernel
+                # This will block the thread while LLVM does its work
+                _ = process_batch_kernel(
+                    f_config,
+                    f_state,
+                    dummy_in.bundle,
+                    parser_bundle,
+                    o_config,
+                    dummy_out.bundle,
+                )
+
+                bin_processor = BinaryBatchProcessor()
+                bin_processor.shared = self.shared
+                bin_processor.process(dummy_in)
+
+                txt_processor = LogRowBatchProcessor()
+                txt_processor.shared = self.shared
+                txt_processor.process(dummy_out)
+        finally:
+            self._frame_codec = None
+            self._frame_parser = None
+
+    def exercise_parsing_pipeline(self):
+        print("exercise_parsing_pipeline...")
+
+        steps = []
+        all_steps = [
+            {"type": "skip_words", "count": 1},
+            {"type": "log_level_default"},
+            {"type": "module_name_normalizer", "max_depth": 8, "max_length": 64},
+            {"type": "skip_words", "count": 1},
+            {"type": "skip_words", "count": 1},
+        ]
+
+        for step in all_steps:
+            decoder_config = {
+                "type": "line_decoder",
+                "frame_errors_hidden": False,
+                "filter_trim_r": True,
+                "filter_printable": True,
+                "filter_ansi": True,
+                "frame_length_dynamic": True,
+                "frame_length": 0,
+                "frame_length_minimum": 8,
+                "frame_length_maximum": 1024,
+            }
+
+            parser_config = {
+                "type": "default",
+                "parser_errors_hidden": False,
+                "steps": steps,
+                "filter_squash_spaces": False,
+            }
+
+            self.exercise_parsing_pipeline_config(decoder_config, parser_config)
+            steps.append(step)
+
     def run_all(self):
         """Execute the full warmup suite."""
         try:
-            print("exercise_logging_kernels...")
+            self.exercise_parsing_pipeline()
+
             self.exercise_logging_kernels()
 
-            print("exercise_tracker_kernels...")
             self.exercise_tracker_kernels()
 
-            print("exercise_formatting_kernels...")
             self.exercise_formatting_kernels()
 
-            print("exercise_telemetry_kernels...")
             self.exercise_telemetry_kernels()
 
             self.exercise_timesync_kernels()

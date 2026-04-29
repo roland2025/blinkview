@@ -319,8 +319,10 @@ class BlinkMainWindow(QMainWindow):
     def _start_stage_3(self):
         self.timer_slow.start(self.timeout_slow)
 
+        registry = self.gui_context.registry
+
         def start_fast_timer():
-            self.last_poll_time = self.gui_context.registry.now_ns() + (self.timeout_fast) * 1_000_000
+            self.last_poll_time = registry.now_ns() + (self.timeout_fast) * 1_000_000
             # Set it to the future to avoid false lag detection on the first tick
             self.timer_fast.start(self.timeout_fast)
             compile_time = (self._numba_compile_end - self._numba_compile_start) / 1_000_000_000.0
@@ -330,7 +332,16 @@ class BlinkMainWindow(QMainWindow):
             if compile_time > 2:
                 compile_msg = f" | {compile_time:.0f} sec"
 
-            ToastManager.show(f"System ready{compile_msg}", ToastType.SUCCESS, parent=self)
+            if registry.warmup_success:
+                message = f"System ready{compile_msg}"
+                toast_type = ToastType.SUCCESS
+                duration = 5.0
+            else:
+                message = f"Compilation failed: {registry.warmup_error}"
+                toast_type = ToastType.ERROR
+                duration = 15.0
+
+            ToastManager.show(message, toast_type, duration, parent=self)
 
         QTimer.singleShot(100, start_fast_timer)
 
@@ -343,7 +354,7 @@ class BlinkMainWindow(QMainWindow):
         QTimer.singleShot(100, self._start_stage_3)
 
     def _start_stage_1(self):
-        ToastManager.show("Compiling Numba kernels", ToastType.WARNING, duration=1.0, parent=self)
+        ToastManager.show("Compiling Shaders", ToastType.WARNING, duration=1.0, parent=self)
         QTimer.singleShot(333, self._start_stage_2)
 
     def load_ui_state(self):

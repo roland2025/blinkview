@@ -79,53 +79,63 @@ def estimate_log_batch_size(
     tables: RegistryParams,
     cfg: FormattingConfig,
 ) -> int:
-    # Unpack registry lengths
+    # 1. Unpack registry lengths
     _, _, l_len, _, _, l_count = tables.levels
     _, _, m_len, _, _, m_count = tables.modules
     _, _, d_len, _, _, d_count = tables.devices
 
-    # Unpack segment metadata
+    # 2. Unpack segment metadata
     s_lens = segment.lengths
     s_devs = segment.devices
     s_lvls = segment.levels
     s_mods = segment.modules
 
+    # 3. Unpack Config
     show_ts, show_dev = cfg.show_ts, cfg.show_dev
     show_lvl, show_mod = cfg.show_lvl, cfg.show_mod
+    ts_precision = cfg.ts_precision  # 3, 6, or 9
 
     total_size = 0
     for idx in indices:
         row_size = 0
         is_first = True
 
+        # --- 1. Timestamp ---
         if show_ts:
-            row_size += 12  # HH:MM:SS.mmm
+            # "HH:MM:SS." is 9 chars. Then add precision (3, 6, or 9)
+            row_size += 9 + ts_precision
             is_first = False
 
+        # --- 2. Device ---
         if show_dev:
             if not is_first:
-                row_size += 1
+                row_size += 1  # space
             d_id = s_devs[idx]
-            row_size += d_len[d_id] if d_id < d_count else 3
+            row_size += d_len[d_id] if d_id < d_count else 3  # Name or "???"
             is_first = False
 
+        # --- 3. Level ---
         if show_lvl:
             if not is_first:
-                row_size += 1
+                row_size += 1  # space
             l_id = s_lvls[idx]
-            row_size += l_len[l_id] if l_id < l_count else 3
+            row_size += l_len[l_id] if l_id < l_count else 3  # Name or "???"
             is_first = False
 
+        # --- 4. Module ---
         if show_mod:
             if not is_first:
-                row_size += 1
+                row_size += 1  # space
             m_id = s_mods[idx]
-            row_size += (m_len[m_id] if m_id < m_count else 7) + 1  # Name + ":"
+            # Name (or "unknown") + ":"
+            row_size += (m_len[m_id] if m_id < m_count else 7) + 1
             is_first = False
 
-        # Message: space (if needed) + content + newline
+        # --- 5. Message Body ---
         if not is_first:
-            row_size += 1
+            row_size += 1  # space
+
+        # Message content + newline character '\n'
         row_size += s_lens[idx] + 1
 
         total_size += row_size
@@ -175,6 +185,55 @@ def find_id_index(val_arr: np.ndarray, count: int, target_id: int) -> int:
     return -1
 
 
+@app_njit(inline="always")
+def nb_format_timestamp(out, curr, ts_ns, precision):
+    """
+    Formats timestamp to the buffer.
+    precision: 3 for ms, 6 for us, 9 for ns.
+    Returns the updated 'curr' index.
+    """
+    # Calculate time components from nanoseconds
+    ns = ts_ns % 1000
+    us = (ts_ns // 1_000) % 1000
+    ms = (ts_ns // 1_000_000) % 1000
+    sec = (ts_ns // 1_000_000_000) % 60
+    mn = (ts_ns // 60_000_000_000) % 60
+    hr = (ts_ns // 3_600_000_000_000) % 24
+
+    # HH:MM:SS.
+    out[curr + 0] = CHAR_ZERO + (hr // 10)
+    out[curr + 1] = CHAR_ZERO + (hr % 10)
+    out[curr + 2] = CHAR_COLON
+    out[curr + 3] = CHAR_ZERO + (mn // 10)
+    out[curr + 4] = CHAR_ZERO + (mn % 10)
+    out[curr + 5] = CHAR_COLON
+    out[curr + 6] = CHAR_ZERO + (sec // 10)
+    out[curr + 7] = CHAR_ZERO + (sec % 10)
+    out[curr + 8] = CHAR_DOT
+
+    # Milliseconds (Always included)
+    out[curr + 9] = CHAR_ZERO + (ms // 100)
+    out[curr + 10] = CHAR_ZERO + ((ms // 10) % 10)
+    out[curr + 11] = CHAR_ZERO + (ms % 10)
+    curr += 12
+
+    # Microseconds
+    if precision >= 6:
+        out[curr + 0] = CHAR_ZERO + (us // 100)
+        out[curr + 1] = CHAR_ZERO + ((us // 10) % 10)
+        out[curr + 2] = CHAR_ZERO + (us % 10)
+        curr += 3
+
+    # Nanoseconds
+    if precision >= 9:
+        out[curr + 0] = CHAR_ZERO + (ns // 100)
+        out[curr + 1] = CHAR_ZERO + ((ns // 10) % 10)
+        out[curr + 2] = CHAR_ZERO + (ns % 10)
+        curr += 3
+
+    return curr
+
+
 @app_njit()
 def format_log_batch(
     out: np.ndarray,
@@ -200,6 +259,9 @@ def format_log_batch(
 
     show_ts, show_dev = cfg.show_ts, cfg.show_dev
     show_lvl, show_mod = cfg.show_lvl, cfg.show_mod
+
+    ts_precision = cfg.ts_precision
+
     tz_offset_ns = tz_offset_sec * 1_000_000_000
     # Fallbacks
     UNKNOWN_LEVEL = (CHAR_QUESTION, CHAR_QUESTION, CHAR_QUESTION)
@@ -213,23 +275,7 @@ def format_log_batch(
         # 1. Timestamp
         if show_ts:
             ts_ns = s_ts[idx] + tz_offset_ns
-            ms = (ts_ns // 1_000_000) % 1000
-            sec = (ts_ns // 1_000_000_000) % 60
-            mn = (ts_ns // 60_000_000_000) % 60
-            hr = (ts_ns // 3_600_000_000_000) % 24
-
-            out[curr + 0], out[curr + 1] = CHAR_ZERO + (hr // 10), CHAR_ZERO + (hr % 10)
-            out[curr + 2] = CHAR_COLON
-            out[curr + 3], out[curr + 4] = CHAR_ZERO + (mn // 10), CHAR_ZERO + (mn % 10)
-            out[curr + 5] = CHAR_COLON
-            out[curr + 6], out[curr + 7] = CHAR_ZERO + (sec // 10), CHAR_ZERO + (sec % 10)
-            out[curr + 8] = CHAR_DOT
-            out[curr + 9], out[curr + 10], out[curr + 11] = (
-                CHAR_ZERO + (ms // 100),
-                CHAR_ZERO + ((ms // 10) % 10),
-                CHAR_ZERO + (ms % 10),
-            )
-            curr += 12
+            curr = nb_format_timestamp(out, curr, ts_ns, ts_precision)
             first_field = False
 
         # --- 2. Device (Direct Index) ---

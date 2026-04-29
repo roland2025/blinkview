@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import List
 
 import numpy as np
+from numba.typed import List as NumbaList
 
 from blinkview.core import dtypes
 from blinkview.core.bindable import bindable
@@ -32,6 +33,7 @@ from blinkview.core.types.parsing import (
     UnifiedParserConfig,
     UnifiedParserState,
     UnusedSyncState,
+    pipeline_bundle_type,
 )
 from blinkview.ops.constants import EMPTY_STATE
 from blinkview.ops.generic import SkipWordsConfig, skip_words_parser
@@ -204,7 +206,12 @@ class GenericFrameParser(FrameParser):
 
             self.post_process = pp_gen
 
-        return ParserPipelineBundle(config=p_config, pipeline=tuple(pipe))
+        # 3. Initialize the typed list safely
+        typed_pipe = NumbaList.empty_list(pipeline_bundle_type)
+        for item in pipe:
+            typed_pipe.append(item)
+        return ParserPipelineBundle(config=p_config, pipeline=typed_pipe)
+        # return ParserPipelineBundle(config=p_config, pipeline=tuple(pipe))
 
     def no_post_process(self, _):
         return False

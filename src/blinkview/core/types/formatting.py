@@ -12,3 +12,4 @@ class FormattingConfig(NamedTuple):
     show_dev: bool = True
     show_lvl: bool = True
     show_mod: bool = True
+    ts_precision: int = 3
