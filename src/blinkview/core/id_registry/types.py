@@ -30,3 +30,4 @@ class RegistryParams(NamedTuple):
     levels: StringTableParams
     modules: StringTableParams
     devices: StringTableParams
+    parents: np.ndarray

@@ -75,14 +75,15 @@ def update_iso8601_timestamp_cache(total_sec: int, ts_cache: np.ndarray):
 @app_njit()
 def estimate_log_batch_size(
     indices: np.ndarray,
+    count,
     segment: LogBundle,
     tables: RegistryParams,
     cfg: FormattingConfig,
 ) -> int:
     # 1. Unpack registry lengths
-    _, _, l_len, _, _, l_count = tables.levels
-    _, _, m_len, _, _, m_count = tables.modules
-    _, _, d_len, _, _, d_count = tables.devices
+    l_len, l_count = tables.levels.lens, tables.levels.count
+    m_len, m_count = tables.modules.lens, tables.modules.count
+    d_len, d_count = tables.devices.lens, tables.devices.count
 
     # 2. Unpack segment metadata
     s_lens = segment.lengths
@@ -96,7 +97,9 @@ def estimate_log_batch_size(
     ts_precision = cfg.ts_precision  # 3, 6, or 9
 
     total_size = 0
-    for idx in indices:
+    for i in range(count):
+        idx = indices[i]
+
         row_size = 0
         is_first = True
 
@@ -238,15 +241,19 @@ def nb_format_timestamp(out, curr, ts_ns, precision):
 def format_log_batch(
     out: np.ndarray,
     indices: np.ndarray,
+    count,
     segment: LogBundle,
     tables: RegistryParams,
     cfg: FormattingConfig,
     tz_offset_sec: int,
 ):
     # 1. Unpack Tables
-    l_buf, l_off, l_len, _, l_values, l_count = tables.levels
-    m_buf, m_off, m_len, _, _, m_count = tables.modules
-    d_buf, d_off, d_len, _, _, d_count = tables.devices
+    # 1. Unpack Tables via explicit attribute access
+    levels_tbl = tables.levels
+
+    modules_tbl = tables.modules
+
+    devices_tbl = tables.devices
 
     # 2. Unpack Segment (Crucial for Numba stability)
     s_ts = segment.timestamps
@@ -269,7 +276,8 @@ def format_log_batch(
     UNKNOWN_MOD = (117, 110, 107, 110, 111, 119, 110)  # "unknown"
 
     curr = 0
-    for idx in indices:
+    for i in range(count):
+        idx = indices[i]
         first_field = True
 
         # 1. Timestamp
@@ -283,7 +291,7 @@ def format_log_batch(
             if not first_field:
                 out[curr] = CHAR_SPACE
                 curr += 1
-            curr = write_table_entry(out, curr, tables.devices, s_devs[idx], UNKNOWN_DEV)
+            curr = write_table_entry(out, curr, devices_tbl, s_devs[idx], UNKNOWN_DEV)
             first_field = False
 
         # --- 3. Level (Search Lookup) ---
@@ -291,7 +299,7 @@ def format_log_batch(
             if not first_field:
                 out[curr] = CHAR_SPACE
                 curr += 1
-            curr = write_table_lookup(out, curr, tables.levels, s_lvls[idx], UNKNOWN_LEVEL)
+            curr = write_table_lookup(out, curr, levels_tbl, s_lvls[idx], UNKNOWN_LEVEL)
             first_field = False
 
         # --- 4. Module (Direct Index) ---
@@ -299,7 +307,7 @@ def format_log_batch(
             if not first_field:
                 out[curr] = CHAR_SPACE
                 curr += 1
-            curr = write_table_entry(out, curr, tables.modules, s_mods[idx], UNKNOWN_MOD)
+            curr = write_table_entry(out, curr, modules_tbl, s_mods[idx], UNKNOWN_MOD)
             out[curr] = CHAR_COLON
             curr += 1
             first_field = False

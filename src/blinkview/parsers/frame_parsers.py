@@ -23,6 +23,10 @@ from blinkview.core.types.modules import (
     ModuleTrackerState,
 )
 from blinkview.core.types.parsing import (
+    TS_PRECISION_MS,
+    TS_PRECISION_NS,
+    TS_PRECISION_S,
+    TS_PRECISION_US,
     CodecID,
     EmptyUnifiedParserConfig,
     EmptyUnifiedParserState,
@@ -377,7 +381,7 @@ class ModuleNameNormalizer(ModuleNameParserBase):
         return ParserID.MOD_DYNAMIC_SM, self.tracker_state, config
 
 
-@FrameSectionParserFactory.register("timestamp")
+# @FrameSectionParserFactory.register("timestamp")
 class TimestampParser(FrameSectionParser):
     def __init__(self):
         super().__init__()
@@ -394,6 +398,45 @@ class TimestampParser(FrameSectionParser):
         self.state.timestamp.utc_offset[0] = dtypes.TS_TYPE(utc_offset_seconds)
 
         return changed
+
+
+TS_PRECISIONS = [
+    TS_PRECISION_S,
+    TS_PRECISION_MS,
+    TS_PRECISION_US,
+    TS_PRECISION_NS,
+]
+
+TS_PRECISIONS_DESC = [
+    "seconds",
+    "milliseconds",
+    "microseconds",
+    "nanoseconds",
+]
+
+
+@configuration_property(
+    "precision", type="integer", enum=TS_PRECISIONS, enum_descriptions=TS_PRECISIONS_DESC, default=TS_PRECISION_MS
+)
+@FrameSectionParserFactory.register("timestamp_integer")
+class ZephyrUptimeFormattedParser(TimestampParser):
+    precision: int
+
+    def __init__(self):
+        super().__init__()
+        self._bundle = None
+
+    def apply_config(self, config: dict):
+        changed = super().apply_config(config)
+
+        config = UnifiedParserConfig(timestamp_precision=getattr(self, "precision", TS_PRECISION_MS))
+
+        self._bundle = ParserID.TS_INTEGER, self.state, config
+
+        return changed
+
+    def bundle(self):
+        return self._bundle
 
 
 #

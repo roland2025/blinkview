@@ -22,8 +22,6 @@ class ModuleIdentity:
         "parent",
         "submodules",
         "submodule_list",
-        "latest_row",
-        "_descendant_cache",
         "meta",
     )
 
@@ -40,22 +38,18 @@ class ModuleIdentity:
         self.submodules: dict[str, "ModuleIdentity"] = {}
         self.submodule_list: list["ModuleIdentity"] = []
 
-        self.latest_row = None
-        self._descendant_cache: list["ModuleIdentity"] = []
-
         self.meta = None
 
     def _bubble_up_new_child(self, new_module: "ModuleIdentity"):
         """Appends the new module to this node's cache and continues up."""
-        self._descendant_cache = self._descendant_cache + [new_module]  # noqa
 
         if self.parent:
             self.parent._bubble_up_new_child(new_module)
         # If no parent, we are the Device Root; bubbling stops here.
 
     def get_all_descendants(self) -> list["ModuleIdentity"]:
-        """Returns all descendants in the subtree rooted at this module, excluding itself."""
-        return self._descendant_cache
+        """Delegates to the registry for the heavy lifting."""
+        return self.device._id_registry.get_descendant_modules(self.id)
 
     def name_with_device(self) -> str:
         return f"{self.device.name}.{self.name}"
@@ -179,7 +173,6 @@ class DeviceIdentity:
     def get_all_modules(self) -> list[ModuleIdentity]:
         """
         Returns modules in chronological order.
-        Thread-safe: returning a list copy is safe even if append() occurs.
         """
         return self.module_list
 

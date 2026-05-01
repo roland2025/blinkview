@@ -62,18 +62,12 @@ class ModuleFilterSidebar(QWidget):
         self.pause_action = self.toolbar.addWidget(self.pause_label)
         self.pause_action.setVisible(False)
 
-        # Connect to the shared model signal
-        self.gui_context.module_filter_model.sync_paused_changed.connect(self.pause_action.setVisible)
-
-        self.gui_context.module_filter_model.sync_paused_changed.connect(self.print_visible)
-
         # Add the Table (The existing logic)
         self.table = ModuleFilterTable(gui_context, self.log_filter, self)
         self.table.setEnabled(self.action_enable.isChecked())
         self.layout.addWidget(self.table)
 
-    def print_visible(self, value):
-        print(f"Visible: {value}")
+        self.table.sync_paused.connect(self.pause_action.setVisible)
 
     def _on_enable_toggled(self, checked: bool):
         """Toggle whether this tab uses surgical filtering or pass-through."""
@@ -82,9 +76,6 @@ class ModuleFilterSidebar(QWidget):
         # Visually dim the table when disabled to prevent confusion
         self.table.setEnabled(checked)
 
-        # Trigger the high-speed 'bake' and UI refresh
-        self.log_filter.filter_changed.emit()
-
     def _on_global_level_changed(self, index):
         """Mass-update the index-based filter for this tab."""
         level_identity = self.level_combo.itemData(index)
@@ -92,16 +83,7 @@ class ModuleFilterSidebar(QWidget):
         self.log_filter.set_level(level_identity)
 
         # Trigger the table and log view to refresh
-        self.table.proxy.layoutChanged.emit()
-
-    # Proxy the show/hide events to the table so the 1Hz sync still works
-    def showEvent(self, event):
-        self.table.showEvent(event)
-        super().showEvent(event)
-
-    def hideEvent(self, event):
-        self.table.hideEvent(event)
-        super().hideEvent(event)
+        self.table.fast_model.layoutChanged.emit()
 
     def get_state(self):
         return {
@@ -121,3 +103,10 @@ class ModuleFilterSidebar(QWidget):
             self.level_combo.setCurrentIndex(index)
 
         self.log_filter.restore_state(state.get("module_filters", {}))
+
+    def sync_modules(self):
+        """Ensures the underlying Numba masks are sized for all known modules."""
+        self.log_filter.sync_modules()
+
+    def get_filter(self):
+        return self.log_filter.get_filter()

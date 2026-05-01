@@ -197,6 +197,19 @@ class CircularLogPool:
             self.active_segment = None
             self._rotate_segment()
 
+    def acquire_indices_buffer(self, capacity: Optional[int] = None):
+        """
+        Acquires a preallocated indices array from the global memory pool.
+        Sized by default to accommodate the maximum segment capacity.
+
+        Returns:
+            A memory handle. The caller must call .release() on it when finished.
+        """
+        # Default to the pool's current segment capacity, which adapts
+        # after the _apply_real_world_heuristics probe phase.
+        req_cap = capacity if capacity is not None else self.segment_capacity
+        return self._global_pool.acquire(req_cap, dtype=np.int64)
+
 
 def allocate_telemetry_workspace(num_channels: int) -> np.ndarray:
     """

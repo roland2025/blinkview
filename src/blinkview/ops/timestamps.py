@@ -9,6 +9,7 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.parsing import SyncState
+from blinkview.ops.constants import CHAR_NINE, CHAR_SPACE, CHAR_TAB, CHAR_ZERO
 
 
 @app_njit(inline="always")
@@ -46,6 +47,71 @@ def parse_iso8601_to_ns(buffer, start, offset_sec):
     res_ns += ms * 1_000_000
 
     return res_ns - (offset_sec * 1_000_000_000)
+
+
+@app_njit(inline="always")
+def nb_parse_int_timestamp(
+    buffer,
+    start_cursor,
+    end_cursor,
+    out_b,
+    out_idx,
+    state,
+    config,  # Precision is pulled from here
+):
+    cursor = start_cursor
+
+    # 1. Skip leading whitespace
+    # while cursor < end_cursor and (buffer[cursor] == CHAR_SPACE or buffer[cursor] == CHAR_TAB):
+    #     cursor += 1
+
+    if cursor >= end_cursor:
+        return -1
+
+    # 2. Parse the integer value
+    raw_val = 0
+    found_digits = False
+
+    while cursor < end_cursor:
+        c = buffer[cursor]
+        if CHAR_ZERO <= c <= CHAR_NINE:
+            raw_val = raw_val * 10 + (c - CHAR_ZERO)
+            found_digits = True
+            cursor += 1
+        else:
+            break
+
+    if not found_digits:
+        return -1
+
+    # 3. Determine multiplier from config
+    # 0: Seconds, 1: Millis, 2: Micros, 3: Nanos
+    precision = config.timestamp_precision
+    multiplier = 1
+
+    if precision == 0:  # Seconds
+        multiplier = 1_000_000_000
+    elif precision == 1:  # Millis
+        multiplier = 1_000_000
+    elif precision == 2:  # Micros
+        multiplier = 1_000
+    elif precision == 3:  # Nanos
+        multiplier = 1
+    else:
+        # Fallback or error if precision is undefined
+        return -1
+
+    raw_ns = raw_val * multiplier
+
+    # 4. Project and Store
+    rx_ns = out_b.rx_timestamps[out_idx]
+    out_b.timestamps[out_idx] = nb_project_synced_ns(raw_ns, rx_ns, state.timestamp.sync)
+
+    # 5. Clean up trailing whitespace
+    while cursor < end_cursor and (buffer[cursor] == CHAR_SPACE or buffer[cursor] == CHAR_TAB):
+        cursor += 1
+
+    return cursor
 
 
 @app_njit(inline="always")

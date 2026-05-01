@@ -53,7 +53,7 @@ class PooledArrayHandle:
     @property
     def capacity(self) -> int:
         """Returns the total allocated size of the raw slab."""
-        return self.array.shape[0] if self.array is not None else 0
+        return a.shape[0] if (a := self.array) is not None else 0
 
 
 class NumpyArrayPool:

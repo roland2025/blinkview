@@ -14,7 +14,6 @@ from qtpy.QtGui import QAction
 from qtpy.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.core import dtypes
-from blinkview.core.batched_logrows import BatchedLogRows
 from blinkview.core.dtypes import ID_UNSPECIFIED, LEVEL_UNSPECIFIED, SEQ_NONE
 from blinkview.core.types.formatting import FormattingConfig
 from blinkview.ops.formatting import estimate_log_batch_size, format_log_batch
@@ -90,8 +89,6 @@ QToolButton[filterEnabled="true"] {
 
         # --- HISTORY BUFFER ---
         # Stores the raw message objects so we can instantly redraw when a toggle changes
-        # self.log_history = deque(maxlen=self.max_rows)
-        self.log_history = BatchedLogRows(maxlen=self.max_rows)
 
         # Main layout
         self.layout = QVBoxLayout(self)
@@ -157,6 +154,7 @@ QToolButton[filterEnabled="true"] {
 
         self.is_paused = False
         self.auto_paused = False
+        self._is_catching_up = True
 
         # Velocity Tracking
         self.velocity_tracker = LogVelocityTracker(limit_per_sec=1000)
@@ -410,187 +408,126 @@ QToolButton[filterEnabled="true"] {
         self.latest_seq_seen = SEQ_NONE  # Reset sequence tracker to ensure we load all relevant logs
 
     def apply_updates(self):
-        """
-        Zero-hydration replacement. Blasts raw bytes from the pool into a single
-        formatted string for the UI, bypassing LogRow object creation entirely.
-        """
         if self.is_paused or self.auto_paused:
             return
 
         now_ns = self.gui_context.registry.now_ns
         t_start = now_ns()
 
-        if t_start - self.prev_apply < 100_000_000:  # Target ~30Hz (1/30 = 0.033s)
+        if t_start - self.prev_apply < 100_000_000:
             return
+
+        self.filter_sidebar.sync_modules()
         self.prev_apply = t_start
 
         array_pool = self.gui_context.registry.system_ctx.array_pool
-
-        # 1. Setup Filters & Registry Maps
         f = self.log_filter
         reg = self.gui_context.id_registry
         pool = self.gui_context.registry.central.log_pool
 
         tz_offset_sec = get_local_utc_offset_seconds()
 
-        # Get Numba-friendly byte maps
-
-        # Prepare module whitelist for Numba
         t_modules = getattr(f, "target_modules", None)
-        if t_modules:
-            tm_arr = np.array(t_modules, dtype=dtypes.ID_TYPE)
-        else:
-            tm_arr = np.empty(0, dtype=dtypes.ID_TYPE)
+        if not t_modules and f.filtered_module:
+            t_modules = [f.filtered_module.id]
 
-        t_module = dtypes.ID_TYPE(f.filtered_module.id if f.filtered_module else ID_UNSPECIFIED)
+        tm_arr = np.array(t_modules, dtype=dtypes.ID_TYPE) if t_modules else np.empty(0, dtype=dtypes.ID_TYPE)
         t_device = dtypes.ID_TYPE(f.allowed_device.id if f.allowed_device else ID_UNSPECIFIED)
         target_level = dtypes.LEVEL_TYPE(f.log_level.value if f.log_level.value else LEVEL_UNSPECIFIED)
 
-        # 2. Fetch & Format Stage (Numba Accelerated)
-        t_fetch_start = now_ns()
-
         total_new_rows = 0
         full_string_batch = ""
-
         format_cfg = FormattingConfig(self.show_ts, self.show_dev, self.show_lvl, self.show_mod, 9)
 
-        with pool.get_snapshot() as segments:
+        # Flag to track if we successfully consumed all segments without breaking
+        reached_live_edge = True
+
+        filter_enabled, filter_mask = self.filter_sidebar.get_filter()
+
+        with pool.get_snapshot() as segments, pool.acquire_indices_buffer() as indices:
             for segment in segments:
                 segment_last_sequence_id = segment.last_sequence_id
-                # Quick skip: segment is empty or already fully seen
                 if segment.size == 0 or segment_last_sequence_id <= self.latest_seq_seen:
                     continue
-                # Find matching indices in this segment
-                # print(
-                #     f"filter_segment("
-                #     f"start_seq={type(self.latest_seq_seen)}({self.latest_seq_seen}), "
-                #     f"tm_arr={tm_arr.dtype}, "  # This is usually the culprit
-                #     f"target_level={type(target_level)}({target_level}), "
-                #     f"target_module={type(t_module)}({t_module}), "
-                #     f"target_device={type(t_device)}({t_device}))"
-                # )
-                indices = filter_segment(
+
+                match_count = filter_segment(
                     segment.bundle,
                     target_modules_arr=tm_arr,
+                    out_indices=indices.array,
+                    module_filter_mask=filter_mask,
+                    filter_enabled=filter_enabled,
                     start_seq=self.latest_seq_seen,
                     target_level=target_level,
-                    target_module=t_module,
                     target_device=t_device,
                 )
 
-                if indices.size > 0:
-                    # 1. Estimate
-                    # reg.levels_table.debug_print("LEVELS")
-                    # reg.modules_table.debug_print("MODULES")
-                    # reg.devices_table.debug_print("DEVICES")
-                    req_bytes = estimate_log_batch_size(indices, segment.bundle, reg.bundle(), format_cfg)
+                if match_count > 0:
+                    req_bytes = estimate_log_batch_size(
+                        indices.array, match_count, segment.bundle, reg.bundle(), format_cfg
+                    )
 
-                    # 2. Acquire pooled memory (zero allocation from OS)
                     with array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
-                        # 3. Format into pool
                         bytes_written = format_log_batch(
-                            handle.array, indices, segment.bundle, reg.bundle(), format_cfg, tz_offset_sec
+                            handle.array,
+                            indices.array,
+                            match_count,
+                            segment.bundle,
+                            reg.bundle(),
+                            format_cfg,
+                            tz_offset_sec,
                         )
-
-                        # 4. Final conversion to string
-                        # .tobytes() on a slice is necessary for decode,
-                        # but it's much faster than incremental string building.
                         full_string_batch += handle.array[:bytes_written].tobytes().decode("utf-8", errors="replace")
 
-                    total_new_rows += indices.size
-                    self.latest_seq_seen = max(self.latest_seq_seen, segment_last_sequence_id)
+                    total_new_rows += match_count
+
+                # CRITICAL FIX 1: MUST be outside the match_count > 0 block!
+                # Even if 0 matches, we have "seen" this segment up to its last sequence.
+                self.latest_seq_seen = max(self.latest_seq_seen, segment_last_sequence_id)
 
                 if total_new_rows >= self.max_rows:
+                    reached_live_edge = False
                     break
 
-        t_fetch_end = now_ns()
-        fetch_and_format_ms = (t_fetch_end - t_fetch_start) / 1e6
+        # CRITICAL FIX 2: Velocity / Auto-Pause Catch-up Logic
+        # Update catch-up state: If we cleared all segments, we are now live.
+        if self._is_catching_up and reached_live_edge:
+            self._is_catching_up = False
 
-        # 3. UI Append Stage
-        t_ui_ms = 0.0
         if total_new_rows > 0:
-            # Velocity / Auto-Pause Logic
-            # (Note: we use total_new_rows as the count since we don't have row objects)
-            is_ui_empty = self.text_area.document().isEmpty()
-
-            is_clogged = self.velocity_tracker.update_and_check(total_new_rows)
-
-            if is_ui_empty:
+            if self._is_catching_up:
+                # Bypass velocity tracking while paging in historical logs
                 is_clogged = False
+                self.velocity_tracker.reset()
+            else:
+                # Only track velocity for live incoming logs
+                is_clogged = self.velocity_tracker.update_and_check(total_new_rows)
 
             if is_clogged and not self.is_paused:
                 self.auto_paused = True
                 self.action_pause.setChecked(True)
             elif not (self.is_paused or self.auto_paused):
-                t_ui_start = now_ns()
-                # Pass the single giant string to your smart append_log
                 self.text_area.append_log(full_string_batch)
-                t_ui_end = now_ns()
-                t_ui_ms = (t_ui_end - t_ui_start) / 1e6
-
-        t_total_end = now_ns()
-        total_ms = (t_total_end - t_start) / 1e6
-
-        # 4. Telemetry
-        # if total_new_rows:
-        #     msg = f"rows={total_new_rows} total={total_ms:.2f}ms fetch={fetch_and_format_ms:.2f}ms ui={t_ui_ms:.2f}ms"
-        #     self.logger.debug(msg)
-        # print(msg)
-
-    def _format_messages(self, messages: Iterable, rows=None) -> list:
-        """Dynamically builds the string based on the active toggles."""
-        format_ts = self.timestamp_formatter.format
-        rows = rows or []
-        append = rows.append
-
-        # Local cache for speed
-        show_ts = self.show_ts
-        show_dev = self.show_dev
-        show_lvl = self.show_lvl
-        show_mod = self.show_mod
-
-        for msg in messages:
-            parts = []
-            if show_ts:
-                parts.append(format_ts(msg.timestamp_ns))
-            if show_dev:
-                parts.append(msg.module.device.name)
-            if show_lvl:
-                parts.append(msg.level.name)
-            if show_mod:
-                parts.append(f"{msg.module.name}:")
-
-            parts.append(msg.message)
-
-            # Join the active parts with a space
-            append(" ".join(parts))
-
-        return rows
 
     def _redraw_history(self):
-        """Instantly clears the screen and redraws all historical logs with the new layout."""
+        """
+        Clears the screen and triggers a full re-fetch from the central memory pool
+        using the updated column visibility toggles.
+        """
         self.text_area.clear()
-        if self.log_history:
-            # Re-sync the high watermark to the last item in our history buffer
-            self.latest_seq_seen = self.log_history[-1][-1].seq
-            formatted_rows = []
-            for batch in self.log_history:
-                formatted_rows.extend(self._format_messages(batch))
 
-            print(
-                f"[BlinkMainWindow] Redrawing historical logs batches={len(self.log_history)} rows={len(formatted_rows)}"
-            )
+        # Reset trackers so apply_updates fetches everything again
+        self.latest_seq_seen = SEQ_NONE
+        self.velocity_tracker.reset()
+        self._is_catching_up = True
 
-            self.text_area.setPlainText("\n".join(formatted_rows))
-
-            # Scroll to the bottom
-            self.text_area.scroll_to_end()
+        # Force an immediate UI update rather than waiting for the next timer tick
+        self.apply_updates()
 
     def clear_logs(self):
-        self.log_history.clear()
         self.text_area.clear()
-        self.latest_seq_seen = -1  # Reset tracker
+        self.latest_seq_seen = SEQ_NONE  # Reset tracker
         self.velocity_tracker.reset()
+        self._is_catching_up = True
 
     def _toggle_telemetry_sidebar(self, checked):
         """Toggles the visibility of the Telemetry sidebar."""

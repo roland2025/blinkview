@@ -73,18 +73,50 @@ def copy_batch_to_segment(segment: LogBundle, batch: LogBundle, batch_start_idx:
     return rows_to_copy
 
 
+# ---------------------------------------------------------
+# Inline Binary Search Helpers (Zero NumPy Overhead)
+# ---------------------------------------------------------
+@app_njit(inline="always")
+def fast_find_first_ge(arr, count, val):
+    """Finds first index where arr[i] >= val"""
+    left = 0
+    right = count
+    while left < right:
+        mid = (left + right) >> 1
+        if arr[mid] < val:
+            left = mid + 1
+        else:
+            right = mid
+    return left
+
+
+@app_njit(inline="always")
+def fast_find_first_gt(arr, count, val):
+    """Finds first index where arr[i] > val"""
+    left = 0
+    right = count
+    while left < right:
+        mid = (left + right) >> 1
+        if arr[mid] <= val:
+            left = mid + 1
+        else:
+            right = mid
+    return left
+
+
 @app_njit()
 def filter_segment(
-    segment: LogBundle,
+    segment,  # LogBundle
     target_modules_arr,
-    start_seq=SEQ_NONE,  # Ensure this is here
+    out_indices,
+    module_filter_mask,
+    filter_enabled: bool,
+    start_seq=SEQ_NONE,
     start_ts=TS_UNSPECIFIED,
     end_ts=TS_UNSPECIFIED,
     target_level=LEVEL_UNSPECIFIED,
-    target_module=ID_UNSPECIFIED,
     target_device=ID_UNSPECIFIED,
 ):
-
     count = segment.size[0]
     timestamps = segment.timestamps
     levels = segment.levels
@@ -92,43 +124,109 @@ def filter_segment(
     devices = segment.devices
     seqs = segment.sequences
 
-    target_modules_size = target_modules_arr.size
+    # 1. Zero-Overhead Logarithmic Boundary Finding
+    loop_start = 0
+    loop_end = count
 
-    matching_indices = np.empty(count, dtype=np.int64)
+    if start_seq != SEQ_NONE:
+        idx = fast_find_first_gt(seqs, count, start_seq)
+        if idx > loop_start:
+            loop_start = idx
+
+    if start_ts != TS_UNSPECIFIED:
+        idx = fast_find_first_ge(timestamps, count, start_ts)
+        if idx > loop_start:
+            loop_start = idx
+
+    if end_ts != TS_UNSPECIFIED:
+        idx = fast_find_first_gt(timestamps, count, end_ts)
+        if idx < loop_end:
+            loop_end = idx
+
+    if loop_start >= loop_end:
+        return 0
+
     match_count = 0
-    use_multi_module = target_modules_size > 0
+    mask_size = module_filter_mask.size
+    check_device = target_device != ID_UNSPECIFIED
 
-    for i in range(count):
-        # 1. Sequence Check (Fastest exclusion)
-        if start_seq != SEQ_NONE and seqs[i] <= start_seq:
-            continue
+    # =========================================================
+    # PATH 1: SURGICAL MASK (Ultra-Fast Branchless Logic)
+    # =========================================================
+    if filter_enabled:
+        for i in range(loop_start, loop_end):
+            # 1. Device match (Resolves to 1 or 0 without branching)
+            dev_match = (not check_device) | (devices[i] == target_device)
 
-        # 2. Module Filter
-        if use_multi_module:
-            found = False
-            for m_idx in range(target_modules_size):
-                if modules[i] == target_modules_arr[m_idx]:
-                    found = True
-                    break
-            if not found:
-                continue
-        elif target_module != ID_UNSPECIFIED and modules[i] != target_module:
-            continue
+            # 2. Module & Level match
+            mod_id = modules[i]
 
-        # 3. Level/Device/Time filters...
-        if target_level != LEVEL_UNSPECIFIED and levels[i] != target_level:
-            continue
-        if target_device != ID_UNSPECIFIED and devices[i] != target_device:
-            continue
-        if start_ts != -1 and timestamps[i] < start_ts:
-            continue
-        if end_ts != -1 and timestamps[i] > end_ts:
-            continue
+            # Safe branchless bounds checking
+            is_valid_mod = mod_id < mask_size
+            safe_mod_id = mod_id if is_valid_mod else 0
 
-        matching_indices[match_count] = i
-        match_count += 1
+            allowed_level = module_filter_mask[safe_mod_id]
+            lvl_match = levels[i] >= allowed_level
 
-    return matching_indices[:match_count]
+            # 3. Combine using bitwise AND (prevents short-circuit branching)
+            is_match = dev_match & is_valid_mod & lvl_match
+
+            # 4. Branchless Append
+            out_indices[match_count] = i
+            match_count += is_match
+
+            # =========================================================
+    # PATH 2: GLOBAL FALLBACK (Standard branching)
+    # =========================================================
+    else:
+        target_modules_size = target_modules_arr.size
+        check_level = target_level != LEVEL_UNSPECIFIED
+
+        # PATH 2A: No module filter (Fastest)
+        if target_modules_size == 0:
+            for i in range(loop_start, loop_end):
+                dev_match = (not check_device) | (devices[i] == target_device)
+                lvl_match = (not check_level) | (levels[i] == target_level)
+
+                is_match = dev_match & lvl_match
+
+                out_indices[match_count] = i
+                match_count += is_match
+
+        # PATH 2B: Single module filter (Ultra-Fast Scalar)
+        elif target_modules_size == 1:
+            single_target_module = target_modules_arr[0]
+
+            for i in range(loop_start, loop_end):
+                dev_match = (not check_device) | (devices[i] == target_device)
+                lvl_match = (not check_level) | (levels[i] == target_level)
+                mod_match = modules[i] == single_target_module
+
+                is_match = dev_match & lvl_match & mod_match
+
+                out_indices[match_count] = i
+                match_count += is_match
+
+        # PATH 2C: Multi-module filter (Array Iteration)
+        else:
+            for i in range(loop_start, loop_end):
+                dev_match = (not check_device) | (devices[i] == target_device)
+                lvl_match = (not check_level) | (levels[i] == target_level)
+
+                # The inner loop contains a 'break', which is technically a branch,
+                # but modern CPUs predict small inner loop exits incredibly well.
+                mod_match = False
+                for m_idx in range(target_modules_size):
+                    if modules[i] == target_modules_arr[m_idx]:
+                        mod_match = True
+                        break
+
+                is_match = dev_match & lvl_match & mod_match
+
+                out_indices[match_count] = i
+                match_count += is_match
+
+    return match_count
 
 
 @app_njit()

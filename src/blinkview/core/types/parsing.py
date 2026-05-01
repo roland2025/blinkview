@@ -38,6 +38,7 @@ class ParserID:
 
     TS_ADB_LONG = CAT_TEMPORAL + 4
     TS_ZEPHYR_UPTIME_FORMATTED = CAT_TEMPORAL + 5
+    TS_INTEGER = CAT_TEMPORAL + 6
 
     # --- 200: Identity ---
     MOD_FIXED_WIDTH = CAT_IDENTITY + 0
@@ -234,6 +235,12 @@ class UnifiedParserState(NamedTuple):
 EmptyUnifiedParserState = UnifiedParserState()
 
 
+TS_PRECISION_S = 0  # Seconds
+TS_PRECISION_MS = 1  # Milliseconds
+TS_PRECISION_US = 2  # Microseconds
+TS_PRECISION_NS = 3  # Nanoseconds
+
+
 class UnifiedParserConfig(NamedTuple):
     parser_id: int = 0
 
@@ -246,6 +253,8 @@ class UnifiedParserConfig(NamedTuple):
 
     # --- Module Name Defaults ---
     module_config: DynamicWidthConfig = EmptyDynamicWidthConfig
+
+    timestamp_precision: int = TS_PRECISION_MS  # For time parsers, indicates the expected timestamp format/precision
 
 
 EmptyUnifiedParserConfig = UnifiedParserConfig()

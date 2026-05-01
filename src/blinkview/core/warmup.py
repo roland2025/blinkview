@@ -139,10 +139,12 @@ class NumbaWarmupHelper:
         tm_arr = np.array([self.floats_mod.id, self.warmup_mod.id], dtype=dtypes.ID_TYPE)
         s_seq = dtypes.SEQ_TYPE(0)  # uint64
         t_lvl = dtypes.LEVEL_UNSPECIFIED  # uint8
-        t_mod = dtypes.ID_UNSPECIFIED  # uint32
         t_dev = dtypes.ID_UNSPECIFIED  # uint32
 
-        with self.log_pool.get_snapshot() as segments:
+        filter_mask = np.full(1, LogLevel.ALL.value, dtype=dtypes.LEVEL_TYPE)
+        filter_enabled = False
+
+        with self.log_pool.get_snapshot() as segments, self.log_pool.acquire_indices_buffer() as indices:
             for segment in segments:
                 # print(
                 #     f"warmup_filter_segment("
@@ -152,24 +154,32 @@ class NumbaWarmupHelper:
                 #     f"target_module={type(t_mod)}({t_mod}), "
                 #     f"target_device={type(t_dev)}({t_dev}))"
                 # )
-                indices = filter_segment(
+                match_count = filter_segment(
                     segment.bundle,
                     target_modules_arr=tm_arr,
+                    out_indices=indices.array,
+                    module_filter_mask=filter_mask,
+                    filter_enabled=filter_enabled,
                     start_seq=s_seq,
                     target_level=t_lvl,
-                    target_module=t_mod,
                     target_device=t_dev,
                 )
 
-                if indices.size > 0:
+                if match_count > 0:
                     # Trigger: Size Estimation Kernel
                     req_bytes = estimate_log_batch_size(
-                        indices, segment.bundle, self.registry.bundle(), self.format_cfg
+                        indices.array, match_count, segment.bundle, self.registry.bundle(), self.format_cfg
                     )
                     # Trigger: Formatting Kernel
                     with self.array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
                         format_log_batch(
-                            handle.array, indices, segment.bundle, self.registry.bundle(), self.format_cfg, 0
+                            handle.array,
+                            indices.array,
+                            match_count,
+                            segment.bundle,
+                            self.registry.bundle(),
+                            self.format_cfg,
+                            0,
                         )
 
     def exercise_telemetry_kernels(self):

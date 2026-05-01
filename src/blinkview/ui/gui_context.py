@@ -32,7 +32,6 @@ class GUIContext(QObject):
         self.settings: "SettingsManager" = None
 
         self.telemetry_model = None
-        self.module_filter_model = None
         self.theme: "StyleConfig" = None
 
         self.index_manager = LogFilterIndexManager(gui_context=self, parent=self)
@@ -97,13 +96,9 @@ class GUIContext(QObject):
     def set_reattach_tab(self, reattach_fn):
         self.reattach_tab = reattach_fn
 
-    def set_module_filter_model(self, module_filter_model):
-        self.module_filter_model = module_filter_model
-
     def on_heartbeat(self):
         """Dispatches the update signal to slow sync components like the TelemetryModel."""
         self.telemetry_model.sync_registry()
-        self.module_filter_model.sync_registry()
 
     def on_update(self):
         """Dispatches the update signal to all registered views for a fast sync."""
