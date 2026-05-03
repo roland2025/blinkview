@@ -151,7 +151,7 @@ def filter_segment(
     check_device = target_device != ID_UNSPECIFIED
 
     # =========================================================
-    # PATH 1: SURGICAL MASK (Ultra-Fast Branchless Logic)
+    # PATH 1: SURGICAL MASK
     # =========================================================
     if filter_enabled:
         for i in range(loop_start, loop_end):
@@ -161,22 +161,18 @@ def filter_segment(
             # 2. Module & Level match
             mod_id = modules[i]
 
-            # Safe branchless bounds checking
-            is_valid_mod = mod_id < mask_size
-            safe_mod_id = mod_id if is_valid_mod else 0
-
-            allowed_level = module_filter_mask[safe_mod_id]
+            allowed_level = module_filter_mask[mod_id]
             lvl_match = levels[i] >= allowed_level
 
             # 3. Combine using bitwise AND (prevents short-circuit branching)
-            is_match = dev_match & is_valid_mod & lvl_match
+            is_match = dev_match & lvl_match
 
             # 4. Branchless Append
             out_indices[match_count] = i
             match_count += is_match
 
             # =========================================================
-    # PATH 2: GLOBAL FALLBACK (Standard branching)
+    # PATH 2: GLOBAL FALLBACK
     # =========================================================
     else:
         target_modules_size = target_modules_arr.size
@@ -198,11 +194,10 @@ def filter_segment(
             single_target_module = target_modules_arr[0]
 
             for i in range(loop_start, loop_end):
-                dev_match = (not check_device) | (devices[i] == target_device)
                 lvl_match = (not check_level) | (levels[i] == target_level)
                 mod_match = modules[i] == single_target_module
 
-                is_match = dev_match & lvl_match & mod_match
+                is_match = lvl_match & mod_match
 
                 out_indices[match_count] = i
                 match_count += is_match

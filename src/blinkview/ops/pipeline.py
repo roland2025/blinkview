@@ -98,7 +98,7 @@ def execute_parser_pipeline(buffer, start_cursor, end_cursor, out_b, out_idx, pa
 
 
 @app_njit()
-def execute_parser_pipeline(buffer, start_cursor, end_cursor, out_b, out_idx, parser_bundles):
+def execute_parser_pipeline_(buffer, start_cursor, end_cursor, out_b, out_idx, parser_bundles):
     # parser_bundles is now a standard homogeneous List or Tuple
     length = len(parser_bundles)
     if length == 0:
