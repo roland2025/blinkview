@@ -16,6 +16,7 @@ OFFSET_TYPE = np.uint32
 LEN_TYPE = np.uint32
 ID_TYPE = np.uint32  # Global IDs (Devices, Modules)
 VALUES_TYPE = np.uint32
+INDEX_TYPE = np.int32
 
 # --- Log Specifics ---
 LEVEL_TYPE = np.uint8

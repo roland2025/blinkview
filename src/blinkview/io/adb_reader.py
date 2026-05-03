@@ -231,8 +231,8 @@ ensuring high throughput without pipeline stalls."""
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
+                text=False,
+                bufsize=-1,
             )
 
             # Give it a moment to fail
@@ -354,30 +354,31 @@ ensuring high throughput without pipeline stalls."""
         _ = self.query(data)
 
     def query(self, cmd: str) -> list[str]:
-        """
-        Sends a command and waits for the output.
-        Uses a sentinel to know when the command is finished.
-        """
         if self._shell is None:
             return []
 
-        sentinel = "__BlinkSync_Done__"
+        # Use bytes for the sentinel
+        sentinel = b"__BlinkSync_Done__"
         results = []
 
         with self._shell_lock:
-            # Send the command + the sentinel
-            self._shell.stdin.write(f"{cmd}; echo {sentinel}\n")
+            # Encode command to bytes
+            self._shell.stdin.write(f"{cmd}; echo {sentinel.decode()}\n".encode())
             self._shell.stdin.flush()
 
-            # Read line by line until we hit the sentinel
-            for line in self._shell.stdout:
-                clean_line = line.strip()
-                if clean_line == sentinel:
+            output = b""
+            while True:
+                # .buffer is not needed because the stream is already binary
+                chunk = self._shell.stdout.read1(4096)
+                if not chunk:
                     break
-                if clean_line:
-                    results.append(clean_line)
+                output += chunk
+                if sentinel in output:
+                    break
 
-        return results
+            # Decode once at the end
+            decoded_output = output.replace(sentinel, b"").decode(errors="ignore")
+            return [line.strip() for line in decoded_output.splitlines() if line.strip()]
 
     def _refresh_process_ids(self):
         """Uses the persistent shell to map all process names to PIDs."""

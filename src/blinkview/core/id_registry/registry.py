@@ -62,10 +62,10 @@ class IDRegistry:
 
         self.level_map = LevelMap()
 
-        self.modules_table = IndexedStringTable(initial_capacity=1024)
-        self.devices_table = IndexedStringTable(initial_capacity=10)
+        self.modules_table = IndexedStringTable(initial_capacity=1024, use_hashes=False)
+        self.devices_table = IndexedStringTable(initial_capacity=10, use_hashes=False)
         self.levels_table = IndexedStringTable(
-            initial_capacity=10, buffer_size_bytes=128, values_dtype=dtypes.VALUES_TYPE
+            initial_capacity=10, buffer_size_bytes=128, values_dtype=dtypes.VALUES_TYPE, use_hashes=False
         )
 
         self._init_level_maps()
@@ -83,14 +83,14 @@ class IDRegistry:
 
         self.levels_table.debug_print("LEVELS")
 
-    def _generate_module_id(self) -> int:
+    def generate_module_id(self) -> int:
         """Internal callback passed to DeviceIdentity."""
         with self._lock:
             current = self._module_id_counter
             self._module_id_counter += 1
             return current
 
-    def _register_new_modules(self, modules: List[ModuleIdentity]):
+    def register_new_modules(self, registration_data: List[tuple[ModuleIdentity, int]]):
         """
         Internal callback called by DeviceIdentity when a new module is created.
         Uses Atomic Swap for the global list.
@@ -98,8 +98,6 @@ class IDRegistry:
         # This is called from within the DeviceIdentity's lock,
         # but we use our own lock to protect the global counters and list.
         with self._lock:
-            self.module_list = self.module_list + modules  # noqa
-
             required_capacity = self._module_id_counter
             if required_capacity > self._parent_capacity:
                 # Double the capacity until it fits
@@ -115,13 +113,17 @@ class IDRegistry:
                 self._parent_array = new_array
                 self._parent_capacity = new_cap
 
-            for module in modules:
+            for module, parent_id in registration_data:
+                # 1. Update Global List/Map
                 self.modules[module.id] = module
+                self.module_list.append(module)
+
+                # 2. Update Table (using the name string already on the module)
                 self.modules_table.register_name(module.id, module.name)
 
-                # Update the parent topology cache
-                if module.parent is not None:
-                    self._parent_array[module.id] = module.parent.id
+                # 3. Update Topology Array (The untangled link)
+                if parent_id != NO_PARENT:
+                    self._parent_array[module.id] = parent_id
 
     def get_device(self, name: str) -> DeviceIdentity:
         """Retrieve or create a DeviceIdentity by name."""
@@ -229,6 +231,12 @@ class IDRegistry:
         # 2. Map to objects (CPython dict lookups are very fast)
         # We use 'self.modules' directly here
         return [modules[mid] for mid in ids]
+
+    def get_parent(self, mod_id: int) -> ModuleIdentity | None:
+        parent_id = self._parent_array[mod_id]
+        if parent_id == NO_PARENT:
+            return None
+        return self.modules.get(parent_id)
 
 
 def create_mock_modules(iterations=1_000):

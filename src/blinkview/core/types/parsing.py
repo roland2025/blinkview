@@ -22,41 +22,29 @@ from blinkview.core.types.modules import (
 
 
 class ParserID:
-    # --- Category Bases ---
-    CAT_TEMPORAL = 100
-    CAT_IDENTITY = 200
-    CAT_CLASSIFICATION = 300
-    CAT_STRUCTURAL = 400
-    CAT_SANITIZATION = 500
-    CAT_PLUGIN_V1 = 1000
+    # --- Temporal ---
+    TS_UNIX_SEC = 0
+    TS_UNIX_MS = 1
+    TS_ISO8601 = 2
+    TS_CUSTOM_STRFTIME = 3
+    TS_ADB_LONG = 4
+    TS_ZEPHYR_UPTIME_FORMATTED = 5
+    TS_INTEGER = 6
 
-    # --- 100: Temporal ---
-    TS_UNIX_SEC = CAT_TEMPORAL + 0
-    TS_UNIX_MS = CAT_TEMPORAL + 1
-    TS_ISO8601 = CAT_TEMPORAL + 2
-    TS_CUSTOM_STRFTIME = CAT_TEMPORAL + 3
+    # --- Identity ---
+    MOD_FIXED_WIDTH = 7
+    MOD_DYNAMIC_SM = 8
+    MOD_BRACKETED = 9
+    MOD_ADB_LONG = 10
+    DEVICE_ID_STATIC = 11
+    PID_TID_ADB_LONG = 12
 
-    TS_ADB_LONG = CAT_TEMPORAL + 4
-    TS_ZEPHYR_UPTIME_FORMATTED = CAT_TEMPORAL + 5
-    TS_INTEGER = CAT_TEMPORAL + 6
+    # --- Classification ---
+    LEVEL_NAME_MAP = 13
+    LEVEL_MAP_ADB_LONG = 14
 
-    # --- 200: Identity ---
-    MOD_FIXED_WIDTH = CAT_IDENTITY + 0
-    MOD_DYNAMIC_SM = CAT_IDENTITY + 1
-    MOD_BRACKETED = CAT_IDENTITY + 2
-    MOD_ADB_LONG = CAT_IDENTITY + 3
-
-    DEVICE_ID_STATIC = CAT_IDENTITY + 10
-
-    PID_TID_ADB_LONG = CAT_IDENTITY + 20
-
-    # --- 300: Classification ---
-    LEVEL_NAME_MAP = CAT_CLASSIFICATION + 0
-
-    LEVEL_MAP_ADB_LONG = CAT_CLASSIFICATION + 2
-
-    # --- 400: Structural ---
-    SKIP_WORDS = CAT_STRUCTURAL + 0
+    # --- Structural ---
+    SKIP_WORDS = 15
 
 
 class CodecID:
@@ -282,5 +270,6 @@ class ParserPipelineBundle(NamedTuple):
     """
 
     config: ParserConfig
-    pipeline: NumbaList  # Tuple[Tuple[int, UnifiedParserState, UnifiedParserConfig], ...]
+    # pipeline: Tuple[Tuple[int, UnifiedParserState, UnifiedParserConfig], ...]
+    pipeline: NumbaList
     # pipeline: Tuple[Tuple[Callable, Any, Any], ...]

@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING
 
 from qtpy.QtCore import QObject
 
-from blinkview.ui.log_filter_index_manager import LogFilterIndexManager
-
 if TYPE_CHECKING:
     from blinkview import Registry
     from blinkview.core.id_registry import IDRegistry
@@ -33,8 +31,6 @@ class GUIContext(QObject):
 
         self.telemetry_model = None
         self.theme: "StyleConfig" = None
-
-        self.index_manager = LogFilterIndexManager(gui_context=self, parent=self)
 
         # Factory function for creating widgets with context (cls_name, name, as_window=False, **kwargs)
         self.create_widget = None

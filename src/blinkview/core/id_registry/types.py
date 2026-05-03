@@ -8,8 +8,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from blinkview.core import dtypes
-from blinkview.core.types.empty import EMPTY_BYTES, EMPTY_HASH, EMPTY_ID, EMPTY_LEN, EMPTY_OFF
+from blinkview.core.types.empty import EMPTY_BYTES, EMPTY_HASH, EMPTY_ID, EMPTY_INDEX, EMPTY_LEN, EMPTY_OFF
 
 
 class StringTableParams(NamedTuple):
@@ -19,6 +18,7 @@ class StringTableParams(NamedTuple):
     hashes: np.ndarray = EMPTY_HASH  # dtype: dtypes.HASH_TYPE
     values: np.ndarray = EMPTY_ID  # dtype: ?
     count: int = 0
+    hash_index: np.ndarray = EMPTY_INDEX
 
 
 EmptyStringTableParams = StringTableParams()

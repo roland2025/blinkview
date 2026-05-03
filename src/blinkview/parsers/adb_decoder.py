@@ -57,7 +57,7 @@ class AdbModuleName(ModuleNameParserBase):
         # 1. Build the IMMUTABLE config snapshot
         # Note: 'tracker' is removed from here.
         config = UnifiedParserConfig(
-            string_table=self.shared.id_registry.modules_table.bundle(),
+            string_table=self.local.device_id.modules_table.bundle(),
             module_config=DynamicWidthConfig(
                 max_length=128,
                 max_depth=3,

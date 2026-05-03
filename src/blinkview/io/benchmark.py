@@ -181,14 +181,14 @@ class Benchmark(BaseReader):
                     try:
                         batch = queue_get(timeout=timeout)
                         if batch is not None:
+                            batch: PooledLogBatch
                             with batch:
+                                b = batch.bundle
                                 if batch.size > 0:
-                                    if not batch.has_devices:
+                                    if not b.has_devices:
                                         total_recv_msgs += batch.size
                                     else:
-                                        total_recv_msgs += np.count_nonzero(
-                                            batch.devices[: batch.size] == target_device_id
-                                        )
+                                        total_recv_msgs += np.count_nonzero(b.devices[: batch.size] == target_device_id)
                     except Exception:
                         break
                     current_time = time_ns()

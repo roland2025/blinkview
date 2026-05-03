@@ -23,13 +23,6 @@ from blinkview.ops.modules import parse_fixed_width_name, parse_module_tags_stat
 from blinkview.ops.timestamps import nb_parse_int_timestamp
 from blinkview.ops.zephyr_timestamp import nb_parse_zephyr_uptime_formatted
 
-# --- Extract Categories for Numba ---
-_CAT_IDENTITY = ParserID.CAT_IDENTITY
-_CAT_CLASSIFICATION = ParserID.CAT_CLASSIFICATION
-_CAT_STRUCTURAL = ParserID.CAT_STRUCTURAL
-_CAT_SANITIZATION = ParserID.CAT_SANITIZATION
-_CAT_PLUGIN = ParserID.CAT_PLUGIN_V1
-
 # --- Extract Specific IDs for Numba ---
 MOD_FIXED_WIDTH = ParserID.MOD_FIXED_WIDTH
 MOD_DYNAMIC_SM = ParserID.MOD_DYNAMIC_SM
@@ -87,15 +80,15 @@ def _process_bundle(buffer, cursor, end_cursor, out_b, out_idx, bundle):
 
 
 @app_njit()
-def execute_parser_pipeline_(buffer, start_cursor, end_cursor, out_b, out_idx, parser_bundles):
+def execute_parser_pipeline(buffer, start_cursor, end_cursor, out_b, out_idx, parser_bundles):
     # parser_bundles is now a standard homogeneous List or Tuple
     if len(parser_bundles) == 0:
         return start_cursor
 
     cursor = start_cursor
 
-    for bundle in literal_unroll(parser_bundles):  # 20% faster
-        # for bundle in parser_bundles:  # 20% slower
+    # for bundle in literal_unroll(parser_bundles):  # very slow compile times, maybe faster
+    for bundle in parser_bundles:
         cursor = _process_bundle(buffer, cursor, end_cursor, out_b, out_idx, bundle)
 
         if cursor == -1:

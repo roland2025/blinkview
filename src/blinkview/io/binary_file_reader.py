@@ -88,7 +88,7 @@ class BinaryFileReader(BaseReader):
         pool_create = self.shared.array_pool.create
 
         def batch_acquire():
-            return pool_create(PooledLogBatch, buffer_chunks, buffer_bytes // 1024)
+            return pool_create(PooledLogBatch, buffer_chunks, buffer_bytes)
 
         batch = None
 
@@ -176,7 +176,7 @@ class BinaryFileReader(BaseReader):
                         break
 
                 # 4. Add data to the current batch
-                if not batch.insert(ts_data, data):
+                if not batch.insert(ts_data, ts_data, data):
                     # Batch capacity or buffer is full, flush it
                     with batch:
                         self.distribute(batch)
@@ -185,7 +185,7 @@ class BinaryFileReader(BaseReader):
 
                     # Acquire new batch and immediately append the skipped data
                     batch = batch_acquire()
-                    batch.insert(ts_data, data)
+                    batch.insert(ts_data, ts_data, data)
 
                 # 5. Check if the batching window has elapsed
                 if (time_ns() - batch.start_ts) >= delay_ns:

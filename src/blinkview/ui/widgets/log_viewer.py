@@ -480,7 +480,6 @@ QToolButton[filterEnabled="true"] {
 
                     total_new_rows += match_count
 
-                # CRITICAL FIX 1: MUST be outside the match_count > 0 block!
                 # Even if 0 matches, we have "seen" this segment up to its last sequence.
                 self.latest_seq_seen = max(self.latest_seq_seen, segment_last_sequence_id)
 
@@ -489,12 +488,14 @@ QToolButton[filterEnabled="true"] {
                     break
 
         # CRITICAL FIX 2: Velocity / Auto-Pause Catch-up Logic
+        was_catching_up = self._is_catching_up
         # Update catch-up state: If we cleared all segments, we are now live.
         if self._is_catching_up and reached_live_edge:
             self._is_catching_up = False
 
         if total_new_rows > 0:
-            if self._is_catching_up:
+            # 2. CHECK the remembered state, not the newly updated one
+            if was_catching_up:
                 # Bypass velocity tracking while paging in historical logs
                 is_clogged = False
                 self.velocity_tracker.reset()

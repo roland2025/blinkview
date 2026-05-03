@@ -20,11 +20,6 @@ MODULE_ID_FULL = 0xFFFFFFFE
 MODULE_ID_UNKNOWN = 0xFFFFFFFF
 
 
-class TrackerState(NamedTuple):
-    count: np.ndarray
-    bytes_cursor: np.ndarray
-
-
 class ModuleTrackerState(NamedTuple):
     count: np.ndarray = ZERO_COUNT  # [0] = number of unresolved names in current chunk
     bytes_cursor: np.ndarray = ZERO_CURSOR  # [0] = write position in name_bytes

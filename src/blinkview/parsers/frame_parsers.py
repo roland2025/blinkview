@@ -315,7 +315,7 @@ class FixedWidthModuleNameParser(ModuleNameParserBase):
         # We pass only the search width and the current module registry
 
         config = UnifiedParserConfig(
-            string_table=self.shared.id_registry.modules_table.bundle(),
+            string_table=self.local.device_id.modules_table.bundle(),
             module_config=DynamicWidthConfig(max_length=self.max_length),
         )
 
@@ -368,7 +368,7 @@ class ModuleNameNormalizer(ModuleNameParserBase):
         # 1. Build the IMMUTABLE config snapshot
         # Note: 'tracker' is removed from here.
         config = UnifiedParserConfig(
-            string_table=self.shared.id_registry.modules_table.bundle(),
+            string_table=self.local.device_id.modules_table.bundle(),
             module_config=DynamicWidthConfig(
                 max_length=self.max_length,
                 max_depth=self.max_depth,

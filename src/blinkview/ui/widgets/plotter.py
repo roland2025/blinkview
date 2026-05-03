@@ -172,7 +172,25 @@ class TelemetryPlotter(QWidget):
         self.duration_combo = QComboBox()
         self.duration_combo.setMinimumWidth(60)
         self.duration_combo.setEditable(True)
-        duration_items = ["0.1s", "0.5s", "1s", "2s", "5s", "10s", "30s", "60s", "2m", "5m", "10m", "30m", "1h"]
+        duration_items = [
+            "0.1s",
+            "0.5s",
+            "1s",
+            "2s",
+            "5s",
+            "10s",
+            "30s",
+            "60s",
+            "2m",
+            "5m",
+            "10m",
+            "30m",
+            "1h",
+            "2h",
+            "6h",
+            "12h",
+            "24h",
+        ]
         self.duration_combo.addItems(reversed(duration_items))
 
         idx = self.duration_combo.findText(self.view_duration_text)

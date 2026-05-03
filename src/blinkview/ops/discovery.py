@@ -14,7 +14,7 @@ def resolve_module_id(name_buffer, name_start, name_len, table, tracker):
     if name_len == 0:
         return MODULE_ID_UNKNOWN
 
-    name_hash = fnv1a_64_fast(name_buffer[name_start : name_start + name_len])
+    name_hash = fnv1a_64_fast(name_buffer, name_start, name_len)
 
     # Check Permanent Registry (ByteMap)
     bm_buffer = table.buffer
@@ -23,7 +23,19 @@ def resolve_module_id(name_buffer, name_start, name_len, table, tracker):
     bm_hashes = table.hashes
     count = table.count
 
-    for mod_id in range(count):
+    hash_index = table.hash_index
+    index_mask = len(hash_index) - 1
+
+    # Calculate starting bucket
+    idx = name_hash & index_mask
+
+    while True:
+        mod_id = hash_index[idx]
+
+        if mod_id == -1:  # Hit an empty slot: String is NOT in permanent registry
+            break
+
+        # Check if this bucket contains our string
         if bm_hashes[mod_id] == name_hash and bm_lens[mod_id] == name_len:
             offset = bm_offsets[mod_id]
             is_match = True
@@ -33,6 +45,9 @@ def resolve_module_id(name_buffer, name_start, name_len, table, tracker):
                     break
             if is_match:
                 return mod_id
+
+        # Collision: Move to next bucket (Linear Probing)
+        idx = (idx + 1) & index_mask
 
     # 2. Check Temporary Cache (Tracker)
     t_count = tracker.count[0]

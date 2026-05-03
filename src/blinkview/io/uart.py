@@ -179,7 +179,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                                 tuner.update(batch.msg_cursor, batch.size, delay_s)
 
                             batch = batch_acquire()
-                            batch.insert(now, first_byte)
+                            batch.insert(now, now, first_byte)
 
                         # 6. Drain remaining burst and Append
                         waiting = ser.in_waiting
@@ -192,7 +192,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                                     tuner.update(batch.msg_cursor, batch.size, delay_s)
 
                                 batch = batch_acquire()
-                                batch.insert(now, rest)
+                                batch.insert(now, now, rest)
 
                     if batch is not None and (now - batch.start_ts) >= delay_ns:
                         with batch:
