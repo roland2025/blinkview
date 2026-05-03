@@ -9,9 +9,8 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import List, Optional, Union
 
-from PyQt6.QtGui import QPainter, QPalette
 from qtpy.QtCore import QMimeData, Qt, QTimer, Signal
-from qtpy.QtGui import QAction, QDrag, QFont, QPixmap
+from qtpy.QtGui import QAction, QDrag, QFont, QPainter, QPalette, QPixmap
 from qtpy.QtWidgets import (
     QApplication,
     QComboBox,

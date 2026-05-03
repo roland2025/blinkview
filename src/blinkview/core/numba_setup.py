@@ -9,24 +9,34 @@ from pathlib import Path
 
 from blinkview import __version__
 
+IS_CACHE_FRESH = False
+
 
 def export_numba_cache(settings):
     """
     Calculates the versioned cache path and exports it to the environment.
-    Returns the path for the updater to use later.
+    Sets a global flag indicating if the directory was empty upon initialization.
     """
-    # 1. Determine base path (Default to repo path if set, otherwise current dir)
+    global IS_CACHE_FRESH
+
+    # 1. Determine base path
     repo_path = Path(settings.get("update.path", "."))
 
     # 2. Define the versioned structure
-    # This prevents cross-version bytecode contamination
     cache_root = repo_path / ".numba_cache"
     versioned_dir = cache_root / __version__
 
-    # 3. Ensure directory exists
-    versioned_dir.mkdir(parents=True, exist_ok=True)
+    # 3. Check if empty BEFORE creating/writing to it
+    # We check if the directory exists and contains any files
+    if not versioned_dir.exists():
+        IS_CACHE_FRESH = True
+        versioned_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        # Check if directory contains any files (excluding hidden system files if necessary)
+        is_empty = not any(versioned_dir.iterdir())
+        IS_CACHE_FRESH = is_empty
 
-    # 4. EXPORT: This is the critical step for Numba
+    # 4. EXPORT: Set the environment variable for the Numba JIT compiler
     os.environ["NUMBA_CACHE_DIR"] = str(versioned_dir.resolve())
 
     return versioned_dir

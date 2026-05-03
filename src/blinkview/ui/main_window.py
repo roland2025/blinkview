@@ -34,6 +34,7 @@ from qtpy.QtWidgets import (
 from blinkview import __version__ as blinkview_version
 from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.config_manager import ConfigManager
+from blinkview.core.numba_setup import IS_CACHE_FRESH
 from blinkview.core.registry import Registry
 from blinkview.core.settings_manager import SettingsManager
 from blinkview.core.task_manager import TaskManager
@@ -340,19 +341,30 @@ class BlinkMainWindow(QMainWindow):
 
             ToastManager.show(message, toast_type, duration, parent=self)
 
-        QTimer.singleShot(100, start_fast_timer)
+        # FAST PATH: Skip 100ms delay if cache is warm
+        if IS_CACHE_FRESH:
+            QTimer.singleShot(100, start_fast_timer)
+        else:
+            start_fast_timer()
 
     def _start_stage_2(self):
         self._numba_compile_start = self.gui_context.registry.now_ns()
-
         self.gui_context.registry.start()
-
         self._numba_compile_end = self.gui_context.registry.now_ns()
-        QTimer.singleShot(100, self._start_stage_3)
+
+        # FAST PATH: Skip 100ms delay if cache is warm
+        if IS_CACHE_FRESH:
+            QTimer.singleShot(100, self._start_stage_3)
+        else:
+            self._start_stage_3()
 
     def _start_stage_1(self):
-        ToastManager.show("Compiling Shaders", ToastType.WARNING, duration=1.0, parent=self)
-        QTimer.singleShot(333, self._start_stage_2)
+        # FAST PATH: Skip the warning toast and the 333ms delay
+        if IS_CACHE_FRESH:
+            ToastManager.show("Compiling Shaders", ToastType.WARNING, duration=1.0, parent=self)
+            QTimer.singleShot(333, self._start_stage_2)
+        else:
+            self._start_stage_2()
 
     def load_ui_state(self):
         self.gui_context.gui_state.load_ui_state(
