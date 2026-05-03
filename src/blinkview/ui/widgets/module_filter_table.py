@@ -222,7 +222,7 @@ class TempLogFilter(QObject):
             level_obj = LogLevel.from_string(mod_state.get("level"), default=LogLevel.ALL)
             level_val = level_obj.value
 
-            print(f"TempLogFilter.restore: mod_id={mod_id} is_enabled={is_enabled} level_val={level_val}")
+            # print(f"TempLogFilter.restore: mod_id={mod_id} is_enabled={is_enabled} level_val={level_val}")
 
             # Update the NumPy masks directly
             self.enabled_mask[mod_id] = is_enabled
@@ -230,9 +230,9 @@ class TempLogFilter(QObject):
 
             self.filter_mask[mod_id] = level_val if is_enabled else LogLevel.OFF.value
 
-        print(
-            f"TempLogFilter.restored: enabled_mask={self.enabled_mask[: self._initialized_count]} level_mask={self.level_mask[: self._initialized_count]}"
-        )
+        # print(
+        #     f"TempLogFilter.restored: enabled_mask={self.enabled_mask[: self._initialized_count]} level_mask={self.level_mask[: self._initialized_count]}"
+        # )
 
         # Emit once after all restorations are complete
         self.filter_changed.emit()

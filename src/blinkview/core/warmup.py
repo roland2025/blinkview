@@ -191,54 +191,63 @@ class NumbaWarmupHelper:
         print("exercise_telemetry_kernels...")
 
         discovery_ws = allocate_discovery_workspace()
+        warmup_max_points = 50000
 
         # Trigger: Anchor discovery
         start_seq, num_channels = get_telemetry_anchor(self.log_pool, self.floats_mod.id, SEQ_NONE, discovery_ws)
-        warmup_channels = num_channels if num_channels > 0 else 1
-        temp_floats = allocate_telemetry_workspace(warmup_channels)
-        module_buffer = ModuleBuffer(max_points=1024, num_channels=warmup_channels)
+        warmup_channels_total = num_channels if num_channels > 0 else 1
+        for warmup_channels in range(warmup_channels_total):
+            temp_floats = allocate_telemetry_workspace(warmup_channels)
+            module_buffer = ModuleBuffer(max_points=1024, num_channels=warmup_channels)
 
-        if warmup_channels > 0:
-            # Trigger: Extraction and Byte-to-Float kernels
-            with fetch_telemetry_arrays(
-                self.array_pool, self.log_pool, self.floats_mod.id, start_seq, warmup_channels, temp_floats
-            ) as batch:
-                module_buffer.update(batch)
+            start_seq = dtypes.SEQ_TYPE(start_seq)
 
-        buf_bundle = module_buffer.bundle()
+            if warmup_channels > 0:
+                with fetch_telemetry_arrays(
+                    self.array_pool,
+                    self.log_pool,
+                    self.floats_mod.id,
+                    start_seq,
+                    warmup_channels,
+                    temp_floats,
+                    warmup_max_points,
+                ) as batch:
+                    module_buffer.update(batch)
 
-        t_now = self.time_ns() / 1e9
-        t_min, t_max = t_now - 60, t_now
-        num_bins = 200  # Small bin count is fine for warmup
+            buf_bundle = module_buffer.bundle()
 
-        # Pre-allocate scratchpads for output
-        # Note: size is usually num_bins * 2 to account for min-max pairs or extra points
-        out_x = np.zeros(num_bins * 8, dtype=dtypes.PLOT_TS_TYPE)
-        out_y = np.zeros(num_bins * 8, dtype=dtypes.PLOT_VAL_TYPE)
+            t_now = self.time_ns() / 1e9
+            t_min, t_max = t_now - 60, t_now
+            num_bins = 200  # Small bin count is fine for warmup
 
-        # Exercise Main Plot Downsampler (Linear)
-        # This now uses the clean, refactored signature
-        _ = slice_and_downsample_linear(
-            buf_bundle,
-            col_idx=0,
-            out_x=out_x,
-            out_y=out_y,
-            t_min_s=t_min,
-            t_max_s=t_max,
-            num_bins=num_bins,
-        )
+            # Pre-allocate scratchpads for output
+            # Note: size is usually num_bins * 2 to account for min-max pairs or extra points
+            out_x = np.zeros(num_bins * 8, dtype=dtypes.PLOT_TS_TYPE)
+            out_y = np.zeros(num_bins * 8, dtype=dtypes.PLOT_VAL_TYPE)
 
-        _ = minmax_downsample_inplace(
-            x_plot=module_buffer.x_data,
-            x_ts=module_buffer.x_data_int64,
-            y_2d=module_buffer.y_data,
-            col_idx=0,
-            start_idx=0,
-            count=module_buffer.size,
-            out_x=out_x,
-            out_y=out_y,
-            num_bins=num_bins,
-        )
+            # Exercise Main Plot Downsampler (Linear)
+            # This now uses the clean, refactored signature
+            _ = slice_and_downsample_linear(
+                buf_bundle,
+                col_idx=0,
+                out_x=out_x,
+                out_y=out_y,
+                t_min_s=t_min,
+                t_max_s=t_max,
+                num_bins=num_bins,
+            )
+
+            _ = minmax_downsample_inplace(
+                x_plot=module_buffer.x_data,
+                x_ts=module_buffer.x_data_int64,
+                y_2d=module_buffer.y_data,
+                col_idx=0,
+                start_idx=0,
+                count=module_buffer.size,
+                out_x=out_x,
+                out_y=out_y,
+                num_bins=num_bins,
+            )
 
     def exercise_timesync_kernels(self):
         """Triggers compilation for the TimeSyncEngine, Projection, and String Parsing."""

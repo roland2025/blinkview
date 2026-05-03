@@ -442,7 +442,6 @@ class TelemetryPlotter(QWidget):
                     current_module_seq = buf.last_seq
                 else:
                     continue
-
             # === FETCH LOGIC ===
             with fetch_telemetry_arrays(
                 array_pool, log_pool, module.id, current_module_seq, target_cols, buf.temp_floats, max_points
