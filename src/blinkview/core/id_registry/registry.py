@@ -81,7 +81,7 @@ class IDRegistry:
             # We use i as the sequential index, and lvl.value as the 'searchable' ID
             self.levels_table.register_name(i, lvl.name, value=lvl.value)
 
-        self.levels_table.debug_print("LEVELS")
+        # self.levels_table.debug_print("LEVELS")
 
     def generate_module_id(self) -> int:
         """Internal callback passed to DeviceIdentity."""
