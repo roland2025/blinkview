@@ -15,6 +15,7 @@ from qtpy.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLay
 
 from blinkview.core import dtypes
 from blinkview.core.dtypes import ID_UNSPECIFIED, LEVEL_UNSPECIFIED, SEQ_NONE
+from blinkview.core.types.empty import EMPTY_ID
 from blinkview.core.types.formatting import FormattingConfig
 from blinkview.ops.formatting import estimate_log_batch_size, format_log_batch
 from blinkview.ops.segments import filter_segment
@@ -431,7 +432,7 @@ QToolButton[filterEnabled="true"] {
         if not t_modules and f.filtered_module:
             t_modules = [f.filtered_module.id]
 
-        tm_arr = np.array(t_modules, dtype=dtypes.ID_TYPE) if t_modules else np.empty(0, dtype=dtypes.ID_TYPE)
+        tm_arr = np.array(t_modules, dtype=dtypes.ID_TYPE) if t_modules else EMPTY_ID
         t_device = dtypes.ID_TYPE(f.allowed_device.id if f.allowed_device else ID_UNSPECIFIED)
         target_level = dtypes.LEVEL_TYPE(f.log_level.value if f.log_level.value else LEVEL_UNSPECIFIED)
 
@@ -450,6 +451,17 @@ QToolButton[filterEnabled="true"] {
                 if segment.size == 0 or segment_last_sequence_id <= self.latest_seq_seen:
                     continue
 
+                # print(
+                #     f"logviewer_filter_segment("
+                #     f"bundle={type(segment.bundle)}, "
+                #     f"tm_arr={tm_arr.dtype}, "
+                #     f"indices={type(indices.array)}, "
+                #     f"filter_mask={type(filter_mask)}, "
+                #     f"filter_enabled={type(filter_enabled)}, "
+                #     f"s_seq={type(self.latest_seq_seen)}, "
+                #     f"t_lvl={type(target_level)}, "
+                #     f"t_dev={type(t_device)}, "
+                # )
                 match_count = filter_segment(
                     segment.bundle,
                     target_modules_arr=tm_arr,

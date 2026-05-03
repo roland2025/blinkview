@@ -121,8 +121,6 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         delay_s = self.delay / 1000.0
         delay_ns = int(self.delay * 1_000_000)
 
-        last_set_timeout = None
-
         # 2. Stats and Auto-Tuning Setup
         # We set msg_size_bytes to 20 to maintain your ~50 chunks/KB density preference
         stats = Speedometer(logger=self.logger.child("stats"))
@@ -154,18 +152,6 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
                 try:
                     now = time_ns()
-                    if batch is None or batch.start_ts == 0:
-                        new_timeout = 0.1  # Idle: Wait up to 100ms for the first byte
-                    else:
-                        # Calculate remaining time in the window
-                        elapsed_ns = now - batch.start_ts
-                        remaining_ns = (delay_ns / 2) - elapsed_ns
-
-                        new_timeout = max(0.001, remaining_ns / 1_000_000_000.0)
-
-                    if new_timeout != last_set_timeout:
-                        ser.timeout = new_timeout
-                        last_set_timeout = new_timeout
 
                     # 5. Read Lead Byte (Establish Arrival Timestamp)
                     first_byte = _read(1)
@@ -182,7 +168,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                             batch.insert(now, now, first_byte)
 
                         # 6. Drain remaining burst and Append
-                        waiting = ser.in_waiting
+                        waiting = ser.in_waiting or 1024
                         if waiting > 0:
                             rest = _read(waiting)
                             # print(f"{self.__class__.__name__}: read {time()} ... {first_byte + rest}")
@@ -194,7 +180,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                                 batch = batch_acquire()
                                 batch.insert(now, now, rest)
 
-                    if batch is not None and (now - batch.start_ts) >= delay_ns:
+                    if batch is not None and batch.start_ts > 0 and (now - batch.start_ts) >= delay_ns:
                         with batch:
                             self.distribute(batch)
                             tuner.update(batch.msg_cursor, batch.size, delay_s)

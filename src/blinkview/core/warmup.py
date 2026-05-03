@@ -148,11 +148,14 @@ class NumbaWarmupHelper:
             for segment in segments:
                 # print(
                 #     f"warmup_filter_segment("
-                #     f"start_seq={type(s_seq)}({s_seq}), "
-                #     f"tm_arr={tm_arr.dtype}, "  # This is usually the culprit
-                #     f"target_level={type(t_lvl)}({t_lvl}), "
-                #     f"target_module={type(t_mod)}({t_mod}), "
-                #     f"target_device={type(t_dev)}({t_dev}))"
+                #     f"bundle={type(segment.bundle)}, "
+                #     f"tm_arr={tm_arr.dtype}, "
+                #     f"indices={type(indices.array)}, "
+                #     f"filter_mask={type(filter_mask)}, "
+                #     f"filter_enabled={type(filter_enabled)}, "
+                #     f"s_seq={type(s_seq)}, "
+                #     f"t_lvl={type(t_lvl)}, "
+                #     f"t_dev={type(t_dev)}, "
                 # )
                 match_count = filter_segment(
                     segment.bundle,
@@ -161,8 +164,8 @@ class NumbaWarmupHelper:
                     module_filter_mask=filter_mask,
                     filter_enabled=filter_enabled,
                     start_seq=s_seq,
-                    target_level=t_lvl,
-                    target_device=t_dev,
+                    target_level=dtypes.LEVEL_TYPE(t_lvl),
+                    target_device=dtypes.ID_TYPE(t_dev),
                 )
 
                 if match_count > 0:
