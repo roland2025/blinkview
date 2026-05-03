@@ -29,30 +29,30 @@ blink
 
 ## Features
 
-- Real-time log viewing
-- High-performance ingestion from multiple sources
-- UART support
-- CAN-bus + cantools + DBC integration for signal extraction
-- Multi-window log views with independent filters
-- Structured log parsing
-- Configurable parsing templates
-- Supports multiple device formats simultaneously
-- Automatic module/submodule hierarchy
-- Timestamp alignment using high-precision clocks
-- Key-Value extraction panel
-  - Extract numeric and state values from logs
-  - Live updating values
-- Detachable windows
-- Multi-source telemetry
-  - Multiple UART devices
-  - Network sockets (basic support, needs work)
-- Raw data logging and replay
-  - Lossless raw logging
-  - Timestamped binary format
-- Modular multi-window UI
-  - Independent log windows
-  - Independent key-value panels
-  - Fully configurable layout
+- Real-time log viewing from multiple sources simultaneously.
+- High-performance ingestion pipeline optimized for low overhead.
+- **Supported Sources**:
+  - UART/Serial ports
+  - CAN-bus (with DBC file integration for signal decoding)
+  - SEGGER RTT (Real Time Transfer)
+  - Android Debug Bridge (ADB logcat) - *Note: Filtering needs improvement, feature is not yet finalized.*
+- **Visualization & UI**:
+  - Multi-window, tabbed log views.
+  - **Advanced Log Viewer**:
+    - Filter by device, module, and submodules.
+    - Filter by log level (INFO, WARN, ERROR, etc.).
+    - Toggle visibility of timestamp, device, level, and module columns.
+    - Automatic auto-pause on high-velocity log bursts to prevent UI lockup.
+    - Fast text search and highlighting.
+  - Detachable windows for multi-monitor setups.
+  - Live plotting of numeric telemetry data.
+  - Watch/Command list for sending structured commands and monitoring specific variables.
+  - Structured and configurable log parsing.
+  - Automatic module/submodule hierarchy detection.
+- **Core Engine**:
+  - Timestamp alignment across different sources using high-precision clocks.
+  - Raw data logging for lossless capture.
+  - Centralized storage with a pub/sub architecture for UI updates.
 
 ---
 
@@ -62,6 +62,7 @@ BlinkView is designed for high-throughput telemetry environments.
 
 Features include:
 
+- **Numba JIT Compilation**: Uses system-specific compiled backends via Numba for extreme performance. This powers core data processing (parsing, buffering, reordering), as well as fast filtering in text log views and high-speed telemetry plotting.
 - Lock-efficient central storage
 - Multi-threaded ingestion pipeline
 - Timestamp reorder buffering
@@ -80,6 +81,7 @@ graph TD
     CAN[CAN Source]
     Socket[Socket Source]
     RTT[RTT Source]
+    ADB[ADB Source]
 
     %% Pipeline Subgraphs
     subgraph UART_Pipe [UART Pipeline]
@@ -104,6 +106,12 @@ graph TD
         RTT_Raw[Raw File Writer]
         RTT_P[Parser]
         RTT_KV[KV Extractor]
+    end
+
+    subgraph ADB_Pipe [ADB Pipeline]
+        ADB_Raw[Raw File Writer]
+        ADB_P[Parser]
+        ADB_KV[KV Extractor]
     end
 
     %% Reorder Logic
@@ -139,6 +147,11 @@ graph TD
     RTT_P --> RTT_KV
     RTT_P & RTT_KV --> Reorder
 
+    ADB --> ADB_Raw
+    ADB --> ADB_P
+    ADB_P --> ADB_KV
+    ADB_P & ADB_KV --> Reorder
+
     %% Chronological Alignment to Hub
     Reorder -- "Ordered Stream" --> Storage
     
@@ -150,13 +163,14 @@ graph TD
 
     %% B&W Styling
     classDef bw fill:#fff,stroke:#000,stroke-width:2px,color:#000
-    class UART,CAN,Socket,RTT,UART_P,CAN_P,Sock_P,RTT_P,UART_KV,CAN_KV,Sock_KV,RTT_KV,UART_Raw,CAN_Raw,Sock_Raw,RTT_Raw,Reorder,Storage,LogUI,KVPanel,Plotter,UWriter bw
+    class UART,CAN,Socket,RTT,ADB,UART_P,CAN_P,Sock_P,RTT_P,ADB_P,UART_KV,CAN_KV,Sock_KV,RTT_KV,ADB_KV,UART_Raw,CAN_Raw,Sock_Raw,RTT_Raw,ADB_Raw,Reorder,Storage,LogUI,KVPanel,Plotter,UWriter bw
     
     %% Subgraph Styling
     style UART_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
     style CAN_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
     style Sock_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
     style RTT_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
+    style ADB_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
 ```
 
 Core logic is fully separated from the UI for performance and flexibility.
@@ -184,7 +198,7 @@ Or custom formats via parser templates.
 - Python 3.10+
 - PySide6 (for the UI)
 - pyserial (for UART)
-- optional: pyttsx3 (text-to-speech)
+- numba (for high-performance data processing)
 
 ### UV package manager
 UV is a modern Python tool for managing packages and tools.
@@ -267,10 +281,11 @@ blink config --global log_dir /path/to/logs
 
 ## Supported Inputs
 
-- UART
-- CAN-bus (via cantools and DBC files)
-- TCP / UDP sockets (basic support, needs work)
-- Log files
+- **UART / Serial**: For classic embedded device logging.
+- **CAN-bus**: Integrated with `cantools` for DBC-based signal extraction.
+- **SEGGER RTT**: High-speed logging for ARM Cortex-M microcontrollers.
+- **Android ADB**: Stream logs directly from Android devices via `logcat`. *Note: Filtering needs improvement, feature is not yet finalized.*
+- **TCP / UDP Sockets**: For network-based telemetry streams.
 
 ---
 
@@ -283,7 +298,6 @@ BlinkView is built with these priorities:
 - Flexible parsing
 - Multi-device support
 - Non-blocking UI
-- Extensibility
 
 ---
 
@@ -310,17 +324,17 @@ Core features are functional, and the architecture is designed for long-term ext
 
 ## Roadmap
 
-- RTT, TCP/UDP source support
-- file replay
-- text-to-speech alerts
-- live plotting
-- advanced parsing templates
-- 
+- File replay
+- Text-to-speech alerts
+- Advanced parsing and filtering options
+- More plot types and customization
+- Improved UI for configuration
+
 ---
 
 ## License
 
-MIT License
+Mozilla Public License 2.0 (MPL-2.0)
 
 ---
 
