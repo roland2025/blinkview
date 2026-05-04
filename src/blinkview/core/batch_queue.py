@@ -85,7 +85,14 @@ class BatchQueue:
                     return None
 
             # print(f"batch queue get: {self._total_objects} {self._deque}")
-            batch = self._deque.popleft()
+
+            # If the deque is empty here, it means we woke up due to _shutdown
+            if not (dq := self._deque):
+                return None
+
+                # 3. Use the localized 'dq' for the pop
+            batch = dq.popleft()
+
             batch_len = len(batch)
             self._total_objects -= batch_len
             self.popped += batch_len
