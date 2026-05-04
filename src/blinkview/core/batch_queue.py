@@ -29,59 +29,57 @@ class BatchQueue:
         self._shutdown = False
 
     def put(self, batch):
+        """Adds a batch to the queue with localized lookups for performance."""
+        # Localize built-ins and attributes before the loop/logic
+        _len = len
+        _getattr = getattr
 
-        batch_size = len(batch)
-        if batch_size == 0:
+        if not (batch_size := _len(batch)):
             return
 
-        retain = getattr(batch, "retain", None)
-        if retain is not None:
+        if (retain := _getattr(batch, "retain", None)) is not None:
             retain()
 
-        batches_to_release = None
+        dropped_batches = None
 
         with self._not_empty:
-            # print(
-            #     f"[BatchQueue] put: batch={batch} batch_size={batch_size} {self._total_objects} retain={retain is not None}  deque={self._deque}"
-            # )
+            dq = self._deque
+            dq.append(batch)
 
-            self._deque.append(batch)
             self._total_objects += batch_size
             self.pushed += batch_size
 
-            # NEW LOGIC: Only drop if the REMAINING total would still be >= maxlen
-            # We check the size of the oldest batch (self._deque[0]) before popping it.
-            while len(self._deque) > 1:
-                oldest_batch_size = len(self._deque[0])
+            while _len(dq) > 1:
+                # Reusing _len here saves a global lookup on every iteration
+                oldest_batch_size = _len(dq[0])
                 if (self._total_objects - oldest_batch_size) >= self.maxlen:
-                    oldest_batch = self._deque.popleft()
+                    oldest_batch = dq.popleft()
                     self._total_objects -= oldest_batch_size
                     self.dropped += oldest_batch_size
 
-                    release = getattr(oldest_batch, "release", None)
-                    if release is not None:
-                        if batches_to_release is None:
-                            batches_to_release = []
-
-                        batches_to_release.append(oldest_batch)
+                    if (_ := _getattr(oldest_batch, "release", None)) is not None:
+                        if dropped_batches is None:
+                            dropped_batches = []
+                        dropped_batches.append(oldest_batch)
                 else:
-                    # If dropping the oldest batch would put us under maxlen, stop dropping.
                     break
 
             self._not_empty.notify()
 
-        if batches_to_release:
-            for i in batches_to_release:
-                i.release()
+        if dropped_batches:
+            for b in dropped_batches:
+                b.release()
 
     def get(self, timeout=None):
         """Returns the oldest batch."""
-        with self._not_empty:
+        _not_empty = self._not_empty
+
+        with _not_empty:
             if self._total_objects == 0:
                 if timeout is None:
                     return None
                 # Check our total objects tracker instead of the deque length
-                if not self._not_empty.wait_for(lambda: self._total_objects > 0 or self._shutdown, timeout):
+                if not _not_empty.wait_for(lambda: self._total_objects > 0 or self._shutdown, timeout):
                     return None
 
             # print(f"batch queue get: {self._total_objects} {self._deque}")
@@ -125,14 +123,17 @@ class BatchQueue:
             }
 
     def clear(self):
+        """Clears all batches, releases memory, and resets the shutdown state."""
         with self._not_empty:
-            while self._deque:
-                batch = self._deque.pop()
-                release = getattr(batch, "release", None)
-                if release is not None:
+            dq = self._deque  # Localize for the loop
+            while dq:
+                batch = dq.pop()
+                # Check and bind 'release' in one shot
+                if (release := getattr(batch, "release", None)) is not None:
                     release()
 
             self._total_objects = 0
+            self._shutdown = False  # Reset so it's ready for a fresh start
 
     def __getitem__(self, index):
         """
