@@ -65,3 +65,16 @@ We have included several utilities to help monitor the system:
 
 - `blinkview.utils.audit_imports`: Profiles the memory cost of each import step.
 - `blinkview.utils.profile_memory`: A wrapper function to measure the USS and Private Bytes delta of a specific logic block.
+
+## Experimental Features
+
+### Daemon Mode
+```bash
+# Linux
+UV_PROJECT_ENVIRONMENT=".venvd" uv sync --only-group daemon --python 3.14t
+
+# Windows PowerShell
+$env:UV_PROJECT_ENVIRONMENT=".venvd"; uv sync --only-group daemon --python 3.14t
+```
+
+---

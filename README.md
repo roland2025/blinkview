@@ -1,111 +1,136 @@
 # BlinkView
 
-**BlinkView** is a high-performance telemetry, log viewer, and visualization tool designed for embedded systems.
+**BlinkView** is a cross-device debugging tool for embedded systems. 
 
-It provides real-time log streaming, structured parsing, key-value extraction, plotting, and multi-window monitoring — all optimized for high-throughput sources like UART, RTT, and sockets.
-
-BlinkView helps you turn raw firmware logs into instant insight.
+It aligns and analyzes logs from multiple sources—such as firmware (UART/RTT), CAN bus, and Android—in a single, time-synchronized timeline. Trace events across devices to understand real system behavior.
 
 ---
 
-## Why BlinkView?
+## The Problem: "Manual Glue"
+In complex hardware/software systems, bugs rarely stay in one layer. Investigating a failure often means manually aligning timestamps from a serial terminal, a CAN log, and `adb logcat`.
 
-BlinkView is inspired by the first signal every embedded engineer knows: the blinking LED.
+BlinkView replaces ad-hoc 'log-merger' scripts with a **unified environment** that handles ingestion, time alignment, and visualization in one place.
 
-It focuses on:
+BlinkView evolved from an internal tool used for debugging real multi-device embedded systems.
 
-- Fast insight
-- Minimal friction
-- Real-time visibility
-- Embedded-friendly workflows
+---
+## Example Use Case
 
-Launch your telemetry dashboard as easily as:
+Debugging a command across a system:
+
+- User presses a button in an Android app
+- Command is sent over BLE or UART
+- Controller processes it and sends CAN messages
+- Motor or battery responds
+
+BlinkView lets you see all of this in one timeline:
+- Android logcat event
+- Transport messages
+- Firmware logs
+- CAN signals (decoded via DBC)
+
+This makes it possible to:
+- trace behavior across components
+- measure delays between steps
+- identify where failures occur
+---
+
+## Installation
+
+### Requirements
+
+- Python 3.10+
+
+BlinkView manages its dependencies via `uv`, including optional hardware backends and GUI support.
+
+### Using UV (Recommended)
+BlinkView is best installed via `uv` for environment isolation.
+
+**Windows (PowerShell):**
+```bash
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+**Install from source:**
+```bash
+# Clone the repo
+git clone https://github.com/roland2025/blinkview.git
+cd blinkview
+
+# Install the tool
+uv tool install ".[all]" --python 3.14
+```
+
+---
+
+## Usage
 
 ```bash
+# Go to your project directory
+cd your/mcu/project
+
+# Initialize the profile
+blink init
+
+# Launch the tool
 blink
 ```
+
+* **Profiles:** Stored in `./.blinkview/` (can be committed to Git).
+* **Logs:** Saved in `./logs/` (should be ignored in Git).
+* **Global Config:** Set a centralized log directory with `blink config --global log_dir /path/to/logs`.
 
 ---
 
 ## Features
 
-- Real-time log viewing from multiple sources simultaneously.
-- High-performance ingestion pipeline optimized for low overhead.
-- **Supported Sources**:
-  - UART/Serial ports
-  - CAN-bus (with DBC file integration for signal decoding)
-  - SEGGER RTT (Real Time Transfer)
-  - Android Debug Bridge (ADB logcat) - *Note: Filtering needs improvement, feature is not yet finalized.*
-- **Visualization & UI**:
-  - Multi-window, tabbed log views.
-  - **Advanced Log Viewer**:
-    - Filter by device, module, and submodules.
-    - Filter by log level (INFO, WARN, ERROR, etc.).
-    - Toggle visibility of timestamp, device, level, and module columns.
-    - Automatic auto-pause on high-velocity log bursts to prevent UI lockup.
-    - Fast text search and highlighting.
-  - Detachable windows for multi-monitor setups.
-  - Live plotting of numeric telemetry data.
-  - Watch/Command list for sending structured commands and monitoring specific variables.
-  - Structured and configurable log parsing.
-  - Automatic module/submodule hierarchy detection.
-- **Core Engine**:
-  - Timestamp alignment across different sources using high-precision clocks.
-  - Raw data logging for lossless capture.
-  - Centralized storage with a pub/sub architecture for UI updates.
+* **Multi-Source Ingestion:**
+  * Serial / UART
+  * CAN-bus (with DBC decoding)
+  * SEGGER RTT
+  * TCP/UDP sockets
+  * ADB logcat  *(experimental, filtering and integration still evolving)*.
+* **Text Log Viewer:** 
+  * Advanced filtering by device, module, and log level.
+  * High-speed text search and highlighting.
+  * Auto-pause on high-velocity bursts to maintain UI responsiveness.
+* **Session Persistence:** Automatically remembers window positions and active log filter settings. Pick up exactly where you left off without re-configuring your workspace.
+* **Watch / Command List:** 
+  * Monitor specific variables and latest state values.
+  * Send structured commands back to the device.
+* **Live Telemetry Plotting:** Real-time visualization of numeric data streams.
+* **Unified Timeline Alignment:**
+  * Best-effort time alignment across sources with different transport characteristics.
+  * Leverages high-precision internal clocks where the hardware/transport allows (e.g., SEGGER RTT) and provides time-correlated views for higher-latency sources like UART or ADB.
 
 ---
 
-## Performance
+## Architecture & Performance
 
-BlinkView is designed for high-throughput telemetry environments.
+BlinkView is designed for high-throughput telemetry. It utilizes a multi-threaded ingestion pipeline where data sources run in isolated threads to prevent cross-source blocking.
 
-Features include:
-
-- **Numba JIT Compilation**: Uses system-specific compiled backends via Numba for extreme performance. This powers core data processing (parsing, buffering, reordering), as well as fast filtering in text log views and high-speed telemetry plotting.
-- Lock-efficient central storage
-- Multi-threaded ingestion pipeline
-- Timestamp reorder buffering
-- Minimal UI overhead
-- Efficient append-only log storage
-- Capable of handling millions of log lines per session
-
----
-
-## Architecture Overview
+*   **Numba JIT Compilation:** Core parsing, filtering, and reordering logic is compiled to machine code for near-native performance.
+*   **KV Extraction:** A dedicated extractor identifies key-value pairs within the stream for real-time monitoring.
+*   **Time-Reordering:** A reorder layer buffers incoming packets to handle varying transport latencies and produce a cohesive chronological stream.
 
 ```mermaid
 graph TD
     %% Source Nodes
-    UART[UART Source]
+    StreamSource[Stream Sources <br/> <i>UART / RTT / Socket</i>]
     CAN[CAN Source]
-    Socket[Socket Source]
-    RTT[RTT Source]
     ADB[ADB Source]
 
     %% Pipeline Subgraphs
-    subgraph UART_Pipe [UART Pipeline]
-        UART_Raw[Raw File Writer]
-        UART_P[Parser]
-        UART_KV[KV Extractor]
+    subgraph Stream_Pipe [Stream Pipeline]
+        Stream_Raw[Raw File Writer]
+        Stream_P[Parser]
+        Stream_KV[KV Extractor]
     end
 
     subgraph CAN_Pipe [CAN Pipeline]
         CAN_Raw[Raw File Writer]
         CAN_P[Parser]
         CAN_KV[KV Extractor]
-    end
-
-    subgraph Sock_Pipe [Socket Pipeline]
-        Sock_Raw[Raw File Writer]
-        Sock_P[Parser]
-        Sock_KV[KV Extractor]
-    end
-
-    subgraph RTT_Pipe [RTT Pipeline]
-        RTT_Raw[Raw File Writer]
-        RTT_P[Parser]
-        RTT_KV[KV Extractor]
     end
 
     subgraph ADB_Pipe [ADB Pipeline]
@@ -121,220 +146,41 @@ graph TD
     Storage((Central Storage <br/> <i>Pub/Sub Provider</i>))
 
     %% Output Nodes
-    LogUI[Log UI]
-    KVPanel[KV Panel]
+    LogView[Text Log Viewer]
+    WatchCmd[Watch / Command List]
     Plotter[Plotter]
     UWriter[Unified File Writer]
 
-    %% Flow within Pipelines
-    UART --> UART_Raw
-    UART --> UART_P
-    UART_P --> UART_KV
-    UART_P & UART_KV --> Reorder
+    %% Flow
+    StreamSource --> Stream_Raw
+    StreamSource --> Stream_P
+    Stream_P --> Stream_KV
+    Stream_P & Stream_KV --> Reorder
 
     CAN --> CAN_Raw
     CAN --> CAN_P
     CAN_P --> CAN_KV
     CAN_P & CAN_KV --> Reorder
 
-    Socket --> Sock_Raw
-    Socket --> Sock_P
-    Sock_P --> Sock_KV
-    Sock_P & Sock_KV --> Reorder
-
-    RTT --> RTT_Raw
-    RTT --> RTT_P
-    RTT_P --> RTT_KV
-    RTT_P & RTT_KV --> Reorder
-
     ADB --> ADB_Raw
     ADB --> ADB_P
     ADB_P --> ADB_KV
     ADB_P & ADB_KV --> Reorder
 
-    %% Chronological Alignment to Hub
     Reorder -- "Ordered Stream" --> Storage
     
-    %% Pub/Sub Distribution
-    Storage -.-> LogUI
-    Storage -.-> KVPanel
+    Storage -.-> LogView
+    Storage -.-> WatchCmd
     Storage -.-> Plotter
     Storage -.-> UWriter
 
     %% B&W Styling
     classDef bw fill:#fff,stroke:#000,stroke-width:2px,color:#000
-    class UART,CAN,Socket,RTT,ADB,UART_P,CAN_P,Sock_P,RTT_P,ADB_P,UART_KV,CAN_KV,Sock_KV,RTT_KV,ADB_KV,UART_Raw,CAN_Raw,Sock_Raw,RTT_Raw,ADB_Raw,Reorder,Storage,LogUI,KVPanel,Plotter,UWriter bw
-    
-    %% Subgraph Styling
-    style UART_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
+    class StreamSource,CAN,ADB,Stream_P,CAN_P,ADB_P,Stream_KV,CAN_KV,ADB_KV,Stream_Raw,CAN_Raw,ADB_Raw,Reorder,Storage,LogView,WatchCmd,Plotter,UWriter bw
+    style Stream_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
     style CAN_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
-    style Sock_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
-    style RTT_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
     style ADB_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
 ```
-
-Core logic is fully separated from the UI for performance and flexibility.
-
----
-
-## Example Log Format
-
-BlinkView supports flexible log formats such as:
-
-```
-[123.456] INFO main: System initialized
-[123.789] WARN battery.current: 132 mA
-[124.001] ERROR motor.driver: Overcurrent detected
-```
-
-Or custom formats via parser templates.
-
----
-
-## Installation
-
-### Requirements
-
-- Python 3.10+
-- PySide6 (for the UI)
-- pyserial (for UART)
-- numba (for high-performance data processing)
-
-### UV package manager
-UV is a modern Python tool for managing packages and tools.
-
-For an optimal experience, BlinkView should be installed via uv. This ensures environment isolation and a simplified setup of all dependencies.
-
-https://docs.astral.sh/uv/getting-started/installation/
-
-#### UV on Windows
-
-```bash
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-### Install from source
-
-```bash
-#Clone the repo
-git clone https://github.com/roland2025/blinkview.git
-cd blinkview
-
-# install the tool to system
-uv tool install ".[all]" --python 3.14
-```
-
-### Daemon mode (experimental)
-
-```bash
-# linux
-UV_PROJECT_ENVIRONMENT=".venvd" uv sync --only-group daemon --python 3.14t
-
-# windows powershell
-$env:UV_PROJECT_ENVIRONMENT=".venvd"; uv sync --only-group daemon --python 3.14t
-```
-
-#### Upgrading
-
-```bash
-uv tool upgrade blinkview
-```
-
----
-
-## Usage
-
-
-```bash
-# go to your embedded project directory
-cd your/mcu/project
-
-# initialize the default profile
-blink init
-
-# start the GUI
-blink
-```
-
-* if you initialized a project
-  * profiles are saved in `./.blinkview/`
-  * logs are saved in `./logs/`
-* if you didnt init a project
-  * profiles and logs are saved in `~/.blinkview/`
-
-* recommended workflow:
-  * initialize a profile for each project
-  * start the GUI from the project directory
-  * profiles can be added to git for team sharing
-  * logs are in a separate directory and can be ignored in git
-
-### Unified logs directory
-By default, BlinkView saves logs in the current project directory under `./logs/`.
-
-To centralize logs across projects, you can set a global log directory:
-
-```bash
-blink config --global log_dir /path/to/logs
-```
-
----
-
-## Supported Inputs
-
-- **UART / Serial**: For classic embedded device logging.
-- **CAN-bus**: Integrated with `cantools` for DBC-based signal extraction.
-- **SEGGER RTT**: High-speed logging for ARM Cortex-M microcontrollers.
-- **Android ADB**: Stream logs directly from Android devices via `logcat`. *Note: Filtering needs improvement, feature is not yet finalized.*
-- **TCP / UDP Sockets**: For network-based telemetry streams.
-
----
-
-## Design Goals
-
-BlinkView is built with these priorities:
-
-- Performance first
-- Embedded-focused workflows
-- Flexible parsing
-- Multi-device support
-- Non-blocking UI
-
----
-
-## Use Cases
-
-BlinkView is ideal for:
-
-- Firmware development
-- Embedded debugging
-- Telemetry visualization
-- Robotics development
-- Battery system monitoring
-- Real-time system analysis
-
----
-
-## Status
-
-BlinkView is currently in active development.
-
-Core features are functional, and the architecture is designed for long-term extensibility.
-
----
-
-## Roadmap
-
-- File replay
-- Text-to-speech alerts
-- Advanced parsing and filtering options
-- More plot types and customization
-- Improved UI for configuration
-
----
-
-## License
-
-Mozilla Public License 2.0 (MPL-2.0)
 
 ---
 
@@ -343,12 +189,13 @@ Mozilla Public License 2.0 (MPL-2.0)
 BlinkView is named after the first embedded program everyone writes:
 
 ```c
-while (1)
-{
+while (1) {
     toggle_led();
 }
 ```
 
-The blink is the first signal that your system is alive.
+The blink is the first signal that your system is alive. BlinkView helps you see everything that follows.
 
-BlinkView helps you see everything that follows.
+---
+
+**License:** Mozilla Public License 2.0 (MPL-2.0)

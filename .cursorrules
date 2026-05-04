@@ -1,0 +1,7 @@
+# BlinkView Global Rules
+
+* **Strict UI Import:** NEVER import `PySide6` directly. ALWAYS use `from qtpy import...`.
+* **Numba Constraints:** Code in `src/blinkview/ops/` must be `@njit` compatible (numpy/bytes only, no python objects).
+* **Architecture:** UI must never block on data ingestion.
+
+**For deep architectural context, state management, and implementation details, ALWAYS read `agents.md` before generating large features.**
