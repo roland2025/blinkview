@@ -92,6 +92,7 @@ class IndexedStringTable:
         "_lens",
         "_hashes",
         "_values",
+        "_in_use",
         "_hash_index",
         "index_size",
         "_buffer",
@@ -112,6 +113,8 @@ class IndexedStringTable:
         self._offsets = np.empty(initial_capacity, dtype=dtypes.OFFSET_TYPE)
         self._lens = np.empty(initial_capacity, dtype=dtypes.LEN_TYPE)
         self._hashes = np.empty(initial_capacity, dtype=dtypes.HASH_TYPE)
+
+        self._in_use = np.zeros(initial_capacity, dtype=np.bool_)
 
         self.use_hashes = use_hashes
 
@@ -163,6 +166,11 @@ class IndexedStringTable:
             self._offsets = np.resize(self._offsets, new_cap)
             self._lens = np.resize(self._lens, new_cap)
             self._hashes = np.resize(self._hashes, new_cap)
+
+            self._in_use = np.resize(self._in_use, new_cap)
+
+            self._in_use[current_cap:] = False
+
             if self._values is not None:
                 self._values = np.resize(self._values, new_cap)
 
@@ -201,6 +209,9 @@ class IndexedStringTable:
 
         if (v := self._values) is not None and value is not None:
             v[identity_id] = value
+
+        # Mark this specific ID as active
+        self._in_use[identity_id] = True
 
         # Reset bundle since data was written
         self._bundle = None
@@ -258,3 +269,7 @@ class IndexedStringTable:
     def __getitem__(self, identity_id: int) -> str:
         """Syntactic sugar for get_string: name = table[5]"""
         return self.get_string(identity_id)
+
+    def get_active_ids(self) -> np.ndarray:
+        """Returns an array of all IDs currently marked as in use."""
+        return np.where(self._in_use[: self.count])[0]

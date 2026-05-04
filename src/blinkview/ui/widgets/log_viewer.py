@@ -442,7 +442,7 @@ QToolButton[filterEnabled="true"] {
                 )
             elif dev := f.allowed_device:
                 # Tab is restricted to a device (No specific module)
-                t_list = np.array([mod.id for mod in reg.get_all_modules() if mod.device == dev], dtype=dtypes.ID_TYPE)
+                t_list = f.allowed_device.get_all_module_ids()
             else:
                 # Global 'All Logs' view
                 t_list = None
@@ -457,7 +457,12 @@ QToolButton[filterEnabled="true"] {
             if filter_enabled:
                 # Path 1: Surgical Mode
                 mask_to_use = sidebar_mask[:mod_count] if len(sidebar_mask) >= mod_count else sidebar_mask
-                self._effective_mask = np.maximum(mask_to_use, global_threshold)
+                raw_effective = np.maximum(mask_to_use, global_threshold)
+                if self._filter_cache is not None:
+                    self._effective_mask = np.full(mod_count, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
+                    self._effective_mask[self._filter_cache] = raw_effective[self._filter_cache]
+                else:
+                    self._effective_mask = raw_effective
             else:
                 # Path 2: Tab Fallback Mode
                 self._effective_mask = np.full(mod_count, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)

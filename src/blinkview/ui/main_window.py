@@ -475,7 +475,7 @@ class BlinkMainWindow(QMainWindow):
         exit_act = menu.addAction("Quit")
         exit_act.triggered.connect(self.close)
 
-    def create_widget(self, cls_name, name, as_window=False, show=True, params=None, reattach_on_close=True):
+    def create_widget(self, cls_name, name, as_window=False, show=True, params=None, reattach_on_close=False):
         """Routes a string class name to the correct factory method."""
 
         # Prevent duplicate tabs using the helper

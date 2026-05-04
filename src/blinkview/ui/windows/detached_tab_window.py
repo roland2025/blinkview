@@ -71,6 +71,9 @@ class DetachedTabWindow(QMainWindow):
 
         # If we are force-destroying, just clear references and exit
         if self._force_destroy or not self.reattach_on_close:
+            if self.widget and isValid(self.widget):
+                self.widget.close()
+
             self.setCentralWidget(None)
             self.widget = None
             event.accept()
@@ -101,7 +104,8 @@ class DetachedTabWindow(QMainWindow):
         # Proactively clear the central widget to stop the window from
         # owning/touching the dying widget's memory.
         try:
-            if isValid(self.widget):
+            if self.widget and isValid(self.widget):
+                self.widget.close()
                 self.setCentralWidget(None)
         except RuntimeError:
             pass

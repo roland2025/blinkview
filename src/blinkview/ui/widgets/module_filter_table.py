@@ -376,7 +376,12 @@ class ModuleFilterTable(QTableView):
         self.setModel(self.fast_model)
 
         # 2. Trigger the initial sync to build the rows
-        self.fast_model.sync_registry(allowed_device=self.log_filter.log_filter.allowed_device)
+        f = self.log_filter.log_filter
+        self.fast_model.sync_registry(
+            allowed_device=f.allowed_device,
+            root_module=f.filtered_module,
+            include_children=f.filtered_module_children,
+        )
 
         # View Styling
         self.setShowGrid(False)
@@ -410,13 +415,6 @@ class ModuleFilterTable(QTableView):
 
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
-
-        f = self.log_filter.log_filter
-        self.fast_model.sync_registry(
-            allowed_device=f.allowed_device,
-            root_module=f.filtered_module,
-            include_children=f.filtered_module_children,
-        )
 
     def check_for_new_modules(self):
         """Lightweight check to see if we need to rebuild the UI list."""

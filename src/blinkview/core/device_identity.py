@@ -8,6 +8,7 @@ import re
 from threading import Lock
 from typing import TYPE_CHECKING
 
+from blinkview.core import dtypes
 from blinkview.core.id_registry.tables import IndexedStringTable
 from blinkview.ops.id_registry import NO_PARENT
 
@@ -159,6 +160,14 @@ class DeviceIdentity:
                 self.id_registry.register_new_modules(new_registrations)
 
         return target_node
+
+    def get_all_module_ids(self):
+        """Returns a NumPy array of all module IDs belonging to this device."""
+        # The modules_table tracks all modules registered to this specific device
+        # We slice up to the current count to get the active IDs.
+        # Ensure it returns the correct ID_TYPE defined in dtypes.
+        with self._lock:
+            return self.modules_table.get_active_ids().astype(dtypes.ID_TYPE, copy=False)
 
     def __str__(self):
         return self.name
