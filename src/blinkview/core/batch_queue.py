@@ -26,6 +26,7 @@ class BatchQueue:
         # Condition is safer and faster than Event + Lock for queues
         self._lock = Lock()
         self._not_empty = Condition(self._lock)
+        self._shutdown = False
 
     def put(self, batch):
 
@@ -80,7 +81,7 @@ class BatchQueue:
                 if timeout is None:
                     return None
                 # Check our total objects tracker instead of the deque length
-                if not self._not_empty.wait_for(lambda: self._total_objects > 0, timeout):
+                if not self._not_empty.wait_for(lambda: self._total_objects > 0 or self._shutdown, timeout):
                     return None
 
             # print(f"batch queue get: {self._total_objects} {self._deque}")
@@ -146,22 +147,13 @@ class BatchQueue:
         # len() on a deque is O(1) and atomic in CPython/3.14t
         return len(self._deque)
 
-    # def get_many(self, timeout=None):
-    #     """Returns ALL objects currently in the queue, flattened."""
-    #     with self._not_empty:
-    #         if self._total_objects == 0:
-    #             if timeout is None:
-    #                 return None
-    #             # Check our total objects tracker
-    #             if not self._not_empty.wait_for(lambda: self._total_objects > 0, timeout):
-    #                 return None
-    #
-    #         # Flatten the nested batches into a single list of objects instantly
-    #         count = self._total_objects
-    #         all_objects = list(itertools.chain.from_iterable(self._deque))
-    #
-    #         self._deque.clear()
-    #         self._total_objects = 0
-    #         self.popped += count
-    #
-    #         return all_objects
+    def trigger_shutdown(self):
+        """Instantly wakes up any threads blocking on get()."""
+        with self._not_empty:
+            self._shutdown = True
+            self._not_empty.notify_all()
+
+    def reset_shutdown(self):
+        """Resets the shutdown flag, allowing get() to resume blocking."""
+        with self._not_empty:
+            self._shutdown = False

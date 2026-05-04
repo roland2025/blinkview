@@ -150,7 +150,7 @@ class FileLogger(BaseFileLogger):
 
         try:
             while not stop_is_set():
-                batch = queue_get(timeout=0.1)
+                batch = queue_get(timeout=120)
                 now = perf_counter()
 
                 if batch is not None:

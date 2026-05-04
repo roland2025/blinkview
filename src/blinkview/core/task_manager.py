@@ -69,31 +69,34 @@ class TaskManager:
                 now = time.time()
                 next_wakeup = None
 
-                # Dispatch due tasks and update their next run times
+                # SINGLE PASS: Dispatch tasks and calculate the next wakeup time
                 for task in self._periodic_tasks.values():
                     if now >= task["next_run"]:
-                        # Only submit if the previous run has finished
-                        if not task.get("is_running"):
+                        if not task["is_running"]:
                             task["is_running"] = True
-
                             future = self.executor.submit(task["func"], *task["args"], **task["kwargs"])
 
-                            # Define a callback to clear the flag when the future completes
-                            # Note: default arguments are used to capture the current 'task' reference
+                            # Ensure the callback modifies state under the condition lock
                             def make_done_callback(t=task):
                                 def callback(f):
-                                    t["is_running"] = False
+                                    with self._condition:
+                                        t["is_running"] = False
 
                                 return callback
 
                             future.add_done_callback(make_done_callback())
 
-                        # Advance the next run time regardless, so it checks again next tick
-                        task["next_run"] = now + task["interval"]
+                        # Advance the next run time strictly based on its last target, not 'now',
+                        # to prevent the schedule from drifting over hours/days.
+                        # (Fallback to 'now' if it fell massively behind to prevent infinite catch-up storms)
+                        if now - task["next_run"] > task["interval"] * 2:
+                            task["next_run"] = now + task["interval"]
+                        else:
+                            task["next_run"] += task["interval"]
 
-                # Find the earliest upcoming task
-                if self._periodic_tasks:
-                    next_wakeup = min(task["next_run"] for task in self._periodic_tasks.values())
+                    # Calculate next_wakeup in the same pass
+                    if next_wakeup is None or task["next_run"] < next_wakeup:
+                        next_wakeup = task["next_run"]
 
                 if not self._running:
                     break
@@ -102,6 +105,8 @@ class TaskManager:
                 if next_wakeup is None:
                     self._condition.wait()
                 else:
+                    # Recalculate time just before sleeping to account for the few
+                    # microseconds spent dispatching tasks in the loop above
                     sleep_time = next_wakeup - time.time()
                     if sleep_time > 0:
                         self._condition.wait(timeout=sleep_time)

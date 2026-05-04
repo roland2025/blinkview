@@ -10,6 +10,7 @@ from threading import RLock
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Optional
 
+from blinkview.core.base_reorder import ReorderFactory
 from blinkview.core.id_registry import IDRegistry
 from blinkview.core.module_snapshot import LatestModuleValueTracker
 from blinkview.core.reorderer import Reorder
@@ -32,7 +33,6 @@ from .factory_registry import FactoryRegistry
 from .logger import PrintLogger, SystemLogger
 from .numpy_batch_manager import PooledLogBatch
 from .plugin_manager import PluginManager
-from .reorder_buffer import ReorderFactory
 from .reusable_batch_pool import PoolManager
 from .settings_manager import SettingsManager
 from .sources import SourcesManager

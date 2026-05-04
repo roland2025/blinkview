@@ -63,9 +63,6 @@ class CentralStorage(BaseCentralStorage):
         # Localize method lookups
         stop_is_set = self._stop_event.is_set
         get = self.input_queue.get
-        timeout_sec = 0.2
-
-        time_ns = self.shared.time_ns
 
         speedometer = Speedometer(logger=self.logger.child("stats"))
 
@@ -73,7 +70,7 @@ class CentralStorage(BaseCentralStorage):
             # we need to push messages to subscribers here, but for now we just keep them in the log
 
             try:
-                batch = get(timeout=timeout_sec)
+                batch = get(timeout=120)
                 if batch is None:
                     continue
 

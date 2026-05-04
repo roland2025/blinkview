@@ -213,12 +213,13 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
             while not stop_is_set():
                 # 1. Calculate dynamic timeout based on batch age
-                if batch_out is not None:
+                if batch_out is not None and batch_out.size > 0:
                     elapsed_ns = time_ns() - batch_out_time
                     remaining_timeout = max(0.0, max_timeout - (elapsed_ns / 1e9))
                     current_timeout = remaining_timeout
                 else:
-                    current_timeout = max_timeout
+                    # Will wake up instantly when data arrives OR trigger_shutdown() is called.
+                    current_timeout = 120
 
                 batch_in = get(timeout=current_timeout)
 

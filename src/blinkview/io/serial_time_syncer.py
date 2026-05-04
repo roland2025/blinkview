@@ -137,9 +137,9 @@ class SerialTimeSyncer(BaseParser):
                     # --- 2. Calculate Dynamic Timeout ---
                     now = time_ns()
                     wait_ns = next_ping_due_ns - now
-                    wait_sec = max(0.0, min(0.1, wait_ns / 1_000_000_000.0))
+                    wait_sec = max(0.0, wait_ns / 1_000_000_000.0)
                 else:
-                    wait_sec = 0.2
+                    wait_sec = 1.0
 
                 # --- 3. Process Incoming Rx Batches ---
                 # logger.debug(f"get timeout={wait_sec}")

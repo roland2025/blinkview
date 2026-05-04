@@ -172,6 +172,7 @@ class Reorder(BaseReorder):
 
         time_ns = self.shared.time_ns
         delay_ns = self.delay * 1_000_000
+        delay_sec = self.delay / 1000 / 2
 
         distribute = self.distribute
         get = self.input_queue.get
@@ -247,7 +248,7 @@ class Reorder(BaseReorder):
                 now = time_ns()
 
                 # 1. Drain input queue
-                first_batch = get(timeout=0.015)
+                first_batch = get(timeout=delay_sec)
                 if first_batch is None:
                     # Optional: Uncomment below to flush stale data during idle periods
                     # flush()

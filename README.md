@@ -143,15 +143,9 @@ graph TD
     Reorder{Reorder Layer <br/> <i>Time-Delayed Buffer</i>}
     
     %% Central Hub
-    Storage((Central Storage <br/> <i>Pub/Sub Provider</i>))
+    Storage((Central Storage <br/> <i>Thread-Safe Data Store</i>))
 
-    %% Output Nodes
-    LogView[Text Log Viewer]
-    WatchCmd[Watch / Command List]
-    Plotter[Plotter]
-    UWriter[Unified File Writer]
-
-    %% Flow
+    %% Flow: Sources to Reorder
     StreamSource --> Stream_Raw
     StreamSource --> Stream_P
     Stream_P --> Stream_KV
@@ -167,12 +161,20 @@ graph TD
     ADB_P --> ADB_KV
     ADB_P & ADB_KV --> Reorder
 
-    Reorder -- "Ordered Stream" --> Storage
-    
-    Storage -.-> LogView
-    Storage -.-> WatchCmd
-    Storage -.-> Plotter
-    Storage -.-> UWriter
+    %% Flow: Reorder to Storage
+    Reorder -- Ordered Stream --> Storage
+
+    %% Output Nodes (Consumers)
+    UWriter[Unified File Writer]
+    LogView[Text Log Viewer]
+    WatchCmd[Watch / Command List]
+    Plotter[Plotter]
+
+    %% Data Flow: Storage to Consumers
+    Storage -- Push Stream --> UWriter
+    Storage -.->|Poll 10Hz| LogView
+    Storage -.->|Poll 10Hz| WatchCmd
+    Storage -.->|Poll Variable| Plotter
 
     %% B&W Styling
     classDef bw fill:#fff,stroke:#000,stroke-width:2px,color:#000

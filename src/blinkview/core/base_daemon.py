@@ -124,6 +124,12 @@ class BaseDaemon:
             self.logger.info("[DAEMON] Starting...")
 
         self._stop_event.clear()
+
+        input_queue = getattr(self, "input_queue", None)
+        if input_queue is not None:
+            if hasattr(input_queue, "reset_shutdown"):
+                input_queue.reset_shutdown()
+
         name = getattr(self, "reference_id", None)
         self._thread = Thread(target=self._run_wrapper, daemon=True, name=f"{self.__class__.__name__}({name})")
 
@@ -153,7 +159,12 @@ class BaseDaemon:
 
         if self.logger:
             self.logger.info("[DAEMON] Stopping...")
+
         self._stop_event.set()  # Signals the loop to exit
+
+        input_queue = getattr(self, "input_queue", None)
+        if input_queue is not None and hasattr(input_queue, "trigger_shutdown"):
+            input_queue.trigger_shutdown()
 
         if self._thread:
             self._thread.join(timeout)
