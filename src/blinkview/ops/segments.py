@@ -161,8 +161,10 @@ def filter_segment(
             # 2. Module & Level match
             mod_id = modules[i]
 
-            allowed_level = module_filter_mask[mod_id]
-            lvl_match = levels[i] >= allowed_level
+            mask_level = module_filter_mask[mod_id]
+            effective_min_level = mask_level if mask_level > target_level else target_level
+
+            lvl_match = levels[i] >= effective_min_level
 
             # 3. Combine using bitwise AND (prevents short-circuit branching)
             is_match = dev_match & lvl_match
@@ -182,7 +184,7 @@ def filter_segment(
         if target_modules_size == 0:
             for i in range(loop_start, loop_end):
                 dev_match = (not check_device) | (devices[i] == target_device)
-                lvl_match = (not check_level) | (levels[i] == target_level)
+                lvl_match = (not check_level) | (levels[i] >= target_level)
 
                 is_match = dev_match & lvl_match
 
@@ -194,7 +196,7 @@ def filter_segment(
             single_target_module = target_modules_arr[0]
 
             for i in range(loop_start, loop_end):
-                lvl_match = (not check_level) | (levels[i] == target_level)
+                lvl_match = (not check_level) | (levels[i] >= target_level)
                 mod_match = modules[i] == single_target_module
 
                 is_match = lvl_match & mod_match
@@ -206,7 +208,7 @@ def filter_segment(
         else:
             for i in range(loop_start, loop_end):
                 dev_match = (not check_device) | (devices[i] == target_device)
-                lvl_match = (not check_level) | (levels[i] == target_level)
+                lvl_match = (not check_level) | (levels[i] >= target_level)
 
                 # The inner loop contains a 'break', which is technically a branch,
                 # but modern CPUs predict small inner loop exits incredibly well.

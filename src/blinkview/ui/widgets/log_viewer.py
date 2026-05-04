@@ -182,6 +182,9 @@ QToolButton[filterEnabled="true"] {
         self.splitter = QSplitter(Qt.Horizontal, self)
         self.layout.addWidget(self.splitter)
 
+        self._prev_total_module_count = None
+        self._filter_cache = None
+
         self.log_filter = LogFilter(
             self.gui_context.id_registry,
             self.allowed_device,
@@ -248,18 +251,6 @@ QToolButton[filterEnabled="true"] {
             else:
                 self.splitter.setSizes(self.saved_sizes)
 
-        show_dev_btn = True
-        show_mod_btn = True
-        if self.allowed_device is not None or self.filtered_module is not None:
-            show_dev_btn = False  # If we're filtering to a specific device, the device column is redundant
-
-        if self.filtered_module is not None and not self.filtered_module_children:
-            show_mod_btn = False  # If we're filtering to a specific module, the module column is redundant
-            show_dev_btn = False
-
-        self.column_actions["show_dev"].setVisible(show_dev_btn)
-        self.column_actions["show_mod"].setVisible(show_mod_btn)
-
         self.action_toggle_filter.setVisible(self.filtered_module is None)
 
         idx = self.level_combo.findData(LogLevel.from_string(self.log_level))
@@ -288,6 +279,10 @@ QToolButton[filterEnabled="true"] {
         )
 
         self.filtered_module_children = state.get("filtered_module_children", self.filtered_module_children)
+
+        if self.filtered_module_children:
+            self.show_mod = True
+
         self.log_level = state.get("log_level", self.log_level)
 
         view_state = state.get("view_state", {})
@@ -295,12 +290,6 @@ QToolButton[filterEnabled="true"] {
         self.show_dev = view_state.get("show_dev", self.show_dev)
         self.show_lvl = view_state.get("show_lvl", self.show_lvl)
         self.show_mod = view_state.get("show_mod", self.show_mod)
-
-        if self.allowed_device is not None:
-            self.show_dev = False
-        if self.filtered_module is not None:
-            self.show_mod = False
-            self.show_dev = False
 
         self.show_telemetry = view_state.get("show_telemetry", self.show_telemetry)
         self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
@@ -428,17 +417,26 @@ QToolButton[filterEnabled="true"] {
 
         tz_offset_sec = get_local_utc_offset_seconds()
 
-        t_modules = getattr(f, "target_modules", None)
-        if not t_modules and f.filtered_module:
-            t_modules = [f.filtered_module.id]
+        if self._prev_total_module_count != (mod_count := reg.module_count()) or self._filter_cache is None:
+            self._prev_total_module_count = mod_count
 
-        tm_arr = np.array(t_modules, dtype=dtypes.ID_TYPE) if t_modules else EMPTY_ID
+            # Check if a module is filtered, then decide on the subtree vs single ID
+            t_list = EMPTY_ID
+            if m := f.filtered_module:
+                t_list = (
+                    reg.get_descendant_ids(m.id)
+                    if f.filtered_module_children
+                    else np.array([m.id], dtype=dtypes.ID_TYPE)
+                )
+
+            self._filter_cache = t_list
+
         t_device = dtypes.ID_TYPE(f.allowed_device.id if f.allowed_device else ID_UNSPECIFIED)
-        target_level = dtypes.LEVEL_TYPE(f.log_level.value if f.log_level.value else LEVEL_UNSPECIFIED)
+        target_level = dtypes.LEVEL_TYPE(f.log_level.value)
 
         total_new_rows = 0
         full_string_batch = ""
-        format_cfg = FormattingConfig(self.show_ts, self.show_dev, self.show_lvl, self.show_mod, 9)
+        format_cfg = FormattingConfig(self.show_ts, self.show_dev, self.show_lvl, self.show_mod, 3)
 
         # Flag to track if we successfully consumed all segments without breaking
         reached_live_edge = True
@@ -464,7 +462,7 @@ QToolButton[filterEnabled="true"] {
                 # )
                 match_count = filter_segment(
                     segment.bundle,
-                    target_modules_arr=tm_arr,
+                    target_modules_arr=self._filter_cache,
                     out_indices=indices.array,
                     module_filter_mask=filter_mask,
                     filter_enabled=filter_enabled,

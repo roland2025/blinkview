@@ -134,7 +134,7 @@ class TempLogFilter(QObject):
             nb_inherit_states(
                 self.enabled_mask,
                 self.level_mask,
-                self.filter_mask,  # <-- NEW
+                self.filter_mask,
                 self.registry._parent_array,
                 self._initialized_count,
                 target_count,
@@ -159,16 +159,6 @@ class TempLogFilter(QObject):
         print(f"[TempLogFilter] set_enabled: {self.enabled}")
 
         # This signal will trigger your Numba backend to re-evaluate the active masks
-        self.filter_changed.emit()
-
-    def set_level(self, level_obj):
-        """Mass-updates the log level for ALL known modules."""
-        # Vectorized assignment sets every element in the array instantly
-        self.level_mask[:] = level_obj.value
-
-        self.filter_mask[:] = np.where(self.enabled_mask, self.level_mask, LogLevel.OFF.value)
-
-        # Emit the update for the backend to catch
         self.filter_changed.emit()
 
     def get_state(self):
@@ -278,6 +268,16 @@ class TempLogFilter(QObject):
             new_level=level.value,
             off_value=LogLevel.OFF.value,
         )
+        self.filter_changed.emit()
+
+    def reset_all(self):
+        """Restores all modules to the default state (Enabled, Level: ALL)."""
+        # Vectorized reset of all masks
+        self.enabled_mask[:] = True
+        self.level_mask[:] = LogLevel.ALL.value
+        self.filter_mask[:] = LogLevel.ALL.value
+
+        # Trigger UI and backend updates
         self.filter_changed.emit()
 
 
@@ -406,25 +406,36 @@ class ModuleFilterTable(QTableView):
         if not index.isValid():
             return
 
-        # IMPORTANT: Extract the module_id for the clicked row.
-        # If FastModuleFilterModel exposes the ID via UserRole:
+        # 1. Extract the module_id from the model
         module_id = self.fast_model.data(self.fast_model.index(index.row(), 0), Qt.UserRole)
-
-        # If your model doesn't use UserRole, you might need a direct method like:
-        # module_id = self.fast_model.get_module_id_at_row(index.row())
-
         if module_id is None:
             return
 
+        # 2. Resolve the module name from the registry
+        module_obj = self.gui_context.id_registry.module_from_int(module_id)
+        module_name = module_obj.name_with_device() if module_obj else f"ID: {module_id}"
+
         menu = QMenu(self)
-        menu.addSection("Module + Children")
+
+        header_action = QAction(module_name, self)
+        header_action.setEnabled(False)  # Makes it non-clickable and styled as a label
+        menu.addAction(header_action)
+
+        menu.addSeparator()
+
+        subtree_header = QAction("Apply to subtree", self)
+        subtree_header.setEnabled(False)
+        # Optional: You can even set a specific font to make it look "header-y"
+        # f = subtree_header.font(); f.setPointWeight(QFont.Bold); subtree_header.setFont(f)
+        menu.addAction(subtree_header)
+
         # Action: Enable Subtree
-        action_enable = QAction("Enable", self)
+        action_enable = QAction("Enable All", self)
         action_enable.triggered.connect(lambda: self.log_filter.set_subtree_enabled(module_id, True))
         menu.addAction(action_enable)
 
         # Action: Disable Subtree
-        action_disable = QAction("Disable", self)
+        action_disable = QAction("Disable All", self)
         action_disable.triggered.connect(lambda: self.log_filter.set_subtree_enabled(module_id, False))
         menu.addAction(action_disable)
 
@@ -434,11 +445,19 @@ class ModuleFilterTable(QTableView):
         level_menu = menu.addMenu("Set Level")
         for lvl in LogLevel.LIST:
             action_lvl = QAction(lvl.name_conf, self)
-
-            # The lambda parameter capture (l=lvl) is crucial here so python doesn't bind
-            # to the last item in the loop for every action.
             action_lvl.triggered.connect(lambda checked=False, l=lvl: self.log_filter.set_subtree_level(module_id, l))
             level_menu.addAction(action_lvl)
+
+        menu.addSeparator()
+
+        # Create a submenu for Reset
+        reset_menu = menu.addMenu("Global Reset...")
+
+        # Add a confirmation action inside the submenu
+        action_confirm_reset = QAction("Confirm: Reset All Modules", self)
+        action_confirm_reset.setToolTip("Enable all modules and set levels to ALL")
+        action_confirm_reset.triggered.connect(self.log_filter.reset_all)
+        reset_menu.addAction(action_confirm_reset)
 
         # Show the menu at the cursor position
         menu.exec_(self.viewport().mapToGlobal(pos))

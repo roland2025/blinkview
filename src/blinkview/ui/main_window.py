@@ -362,9 +362,7 @@ class BlinkMainWindow(QMainWindow):
         # FAST PATH: Skip the warning toast and the 333ms delay
         if IS_CACHE_FRESH:
             ToastManager.show("Compiling Shaders", ToastType.WARNING, duration=1.0, parent=self)
-            QTimer.singleShot(333, self._start_stage_2)
-        else:
-            self._start_stage_2()
+        QTimer.singleShot(333, self._start_stage_2)
 
     def load_ui_state(self):
         self.gui_context.gui_state.load_ui_state(

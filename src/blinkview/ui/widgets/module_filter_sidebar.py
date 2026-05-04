@@ -44,17 +44,6 @@ class ModuleFilterSidebar(QWidget):
 
         self.toolbar.addSeparator()
 
-        # Add the Global Level Selector to the Toolbar
-        self.toolbar.addWidget(QLabel(" Min: "))
-        self.level_combo = QComboBox()
-        for lvl in LogLevel.LIST:
-            self.level_combo.addItem(lvl.name_conf, lvl)
-
-        self.toolbar.addWidget(self.level_combo)
-        self.level_combo.currentIndexChanged.connect(self._on_global_level_changed)
-
-        self.toolbar.addSeparator()
-
         # Add Pause Indicator
         self.pause_label = QLabel(" ⏸ Sync Paused ")
         # self.pause_label.setStyleSheet("color: #888; font-style: italic; font-size: 10px;")
@@ -76,19 +65,9 @@ class ModuleFilterSidebar(QWidget):
         # Visually dim the table when disabled to prevent confusion
         self.table.setEnabled(checked)
 
-    def _on_global_level_changed(self, index):
-        """Mass-update the index-based filter for this tab."""
-        level_identity = self.level_combo.itemData(index)
-
-        self.log_filter.set_level(level_identity)
-
-        # Trigger the table and log view to refresh
-        self.table.fast_model.layoutChanged.emit()
-
     def get_state(self):
         return {
             "enabled": self.log_filter.enabled,
-            "global_level": self.level_combo.itemData(self.level_combo.currentIndex()).name_conf,
             "module_filters": self.log_filter.get_state(),
         }
 
@@ -97,10 +76,6 @@ class ModuleFilterSidebar(QWidget):
             return
 
         self.action_enable.setChecked(state.get("enabled", False))
-        global_level_name = state.get("global_level", "INFO")
-        index = self.level_combo.findData(LogLevel.from_string(global_level_name))
-        if index != -1:
-            self.level_combo.setCurrentIndex(index)
 
         self.log_filter.restore_state(state.get("module_filters", {}))
 
