@@ -61,8 +61,8 @@ class UIStateHandler:
             data = json.loads(file_path.read_text())
 
             # Restore binary geometry/state
-            geo_dict = data.get("window_geometry", {})
-            restore_window_geometry_safe(self.window, geo_dict)
+            geo_dict_window = data.get("window_geometry", {})
+            restore_window_geometry_safe(self.window, geo_dict_window)
 
             if "window_state" in data:
                 self.window.restoreState(QByteArray(b64decode(data["window_state"])))
@@ -103,13 +103,14 @@ class UIStateHandler:
                 for win_info in floating_data:
                     params = win_info.get("params", {})
                     tab_name = params.get("tab_name") or win_info.get("name", "Floating Tool")
+
                     new_win = self.window.create_widget(
                         cls_name=win_info.get("class"),
                         name=tab_name,
                         as_window=True,
                         show=False,
                         params=params,
-                        reattach_on_close=win_info.get("reattach_on_close", True),
+                        reattach_on_close=win_info.get("reattach_on_close", False),
                     )
 
                     if not new_win:
@@ -137,7 +138,11 @@ class UIStateHandler:
                     QTimer.singleShot(100, restore_this_window)
 
         except Exception as e:
-            print(f"⚠Could not restore UI state: {e}")
+            print(f"Could not restore UI state")
+
+            import traceback
+
+            print(traceback.format_exc())
 
     def on_ui_restoration_complete(self):
         """This is your callback method."""

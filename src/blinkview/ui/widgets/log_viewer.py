@@ -112,7 +112,7 @@ QToolButton[filterEnabled="true"] {
 
         self.level_combo = QComboBox()
 
-        for lvl in LogLevel.LIST:
+        for lvl in LogLevel.LIST_UI:
             self.level_combo.addItem(lvl.name_conf, lvl)  # lvl is the LevelIdentity object
 
         self.toolbar.addWidget(self.level_combo)
@@ -183,7 +183,8 @@ QToolButton[filterEnabled="true"] {
         self.layout.addWidget(self.splitter)
 
         self._prev_total_module_count = None
-        self._filter_cache = None
+        self._filter_cache = None  # Allowed IDs for this tab
+        self._effective_mask = None  # The final baked Numba mask
 
         self.log_filter = LogFilter(
             self.gui_context.id_registry,
@@ -251,7 +252,8 @@ QToolButton[filterEnabled="true"] {
             else:
                 self.splitter.setSizes(self.saved_sizes)
 
-        self.action_toggle_filter.setVisible(self.filtered_module is None)
+        show_filter_btn = self.filtered_module is None or self.filtered_module_children
+        self.action_toggle_filter.setVisible(show_filter_btn)
 
         idx = self.level_combo.findData(LogLevel.from_string(self.log_level))
         if idx != -1:
@@ -280,16 +282,21 @@ QToolButton[filterEnabled="true"] {
 
         self.filtered_module_children = state.get("filtered_module_children", self.filtered_module_children)
 
-        if self.filtered_module_children:
-            self.show_mod = True
+        default_show_dev = self.show_dev
+        if self.filtered_module is not None or self.allowed_device is not None:
+            default_show_dev = False  # Hide Device column if constrained to a module or device
+
+        default_show_mod = self.show_mod
+        if self.filtered_module is not None and not self.filtered_module_children:
+            default_show_mod = False  # Hide Module column if constrained to a SINGLE module (no children)
 
         self.log_level = state.get("log_level", self.log_level)
 
         view_state = state.get("view_state", {})
         self.show_ts = view_state.get("show_ts", self.show_ts)
-        self.show_dev = view_state.get("show_dev", self.show_dev)
+        self.show_dev = view_state.get("show_dev", default_show_dev)
         self.show_lvl = view_state.get("show_lvl", self.show_lvl)
-        self.show_mod = view_state.get("show_mod", self.show_mod)
+        self.show_mod = view_state.get("show_mod", default_show_mod)
 
         self.show_telemetry = view_state.get("show_telemetry", self.show_telemetry)
         self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
@@ -319,6 +326,8 @@ QToolButton[filterEnabled="true"] {
         # Retrieve the LevelIdentity object from the userData
         level_identity = self.level_combo.itemData(index)
         self.log_filter.set_level(level_identity.name_conf)
+
+        self._effective_mask = None  # Invalidate cache
 
         self.clear_logs()
 
@@ -372,6 +381,8 @@ QToolButton[filterEnabled="true"] {
             button.style().polish(button)
             button.update()
 
+        self._effective_mask = None  # Invalidate cache
+
     def _toggle_module_filter(self, checked):
         """Toggles the visibility of the surgical Module Filter sidebar."""
         self.show_module_filter = checked
@@ -394,6 +405,8 @@ QToolButton[filterEnabled="true"] {
 
     def reload_and_redraw(self):
         """Public method to clear current logs and reload from the source with current filters."""
+        self._effective_mask = None  # Invalidate cache
+
         self.clear_logs()
         self.latest_seq_seen = SEQ_NONE  # Reset sequence tracker to ensure we load all relevant logs
 
@@ -419,20 +432,40 @@ QToolButton[filterEnabled="true"] {
 
         if self._prev_total_module_count != (mod_count := reg.module_count()) or self._filter_cache is None:
             self._prev_total_module_count = mod_count
+            self._effective_mask = None  # Registry grew, invalidate the mask
 
-            # Check if a module is filtered, then decide on the subtree vs single ID
-            t_list = EMPTY_ID
             if m := f.filtered_module:
                 t_list = (
                     reg.get_descendant_ids(m.id)
                     if f.filtered_module_children
                     else np.array([m.id], dtype=dtypes.ID_TYPE)
                 )
+            elif dev := f.allowed_device:
+                # Tab is restricted to a device (No specific module)
+                t_list = np.array([mod.id for mod in reg.get_all_modules() if mod.device == dev], dtype=dtypes.ID_TYPE)
+            else:
+                # Global 'All Logs' view
+                t_list = None
 
             self._filter_cache = t_list
 
-        t_device = dtypes.ID_TYPE(f.allowed_device.id if f.allowed_device else ID_UNSPECIFIED)
-        target_level = dtypes.LEVEL_TYPE(f.log_level.value)
+        # --- Bake Effective Mask (ONLY IF INVALID) ---
+        if self._effective_mask is None or len(self._effective_mask) < mod_count:
+            filter_enabled, sidebar_mask = self.filter_sidebar.get_filter()
+            global_threshold = dtypes.LEVEL_TYPE(f.log_level.value)
+
+            if filter_enabled:
+                # Path 1: Surgical Mode
+                mask_to_use = sidebar_mask[:mod_count] if len(sidebar_mask) >= mod_count else sidebar_mask
+                self._effective_mask = np.maximum(mask_to_use, global_threshold)
+            else:
+                # Path 2: Tab Fallback Mode
+                self._effective_mask = np.full(mod_count, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
+
+                if self._filter_cache is not None:
+                    self._effective_mask[self._filter_cache] = global_threshold
+                else:
+                    self._effective_mask[:] = global_threshold
 
         total_new_rows = 0
         full_string_batch = ""
@@ -440,8 +473,6 @@ QToolButton[filterEnabled="true"] {
 
         # Flag to track if we successfully consumed all segments without breaking
         reached_live_edge = True
-
-        filter_enabled, filter_mask = self.filter_sidebar.get_filter()
 
         with pool.get_snapshot() as segments, pool.acquire_indices_buffer() as indices:
             for segment in segments:
@@ -462,13 +493,9 @@ QToolButton[filterEnabled="true"] {
                 # )
                 match_count = filter_segment(
                     segment.bundle,
-                    target_modules_arr=self._filter_cache,
+                    effective_mask=self._effective_mask,
                     out_indices=indices.array,
-                    module_filter_mask=filter_mask,
-                    filter_enabled=filter_enabled,
                     start_seq=self.latest_seq_seen,
-                    target_level=target_level,
-                    target_device=t_device,
                 )
 
                 if match_count > 0:

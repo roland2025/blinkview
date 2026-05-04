@@ -99,7 +99,13 @@ class TempLogFilter(QObject):
 
         # Start with current capacity
         cap = self.registry._parent_capacity
-        self.enabled_mask = np.ones(cap, dtype=np.bool_)
+
+        # Determine global default based on whether the tab is constrained
+        # If filtered_module is set, we start everything as False (Disabled)
+        is_constrained = self.log_filter.filtered_module is not None
+        start_enabled = not is_constrained
+
+        self.enabled_mask = np.full(cap, start_enabled, dtype=np.bool_)
         self.level_mask = np.full(cap, LogLevel.ALL.value, dtype=dtypes.LEVEL_TYPE)
 
         # The optimized combined mask
@@ -109,6 +115,24 @@ class TempLogFilter(QObject):
 
         # Track how many modules we've run inheritance on
         self._initialized_count = 0
+
+        # If constrained, immediately enable only the allowed subtree/module
+        if is_constrained:
+            self._apply_tab_constraints()
+
+    def _apply_tab_constraints(self):
+        """Force the masks to respect the tab's module/subtree limits."""
+        if not (m := self.log_filter.filtered_module):
+            return
+
+        self.ensure_capacity(m.id + 1)
+
+        if self.log_filter.filtered_module_children:
+            # Tab allows the whole subtree; enable it in the sidebar mask
+            self.set_subtree_enabled(m.id, True)
+        else:
+            # Tab allows only this module; enable only this ID
+            self.set_module_enabled(m.id, True)
 
     def ensure_capacity(self, target_count: int):
         current_cap = len(self.enabled_mask)
@@ -144,17 +168,33 @@ class TempLogFilter(QObject):
     def set_module_enabled(self, module_id: int, enabled: bool):
         self.ensure_capacity(module_id + 1)
         self.enabled_mask[module_id] = enabled
-        self.filter_mask[module_id] = self.level_mask[module_id] if enabled else LogLevel.OFF.value
-        self.filter_changed.emit()
+
+        # Calculate what the new filter value should be
+        new_filter_val = self.level_mask[module_id] if enabled else LogLevel.OFF.value
+
+        # Only emit if the "effective" filter used by Numba actually changes
+        if self.filter_mask[module_id] != new_filter_val:
+            self.filter_mask[module_id] = new_filter_val
+            self.filter_changed.emit()
 
     def set_module_level(self, module_id: int, level: LevelIdentity):
         self.ensure_capacity(module_id + 1)
+
+        if self.level_mask[module_id] == level.value:
+            return  # No change to level
+
         self.level_mask[module_id] = level.value
-        self.filter_mask[module_id] = level.value if self.enabled_mask[module_id] else LogLevel.OFF.value
-        self.filter_changed.emit()
+        # If the module is currently enabled, changing the level
+        # changes the filter_mask, so we must emit.
+        if self.enabled_mask[module_id]:
+            self.filter_mask[module_id] = level.value
+            self.filter_changed.emit()
 
     def set_enabled(self, enabled: bool):
         """Toggles the global state of this specific filter tab."""
+        if self.enabled == enabled:
+            return
+
         self.enabled = enabled
         print(f"[TempLogFilter] set_enabled: {self.enabled}")
 
@@ -235,8 +275,9 @@ class TempLogFilter(QObject):
         return self.enabled, self.filter_mask
 
     def set_subtree_enabled(self, root_module_id: int, enabled: bool):
-        """Recursively enables/disables a module and all its children."""
         self.ensure_capacity(root_module_id + 1)
+        old_mask = self.filter_mask.copy()
+
         nb_update_subtree(
             self.enabled_mask,
             self.level_mask,
@@ -250,11 +291,14 @@ class TempLogFilter(QObject):
             new_level=0,
             off_value=LogLevel.OFF.value,
         )
-        self.filter_changed.emit()
+
+        if not np.array_equal(old_mask, self.filter_mask):
+            self.filter_changed.emit()
 
     def set_subtree_level(self, root_module_id: int, level: LevelIdentity):
-        """Recursively sets the log level for a module and all its children."""
         self.ensure_capacity(root_module_id + 1)
+        old_mask = self.filter_mask.copy()
+
         nb_update_subtree(
             self.enabled_mask,
             self.level_mask,
@@ -268,17 +312,27 @@ class TempLogFilter(QObject):
             new_level=level.value,
             off_value=LogLevel.OFF.value,
         )
-        self.filter_changed.emit()
+
+        if not np.array_equal(old_mask, self.filter_mask):
+            self.filter_changed.emit()
 
     def reset_all(self):
-        """Restores all modules to the default state (Enabled, Level: ALL)."""
-        # Vectorized reset of all masks
-        self.enabled_mask[:] = True
-        self.level_mask[:] = LogLevel.ALL.value
-        self.filter_mask[:] = LogLevel.ALL.value
+        """Restores modules to the default state allowed by this specific tab."""
+        # Optimization: Take a snapshot of the mask to see if we actually change anything
+        old_mask = self.filter_mask.copy()
 
-        # Trigger UI and backend updates
-        self.filter_changed.emit()
+        is_constrained = self.log_filter.filtered_module is not None
+        self.enabled_mask[:] = not is_constrained
+        self.level_mask[:] = LogLevel.ALL.value
+
+        if is_constrained:
+            self._apply_tab_constraints()
+        else:
+            self.filter_mask[:] = LogLevel.ALL.value
+
+        # Only redraw the logs if the effective filter changed
+        if not np.array_equal(old_mask, self.filter_mask):
+            self.filter_changed.emit()
 
 
 class LevelDelegate(QStyledItemDelegate):
@@ -286,7 +340,7 @@ class LevelDelegate(QStyledItemDelegate):
 
     def createEditor(self, parent, option, index):
         editor = QComboBox(parent)
-        for lvl in LogLevel.LIST:
+        for lvl in LogLevel.LIST_UI:
             editor.addItem(lvl.name_conf, lvl)  # Store LevelIdentity in userData
         return editor
 
@@ -357,6 +411,13 @@ class ModuleFilterTable(QTableView):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
 
+        f = self.log_filter.log_filter
+        self.fast_model.sync_registry(
+            allowed_device=f.allowed_device,
+            root_module=f.filtered_module,
+            include_children=f.filtered_module_children,
+        )
+
     def check_for_new_modules(self):
         """Lightweight check to see if we need to rebuild the UI list."""
         is_editing = self.state() == QTableView.EditingState
@@ -369,12 +430,16 @@ class ModuleFilterTable(QTableView):
                 self.sync_paused.emit(True)
             return
 
-        current_registry_count = self.gui_context.id_registry.module_count()
+        reg = self.gui_context.id_registry
+        if reg.module_count() > self.fast_model.known_module_count:
+            f = self.log_filter.log_filter  # Access the underlying LogFilter
 
-        # Compare against the model's known count, NOT the array capacity!
-        if current_registry_count > self.fast_model.known_module_count:
-            allowed_dev = self.log_filter.log_filter.allowed_device
-            self.fast_model.sync_registry(allowed_device=allowed_dev)
+            # Pass all constraints to the model so it can filter the row list
+            self.fast_model.sync_registry(
+                allowed_device=f.allowed_device,
+                root_module=f.filtered_module,
+                include_children=f.filtered_module_children,
+            )
 
     # --- Visibility Events: Start/Stop the Timer ---
     def showEvent(self, event):
@@ -443,7 +508,7 @@ class ModuleFilterTable(QTableView):
 
         # Submenu: Set Level for Subtree
         level_menu = menu.addMenu("Set Level")
-        for lvl in LogLevel.LIST:
+        for lvl in LogLevel.LIST_UI:
             action_lvl = QAction(lvl.name_conf, self)
             action_lvl.triggered.connect(lambda checked=False, l=lvl: self.log_filter.set_subtree_level(module_id, l))
             level_menu.addAction(action_lvl)

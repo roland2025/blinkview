@@ -60,6 +60,10 @@ class LogLevel:
 
     # For mapping numeric values (from bytes/JSON) back to objects
     LIST = [ALL, TRACE, DEBUG, INFO, WARN, ERROR, FATAL, CRITICAL, OFF]
+
+    # Levels meant for the user to select as a threshold
+    LIST_UI = [ALL, TRACE, DEBUG, INFO, WARN, ERROR, FATAL, CRITICAL]
+
     DICT = {level.value: level for level in LIST}
 
     DICT_NAME = {level.name_conf: level for level in LIST}

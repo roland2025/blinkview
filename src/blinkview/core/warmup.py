@@ -133,39 +133,30 @@ class NumbaWarmupHelper:
 
     def exercise_formatting_kernels(self):
         # Trigger: Filtering and Formatting Logic
-
         print("exercise_formatting_kernels...")
 
-        tm_arr = np.array([self.floats_mod.id, self.warmup_mod.id], dtype=dtypes.ID_TYPE)
         s_seq = dtypes.SEQ_TYPE(0)  # uint64
-        t_lvl = dtypes.LEVEL_UNSPECIFIED  # uint8
-        t_dev = dtypes.ID_UNSPECIFIED  # uint32
 
-        filter_mask = np.full(1, LogLevel.ALL.value, dtype=dtypes.LEVEL_TYPE)
-        filter_enabled = False
+        # --- NEW: Build the Unified Effective Mask for Warmup ---
+        # 1. Grab the current capacity (or a safe minimum)
+        mod_count = self.registry.module_count()
+        safe_capacity = max(10, mod_count)  # Ensure it's large enough for dummy IDs
+
+        # 2. Start with everything OFF (128)
+        effective_mask = np.full(safe_capacity, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
+
+        # 3. Enable only the specific modules we want to trigger the warmup logs
+        effective_mask[self.floats_mod.id] = LogLevel.ALL.value
+        effective_mask[self.warmup_mod.id] = LogLevel.ALL.value
 
         with self.log_pool.get_snapshot() as segments, self.log_pool.acquire_indices_buffer() as indices:
             for segment in segments:
-                # print(
-                #     f"warmup_filter_segment("
-                #     f"bundle={type(segment.bundle)}, "
-                #     f"tm_arr={tm_arr.dtype}, "
-                #     f"indices={type(indices.array)}, "
-                #     f"filter_mask={type(filter_mask)}, "
-                #     f"filter_enabled={type(filter_enabled)}, "
-                #     f"s_seq={type(s_seq)}, "
-                #     f"t_lvl={type(t_lvl)}, "
-                #     f"t_dev={type(t_dev)}, "
-                # )
+                # --- NEW: Use the streamlined signature ---
                 match_count = filter_segment(
                     segment.bundle,
-                    target_modules_arr=tm_arr,
+                    effective_mask=effective_mask,
                     out_indices=indices.array,
-                    module_filter_mask=filter_mask,
-                    filter_enabled=filter_enabled,
                     start_seq=s_seq,
-                    target_level=dtypes.LEVEL_TYPE(t_lvl),
-                    target_device=dtypes.ID_TYPE(t_dev),
                 )
 
                 if match_count > 0:

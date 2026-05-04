@@ -15,7 +15,7 @@ from blinkview.ui.native_dark_mode import set_native_dark_mode
 class DetachedTabWindow(QMainWindow):
     """A floating window that holds a detached tab and re-attaches it when closed."""
 
-    def __init__(self, gui_context, widget, title, reattach=True):
+    def __init__(self, gui_context, widget, title, reattach=False):
         super().__init__(None)
         self.gui_context: GUIContext = gui_context
         self._force_destroy = False

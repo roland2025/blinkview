@@ -42,8 +42,6 @@ class ModuleFilterSidebar(QWidget):
         self.action_enable.setChecked(self.log_filter.enabled)
         self.action_enable.toggled.connect(self._on_enable_toggled)
 
-        self.toolbar.addSeparator()
-
         # Add Pause Indicator
         self.pause_label = QLabel(" ⏸ Sync Paused ")
         # self.pause_label.setStyleSheet("color: #888; font-style: italic; font-size: 10px;")
