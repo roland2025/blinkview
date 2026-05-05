@@ -172,15 +172,30 @@ def parse_module_tags_statemachine(
         if curr >= end_cursor:
             break
 
-        first_char = buffer[curr]
-        if in_bracket_mode and first_char != CHAR_LBRACKET:
-            break
-
+        saw_dot = False
         if config.enable_dot_separator:
             if curr < end_cursor and buffer[curr] == CHAR_DOT:
                 while curr < end_cursor and buffer[curr] == CHAR_DOT:
                     curr += 1
-                continue
+                saw_dot = True
+
+                # Consume any trailing whitespace after the dots
+                while curr < end_cursor and is_whitespace(buffer[curr]):
+                    curr += 1
+
+                if curr >= end_cursor:
+                    break
+
+        first_char = buffer[curr]
+
+        if tag_count > 0:
+            if in_bracket_mode and first_char != CHAR_LBRACKET:
+                # Terminate if we were chaining brackets but hit standard text
+                break
+            elif not in_bracket_mode and not saw_dot:
+                # Terminate if it's a new word with NO dot separator connecting them.
+                # This protects 'gnss: SNR_Max:' while allowing 'events: ...util:'
+                break
 
         found_current_tag = False
         tag_len = 0

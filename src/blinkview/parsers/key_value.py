@@ -87,9 +87,7 @@ class KeyValueEqualParser(BaseParser):
                 continue
 
             with batch:
-                for entry in batch:
-                    ts_ns, msg_view, level, module_id, device_id, seq, *_ = entry
-
+                for ts_ns, msg_view, level, module_id, device_id, *_ in batch:
                     if device_id == device_identity_id or device_id == system_identity_id:
                         continue
 
