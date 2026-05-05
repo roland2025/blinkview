@@ -304,9 +304,6 @@ class UpdateWidget(QWidget):
         Static helper to ensure a valid repo path exists in settings.
         Returns True if a valid path is found or selected, False if aborted.
         """
-        from pathlib import Path
-
-        from qtpy.QtWidgets import QFileDialog
 
         from blinkview.ui.widgets.message_box import MessageBox
         from blinkview.utils.updater import Updater
@@ -318,7 +315,7 @@ class UpdateWidget(QWidget):
             return True
 
         # 2. If not, prompt the user
-        MessageBox.information(
+        MessageBox.info(
             None, "Setup Required", "BlinkView needs to know the location of its source repository to handle updates."
         )
 

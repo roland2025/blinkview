@@ -450,8 +450,8 @@ class Registry:
         if self.sources is not None:
             self.sources.start()
 
-        # self.system_ctx.tasks.run_periodic(1, self.buffer_stats)
         tasks = self.system_ctx.tasks
+        # tasks.run_periodic(1, self.buffer_stats)
         flush_interval = self.reorder.delay / 2 / 1000 if self.reorder is not None and self.reorder.enabled else 0.1
         tasks.run_periodic(flush_interval, self.flush_log_queue)
 
