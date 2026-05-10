@@ -12,7 +12,7 @@ from pathlib import Path
 from time import perf_counter, time
 from typing import Optional
 
-from qtpy.QtCore import Qt, QTimer, Signal, Slot
+from qtpy.QtCore import QCoreApplication, Qt, QTimer, Signal, Slot
 from qtpy.QtGui import QAction, QFont, QIcon
 from qtpy.QtWidgets import (
     QApplication,
@@ -111,7 +111,7 @@ class BlinkMainWindow(QMainWindow):
         fm = self.gui_context.registry.file_manager
         # Standalone is indicated at the end only if necessary
         mode_suffix = " (Standalone)" if fm.standalone_mode else ""
-        self.setWindowTitle(f"{fm.project_name} / {fm.profile_name} - BlinkView{mode_suffix} - {blinkview_version}")
+        self.setWindowTitle(f"{fm.project_name} / {fm.profile_name} - {QCoreApplication.applicationName()}{mode_suffix} - {blinkview_version}")
 
         self.gui_context.registry.configure_system()
 

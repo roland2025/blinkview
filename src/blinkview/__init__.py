@@ -4,10 +4,22 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import os
+from pathlib import Path
+
 __version__ = "0.8.0.dev1"
 __author__ = "Roland Uuesoo"
 
-import os
+__app_name__ = "BlinkView"
+__org_domain__ = "ee.incubator"
+
+# Your specific ID requirement
+__app_id__ = f"{__org_domain__}.{__app_name__.lower()}"
+
+
+# Robust icon path (relative to this file)
+ICON_PATH = (Path(__file__).parent / "assets" / "icon.png").absolute()
+
 
 # These must come BEFORE numpy, scipy, or any telemetry logic
 os.environ["OPENBLAS_NUM_THREADS"] = "1"

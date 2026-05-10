@@ -9,7 +9,7 @@ import numpy as np
 from blinkview.core.numba_config import app_njit
 
 
-def fnv1a_64_python(buffer) -> int:
+def fnv1a_64_python(buffer, start, length) -> int:
     from fnvhash import fnv1a_64
 
     data_slice = buffer[start : start + length]

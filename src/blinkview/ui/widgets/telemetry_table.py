@@ -295,22 +295,27 @@ class TelemetryTable(QWidget):
         print(f"[TelemetryTable] {self.tab_name} Restoring state from {state}")
         self.tab_name = state.get("tab_name", self.tab_name)
 
-        self.show_device_column = state.get("show_device_column", self.show_device_column)
-
         self.filtered_device = self.gui_context.id_registry.resolve_device(
             state.get("filtered_device", self.filtered_device)
         )
         self.proxy_model.setAllowedDevice(self.filtered_device)
-        self.show_device_column = (
-            self.filtered_device is not None
-        )  # If we're filtering by device, we can hide the device column for cleaner UI
 
         self.filtered_module = self.gui_context.id_registry.resolve_module(
             state.get("filtered_module", self.filtered_module)
         )
         self.proxy_model.setAllowedModule(self.filtered_module)
-        if self.filtered_module is not None:
-            self.show_device_column = False  # If we're filtering by module, the device column is redundant since the module name includes the device
+
+        if "show_device_column" in state:
+            # Respect the user's saved configuration explicitly
+            self.show_device_column = state["show_device_column"]
+        else:
+            # Fall back to smart defaults only if no explicit state exists
+            if self.filtered_module is not None:
+                self.show_device_column = False
+            elif self.filtered_device is not None:
+                self.show_device_column = False  # Cleaner UI when filtering by a single device
+            else:
+                self.show_device_column = True
 
         self.filtered_module_children = state.get("filtered_module_children", self.filtered_module_children)
         self.proxy_model.setAllowedModuleChildren(self.filtered_module_children)
@@ -381,16 +386,20 @@ class TelemetryTable(QWidget):
     def _toggle_device_column(self, visible: bool):
         """Hides or shows the module name column based on button state."""
         # Use our constant for the Name/Module columnmsg
+        self.show_device_column = visible
+
         column_idx = TelemetryCol.DEVICE
 
         self.view.setColumnHidden(column_idx, not visible)
 
         # If we just enabled it, make sure it has a reasonable default width
         if visible:
-            h_header = self.view.horizontalHeader()
-            # If it's not set to stretch, give it a fixed starting width
-            if h_header.sectionResizeMode(column_idx) != QHeaderView.Stretch:
-                self.view.setColumnWidth(column_idx, 180)
+            # h_header = self.view.horizontalHeader()
+            # # If it's not set to stretch, give it a fixed starting width
+            # if h_header.sectionResizeMode(column_idx) != QHeaderView.Stretch:
+            #     self.view.setColumnWidth(column_idx, 180)
+
+            self.auto_size_columns()
 
     def _on_search_changed(self, text):
         """Pass the text to our custom proxy model."""
@@ -407,16 +416,10 @@ class TelemetryTable(QWidget):
         if index.column() == TelemetryCol.NAME:
             self.view.setCursor(Qt.PointingHandCursor)
         else:
-            # Reset to default for other columns
             self.view.unsetCursor()
 
-        old_row = self.hovered_row
-        self.hovered_row = index.row()
-
-        # Trigger repaint only for the action column (Column 2)
-        if old_row != -1:
-            self.view.update(self.proxy_model.index(old_row, TelemetryCol.ACTIONS))
-        self.view.update(self.proxy_model.index(self.hovered_row, TelemetryCol.ACTIONS))
+        # Use the new helper to update and redraw
+        self._set_hovered_row(index.row())
 
     def eventFilter(self, source, event):
         if source is not self.view.viewport():
@@ -448,10 +451,7 @@ class TelemetryTable(QWidget):
                     return True
 
             case QEvent.Leave:
-                if self.hovered_row != -1:
-                    row = self.hovered_row
-                    self.hovered_row = -1
-                    self.view.update(self.proxy_model.index(row, TelemetryCol.ACTIONS))
+                self._set_hovered_row(-1)
 
         return super().eventFilter(source, event)
 
@@ -527,6 +527,8 @@ class TelemetryTable(QWidget):
         if not module:
             return
 
+        self._set_hovered_row(-1)
+
         match action_id:
             case "view_logs" | "view_logs_children":
                 # Combine logic for both log views
@@ -579,6 +581,8 @@ class TelemetryTable(QWidget):
         module = self._get_module_at_index(proxy_index)  # Using the helper from the previous turn
         if not module:
             return
+
+        self._set_hovered_row(-1)
 
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
@@ -671,3 +675,19 @@ class TelemetryTable(QWidget):
 
         # This blocks until the drop is finished or cancelled
         drag.exec_(Qt.CopyAction)
+
+    def _set_hovered_row(self, row: int):
+        """Safely updates the hovered row and refreshes all styled columns."""
+        if self.hovered_row == row:
+            return
+
+        old_row = self.hovered_row
+        self.hovered_row = row
+
+        # Trigger a repaint for both the old and new row across columns that care about hover
+        for r in (old_row, self.hovered_row):
+            if r != -1:
+                for col in (TelemetryCol.VALUE, TelemetryCol.ACTIONS):
+                    idx = self.proxy_model.index(r, col)
+                    if idx.isValid():
+                        self.view.update(idx)

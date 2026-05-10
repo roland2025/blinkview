@@ -36,7 +36,16 @@ def export_numba_cache(settings):
         is_empty = not any(versioned_dir.iterdir())
         IS_CACHE_FRESH = is_empty
 
-    # 4. EXPORT: Set the environment variable for the Numba JIT compiler
-    os.environ["NUMBA_CACHE_DIR"] = str(versioned_dir.resolve())
+    # Check if the variable is already defined in the environment
+    if "NUMBA_CACHE_DIR" not in os.environ:
+        # Ensure the directory exists before pointing Numba to it
+        versioned_dir.mkdir(parents=True, exist_ok=True)
+
+        # Resolve and set the environment variable
+        os.environ["NUMBA_CACHE_DIR"] = str(versioned_dir.resolve())
+        print(f"DEBUG: Numba cache redirected to: {os.environ['NUMBA_CACHE_DIR']}")
+    else:
+        versioned_dir = Path(os.environ["NUMBA_CACHE_DIR"])
+        print(f"DEBUG: Using pre-existing NUMBA_CACHE_DIR: {versioned_dir}")
 
     return versioned_dir

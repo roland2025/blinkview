@@ -182,6 +182,8 @@ class Reorder(BaseReorder):
         speed_out = Speedometer(logger=self.logger.child("stats_out"))
         tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.child("tuner_out"))
 
+        logger_backlog = self.logger.child("backlog")
+
         device_queues = defaultdict(deque)
 
         def flush():
@@ -191,6 +193,17 @@ class Reorder(BaseReorder):
                     tuner_out.update(batch_out.msg_cursor, batch_out.size, target_window_sec=0.1)
                     distribute(batch_out)
             batch_out = None
+
+            held_batches = 0
+            held_messages = 0
+            for _q in device_queues.values():
+                held_batches += len(_q)
+                for _qb in _q:
+                    # Calculate how many messages in this batch haven't been merged yet
+                    held_messages += _qb.batch.size - int(_qb.cursor[0])
+
+            # Use debug or info depending on how verbose you want your logs
+            logger_backlog.debug(f"batches={held_batches} msgs={held_messages}")
 
         stop_is_set = self._stop_event.is_set
 

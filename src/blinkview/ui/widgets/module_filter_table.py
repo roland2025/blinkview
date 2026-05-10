@@ -73,7 +73,7 @@ def nb_update_subtree(
         p_id = parent_array[i]
 
         # If this node is the root OR its parent is in our subtree mask
-        if i == root_id or (p_id != -1 and is_in_subtree[p_id]):
+        if i == root_id or (p_id != NO_PARENT and is_in_subtree[p_id]):
             is_in_subtree[i] = True
 
             if update_enabled:

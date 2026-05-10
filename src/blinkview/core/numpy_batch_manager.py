@@ -244,6 +244,21 @@ class PooledLogBatch:
         if not (b := self.bundle):
             return False
 
+        # print(
+        #     f"PooledLogBatch insert -> "
+        #     f"self: {type(self).__name__}, "
+        #     f"ts_ns: {type(ts_ns).__name__}, "
+        #     f"rx_ts_ns: {type(rx_ts_ns).__name__}, "
+        #     f"msg_bytes: {type(msg_bytes).__name__}, "
+        #     f"level: {type(level).__name__}, "
+        #     f"module: {type(module).__name__}, "
+        #     f"device: {type(device).__name__}, "
+        #     f"seq: {type(seq).__name__}, "
+        #     f"ext_u32_1: {type(ext_u32_1).__name__}, "
+        #     f"ext_u32_2: {type(ext_u32_2).__name__}, "
+        #     f"ext_u64_1: {type(ext_u64_1).__name__}"
+        # )
+
         return _nb_bundle_push(
             b, ts_ns, rx_ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
         )

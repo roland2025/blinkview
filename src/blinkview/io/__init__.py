@@ -15,6 +15,7 @@ from . import (
     serial_time_syncer,
     tcp_server,
     uart,
+    udp_reader,
 )
 
 # __all__ = ['uart']

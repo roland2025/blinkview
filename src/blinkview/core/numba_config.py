@@ -56,8 +56,9 @@ def app_njit(*args, **kwargs):
 
     if "fastmath" not in kwargs:
         kwargs["fastmath"] = True  # Usually safe and highly beneficial for plotting
-    if "boundscheck" not in kwargs:
-        kwargs["boundscheck"] = False  # Use with caution!
+
+    # if "boundscheck" not in kwargs:
+    #     kwargs["boundscheck"] = False  # Use with caution!
 
     def decorator(func):
         from numba import njit

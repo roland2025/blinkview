@@ -12,6 +12,47 @@ from typing import Optional
 os.environ["NUMBA_DEBUG_CACHE"] = "1"
 
 
+def register_desktop_entry():
+    if sys.platform != "linux":
+        return
+
+    import shutil
+
+    from blinkview import ICON_PATH, __app_id__, __app_name__, __author__, __version__
+
+    apps_dir = Path.home() / ".local" / "share" / "applications"
+    desktop_file = apps_dir / f"{__app_id__}.desktop"
+
+    # 1. Determine the path
+    cmd_name = __app_name__.lower()
+    exec_path = shutil.which(cmd_name) or f"{sys.executable} {Path(__file__).absolute()}"
+
+    # 2. Prepare the desired content
+    new_content = f"""[Desktop Entry]
+Type=Application
+Name={__app_name__}
+Comment=Managed by {__author__}
+Exec={exec_path}
+Icon={ICON_PATH}
+Terminal=false
+Categories=Utility;Development;
+StartupWMClass={__app_id__}
+""".strip()
+
+    # 3. Only write if necessary
+    should_write = True
+    if desktop_file.exists():
+        existing_content = desktop_file.read_text().strip()
+        if existing_content == new_content:
+            should_write = False
+
+    if should_write:
+        apps_dir.mkdir(parents=True, exist_ok=True)
+        desktop_file.write_text(new_content)
+        desktop_file.chmod(0o755)
+        print(f"DEBUG: Updated desktop entry at {desktop_file}")
+
+
 def run(args):
     from qtpy.QtCore import Qt, QTimer
     from qtpy.QtGui import QIcon
@@ -22,7 +63,7 @@ def run(args):
     if "QT_API" not in os.environ:
         os.environ["QT_API"] = "pyside6"
 
-    from blinkview import __version__ as blinkview_version
+    from blinkview import ICON_PATH, __app_id__, __app_name__, __version__
 
     install_version: Optional[str] = None  # version to install when closing app
 
@@ -36,7 +77,7 @@ def run(args):
             import ctypes
 
             try:
-                myappid = f"ee.incubator.blinkview.{blinkview_version}"
+                myappid = f"{__app_id__}.{__version__}"
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
             except Exception:
                 pass  # Fails gracefully on non-Windows systems
@@ -54,8 +95,13 @@ def run(args):
             # (like 125% or 175% windows scaling)
             if hasattr(Qt, "HighDpiScaleFactorRoundingPolicy"):
                 QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+        else:
+            register_desktop_entry()
 
         app = QApplication(sys.argv)
+
+        app.setApplicationName(__app_name__)
+        app.setDesktopFileName(__app_id__)
 
         app.setStyle("Fusion")
         use_qdarktheme = True
@@ -77,8 +123,9 @@ def run(args):
             """
             app.setStyleSheet(app.styleSheet() + custom_tooltips)
 
+        print(f"ICON_PATH: {ICON_PATH}")
         # Set the global application icon
-        app.setWindowIcon(QIcon(str(Path(__file__).parent.parent / "assets" / "icon.png")))
+        app.setWindowIcon(QIcon(str(ICON_PATH)))
 
         from blinkview.core.settings_manager import SettingsManager
 

@@ -73,6 +73,8 @@ QToolButton[filterEnabled="true"] {
         self.show_dev = True
         self.show_lvl = True
         self.show_mod = True
+        self.show_date = False
+        self.show_ns = False
         self.saved_sizes = None
 
         self._set_defaults()
@@ -80,8 +82,9 @@ QToolButton[filterEnabled="true"] {
         if state:
             self.restore(state)
 
-        self.logger = gui_context.logger.child(f"log_viewer_{id(self):x}")
+        # self.logger = gui_context.logger.child(f"log_viewer_{id(self):x}")
 
+        self.latest_seq_manual = SEQ_NONE
         self.latest_seq_seen = SEQ_NONE
 
         self.prev_apply = 0  # Timestamp of the last apply_updates call for throttling
@@ -130,26 +133,31 @@ QToolButton[filterEnabled="true"] {
         self.action_all.toggled.connect(self._toggle_all_columns)
         self.toolbar.addAction(self.action_all)
 
+        self.column_actions["show_date"] = self._add_toggle(
+            "Date", self.show_date, lambda c: self._toggle_col("show_date", c)
+        )
+
         self.column_actions["show_ts"] = self._add_toggle(
             "Time", self.show_ts, lambda c: self._toggle_col("show_ts", c)
         )
+        self.column_actions["show_ns"] = self._add_toggle("NS", self.show_ns, lambda c: self._toggle_col("show_ns", c))
         self.column_actions["show_dev"] = self._add_toggle(
-            "Device", self.show_dev, lambda c: self._toggle_col("show_dev", c)
+            "DEV", self.show_dev, lambda c: self._toggle_col("show_dev", c)
         )
         self.column_actions["show_lvl"] = self._add_toggle(
-            "Level", self.show_lvl, lambda c: self._toggle_col("show_lvl", c)
+            "LVL", self.show_lvl, lambda c: self._toggle_col("show_lvl", c)
         )
         self.column_actions["show_mod"] = self._add_toggle(
-            "Module", self.show_mod, lambda c: self._toggle_col("show_mod", c)
+            "MOD", self.show_mod, lambda c: self._toggle_col("show_mod", c)
         )
 
         self.toolbar.addSeparator()
 
-        self.action_clear = QAction("Clear Logs", self)
+        self.action_clear = QAction("Clear", self)
         self.action_clear.triggered.connect(self.clear_logs)
         self.toolbar.addAction(self.action_clear)
 
-        self.action_end = QAction("Scroll to End", self)
+        self.action_end = QAction("GoTo End", self)
         self.action_end.setToolTip("Scroll to the latest logs")
         self.toolbar.addAction(self.action_end)
 
@@ -269,6 +277,9 @@ QToolButton[filterEnabled="true"] {
         self.log_level = None
         self.show_filter_sidebar = None
 
+        self.show_date = False
+        self.show_ns = False
+
     def restore(self, state: dict):
         self.tab_name = state.get("tab_name", self.tab_name)
 
@@ -297,6 +308,8 @@ QToolButton[filterEnabled="true"] {
         self.show_dev = view_state.get("show_dev", default_show_dev)
         self.show_lvl = view_state.get("show_lvl", self.show_lvl)
         self.show_mod = view_state.get("show_mod", default_show_mod)
+        self.show_date = view_state.get("show_date", self.show_date)
+        self.show_ns = view_state.get("show_ns", self.show_ns)
 
         self.show_telemetry = view_state.get("show_telemetry", self.show_telemetry)
         self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
@@ -335,6 +348,8 @@ QToolButton[filterEnabled="true"] {
         """Updates the syntax highlighter's index based on which columns are active."""
         # The level is always at a fixed position based on which columns are shown
         idx = 0
+        if self.show_date:
+            idx += 1
         if self.show_ts:
             idx += 1
         if self.show_dev:
@@ -400,6 +415,8 @@ QToolButton[filterEnabled="true"] {
         self.action_all.blockSignals(True)
         self.action_all.setChecked(all_active)
         self.action_all.blockSignals(False)
+
+        self.set_log_index()
 
         self._redraw_history()
 
@@ -474,7 +491,14 @@ QToolButton[filterEnabled="true"] {
 
         total_new_rows = 0
         full_string_batch = ""
-        format_cfg = FormattingConfig(self.show_ts, self.show_dev, self.show_lvl, self.show_mod, 3)
+        format_cfg = FormattingConfig(
+            self.show_ts,
+            self.show_dev,
+            self.show_lvl,
+            self.show_mod,
+            9 if self.show_ns else 3,
+            show_date=self.show_date,
+        )
 
         # Flag to track if we successfully consumed all segments without breaking
         reached_live_edge = True
@@ -485,17 +509,6 @@ QToolButton[filterEnabled="true"] {
                 if segment.size == 0 or segment_last_sequence_id <= self.latest_seq_seen:
                     continue
 
-                # print(
-                #     f"logviewer_filter_segment("
-                #     f"bundle={type(segment.bundle)}, "
-                #     f"tm_arr={tm_arr.dtype}, "
-                #     f"indices={type(indices.array)}, "
-                #     f"filter_mask={type(filter_mask)}, "
-                #     f"filter_enabled={type(filter_enabled)}, "
-                #     f"s_seq={type(self.latest_seq_seen)}, "
-                #     f"t_lvl={type(target_level)}, "
-                #     f"t_dev={type(t_device)}, "
-                # )
                 match_count = filter_segment(
                     segment.bundle,
                     effective_mask=self._effective_mask,
@@ -559,7 +572,7 @@ QToolButton[filterEnabled="true"] {
         self.text_area.clear()
 
         # Reset trackers so apply_updates fetches everything again
-        self.latest_seq_seen = SEQ_NONE
+        self.latest_seq_seen = self.latest_seq_manual
         self.velocity_tracker.reset()
         self._is_catching_up = True
 
@@ -568,7 +581,11 @@ QToolButton[filterEnabled="true"] {
 
     def clear_logs(self):
         self.text_area.clear()
-        self.latest_seq_seen = SEQ_NONE  # Reset tracker
+
+        log_pool = self.gui_context.registry.central.log_pool
+
+        self.latest_seq_manual = self.latest_seq_seen = log_pool.latest_sequence()
+
         self.velocity_tracker.reset()
         self._is_catching_up = True
 

@@ -229,6 +229,11 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                     continue
 
                 with batch_in:
+                    # cls_name = self.__class__.__name__
+                    # print(f"{cls_name}: {batch_in}")
+                    # for ts, msg, *_ in batch_in.iter_human():
+                    #     print(f"{cls_name} >> {ts}: msg={msg}")
+
                     batch_size_bytes = batch_in.msg_cursor
                     tuner_out.ensure_burst_capacity(batch_size_bytes)
 

@@ -91,10 +91,9 @@ def estimate_log_batch_size(
     s_lvls = segment.levels
     s_mods = segment.modules
 
-    # 3. Unpack Config
-    show_ts, show_dev = cfg.show_ts, cfg.show_dev
-    show_lvl, show_mod = cfg.show_lvl, cfg.show_mod
-    ts_precision = cfg.ts_precision  # 3, 6, or 9
+    show_date, show_ts = cfg.show_date, cfg.show_ts
+    show_dev, show_lvl, show_mod = cfg.show_dev, cfg.show_lvl, cfg.show_mod
+    ts_precision = cfg.ts_precision
 
     total_size = 0
     for i in range(count):
@@ -103,13 +102,18 @@ def estimate_log_batch_size(
         row_size = 0
         is_first = True
 
-        # --- 1. Timestamp ---
+        # --- Date ---
+        if show_date:
+            row_size += 10  # YYYY-MM-DD
+            is_first = False
+
+        # --- Time ---
         if show_ts:
             # "HH:MM:SS." is 9 chars. Then add precision (3, 6, or 9)
             row_size += 9 + ts_precision
             is_first = False
 
-        # --- 2. Device ---
+        # --- Device ---
         if show_dev:
             if not is_first:
                 row_size += 1  # space
@@ -117,7 +121,7 @@ def estimate_log_batch_size(
             row_size += d_len[d_id] if d_id < d_count else 3  # Name or "???"
             is_first = False
 
-        # --- 3. Level ---
+        # --- Level ---
         if show_lvl:
             if not is_first:
                 row_size += 1  # space
@@ -125,7 +129,7 @@ def estimate_log_batch_size(
             row_size += l_len[l_id] if l_id < l_count else 3  # Name or "???"
             is_first = False
 
-        # --- 4. Module ---
+        # --- Module ---
         if show_mod:
             if not is_first:
                 row_size += 1  # space
@@ -134,7 +138,7 @@ def estimate_log_batch_size(
             row_size += (m_len[m_id] if m_id < m_count else 7) + 1
             is_first = False
 
-        # --- 5. Message Body ---
+        # --- Message Body ---
         if not is_first:
             row_size += 1  # space
 
@@ -237,6 +241,47 @@ def nb_format_timestamp(out, curr, ts_ns, precision):
     return curr
 
 
+@app_njit(inline="always")
+def nb_write_time_from_cache(out: np.ndarray, curr: int, ts_cache: np.ndarray, ts_ns: int, ts_precision: int) -> int:
+    """
+    Appends HH:MM:SS from the ISO8601 cache, calculates fractional seconds
+    from the raw nanosecond timestamp, and advances the cursor.
+    """
+    # Copy HH:MM:SS from cache
+    for j in range(8):
+        out[curr + j] = ts_cache[11 + j]
+    curr += 8
+
+    out[curr] = CHAR_DOT
+    curr += 1
+
+    # Calculate fractional digits directly
+    sub_sec_ns = ts_ns % 1_000_000_000
+    ms = sub_sec_ns // 1_000_000
+
+    out[curr + 0] = CHAR_ZERO + (ms // 100)
+    out[curr + 1] = CHAR_ZERO + ((ms // 10) % 10)
+    out[curr + 2] = CHAR_ZERO + (ms % 10)
+    curr += 3
+
+    if ts_precision >= 6:
+        # Handled implicitly via NS button logic down the line, kept for scale
+        pass
+
+    if ts_precision >= 9:  # NS extension
+        us = (sub_sec_ns // 1_000) % 1000
+        ns = sub_sec_ns % 1000
+        out[curr + 0] = CHAR_ZERO + (us // 100)
+        out[curr + 1] = CHAR_ZERO + ((us // 10) % 10)
+        out[curr + 2] = CHAR_ZERO + (us % 10)
+        out[curr + 3] = CHAR_ZERO + (ns // 100)
+        out[curr + 4] = CHAR_ZERO + ((ns // 10) % 10)
+        out[curr + 5] = CHAR_ZERO + (ns % 10)
+        curr += 6
+
+    return curr
+
+
 @app_njit()
 def format_log_batch(
     out: np.ndarray,
@@ -264,9 +309,8 @@ def format_log_batch(
     s_lens = segment.lengths
     s_buf = segment.buffer
 
-    show_ts, show_dev = cfg.show_ts, cfg.show_dev
-    show_lvl, show_mod = cfg.show_lvl, cfg.show_mod
-
+    show_date, show_ts = cfg.show_date, cfg.show_ts
+    show_dev, show_lvl, show_mod = cfg.show_dev, cfg.show_lvl, cfg.show_mod
     ts_precision = cfg.ts_precision
 
     tz_offset_ns = tz_offset_sec * 1_000_000_000
@@ -275,15 +319,37 @@ def format_log_batch(
     UNKNOWN_DEV = (CHAR_QUESTION, CHAR_QUESTION, CHAR_QUESTION)
     UNKNOWN_MOD = (117, 110, 107, 110, 111, 119, 110)  # "unknown"
 
+    last_sec = np.int64(-1)
+    ts_cache = np.zeros(19, dtype=np.uint8)
+
     curr = 0
     for i in range(count):
         idx = indices[i]
         first_field = True
 
+        ts_ns = s_ts[idx] + tz_offset_ns
+
+        # 1. Update Timestamp Cache
+        if show_date or show_ts:
+            total_sec = ts_ns // 1_000_000_000
+            if total_sec != last_sec:
+                update_iso8601_timestamp_cache(total_sec, ts_cache)
+                last_sec = total_sec
+
+        # 2. Date Column (YYYY-MM-DD)
+        if show_date:
+            for j in range(10):
+                out[curr + j] = ts_cache[j]
+            curr += 10
+            first_field = False
+
         # 1. Timestamp
         if show_ts:
-            ts_ns = s_ts[idx] + tz_offset_ns
-            curr = nb_format_timestamp(out, curr, ts_ns, ts_precision)
+            if not first_field:
+                out[curr] = CHAR_SPACE
+                curr += 1
+
+            curr = nb_write_time_from_cache(out, curr, ts_cache, ts_ns, ts_precision)
             first_field = False
 
         # --- 2. Device (Direct Index) ---

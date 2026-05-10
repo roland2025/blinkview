@@ -107,11 +107,13 @@ class FrameDecoder(FrameDecoderBase):
 
         self.decode = parser_noop
         self.codec_id = CodecID.NONE
+        self._bundle = None
 
-    def bundle(self):
-        return FrameConfig(
-            decode_id=self.codec_id,  # The new stable integer ID
-            # decode_func=self.decode,  # Kept ONLY for ParserID.PLUGIN
+    def apply_config(self, config: dict):
+
+        changed = self.apply_base_config(config)
+        self._bundle = FrameConfig(
+            decode_id=self.codec_id,
             delimiter=self.frame_delimiter,
             length_fixed=not self.frame_length_dynamic,
             length_min=self.frame_length_minimum,
@@ -122,6 +124,20 @@ class FrameDecoder(FrameDecoderBase):
             filter_trim_r=self.filter_trim_r,
             report_error=not self.frame_errors_hidden,
         )
+        return changed
+
+    def bundle(self):
+        return self._bundle
+
+
+@FrameDecoderFactory.register("none")
+class PreFramedDecoder(FrameDecoder):
+    """For pre-framed data"""
+
+    def __init__(self):
+        super().__init__()
+
+        self.codec_id = CodecID.NONE
 
 
 @FrameDecoderFactory.register("line_decoder")
