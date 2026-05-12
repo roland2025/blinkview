@@ -38,6 +38,7 @@ TransformFunc = Callable[[Any], Any]
     "max_batch",
     type="integer",
     default=BATCH_MAXLEN,
+    hidden=True,
     description="Maximum number of log entries to buffer before flushing",
     ui_order=1,
 )
@@ -72,6 +73,7 @@ TransformFunc = Callable[[Any], Any]
 @configuration_property(
     "time_sync",
     type="object",
+    hidden=True,
     required=False,
     _factory="time_sync",
 )

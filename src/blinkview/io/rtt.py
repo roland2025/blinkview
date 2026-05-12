@@ -8,8 +8,9 @@ from time import sleep
 
 from ..core.configurable import configuration_property, override_property
 from ..core.log_row import LogRow
-from ..core.reusable_batch_pool import TimeDataEntry
+from ..core.numpy_batch_manager import PooledLogBatch
 from ..utils.log_level import LogLevel
+from ..utils.throughput import Speedometer, ThroughputAutoTuner
 from .BaseReader import BaseReader, DeviceFactory
 
 # Values in kHz as required by jlink.connect()
@@ -164,85 +165,96 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         return schema
 
     def run(self):
-        # Localize method lookups for speed
+        # 1. Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
         time_ns = self.shared.time_ns
-
         logger = self.logger
+
+        # Tuner configuration
+        delay_s = self.delay / 1000.0
         delay_ns = int(self.delay * 1_000_000)
-        maxlen = self.maxlen
-        log_rx_tx = self.log_rx_tx
         channel = self.channel
+        log_rx_tx = getattr(self, "log_rx_tx", False)
 
-        pool_acquire = self.shared.pool.get(TimeDataEntry, self).acquire
+        # 2. Stats and Auto-Tuning Setup
+        stats = Speedometer(logger=self.logger.child("stats"))
+        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=20, logger=self.logger.child("tuner"))
 
-        batch = pool_acquire()
-        batch_append = batch.append
+        pool_create = self.shared.array_pool.create
 
-        last_flush_time = time_ns()
-        batch_bytes = 0
-        push_log = self.local.push_log
+        def batch_acquire():
+            # Dynamically pull configuration from the tuner's latest projections
+            return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
+
+        batch = None
 
         if log_rx_tx:
             mod_rx = self.local.device_id.get_module("_reader.rx")
-            batch_rx_log = []
+            push_log = self.local.push_log
 
-        def flush():
-            nonlocal batch, batch_bytes, last_flush_time, batch_rx_log, batch_append
-            if batch.size:
-                last_flush_time = time_ns()
-                if log_rx_tx and batch_rx_log:
-                    push_log(batch_rx_log)
-                    batch_rx_log = []
-                with batch:
-                    self.distribute(batch)
-                batch = pool_acquire()
-                batch_append = batch.append
-
-        while not stop_is_set():
-            if self.jlink is None:
-                self.jlink = self.open()
+        try:
+            while not stop_is_set():
+                # 3. J-Link Lifecycle Management
                 if self.jlink is None:
-                    sleep(1.0)
-                    continue
-                _read_rtt = self.jlink.rtt_read
-
-            try:
-                # Timestamp IMMEDIATELY before reading
-                now = time_ns()
-
-                # Non-blocking read (returns empty list if no data)
-                # Using 1024 as a safe chunk size to maintain low latency per cycle
-                data = _read_rtt(channel, 1024)
-
-                if data:
-                    chunk_bytes = bytes(data)
-                    batch_append(now, chunk_bytes)
-                    batch_bytes += len(chunk_bytes)
-
-                    if log_rx_tx:
-                        batch_rx_log.append(LogRow(now, LogLevel.TRACE, mod_rx, chunk_bytes.hex()))
-
-                    if batch_bytes >= maxlen:
-                        flush()
+                    self.jlink = self.open()
+                    if self.jlink is None:
+                        sleep(1.0)
                         continue
+                    _read_rtt = self.jlink.rtt_read
+
+                # 4. Acquire batch using current Tuner projections
+                if batch is None:
+                    batch = batch_acquire()
+
+                try:
+                    now = time_ns()
+
+                    # Non-blocking read (returns empty list if no data)
+                    data = _read_rtt(channel, 1024)
+
+                    if data:
+                        chunk_bytes = bytes(data)
+
+                        if log_rx_tx:
+                            push_log([LogRow(now, LogLevel.TRACE, mod_rx, chunk_bytes.hex())])
+
+                        # 5. Insert Chunk
+                        if not batch.insert(now, now, chunk_bytes):
+                            with batch:
+                                self.distribute(batch)
+                                tuner.update(batch.msg_cursor, batch.size, delay_s)
+
+                            batch = batch_acquire()
+                            batch.insert(now, now, chunk_bytes)
+
+                    else:
+                        # No data? Sleep 1ms to yield the CPU
+                        sleep(0.001)
+
+                    # 6. Maintenance: Check for time-based flush
+                    if batch is not None and batch.start_ts > 0 and (now - batch.start_ts) >= delay_ns:
+                        with batch:
+                            self.distribute(batch)
+                            tuner.update(batch.msg_cursor, batch.size, delay_s)
+                        batch = None
+
+                except Exception as e:
+                    logger.error("J-Link RTT Runtime Error", e)
+                    self.cleanup_jlink()
+                    sleep(1.0)
+
+        except Exception as e:
+            logger.exception("Fatal error in J-Link RTT Reader loop", e)
+        finally:
+            # 7. Final Cleanup
+            if batch is not None:
+                if len(batch) > 0:
+                    with batch:
+                        self.distribute(batch)
                 else:
-                    # No data? Sleep 1ms to yield the CPU
-                    sleep(0.001)
+                    batch.release()
 
-                # Maintenance: Check for time-based flush
-                # Using 'now' from above is fine for the timeout check
-                if batch and (now - last_flush_time >= delay_ns):
-                    flush()
-
-            except Exception as e:
-                logger.error("J-Link RTT Runtime Error", e)
-                self.cleanup_jlink()
-                sleep(1.0)
-
-        flush()
-        batch.release()
-        self.cleanup_jlink()
+            self.cleanup_jlink()
 
     def cleanup_jlink(self):
         """Safely shuts down the J-Link session."""
@@ -277,9 +289,15 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
             jl.connect(self.target_device, speed=self.speed)
             jl.rtt_start()
 
+            self.logger.info("Draining stale RTT buffer data...")
+            while True:
+                junk = jl.rtt_read(self.channel, 4096)
+                if not junk:
+                    break
+
             return jl
         except Exception as e:
-            self.logger.error(f"Failed to open J-Link.", e)
+            self.logger.error("Failed to open J-Link.", e)
             return None
 
     def send_data(self, data: bytes, channel: int = 0):
@@ -290,8 +308,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         if self.jlink and self.jlink.opened():
             try:
                 # rtt_write returns the number of bytes actually written
-                # print(f"Sending data to J-Link: '{self.target_device}' data: {data}")
                 return self.jlink.rtt_write(channel, list(data))
             except Exception as e:
-                self.logger.error(f"RTT Write failed", e)
+                self.logger.error("RTT Write failed", e)
         return 0

@@ -189,13 +189,14 @@ def parse_module_tags_statemachine(
         first_char = buffer[curr]
 
         if tag_count > 0:
-            if in_bracket_mode and first_char != CHAR_LBRACKET:
-                # Terminate if we were chaining brackets but hit standard text
-                break
-            elif not in_bracket_mode and not saw_dot:
-                # Terminate if it's a new word with NO dot separator connecting them.
-                # This protects 'gnss: SNR_Max:' while allowing 'events: ...util:'
-                break
+            if first_char != CHAR_LBRACKET:
+                if in_bracket_mode:
+                    # Terminate if we were chaining brackets but hit standard text
+                    break
+                elif not saw_dot:
+                    # Terminate if it's a new word with NO dot separator connecting them.
+                    # This protects 'gnss: SNR_Max:' while allowing 'events: ...util:'
+                    break
 
         found_current_tag = False
         tag_len = 0
