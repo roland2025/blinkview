@@ -245,39 +245,45 @@ def nb_format_timestamp(out, curr, ts_ns, precision):
 def nb_write_time_from_cache(out: np.ndarray, curr: int, ts_cache: np.ndarray, ts_ns: int, ts_precision: int) -> int:
     """
     Appends HH:MM:SS from the ISO8601 cache, calculates fractional seconds
-    from the raw nanosecond timestamp, and advances the cursor.
+    from the raw nanosecond timestamp, and advances the cursor based on precision.
     """
     # Copy HH:MM:SS from cache
     for j in range(8):
         out[curr + j] = ts_cache[11 + j]
     curr += 8
 
+    # 0 Precision (Seconds only)
+    if ts_precision == 0:
+        return curr
+
     out[curr] = CHAR_DOT
     curr += 1
 
-    # Calculate fractional digits directly
     sub_sec_ns = ts_ns % 1_000_000_000
-    ms = sub_sec_ns // 1_000_000
 
-    out[curr + 0] = CHAR_ZERO + (ms // 100)
-    out[curr + 1] = CHAR_ZERO + ((ms // 10) % 10)
-    out[curr + 2] = CHAR_ZERO + (ms % 10)
-    curr += 3
+    # 3 Precision (Milliseconds)
+    if ts_precision >= 3:
+        ms = sub_sec_ns // 1_000_000
+        out[curr + 0] = CHAR_ZERO + (ms // 100)
+        out[curr + 1] = CHAR_ZERO + ((ms // 10) % 10)
+        out[curr + 2] = CHAR_ZERO + (ms % 10)
+        curr += 3
 
+    # 6 Precision (Microseconds)
     if ts_precision >= 6:
-        # Handled implicitly via NS button logic down the line, kept for scale
-        pass
-
-    if ts_precision >= 9:  # NS extension
-        us = (sub_sec_ns // 1_000) % 1000
-        ns = sub_sec_ns % 1000
+        us = (sub_sec_ns // 1_000) % 1_000
         out[curr + 0] = CHAR_ZERO + (us // 100)
         out[curr + 1] = CHAR_ZERO + ((us // 10) % 10)
         out[curr + 2] = CHAR_ZERO + (us % 10)
-        out[curr + 3] = CHAR_ZERO + (ns // 100)
-        out[curr + 4] = CHAR_ZERO + ((ns // 10) % 10)
-        out[curr + 5] = CHAR_ZERO + (ns % 10)
-        curr += 6
+        curr += 3
+
+    # 9 Precision (Nanoseconds)
+    if ts_precision >= 9:
+        ns = sub_sec_ns % 1_000
+        out[curr + 0] = CHAR_ZERO + (ns // 100)
+        out[curr + 1] = CHAR_ZERO + ((ns // 10) % 10)
+        out[curr + 2] = CHAR_ZERO + (ns % 10)
+        curr += 3
 
     return curr
 

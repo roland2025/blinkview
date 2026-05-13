@@ -27,7 +27,6 @@ from blinkview.ui.widgets.searchable_log_area import SearchableLogArea
 from blinkview.ui.widgets.telemetry_table import TelemetryTable
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
-from blinkview.utils.time_utils import ConsoleTimestampFormatter
 from blinkview.utils.utc_offset import get_local_utc_offset_seconds
 
 
@@ -74,8 +73,9 @@ QToolButton[filterEnabled="true"] {
         self.show_lvl = True
         self.show_mod = True
         self.show_date = False
-        self.show_ns = False
         self.saved_sizes = None
+
+        self.ts_precision = 3
 
         self._set_defaults()
 
@@ -90,9 +90,6 @@ QToolButton[filterEnabled="true"] {
         self.prev_apply = 0  # Timestamp of the last apply_updates call for throttling
 
         self.max_rows = 100_000  # Max rows to keep in the text area for performance
-
-        # --- HISTORY BUFFER ---
-        # Stores the raw message objects so we can instantly redraw when a toggle changes
 
         # Main layout
         self.layout = QVBoxLayout(self)
@@ -112,6 +109,8 @@ QToolButton[filterEnabled="true"] {
         self.action_toggle_filter.setChecked(self.show_module_filter)
         self.action_toggle_filter.toggled.connect(self._toggle_module_filter)
         self.toolbar.addAction(self.action_toggle_filter)
+
+        self.toolbar.addSeparator()
 
         self.level_combo = QComboBox()
 
@@ -133,14 +132,47 @@ QToolButton[filterEnabled="true"] {
         self.action_all.toggled.connect(self._toggle_all_columns)
         self.toolbar.addAction(self.action_all)
 
-        self.column_actions["show_date"] = self._add_toggle(
-            "Date", self.show_date, lambda c: self._toggle_col("show_date", c)
-        )
-
         self.column_actions["show_ts"] = self._add_toggle(
             "Time", self.show_ts, lambda c: self._toggle_col("show_ts", c)
         )
-        self.column_actions["show_ns"] = self._add_toggle("NS", self.show_ns, lambda c: self._toggle_col("show_ns", c))
+
+        self.column_actions["show_ts"].setToolTip("Toggle Time (Right-click for Date & Precision)")
+
+        time_button = self.toolbar.widgetForAction(self.column_actions["show_ts"])
+        time_button.setContextMenuPolicy(Qt.ActionsContextMenu)
+
+        # 2. Add the Date toggle
+        action_date = QAction("Show Date", self)
+        action_date.setCheckable(True)
+        action_date.setChecked(self.show_date)
+        action_date.toggled.connect(lambda c: self._toggle_col("show_date", c))
+        self.column_actions["show_date"] = action_date
+        time_button.addAction(action_date)
+
+        # 3. Add a visual separator
+        separator = QAction(self)
+        separator.setSeparator(True)
+        time_button.addAction(separator)
+
+        # 4. Add the Precision Radio Group
+        from qtpy.QtWidgets import QActionGroup
+
+        self.precision_group = QActionGroup(self)
+        self.precision_group.setExclusive(True)  # Acts like radio buttons
+
+        precisions = [("Seconds (s)", 0), ("Milliseconds (ms)", 3), ("Microseconds (us)", 6), ("Nanoseconds (ns)", 9)]
+
+        for label, prec_val in precisions:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setChecked(self.ts_precision == prec_val)
+
+            # The lambda captures the current `prec_val` during loop iteration
+            act.triggered.connect(lambda checked, p=prec_val: self._set_ts_precision(p))
+
+            self.precision_group.addAction(act)
+            time_button.addAction(act)
+
         self.column_actions["show_dev"] = self._add_toggle(
             "DEV", self.show_dev, lambda c: self._toggle_col("show_dev", c)
         )
@@ -229,8 +261,6 @@ QToolButton[filterEnabled="true"] {
 
         self.highlighter = LogHighlighter(self.text_area.document())
 
-        self.timestamp_formatter = ConsoleTimestampFormatter()
-
         self.set_log_index()
 
         self.telemetry_sidebar = TelemetryTable(
@@ -278,7 +308,7 @@ QToolButton[filterEnabled="true"] {
         self.show_filter_sidebar = None
 
         self.show_date = False
-        self.show_ns = False
+        self.ts_precision = 3
 
     def restore(self, state: dict):
         self.tab_name = state.get("tab_name", self.tab_name)
@@ -309,7 +339,7 @@ QToolButton[filterEnabled="true"] {
         self.show_lvl = view_state.get("show_lvl", self.show_lvl)
         self.show_mod = view_state.get("show_mod", default_show_mod)
         self.show_date = view_state.get("show_date", self.show_date)
-        self.show_ns = view_state.get("show_ns", self.show_ns)
+        self.ts_precision = view_state.get("ts_precision", self.ts_precision)
 
         self.show_telemetry = view_state.get("show_telemetry", self.show_telemetry)
         self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
@@ -327,6 +357,8 @@ QToolButton[filterEnabled="true"] {
                 "show_dev": self.show_dev,
                 "show_lvl": self.show_lvl,
                 "show_mod": self.show_mod,
+                "show_date": self.show_date,
+                "ts_precision": self.ts_precision,
                 "show_module_filter": self.show_module_filter,
                 "show_telemetry": self.show_telemetry,
                 "splitter_sizes": self.splitter.sizes(),
@@ -496,7 +528,7 @@ QToolButton[filterEnabled="true"] {
             self.show_dev,
             self.show_lvl,
             self.show_mod,
-            9 if self.show_ns else 3,
+            self.ts_precision,
             show_date=self.show_date,
         )
 
@@ -630,3 +662,8 @@ QToolButton[filterEnabled="true"] {
         self.gui_context.deregister_log_target(self)
         self.gui_context.remove_updatable(self)
         super().closeEvent(event)
+
+    def _set_ts_precision(self, precision: int):
+        if self.ts_precision != precision:
+            self.ts_precision = precision
+            self._redraw_history()
