@@ -627,6 +627,7 @@ class TelemetryPlotter(QWidget):
             # Create/Update Main Curves
             # s.curve = s.plot_item.plot(pen=s.color, name=s.name, clipToView=True, skipFiniteCheck=True, antialias=False)
             s.curve = pg.PlotCurveItem(pen=s.color, name=s.name, clipToView=True, skipFiniteCheck=True)
+            s.curve.setZValue(len(self.series_list) - i)
             s.plot_item.addItem(s.curve)
             s.curve.setVisible(s.visible)
 
@@ -634,6 +635,7 @@ class TelemetryPlotter(QWidget):
             if self.show_overview:
                 # s.overview_curve = self.overview_plot.plot(pen=s.color)
                 s.overview_curve = pg.PlotCurveItem(pen=s.color)
+                s.overview_curve.setZValue(len(self.series_list) - i)
                 self.overview_plot.addItem(s.overview_curve)
                 s.overview_curve.setVisible(s.visible)
             else:

@@ -4,7 +4,10 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import ctypes
 from time import sleep
+
+import numpy as np
 
 from ..core.configurable import configuration_property, override_property
 from ..core.log_row import LogRow
@@ -85,22 +88,10 @@ SWD_SPEED_DESCRIPTIONS = [
     ui_order=16,
 )
 @configuration_property(
-    "maxlen",
-    type="integer",
-    default=1_000_000,
-    description="The maximum internal byte buffer size. Prevents memory exhaustion during massive data spikes or downstream pipeline stalls.",
-)
-@configuration_property(
     "delay",
     type="integer",
     default=100,
     description="The maximum time (in milliseconds) to hold incoming bytes before flushing a batch downstream. Balances latency against throughput efficiency.",
-)
-@configuration_property(
-    "log_rx_tx",
-    type="boolean",
-    default=False,
-    description="When enabled, dumps raw RX hex data to the system log for low-level protocol debugging (WARNING: significantly impacts performance).",
 )
 @override_property(
     "logging",
@@ -108,6 +99,14 @@ SWD_SPEED_DESCRIPTIONS = [
     required=True,
     default={"enabled": True, "processor": {"type": "binary"}},
     description="Enable logging of raw byte data. Uses a custom 'binary' processor that formats bytes as hex strings for readability.",
+)
+@configuration_property(
+    "target_rtt_buffer_size",
+    type="integer",
+    default=8192,
+    ui_order=22,
+    description="The physical size of the RTT Up-Buffer in the target's RAM. "
+    "Used to precisely flush stale data on startup without discarding live telemetry.",
 )
 class JLinkRTTReader(BaseReader):
     __doc__ = """The primary data ingestion source for Segger J-Link RTT (Real-Time Transfer).
@@ -125,9 +124,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
     channel: int
     interface: str
     speed: int
-    maxlen: int
     delay: int
-    log_rx_tx: bool
 
     def __init__(self):
         super().__init__()
@@ -174,11 +171,17 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         delay_s = self.delay / 1000.0
         delay_ns = int(self.delay * 1_000_000)
         channel = self.channel
-        log_rx_tx = getattr(self, "log_rx_tx", False)
+
+        read_size = 64 * 1024
+
+        c_buf = (ctypes.c_ubyte * read_size)()
+        np_buf = np.frombuffer(c_buf, dtype=np.uint8)
 
         # 2. Stats and Auto-Tuning Setup
         stats = Speedometer(logger=self.logger.child("stats"))
-        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=20, logger=self.logger.child("tuner"))
+        tuner = ThroughputAutoTuner(
+            speedometer=stats, default_buffer_bytes=read_size, msg_size_bytes=20, logger=self.logger.child("tuner")
+        )
 
         pool_create = self.shared.array_pool.create
 
@@ -188,10 +191,6 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
         batch = None
 
-        if log_rx_tx:
-            mod_rx = self.local.device_id.get_module("_reader.rx")
-            push_log = self.local.push_log
-
         try:
             while not stop_is_set():
                 # 3. J-Link Lifecycle Management
@@ -200,7 +199,11 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                     if self.jlink is None:
                         sleep(1.0)
                         continue
-                    _read_rtt = self.jlink.rtt_read
+                    _dll = self.jlink._dll
+
+                    _dll_rtterminal_read = _dll.JLINK_RTTERMINAL_Read
+                    _dll_is_open = _dll.JLINKARM_IsOpen
+                    _dll_is_connected = _dll.JLINKARM_EMU_IsConnected
 
                 # 4. Acquire batch using current Tuner projections
                 if batch is None:
@@ -209,27 +212,36 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                 try:
                     now = time_ns()
 
-                    # Non-blocking read (returns empty list if no data)
-                    data = _read_rtt(channel, 1024)
+                    # --- FAST HARDWARE CHECK ---
+                    # Calling the C-pointers directly.
+                    # If they return 0, they are falsy, which triggers the exception.
+                    if not _dll_is_open() or not _dll_is_connected():
+                        raise Exception("J-Link connection lost.")
 
-                    if data:
-                        chunk_bytes = bytes(data)
+                    bytes_read = _dll_rtterminal_read(channel, c_buf, read_size)
 
-                        if log_rx_tx:
-                            push_log([LogRow(now, LogLevel.TRACE, mod_rx, chunk_bytes.hex())])
+                    if bytes_read > 0:
+                        # Zero-copy slice of the pre-allocated Numpy memory view
+                        chunk_view = np_buf[:bytes_read]
 
                         # 5. Insert Chunk
-                        if not batch.insert(now, now, chunk_bytes):
+                        if not batch.insert(now, now, chunk_view):
                             with batch:
                                 self.distribute(batch)
                                 tuner.update(batch.msg_cursor, batch.size, delay_s)
 
                             batch = batch_acquire()
-                            batch.insert(now, now, chunk_bytes)
+                            batch.insert(now, now, chunk_view)
+
+                    elif bytes_read == 0:
+                        # No data? Sleep 1ms to yield the CPU
+
+                        sleep(0.001)
 
                     else:
-                        # No data? Sleep 1ms to yield the CPU
-                        sleep(0.001)
+                        # JLINK_RTTERMINAL_Read returns < 0 on error
+
+                        raise Exception(f"RTT Read failed with error code: {bytes_read}")
 
                     # 6. Maintenance: Check for time-based flush
                     if batch is not None and batch.start_ts > 0 and (now - batch.start_ts) >= delay_ns:
@@ -259,15 +271,59 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
     def cleanup_jlink(self):
         """Safely shuts down the J-Link session."""
         if self.jlink:
+            # Step 1: Try to stop RTT
             try:
                 self.jlink.rtt_stop()
+            except Exception:
+                pass  # Expected if the device was unexpectedly unplugged
+
+            # Step 2: ALWAYS ensure the connection is closed
+            try:
                 self.jlink.close()
             except Exception:
                 pass
-            finally:
-                self.jlink = None
+
+            self.jlink = None
+
+    def _drain_stale_data(self, jl):
+        """
+        Drains stale data from the target RAM.
+        Stops as soon as the buffer is empty OR we have drained
+        one full 'target_rtt_buffer_size', ensuring zero-loss of live data.
+        """
+        horizon = self.target_rtt_buffer_size
+        self.logger.info(f"Draining RTT (Target Buffer: {horizon} bytes)...")
+
+        total_drained = 0
+        poll_attempts = 100  # 1.0s timeout
+
+        while True:
+            # Always read in 4k chunks for efficiency during drain
+            junk = jl.rtt_read(self.channel, 4096)
+
+            if junk:
+                total_drained += len(junk)
+
+                # --- THE HORIZON CHECK ---
+                if total_drained >= horizon:
+                    self.logger.info(f"Drain: Horizon reached ({total_drained} bytes). Handing off to main loop.")
+                    break
+            else:
+                # If we've seen data and it suddenly stops, we're dry.
+                if total_drained > 0:
+                    self.logger.debug(f"Drain: Buffer dry after {total_drained} bytes.")
+                    break
+
+                # If we haven't seen anything yet, wait for the DLL to sync
+                poll_attempts -= 1
+                if poll_attempts <= 0:
+                    self.logger.debug("Drain: No data found in 1s window.")
+                    break
+
+            sleep(0.01)
 
     def open(self):
+        jl = None
         try:
             import pylink
 
@@ -289,26 +345,29 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
             jl.connect(self.target_device, speed=self.speed)
             jl.rtt_start()
 
-            self.logger.info("Draining stale RTT buffer data...")
-            while True:
-                junk = jl.rtt_read(self.channel, 4096)
-                if not junk:
-                    break
+            self._drain_stale_data(jl)
 
+            self.logger.info("Connected")
             return jl
         except Exception as e:
             self.logger.error("Failed to open J-Link.", e)
+            if jl is not None:
+                try:
+                    jl.close()
+                except Exception:
+                    pass
             return None
 
-    def send_data(self, data: bytes, channel: int = 0):
+    def send_data(self, data: str, channel: int = 0):
         """
         Sends data to the target's RTT Down-buffer.
         Can be called from other threads or downstream logic.
         """
         if self.jlink and self.jlink.opened():
             try:
+                self.logger.info(f"Sending data to J-Link: {self.target_device}")
                 # rtt_write returns the number of bytes actually written
-                return self.jlink.rtt_write(channel, list(data))
+                return self.jlink.rtt_write(channel, data.encode())
             except Exception as e:
                 self.logger.error("RTT Write failed", e)
         return 0
