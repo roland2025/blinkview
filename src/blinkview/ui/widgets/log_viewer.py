@@ -104,9 +104,12 @@ QToolButton[filterEnabled="true"] {
         print(
             f"[LogViewer] Initializing allowed_device={self.allowed_device} filtered_module={self.filtered_module} children={self.filtered_module_children} log_level={self.log_level}"
         )
-        self.action_toggle_filter = QAction("Filter", self)
+        self.action_toggle_filter = QAction("⧨ Filter", self)
         self.action_toggle_filter.setCheckable(True)
         self.action_toggle_filter.setChecked(self.show_module_filter)
+
+        self.action_toggle_filter.setToolTip("Toggle Module Filter Sidebar")
+
         self.action_toggle_filter.toggled.connect(self._toggle_module_filter)
         self.toolbar.addAction(self.action_toggle_filter)
 
