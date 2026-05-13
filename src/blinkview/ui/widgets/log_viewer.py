@@ -525,7 +525,7 @@ QToolButton[filterEnabled="true"] {
                     self._effective_mask[:] = global_threshold
 
         total_new_rows = 0
-        full_string_batch = ""
+        string_batches = []
         format_cfg = FormattingConfig(
             self.show_ts,
             self.show_dev,
@@ -566,7 +566,8 @@ QToolButton[filterEnabled="true"] {
                             format_cfg,
                             tz_offset_sec,
                         )
-                        full_string_batch += handle.array[:bytes_written].tobytes().decode("utf-8", errors="replace")
+                        decoded_str = handle.array[:bytes_written].tobytes().decode("utf-8", errors="replace")
+                        string_batches.append(decoded_str)
 
                     total_new_rows += match_count
 
@@ -597,6 +598,7 @@ QToolButton[filterEnabled="true"] {
                 self.auto_paused = True
                 self.action_pause.setChecked(True)
             elif not (self.is_paused or self.auto_paused):
+                full_string_batch = "".join(string_batches)
                 self.text_area.append_log(full_string_batch)
 
     def _redraw_history(self):
@@ -604,6 +606,8 @@ QToolButton[filterEnabled="true"] {
         Clears the screen and triggers a full re-fetch from the central memory pool
         using the updated column visibility toggles.
         """
+        # Detach highlighter to prevent synchronous freezing during bulk insert
+        self.highlighter.setDocument(None)
         self.text_area.clear()
 
         # Reset trackers so apply_updates fetches everything again
@@ -613,6 +617,9 @@ QToolButton[filterEnabled="true"] {
 
         # Force an immediate UI update rather than waiting for the next timer tick
         self.apply_updates()
+
+        # Reattach highlighter (Qt will now highlight lazily)
+        self.highlighter.setDocument(self.text_area.document())
 
     def clear_logs(self):
         self.text_area.clear()

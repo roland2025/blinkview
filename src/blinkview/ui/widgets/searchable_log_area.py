@@ -150,6 +150,7 @@ class SearchableLogArea(QWidget):
 
         self.editor.setUpdatesEnabled(False)
         self.editor.blockSignals(True)
+        scrollbar.blockSignals(True)
 
         try:
             cursor = self.editor.textCursor()
@@ -161,7 +162,7 @@ class SearchableLogArea(QWidget):
 
             cursor.insertText(text_to_append)
         finally:
-            # pass
+            scrollbar.blockSignals(False)
             self.editor.setUpdatesEnabled(True)
             self.editor.blockSignals(False)
 
