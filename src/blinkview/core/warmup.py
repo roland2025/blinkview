@@ -25,7 +25,12 @@ from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import create_default_sync
 from blinkview.ops.dispatch import process_batch_kernel
 from blinkview.ops.formatting import estimate_log_batch_size, format_log_batch
-from blinkview.ops.segments import filter_segment, nb_find_next_module_index, nb_find_next_module_match
+from blinkview.ops.segments import (
+    filter_segment,
+    filter_segment_reversed,
+    nb_find_next_module_index,
+    nb_find_next_module_match,
+)
 from blinkview.ops.telemetry import minmax_downsample_inplace, slice_and_downsample_linear
 from blinkview.ops.timestamps import nb_project_synced_ns
 from blinkview.parsers.frame_decoders import FrameDecoder
@@ -156,6 +161,15 @@ class NumbaWarmupHelper:
                     segment.bundle,
                     effective_mask=effective_mask,
                     out_indices=indices.array,
+                    max_matches=1000,
+                    start_seq=s_seq,
+                )
+
+                _ = filter_segment_reversed(
+                    segment.bundle,
+                    effective_mask=effective_mask,
+                    out_indices=indices.array,
+                    max_matches=1000,
                     start_seq=s_seq,
                 )
 

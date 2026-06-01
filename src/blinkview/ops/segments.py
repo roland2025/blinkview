@@ -105,10 +105,74 @@ def fast_find_first_gt(arr, count, val):
 
 
 @app_njit()
+def filter_segment_reversed(
+    segment,  # LogBundle
+    effective_mask,
+    out_indices,
+    max_matches,
+    start_seq=SEQ_NONE,
+    start_ts=TS_UNSPECIFIED,
+    end_ts=TS_UNSPECIFIED,
+):
+    count = segment.size[0]
+    timestamps = segment.timestamps
+    levels = segment.levels
+    modules = segment.modules
+    seqs = segment.sequences
+
+    # 1. Zero-Overhead Logarithmic Boundary Finding
+    loop_start = 0
+    loop_end = count
+
+    if start_seq != SEQ_NONE:
+        idx = fast_find_first_gt(seqs, count, start_seq)
+        if idx > loop_start:
+            loop_start = idx
+
+    if start_ts != TS_UNSPECIFIED:
+        idx = fast_find_first_ge(timestamps, count, start_ts)
+        if idx > loop_start:
+            loop_start = idx
+
+    if end_ts != TS_UNSPECIFIED:
+        idx = fast_find_first_gt(timestamps, count, end_ts)
+        if idx < loop_end:
+            loop_end = idx
+
+    if loop_start >= loop_end:
+        return 0
+
+    match_count = 0
+
+    # 2. Scan BACKWARDS from the newest valid log
+    for i in range(loop_end - 1, loop_start - 1, -1):
+        is_match = levels[i] >= effective_mask[modules[i]]
+
+        if is_match:
+            out_indices[match_count] = i
+            match_count += 1
+            if match_count >= max_matches:
+                break
+
+    # 3. Reverse indices in-place so the formatting engine processes them chronologically
+    left = 0
+    right = match_count - 1
+    while left < right:
+        tmp = out_indices[left]
+        out_indices[left] = out_indices[right]
+        out_indices[right] = tmp
+        left += 1
+        right -= 1
+
+    return match_count
+
+
+@app_njit()
 def filter_segment(
     segment,  # LogBundle
     effective_mask,
     out_indices,
+    max_matches,
     start_seq=SEQ_NONE,
     start_ts=TS_UNSPECIFIED,
     end_ts=TS_UNSPECIFIED,
@@ -150,6 +214,9 @@ def filter_segment(
         # Branchless Append
         out_indices[match_count] = i
         match_count += is_match
+
+        if match_count >= max_matches:
+            break
 
     return match_count
 

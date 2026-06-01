@@ -18,7 +18,7 @@ from blinkview.core.dtypes import ID_UNSPECIFIED, LEVEL_UNSPECIFIED, SEQ_NONE
 from blinkview.core.types.empty import EMPTY_ID
 from blinkview.core.types.formatting import FormattingConfig
 from blinkview.ops.formatting import estimate_log_batch_size, format_log_batch
-from blinkview.ops.segments import filter_segment
+from blinkview.ops.segments import filter_segment, filter_segment_reversed
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
 from blinkview.ui.widgets.log_highlighter import LogHighlighter
@@ -377,7 +377,7 @@ QToolButton[filterEnabled="true"] {
 
         self._effective_mask = None  # Invalidate cache
 
-        self.clear_logs()
+        self._redraw_history()
 
     def set_log_index(self):
         """Updates the syntax highlighter's index based on which columns are active."""
@@ -459,20 +459,29 @@ QToolButton[filterEnabled="true"] {
         """Public method to clear current logs and reload from the source with current filters."""
         self._effective_mask = None  # Invalidate cache
 
-        self.clear_logs()
-        self.latest_seq_seen = SEQ_NONE  # Reset sequence tracker to ensure we load all relevant logs
+        self._redraw_history()
 
     def apply_updates(self):
         if self.is_paused or self.auto_paused:
             return
 
+        import time  # Ensure this is imported at the top of your file ideally
+
+        t_start_total = time.time_ns()
+
+        # Existing throttling logic uses registry.now_ns, keeping it intact
         now_ns = self.gui_context.registry.now_ns
         t_start = now_ns()
 
         if t_start - self.prev_apply < 100_000_000:
             return
 
+        # 1. Profile Sidebar Sync
+        t_sidebar_start = time.time_ns()
         self.filter_sidebar.sync_modules()
+        t_sidebar_end = time.time_ns()
+        # self.logger.debug(f"[Profile] sync_modules: {(t_sidebar_end - t_sidebar_start) / 1_000_000:.3f} ms")
+
         self.prev_apply = t_start
 
         array_pool = self.gui_context.registry.system_ctx.array_pool
@@ -482,6 +491,8 @@ QToolButton[filterEnabled="true"] {
 
         tz_offset_sec = get_local_utc_offset_seconds()
 
+        # 2. Profile Initial Setup & Cache Validation
+        t_setup_start = time.time_ns()
         if self._prev_total_module_count != (mod_count := reg.module_count()) or self._filter_cache is None:
             self._prev_total_module_count = mod_count
             self._effective_mask = None  # Registry grew, invalidate the mask
@@ -500,7 +511,10 @@ QToolButton[filterEnabled="true"] {
                 t_list = None
 
             self._filter_cache = t_list
+        t_setup_end = time.time_ns()
 
+        # 3. Profile Effective Mask Baking
+        t_mask_start = time.time_ns()
         # --- Bake Effective Mask (ONLY IF INVALID) ---
         if self._effective_mask is None or len(self._effective_mask) < mod_count:
             filter_enabled, sidebar_mask = self.filter_sidebar.get_filter()
@@ -523,6 +537,10 @@ QToolButton[filterEnabled="true"] {
                     self._effective_mask[self._filter_cache] = global_threshold
                 else:
                     self._effective_mask[:] = global_threshold
+        t_mask_end = time.time_ns()
+
+        # if (t_mask_end - t_mask_start) > 1_000_000:  # Only log if mask baking took more than 1ms
+        #     self.logger.debug(f"[Profile] Bake Effective Mask: {(t_mask_end - t_mask_start) / 1_000_000:.3f} ms")
 
         total_new_rows = 0
         string_batches = []
@@ -535,19 +553,35 @@ QToolButton[filterEnabled="true"] {
             show_date=self.show_date,
         )
 
-        # Flag to track if we successfully consumed all segments without breaking
         reached_live_edge = True
 
-        with pool.get_snapshot() as segments, pool.acquire_indices_buffer() as indices:
+        # Track the absolute newest sequence we evaluate so we can "jump" the backlog
+        highest_seq_seen_this_tick = self.latest_seq_seen
+        first_segment = True
+
+        # 4. Profile Segment Filtering & Formatting (REVERSED)
+        t_segments_start = time.time_ns()
+        with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
             for segment in segments:
                 segment_last_sequence_id = segment.last_sequence_id
-                if segment.size == 0 or segment_last_sequence_id <= self.latest_seq_seen:
-                    continue
 
-                match_count = filter_segment(
+                # Because we are iterating backwards (newest to oldest segments),
+                # if a segment's LAST sequence is <= our tracker, ALL remaining segments
+                # are guaranteed to be older. We can safely abort the loop entirely.
+                if segment.size == 0 or segment_last_sequence_id <= self.latest_seq_seen:
+                    break
+
+                if first_segment:
+                    highest_seq_seen_this_tick = segment_last_sequence_id
+                    first_segment = False
+
+                allowed_matches = self.max_rows - total_new_rows
+
+                match_count = filter_segment_reversed(
                     segment.bundle,
                     effective_mask=self._effective_mask,
                     out_indices=indices.array,
+                    max_matches=allowed_matches,
                     start_seq=self.latest_seq_seen,
                 )
 
@@ -571,35 +605,45 @@ QToolButton[filterEnabled="true"] {
 
                     total_new_rows += match_count
 
-                # Even if 0 matches, we have "seen" this segment up to its last sequence.
-                self.latest_seq_seen = max(self.latest_seq_seen, segment_last_sequence_id)
-
                 if total_new_rows >= self.max_rows:
                     reached_live_edge = False
                     break
+        t_segments_end = time.time_ns()
 
-        # CRITICAL FIX 2: Velocity / Auto-Pause Catch-up Logic
+        # Update tracker to the absolute newest log evaluated to drop the unprocessed backlog
+        self.latest_seq_seen = max(self.latest_seq_seen, highest_seq_seen_this_tick)
+
+        # if total_new_rows > 0:
+        #     self.logger.debug(
+        #         f"[Profile] Filtering & Formatting {total_new_rows} rows: {(t_segments_end - t_segments_start) / 1_000_000:.3f} ms"
+        #     )
+
+        # Catch-up logic ...
         was_catching_up = self._is_catching_up
-        # Update catch-up state: If we cleared all segments, we are now live.
         if self._is_catching_up and reached_live_edge:
             self._is_catching_up = False
 
         if total_new_rows > 0:
-            # 2. CHECK the remembered state, not the newly updated one
             if was_catching_up:
-                # Bypass velocity tracking while paging in historical logs
                 is_clogged = False
                 self.velocity_tracker.reset()
             else:
-                # Only track velocity for live incoming logs
                 is_clogged = self.velocity_tracker.update_and_check(total_new_rows)
 
+            t_ui_start = time.time_ns()
             if is_clogged and not self.is_paused:
                 self.auto_paused = True
                 self.action_pause.setChecked(True)
             elif not (self.is_paused or self.auto_paused):
+                # We processed the newest segments first, so they are at the front of the list.
+                # Reversing makes the older segments render first, yielding perfect chronological order.
+                string_batches.reverse()
                 full_string_batch = "".join(string_batches)
+
                 self.text_area.append_log(full_string_batch)
+            t_ui_end = time.time_ns()
+
+            # self.logger.debug(f"[Profile] UI Text Append: {(t_ui_end - t_ui_start) / 1_000_000:.3f} ms")
 
     def _redraw_history(self):
         """

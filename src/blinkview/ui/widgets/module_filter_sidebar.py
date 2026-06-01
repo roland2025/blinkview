@@ -63,6 +63,10 @@ class ModuleFilterSidebar(QWidget):
         # Visually dim the table when disabled to prevent confusion
         self.table.setEnabled(checked)
 
+        if checked:
+            self.sync_modules()
+            self.table.check_for_new_modules()
+
     def get_state(self):
         return {
             "enabled": self.log_filter.enabled,
@@ -83,3 +87,9 @@ class ModuleFilterSidebar(QWidget):
 
     def get_filter(self):
         return self.log_filter.get_filter()
+
+    def setVisible(self, checked: bool):
+        super().setVisible(checked)
+        if checked:
+            self.sync_modules()
+            self.table.check_for_new_modules()
