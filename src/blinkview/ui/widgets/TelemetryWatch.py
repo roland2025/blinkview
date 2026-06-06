@@ -33,7 +33,6 @@ from qtpy.QtWidgets import (
 
 from blinkview.core import dtypes
 from blinkview.core.device_identity import ModuleIdentity
-from blinkview.core.log_row import LogRow
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.message_box import MessageBox

@@ -263,7 +263,7 @@ def nb_find_next_module_index(segment: LogBundle, target_module, start_idx):
 
 
 @app_njit()
-def _nb_bundle_push(
+def nb_bundle_push(
     bundle: LogBundle, ts_ns, rx_ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
 ):
     # 1. Early Exit & Pre-flight
@@ -318,7 +318,7 @@ def _nb_bundle_push(
 
 
 @app_njit()
-def _nb_bundle_extend(bundle, msg_bytes):
+def nb_bundle_extend(bundle, msg_bytes):
     # 1. Access size and ensure there's something to append to
     size_ptr = bundle.size
     size = size_ptr[0]

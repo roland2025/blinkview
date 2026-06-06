@@ -11,8 +11,6 @@ from qtpy.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from qtpy.QtGui import QColor
 
 from blinkview.core.device_identity import ModuleIdentity
-from blinkview.core.log_row import LogRow
-from blinkview.core.module_snapshot import ModuleSnapshot
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.action_button_delegate import TelemetryCol
 

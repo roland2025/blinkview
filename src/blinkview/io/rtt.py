@@ -10,9 +10,7 @@ from time import sleep
 import numpy as np
 
 from ..core.configurable import configuration_property, override_property
-from ..core.log_row import LogRow
 from ..core.numpy_batch_manager import PooledLogBatch
-from ..utils.log_level import LogLevel
 from ..utils.throughput import Speedometer, ThroughputAutoTuner
 from .BaseReader import BaseReader, DeviceFactory
 

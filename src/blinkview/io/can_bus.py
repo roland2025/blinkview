@@ -16,7 +16,7 @@ from ..core.limits import BATCH_MAXLEN
 from ..core.numba_config import app_njit
 from ..core.numpy_batch_manager import PooledLogBatch
 from ..core.types.empty import EMPTY_BYTES
-from ..ops.segments import _nb_bundle_push
+from ..ops.segments import nb_bundle_push
 from ..utils.throughput import Speedometer, ThroughputAutoTuner
 from .BaseReader import BaseReader, DeviceFactory
 
@@ -62,7 +62,7 @@ def _nb_can_push(
 
     # 3. Direct push into the bundle
     # level, module, device, seq are 0 for raw CAN ingress
-    return _nb_bundle_push(bundle, ts_ns, data, 0, 0, 0, 0, arb_id, flags, 0)
+    return nb_bundle_push(bundle, ts_ns, data, 0, 0, 0, 0, arb_id, flags, 0)
 
 
 class CanLogBatch(PooledLogBatch):

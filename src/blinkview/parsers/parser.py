@@ -4,30 +4,19 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-
-from time import perf_counter, sleep, time
 from types import SimpleNamespace
 from typing import Any, Callable, List, NamedTuple
-
-import numpy as np
 
 from ..core.base_daemon import BaseDaemon
 from ..core.batch_queue import BatchQueue
 from ..core.configurable import (
     configuration_factory,
     configuration_property,
-    on_config_change,
-    override_property,
 )
 from ..core.constants import SysCat
-from ..core.device_identity import DeviceIdentity
 from ..core.factory import BaseFactory
 from ..core.limits import BATCH_MAXLEN
-from ..core.log_row import LogRow
-from ..core.numpy_batch_manager import PooledLogBatch
-from ..core.reusable_batch_pool import TimeDataEntry
 from ..core.types.parsing import SyncState, create_default_sync
-from ..utils.log_level import LogLevel
 
 # Define the signature for a transformation
 TransformFunc = Callable[[Any], Any]

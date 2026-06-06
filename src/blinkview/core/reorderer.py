@@ -13,7 +13,6 @@ from numba.typed import List as NumbaList
 from blinkview.core import dtypes
 from blinkview.core.base_reorder import BaseReorder, ReorderFactory
 from blinkview.core.batch_queue import BatchQueue
-from blinkview.core.log_row import LogRow
 from blinkview.core.numba_config import app_njit
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.log_batch import LogBundle

@@ -4,11 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from time import perf_counter
-
 from blinkview.core.configurable import override_property
 from blinkview.core.device_identity import DeviceIdentity
-from blinkview.core.log_row import LogRow
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.parsers.parser import BaseParser, ParserFactory
 

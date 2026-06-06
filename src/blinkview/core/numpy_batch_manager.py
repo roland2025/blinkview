@@ -13,7 +13,7 @@ from blinkview.core import dtypes
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.types.empty import EMPTY_ID, EMPTY_LEVEL, EMPTY_SEQ
 from blinkview.core.types.log_batch import LogBundle
-from blinkview.ops.segments import _nb_bundle_extend, _nb_bundle_push
+from blinkview.ops.segments import nb_bundle_extend, nb_bundle_push
 
 
 class PooledLogBatch:
@@ -221,7 +221,7 @@ class PooledLogBatch:
 
         data_view = np.frombuffer(msg_data, dtype=dtypes.BYTE)
 
-        return _nb_bundle_push(
+        return nb_bundle_push(
             b, ts_ns, rx_ts_ns, data_view, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
         )
 
@@ -259,20 +259,20 @@ class PooledLogBatch:
         #     f"ext_u64_1: {type(ext_u64_1).__name__}"
         # )
 
-        return _nb_bundle_push(
+        return nb_bundle_push(
             b, ts_ns, rx_ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
         )
 
     def append(self, msg_bytes: bytes) -> bool:
         if not (b := self.bundle):
             return False
-        return _nb_bundle_extend(b, msg_bytes)
+        return nb_bundle_extend(b, msg_bytes)
 
     def append_any(self, msg_data: Any) -> bool:
         if not (b := self.bundle):
             return False
         data_view = np.frombuffer(msg_data, dtype=dtypes.BYTE)
-        return _nb_bundle_extend(b, data_view)
+        return nb_bundle_extend(b, data_view)
 
     def retain(self):
         with self._lock:

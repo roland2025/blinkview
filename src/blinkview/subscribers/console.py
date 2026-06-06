@@ -10,7 +10,6 @@ from time import sleep
 from rich.text import Text
 
 from ..core.constants import SysCat
-from ..core.log_row import LogRow
 from ..utils.log_filter import LogFilter
 from ..utils.log_level import LogLevel
 from ..utils.time_utils import ConsoleTimestampFormatter
@@ -58,8 +57,6 @@ class ConsoleSubscriber(BaseSubscriber):
             msg_batch = queue_get(0.1)
             if msg_batch is not None:
                 for msg in msg_batch:
-                    msg: LogRow
-
                     if msg.level < self.log_level:
                         continue
 
