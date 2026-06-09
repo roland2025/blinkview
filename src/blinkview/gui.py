@@ -6,20 +6,12 @@
 
 
 def main(args=None):
-    import os
-    import sys
-
-    # Inject CWD before importing local blinkview modules
-    cwd = os.getcwd()
-    if cwd not in sys.path:
-        sys.path.insert(0, cwd)
-
     if args is None:
-        from .ui.run import main as main_fn
+        from blinkview.ui.run import main as main_fn
 
         main_fn()
     else:
-        from .ui.run import run as main_fn
+        from blinkview.ui.run import run as main_fn
 
         main_fn(args)
 

@@ -22,8 +22,6 @@ ICON_PATH = (Path(__file__).parent / "assets" / "icon.png").absolute()
 
 
 # These must come BEFORE numpy, scipy, or any telemetry logic
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OMP_NUM_THREADS"] = "1"
-
-# from .core.registry import Registry
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
