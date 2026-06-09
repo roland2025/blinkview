@@ -7,7 +7,7 @@
 import os
 from pathlib import Path
 
-__version__ = "0.8.0.dev4"
+__version__ = "0.8.1"
 __author__ = "Roland Uuesoo"
 
 __app_name__ = "BlinkView"
