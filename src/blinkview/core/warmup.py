@@ -78,7 +78,6 @@ class NumbaWarmupHelper:
             factories=shared.factories,
             tasks=shared.tasks,
             settings=shared.settings,
-            pool=shared.pool,
             array_pool=shared.array_pool,
         )
 

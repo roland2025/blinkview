@@ -33,7 +33,6 @@ from .factory_registry import FactoryRegistry
 from .logger import PrintLogger, SystemLogger
 from .numpy_batch_manager import PooledLogBatch
 from .plugin_manager import PluginManager
-from .reusable_batch_pool import PoolManager
 from .settings_manager import SettingsManager
 from .sources import SourcesManager
 from .system_context import SystemContext
@@ -154,7 +153,6 @@ class Registry:
             factories=factories,
             tasks=TaskManager(),
             settings=settings or SettingsManager(),
-            pool=PoolManager(),
             array_pool=np_pool,
         )
         self.file_manager.set_context(self.system_ctx)

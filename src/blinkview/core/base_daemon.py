@@ -13,7 +13,7 @@ from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable, configuration_property
 from blinkview.core.constants import SysCat
 from blinkview.core.logger import BaseLogger
-from blinkview.core.reusable_batch_pool import ReusableBatch
+from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.system_context import SystemContext
 from blinkview.utils.generate_id import generate_id
 from blinkview.utils.settings_updater import update_object_from_config
@@ -214,7 +214,7 @@ class BaseDaemon:
                     self.logger.info(f"Subscriber: '{reference_id}' removed")
                 self.subscribers.remove(subscriber)
 
-    def distribute(self, batch: ReusableBatch):
+    def distribute(self, batch: PooledLogBatch):
         with self._subscribers_lock:
             subs = list(self.subscribers)
 

@@ -4,20 +4,12 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from threading import Lock, Thread
-from time import perf_counter
 from typing import Callable, Iterable
 
 from ..core.base_daemon import BaseDaemon
 from ..core.configurable import configuration_factory, configuration_property
 from ..core.constants import SysCat
-from ..core.device_identity import DeviceIdentity
 from ..core.factory import BaseFactory
-from ..core.logger import SystemLogger
-from ..core.reusable_batch_pool import BatchPool
-from ..core.time_sync_engine import TimeSyncEngine
-from ..utils.log_level import LogLevel
-from ..utils.settings_updater import update_object_from_config
 
 PutFnType = Callable[[Iterable[tuple]], None]
 
@@ -40,10 +32,13 @@ class BaseReader(BaseDaemon):
 
         self.targets = [SysCat.PARSER]
 
-        # self.device_id: DeviceIdentity = device_id
-        # self._timestamp_fn = time_ns
-        # self.push_log = push_log_cb
-        # self._mod_id_reader = device_id.get_module('_reader')
+    def get_commands(self) -> list[tuple[str, str]]:
+        """Exposes custom features to GUI/CLI layers.
+
+        Returns:
+            A list of (command_token, human_readable_name) tuples.
+        """
+        return []
 
 
 class DeviceFactory(BaseFactory[BaseReader]):

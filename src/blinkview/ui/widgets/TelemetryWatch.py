@@ -1450,7 +1450,7 @@ class TelemetryWatch(QWidget):
         try:
             tasks = self.gui_context.registry.system_ctx.tasks
             devices = self.gui_context.registry.sources
-            tasks.run_task(devices.send_command, target, val_with_newline)
+            tasks.run_task(devices.send_data, target, val_with_newline)
         except Exception as e:
             print(f"Error sending to '{target}': {e}")
 

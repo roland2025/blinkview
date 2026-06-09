@@ -48,6 +48,7 @@ from blinkview.ui.utils.update_checker import check_for_updates_silently
 from blinkview.ui.utils.window_manager import WindowManager
 from blinkview.ui.widgets.config.dynamic_config import DynamicConfigWidget
 from blinkview.ui.widgets.config.style_config import StyleConfig
+from blinkview.ui.widgets.config_tool_button_widget import SourcesToolButton
 from blinkview.ui.widgets.device_sidebar import DeviceSidebarWidget
 from blinkview.ui.widgets.log_viewer import LogViewerWidget
 from blinkview.ui.widgets.pipelines_sidebar import PipelinesSidebarWidget
@@ -111,7 +112,9 @@ class BlinkMainWindow(QMainWindow):
         fm = self.gui_context.registry.file_manager
         # Standalone is indicated at the end only if necessary
         mode_suffix = " (Standalone)" if fm.standalone_mode else ""
-        self.setWindowTitle(f"{fm.project_name} / {fm.profile_name} - {QCoreApplication.applicationName()}{mode_suffix} - {blinkview_version}")
+        self.setWindowTitle(
+            f"{fm.project_name} / {fm.profile_name} - {QCoreApplication.applicationName()}{mode_suffix} - {blinkview_version}"
+        )
 
         self.gui_context.registry.configure_system()
 
@@ -178,10 +181,14 @@ class BlinkMainWindow(QMainWindow):
 
         self.toolbar.addSeparator()
 
-        # Sources Toggle
-        self.action_view_sources = self.sources_dock.toggleViewAction()
-        self.action_view_sources.setText("Sources")  # Or use an icon
-        self.toolbar.addAction(self.action_view_sources)
+        # --- Sources Toggle Button with Dynamic Context Menu ---
+        self.sources_tool_btn = SourcesToolButton(
+            self.gui_context.config_manager.create_node("/sources"), self.gui_context
+        )
+        self.sources_tool_btn.setChecked(not self.sources_dock.isHidden())
+        self.sources_tool_btn.clicked.connect(lambda checked: self.sources_dock.setVisible(checked))
+        self.sources_dock.visibilityChanged.connect(self.sources_tool_btn.setChecked)
+        self.toolbar.addWidget(self.sources_tool_btn)
 
         # Pipelines Toggle
         self.action_view_pipelines = self.pipelines_dock.toggleViewAction()

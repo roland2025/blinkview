@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from collections import defaultdict, deque
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import numpy as np
 from numba.typed import List as NumbaList
@@ -177,11 +177,11 @@ class Reorder(BaseReorder):
         get = self.input_queue.get
         get_nowait = self.input_queue.get_nowait
 
-        batch_out = None
+        batch_out: Optional[PooledLogBatch] = None
         speed_out = Speedometer(logger=self.logger.child("stats_out"))
         tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.child("tuner_out"))
 
-        logger_backlog = self.logger.child("backlog")
+        # logger_backlog = self.logger.child("backlog")
 
         device_queues = defaultdict(deque)
 
@@ -202,7 +202,7 @@ class Reorder(BaseReorder):
                     held_messages += _qb.batch.size - int(_qb.cursor[0])
 
             # Use debug or info depending on how verbose you want your logs
-            logger_backlog.debug(f"batches={held_batches} msgs={held_messages}")
+            # logger_backlog.debug(f"batches={held_batches} msgs={held_messages}")
 
         stop_is_set = self._stop_event.is_set
 

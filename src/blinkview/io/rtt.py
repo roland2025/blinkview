@@ -5,14 +5,20 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import ctypes
+from threading import RLock
 from time import sleep
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
-from ..core.configurable import configuration_property, override_property
-from ..core.numpy_batch_manager import PooledLogBatch
-from ..utils.throughput import Speedometer, ThroughputAutoTuner
-from .BaseReader import BaseReader, DeviceFactory
+from blinkview.core import dtypes
+from blinkview.core.configurable import configuration_property, override_property
+from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.io.BaseReader import BaseReader, DeviceFactory
+from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
+
+if TYPE_CHECKING:
+    import pylink
 
 # Values in kHz as required by jlink.connect()
 SWD_SPEEDS = [
@@ -123,13 +129,15 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
     interface: str
     speed: int
     delay: int
+    target_rtt_buffer_size: int
 
     def __init__(self):
         super().__init__()
 
         self.logging_type = "default"
         self.logging_processor = "binary"
-        self.jlink = None
+        self.jlink: Optional[pylink.JLink] = None
+        self._jlink_lock = RLock()
 
     @classmethod
     def get_config_schema(cls) -> dict:
@@ -164,6 +172,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         stop_is_set = self._stop_event.is_set
         time_ns = self.shared.time_ns
         logger = self.logger
+        jlink_lock = self._jlink_lock
 
         # Tuner configuration
         delay_s = self.delay / 1000.0
@@ -173,7 +182,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         read_size = 64 * 1024
 
         c_buf = (ctypes.c_ubyte * read_size)()
-        np_buf = np.frombuffer(c_buf, dtype=np.uint8)
+        np_buf = np.frombuffer(c_buf, dtype=dtypes.BYTE)
 
         # 2. Stats and Auto-Tuning Setup
         stats = Speedometer(logger=self.logger.child("stats"))
@@ -187,36 +196,39 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
             # Dynamically pull configuration from the tuner's latest projections
             return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
 
-        batch = None
+        batch: PooledLogBatch = None
 
         try:
             while not stop_is_set():
-                # 3. J-Link Lifecycle Management
+                # self.open() handles its own internal locking safely
                 if self.jlink is None:
-                    self.jlink = self.open()
-                    if self.jlink is None:
+                    created_jl = self.open()
+                    if created_jl is None:
                         sleep(1.0)
                         continue
-                    _dll = self.jlink._dll
 
-                    _dll_rtterminal_read = _dll.JLINK_RTTERMINAL_Read
-                    _dll_is_open = _dll.JLINKARM_IsOpen
-                    _dll_is_connected = _dll.JLINKARM_EMU_IsConnected
+                    # Safely bind the localized function pointers under lock assignment
+                    with jlink_lock:
+                        self.jlink = created_jl
+                        _dll = self.jlink._dll  # noqa
+                        _dll_rtterminal_read = _dll.JLINK_RTTERMINAL_Read
+                        _dll_is_open = _dll.JLINKARM_IsOpen
+                        _dll_is_connected = _dll.JLINKARM_EMU_IsConnected
 
-                # 4. Acquire batch using current Tuner projections
+                # Acquire batch using current Tuner projections
                 if batch is None:
                     batch = batch_acquire()
 
                 try:
-                    now = time_ns()
+                    with jlink_lock:
+                        # --- FAST HARDWARE CHECK ---
+                        # Calling the C-pointers directly.
+                        # If they return 0, they are falsy, which triggers the exception.
+                        if not _dll_is_open() or not _dll_is_connected():
+                            raise Exception("J-Link connection lost.")
 
-                    # --- FAST HARDWARE CHECK ---
-                    # Calling the C-pointers directly.
-                    # If they return 0, they are falsy, which triggers the exception.
-                    if not _dll_is_open() or not _dll_is_connected():
-                        raise Exception("J-Link connection lost.")
-
-                    bytes_read = _dll_rtterminal_read(channel, c_buf, read_size)
+                        now = time_ns()
+                        bytes_read = _dll_rtterminal_read(channel, c_buf, read_size)
 
                     if bytes_read > 0:
                         # Zero-copy slice of the pre-allocated Numpy memory view
@@ -268,20 +280,21 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
     def cleanup_jlink(self):
         """Safely shuts down the J-Link session."""
-        if self.jlink:
-            # Step 1: Try to stop RTT
-            try:
-                self.jlink.rtt_stop()
-            except Exception:
-                pass  # Expected if the device was unexpectedly unplugged
+        with self._jlink_lock:
+            if self.jlink:
+                # Step 1: Try to stop RTT
+                try:
+                    self.jlink.rtt_stop()
+                except Exception:
+                    pass  # Expected if the device was unexpectedly unplugged
 
-            # Step 2: ALWAYS ensure the connection is closed
-            try:
-                self.jlink.close()
-            except Exception:
-                pass
+                # Step 2: ALWAYS ensure the connection is closed
+                try:
+                    self.jlink.close()
+                except Exception:
+                    pass
 
-            self.jlink = None
+                self.jlink = None
 
     def _drain_stale_data(self, jl):
         """
@@ -289,83 +302,144 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         Stops as soon as the buffer is empty OR we have drained
         one full 'target_rtt_buffer_size', ensuring zero-loss of live data.
         """
-        horizon = self.target_rtt_buffer_size
-        self.logger.info(f"Draining RTT (Target Buffer: {horizon} bytes)...")
+        with self._jlink_lock:
+            horizon = self.target_rtt_buffer_size
+            self.logger.info(f"Draining RTT (Target Buffer: {horizon} bytes)...")
 
-        total_drained = 0
-        poll_attempts = 100  # 1.0s timeout
+            total_drained = 0
+            poll_attempts = 100  # 1.0s timeout
 
-        while True:
-            # Always read in 4k chunks for efficiency during drain
-            junk = jl.rtt_read(self.channel, 4096)
+            while True:
+                # Always read in 4k chunks for efficiency during drain
+                junk = jl.rtt_read(self.channel, 4096)
 
-            if junk:
-                total_drained += len(junk)
+                if junk:
+                    total_drained += len(junk)
 
-                # --- THE HORIZON CHECK ---
-                if total_drained >= horizon:
-                    self.logger.info(f"Drain: Horizon reached ({total_drained} bytes). Handing off to main loop.")
-                    break
-            else:
-                # If we've seen data and it suddenly stops, we're dry.
-                if total_drained > 0:
-                    self.logger.debug(f"Drain: Buffer dry after {total_drained} bytes.")
-                    break
+                    # --- THE HORIZON CHECK ---
+                    if total_drained >= horizon:
+                        self.logger.info(f"Drain: Horizon reached ({total_drained} bytes). Handing off to main loop.")
+                        break
+                else:
+                    # If we've seen data and it suddenly stops, we're dry.
+                    if total_drained > 0:
+                        self.logger.debug(f"Drain: Buffer dry after {total_drained} bytes.")
+                        break
 
-                # If we haven't seen anything yet, wait for the DLL to sync
-                poll_attempts -= 1
-                if poll_attempts <= 0:
-                    self.logger.debug("Drain: No data found in 1s window.")
-                    break
+                    # If we haven't seen anything yet, wait for the DLL to sync
+                    poll_attempts -= 1
+                    if poll_attempts <= 0:
+                        self.logger.debug("Drain: No data found in 1s window.")
+                        break
 
-            sleep(0.01)
+                sleep(0.01)
 
     def open(self):
-        jl = None
-        try:
-            import pylink
+        with self._jlink_lock:
+            jl = None
+            try:
+                import pylink
 
-            self.logger.info(f"Connecting to J-Link: {self.target_device}")
-            jl = pylink.JLink()
-            jl.exec_command("SuppressGUI")
+                self.logger.info(f"Connecting to J-Link: {self.target_device}")
+                jl = pylink.JLink()
+                jl.exec_command("SuppressGUI")
 
-            if self.serial_number:
-                jl.open(serial_no=int(self.serial_number))
-            else:
-                jl.open()
+                if self.serial_number:
+                    jl.open(serial_no=int(self.serial_number))
+                else:
+                    jl.open()
 
-            tif = (
-                pylink.enums.JLinkInterfaces.SWD
-                if self.interface.lower() == "swd"
-                else pylink.enums.JLinkInterfaces.JTAG
-            )
-            jl.set_tif(tif)
-            jl.connect(self.target_device, speed=self.speed)
-            jl.rtt_start()
+                tif = (
+                    pylink.enums.JLinkInterfaces.SWD
+                    if self.interface.lower() == "swd"
+                    else pylink.enums.JLinkInterfaces.JTAG
+                )
+                jl.set_tif(tif)
+                jl.connect(self.target_device, speed=self.speed)
+                jl.rtt_start()
 
-            self._drain_stale_data(jl)
+                self._drain_stale_data(jl)
 
-            self.logger.info("Connected")
-            return jl
-        except Exception as e:
-            self.logger.error("Failed to open J-Link.", e)
-            if jl is not None:
-                try:
-                    jl.close()
-                except Exception:
-                    pass
-            return None
+                self.logger.info("Connected")
+                return jl
+            except Exception as e:
+                self.logger.error("Failed to open J-Link.", e)
+                if jl is not None:
+                    try:
+                        jl.close()
+                    except Exception:
+                        pass
+                return None
 
     def send_data(self, data: str, channel: int = 0):
         """
         Sends data to the target's RTT Down-buffer.
         Can be called from other threads or downstream logic.
         """
-        if self.jlink and self.jlink.opened():
-            try:
-                self.logger.info(f"Sending data to J-Link: {self.target_device}")
-                # rtt_write returns the number of bytes actually written
-                return self.jlink.rtt_write(channel, data.encode())
-            except Exception as e:
-                self.logger.error("RTT Write failed", e)
-        return 0
+        with self._jlink_lock:
+            if self.jlink and self.jlink.opened():
+                try:
+                    self.logger.info(f"Sending data to J-Link: {self.target_device}")
+                    # rtt_write returns the number of bytes actually written
+                    return self.jlink.rtt_write(channel, data.encode())
+                except Exception as e:
+                    self.logger.error("RTT Write failed", e)
+            return 0
+
+    def get_commands(self) -> list[tuple[str, str]]:
+        """Exposes expanded J-Link RTT runtime capabilities to GUI/CLI layers."""
+        return [
+            ("reset_mcu", "Reset MCU"),
+            ("halt_mcu", "Halt"),
+            ("resume_mcu", "Resume"),
+            ("restart_rtt", "Restart RTT"),
+        ]
+
+    def send_command(self, command: str):
+        """Processes incoming command strings routed from the UI/CLI layers."""
+        command = command.strip()
+
+        self.logger.debug(f"send_command: {command}")
+
+        with self._jlink_lock:
+            if not self.jlink:
+                self.logger.warn("Command dropped: No active J-Link session initialized.")
+                return
+
+            match command:
+                case "restart_rtt":
+                    self.jlink.rtt_stop()
+                    self.jlink.rtt_start()
+                    self.logger.info("RTT System restarted manually.")
+
+                case "reset_mcu":
+                    self.logger.info(f"Initiating hardware reset on target MCU: {self.target_device}")
+                    try:
+                        self.jlink.reset(halt=False)
+                        self.logger.info("Target MCU successfully reset.")
+                    except Exception as e:
+                        self.logger.error(f"Hardware reset failed: {e}")
+
+                case "halt_mcu":
+                    try:
+                        success = self.jlink.halt()
+                        if success:
+                            self.logger.info("Target core execution halted (paused).")
+                        else:
+                            self.logger.error("Target was not halted")
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to halt core: {e}")
+
+                case "resume_mcu":
+                    try:
+                        if self.jlink.restart():
+                            self.logger.info("Target core execution resumed.")
+                        else:
+                            self.logger.warn("Target was not halted")
+                    except Exception as e:
+                        self.logger.error(f"Failed to resume core: {e}")
+
+                case _:
+                    # Fall back to raw string transmission over RTT Down-buffer channel 0
+                    self.send_data(command)
