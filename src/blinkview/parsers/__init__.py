@@ -4,6 +4,16 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from . import assembler, binary_parser, can_bus, can_parser, cantools_decoder, key_value, parser, transformer
+from blinkview.parsers import (
+    assembler,
+    binary_parser,
+    can_bus,
+    can_parser,
+    cantools_decoder,
+    key_value,
+    multi_rule_key_value,
+    parser,
+    transformer,
+)
 
 __all__ = ["parser", "transformer", "assembler", "can_bus"]

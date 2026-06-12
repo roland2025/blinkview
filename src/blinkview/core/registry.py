@@ -10,33 +10,32 @@ from threading import RLock
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Optional
 
+from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.base_reorder import ReorderFactory
+from blinkview.core.central_storage import CentralFactory
+from blinkview.core.config_manager import ConfigManager
+from blinkview.core.factory_registry import FactoryRegistry
 from blinkview.core.id_registry import IDRegistry
+from blinkview.core.logger import PrintLogger, SystemLogger
 from blinkview.core.module_snapshot import LatestModuleValueTracker
+from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.core.plugin_manager import PluginManager
 from blinkview.core.reorderer import Reorder
-from blinkview.parsers import adb_decoder, frame_decoders, frame_parsers
+from blinkview.core.settings_manager import SettingsManager
+from blinkview.core.sources import SourcesManager
+from blinkview.core.system_context import SystemContext
+from blinkview.core.task_manager import TaskManager
+from blinkview.io import *
+from blinkview.io.BaseReader import DeviceFactory
+from blinkview.parsers import *
+from blinkview.parsers import adb_decoder, frame_decoders, frame_parsers, multi_rule_key_value
+from blinkview.storage import *
+from blinkview.storage.file_logger import FileLogger
+from blinkview.storage.file_manager import FileManager
 from blinkview.subscribers import subscriber
-
-from ..io import *
-from ..io.BaseReader import DeviceFactory
-from ..parsers import *
-from ..storage import *
-from ..storage.file_logger import FileLogger
-from ..storage.file_manager import FileManager
-from ..subscribers.subscriber import SubscriberFactory
-from ..utils import level_map
-from ..utils.time_utils import TimeUtils
-from .array_pool import NumpyArrayPool
-from .central_storage import CentralFactory
-from .config_manager import ConfigManager
-from .factory_registry import FactoryRegistry
-from .logger import PrintLogger, SystemLogger
-from .numpy_batch_manager import PooledLogBatch
-from .plugin_manager import PluginManager
-from .settings_manager import SettingsManager
-from .sources import SourcesManager
-from .system_context import SystemContext
-from .task_manager import TaskManager
+from blinkview.subscribers.subscriber import SubscriberFactory
+from blinkview.utils import level_map
+from blinkview.utils.time_utils import TimeUtils
 
 if TYPE_CHECKING:
     from .central_storage import CentralStorage
@@ -94,6 +93,7 @@ class Registry:
         factories.register("frame_decoder", frame_decoders.FrameDecoderFactory)
         factories.register("frame_parser", frame_parsers.FrameParserFactory)
         factories.register("frame_section_parser", frame_parsers.FrameSectionParserFactory)
+        factories.register("key_value_rule", multi_rule_key_value.ExtractionRuleFactory)
 
         self.file_manager = FileManager(
             session_name=session_name, profile_name=profile_name, log_dir=log_dir, config_path=config_path

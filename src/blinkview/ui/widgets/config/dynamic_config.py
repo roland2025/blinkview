@@ -591,7 +591,7 @@ class DynamicConfigWidget(QWidget):
         layout.addRow(group_box)
 
     def _build_complex_array(self, key, prop_schema, value, data, layout, registry, current_path, required_keys):
-        """Builds an array of objects or factory plugins."""
+        """Builds an array of objects or factory plugins supporting hybrid dict/list traversal."""
         is_required = key in required_keys
         title = prop_schema.get("title", key.replace("_", " ").title())
         description = prop_schema.get("description", "")
@@ -611,6 +611,24 @@ class DynamicConfigWidget(QWidget):
         child_data = value if isinstance(value, list) else []
         node_path = current_path + [key]
 
+        # ==========================================================
+        # --- Shared High-Speed Hybrid Path Resolvers ---
+        # ==========================================================
+        def safe_resolve_sequence(root, path):
+            """Safely navigates an arbitrary path of mixed dict keys and list indexes."""
+            curr = root
+            for p in path:
+                if isinstance(curr, dict):
+                    curr = curr.get(p)
+                elif isinstance(curr, list):
+                    try:
+                        curr = curr[int(p)]
+                    except (ValueError, IndexError):
+                        return None
+                else:
+                    return None
+            return curr
+
         # Render all existing array items
         for idx, item_val in enumerate(child_data):
             idx_str = str(idx)
@@ -624,7 +642,6 @@ class DynamicConfigWidget(QWidget):
             # ==========================================================
             # --- Array Reordering Controls ---
             # ==========================================================
-
             control_layout = QHBoxLayout()
             control_layout.addStretch()  # Push all buttons to the right side
 
@@ -637,7 +654,7 @@ class DynamicConfigWidget(QWidget):
                             }
                             QPushButton:disabled {
                                 color: #6c757d; /* Muted gray when disabled */
-                                text-decoration: none; /* Drop the underline to make it look flatter */
+                                text-decoration: none; 
                             }
                         """
 
@@ -649,11 +666,9 @@ class DynamicConfigWidget(QWidget):
 
             def on_move_up(_=False, i=idx):
                 state = self.get_config()
-                target = state
-                for p in node_path:
-                    target = target.get(p, [])
+                target = safe_resolve_sequence(state, node_path)
 
-                if 0 < i < len(target):
+                if isinstance(target, list) and 0 < i < len(target):
                     # Swap the items in the python list
                     target[i - 1], target[i] = target[i], target[i - 1]
 
@@ -673,11 +688,9 @@ class DynamicConfigWidget(QWidget):
 
             def on_move_down(_=False, i=idx):
                 state = self.get_config()
-                target = state
-                for p in node_path:
-                    target = target.get(p, [])
+                target = safe_resolve_sequence(state, node_path)
 
-                if 0 <= i < len(target) - 1:
+                if isinstance(target, list) and 0 <= i < len(target) - 1:
                     # Swap the items in the python list
                     target[i + 1], target[i] = target[i], target[i + 1]
 
@@ -689,6 +702,28 @@ class DynamicConfigWidget(QWidget):
 
             btn_down.clicked.connect(on_move_down)
 
+            # --- Copy / Duplicate Button ---
+            btn_copy = QPushButton("📋 Copy")
+            btn_copy.setCursor(Qt.PointingHandCursor)
+            btn_copy.setStyleSheet(nav_button_style)
+
+            def on_copy_item(_=False, i=idx):
+                state = self.get_config()
+                target = safe_resolve_sequence(state, node_path)
+
+                if isinstance(target, list) and 0 <= i < len(target):
+                    # Extract current data form state, duplicate it, append to the end
+                    copied_item = deepcopy(target[i])
+                    target.append(copied_item)
+
+                    self.schema = deepcopy(self.original_schema)
+                    self._clear_layout(self.form_layout)
+                    self._widget_registry.clear()
+                    self._build_ui(self.schema, state, self.form_layout, self._widget_registry)
+                    self._check_for_changes()
+
+            btn_copy.clicked.connect(on_copy_item)
+
             # --- Remove Button ---
             btn_delete = QPushButton(f"Remove Item {idx + 1}")
             btn_delete.setStyleSheet("color: #dc3545; border: none; text-decoration: underline;")
@@ -696,11 +731,9 @@ class DynamicConfigWidget(QWidget):
 
             def on_delete_arr(_=False, i=idx):
                 state = self.get_config()
-                target = state
-                for p in node_path:
-                    target = target.get(p, [])
+                target = safe_resolve_sequence(state, node_path)
 
-                if i < len(target):
+                if isinstance(target, list) and i < len(target):
                     target.pop(i)
                     self.schema = deepcopy(self.original_schema)
                     self._clear_layout(self.form_layout)
@@ -713,27 +746,63 @@ class DynamicConfigWidget(QWidget):
             # Pack them into the layout
             control_layout.addWidget(btn_up)
             control_layout.addWidget(btn_down)
+            control_layout.addWidget(btn_copy)
             control_layout.addWidget(btn_delete)
 
-            # Use an empty label string so the layout spans both columns in the form!
             group_layout.addRow("", control_layout)
-            # ==========================================================
 
-        # Add "Add Item" button
+        # --- Add Item Button ---
         btn_add = QPushButton("Add Item")
 
         def on_add_arr(_=False, path=node_path, schema_template=items_schema):
             state = self.get_config()
             target = state
-            for p in path[:-1]:
-                target = target.setdefault(p, {})
 
-            arr = target.get(path[-1])
-            if not isinstance(arr, list):
-                arr = []
-                target[path[-1]] = arr
+            # Safe look-ahead generation loop
+            for i, p in enumerate(path[:-1]):
+                if isinstance(target, dict):
+                    next_p = path[i + 1]
+                    # If next path variable acts like a list index digit, default to list mapping
+                    try:
+                        int(next_p)
+                        is_next_list = True
+                    except ValueError:
+                        is_next_list = False
 
-            arr.append(deepcopy(schema_template.get("default", {})))
+                    default_factory = list if is_next_list else dict
+                    target = target.setdefault(p, default_factory())
+
+                elif isinstance(target, list):
+                    idx = int(p)
+                    while len(target) <= idx:
+                        target.append({})
+                    target = target[idx]
+
+            final_key = path[-1]
+            if isinstance(target, dict):
+                if final_key not in target or not isinstance(target[final_key], list):
+                    target[final_key] = []
+                arr = target[final_key]
+            elif isinstance(target, list):
+                idx = int(final_key)
+                while len(target) <= idx:
+                    target.append([])
+                if not isinstance(target[idx], list):
+                    target[idx] = []
+                arr = target[idx]
+            else:
+                return
+
+            # Deepcopy or fallback copy primitive structures cleanly
+            default_item = schema_template.get("default", {})
+            if isinstance(default_item, (dict, list)):
+                new_item = deepcopy(default_item)
+            elif hasattr(default_item, "copy"):
+                new_item = default_item.copy()
+            else:
+                new_item = default_item
+
+            arr.append(new_item)
 
             self.schema = deepcopy(self.original_schema)
             self._clear_layout(self.form_layout)

@@ -389,10 +389,10 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
     def get_commands(self) -> list[tuple[str, str]]:
         """Exposes expanded J-Link RTT runtime capabilities to GUI/CLI layers."""
         return [
-            ("reset_mcu", "Reset MCU"),
-            ("halt_mcu", "Halt"),
-            ("resume_mcu", "Resume"),
-            ("restart_rtt", "Restart RTT"),
+            ("reset", "Reset MCU"),
+            ("halt", "Halt"),
+            ("restart", "Resume"),
+            ("rtt_restart", "Restart RTT"),
         ]
 
     def send_command(self, command: str):
@@ -407,12 +407,12 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                 return
 
             match command:
-                case "restart_rtt":
+                case "rtt_restart":
                     self.jlink.rtt_stop()
                     self.jlink.rtt_start()
                     self.logger.info("RTT System restarted manually.")
 
-                case "reset_mcu":
+                case "reset":
                     self.logger.info(f"Initiating hardware reset on target MCU: {self.target_device}")
                     try:
                         self.jlink.reset(halt=False)
@@ -420,7 +420,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                     except Exception as e:
                         self.logger.error(f"Hardware reset failed: {e}")
 
-                case "halt_mcu":
+                case "halt":
                     try:
                         success = self.jlink.halt()
                         if success:
@@ -431,7 +431,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                     except Exception as e:
                         self.logger.error(f"Failed to halt core: {e}")
 
-                case "resume_mcu":
+                case "restart":
                     try:
                         if self.jlink.restart():
                             self.logger.info("Target core execution resumed.")
