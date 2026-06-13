@@ -177,19 +177,20 @@ class CantoolsParser(BaseParser):
                     # 1. Localize input array references
                     b_in = batch_in.bundle
                     size = batch_in.size
-                    ts = b_in.timestamps
-                    offsets = b_in.offsets
-                    lengths = b_in.lengths
-                    buf = b_in.buffer
+                    timestamps = memoryview(b_in.timestamps)
+                    offsets = memoryview(b_in.offsets)
+                    lengths = memoryview(b_in.lengths)
+                    buf = memoryview(b_in.buffer)
 
                     # Extension column coming from CANReader
-                    can_ids = b_in.ext_u32_1
+                    can_ids = memoryview(b_in.ext_u32_1)
 
                     # 2. Extract, Decode, and Insert Loop
                     for i in range(size):
                         can_id = can_ids[i]
                         off = offsets[i]
                         data = buf[off : off + lengths[i]].tobytes()
+                        ts = timestamps[i]
 
                         msg_info = info_map_get(can_id)
 
@@ -203,11 +204,11 @@ class CantoolsParser(BaseParser):
                                     out_bytes = str(v).encode()
 
                                     if not batch_out.insert(
-                                        ts[i], out_bytes, log_level_info_int, mod_id, device_id_int
+                                        ts, ts, out_bytes, log_level_info_int, mod_id, device_id_int
                                     ):
                                         flush()
                                         batch_out = batch_acquire()
-                                        batch_out.insert(ts[i], out_bytes, log_level_info_int, mod_id, device_id_int)
+                                        batch_out.insert(ts, ts, out_bytes, log_level_info_int, mod_id, device_id_int)
 
                             except Exception as e:
                                 out_bytes = (
@@ -215,13 +216,14 @@ class CantoolsParser(BaseParser):
                                 )
 
                                 if not batch_out.insert(
-                                    ts[i], out_bytes, log_level_error_int, module_unknown_id_int, device_id_int
+                                    ts, ts, out_bytes, log_level_error_int, module_unknown_id_int, device_id_int
                                 ):
                                     flush()
                                     batch_out = batch_acquire()
                                     batch_out.insert(
-                                        ts[i], out_bytes, log_level_error_int, module_unknown_id_int, device_id_int
+                                        ts, ts, out_bytes, log_level_error_int, module_unknown_id_int, device_id_int
                                     )
+                                self.logger.exception("Failure", e)
 
                         else:
                             # --- Unmapped ID Handling ---
@@ -231,12 +233,12 @@ class CantoolsParser(BaseParser):
                             if not ignore_unknown:
                                 out_bytes = f"[{can_id:04X}] UNMAPPED | {data.hex()}".encode()
                                 if not batch_out.insert(
-                                    ts[i], out_bytes, log_level_info_int, module_unknown_id_int, device_id_int
+                                    ts, ts, out_bytes, log_level_info_int, module_unknown_id_int, device_id_int
                                 ):
                                     flush()
                                     batch_out = batch_acquire()
                                     batch_out.insert(
-                                        ts[i], out_bytes, log_level_info_int, module_unknown_id_int, device_id_int
+                                        ts, ts, out_bytes, log_level_info_int, module_unknown_id_int, device_id_int
                                     )
 
                 # --- Check for Flush Thresholds ---

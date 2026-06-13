@@ -62,7 +62,7 @@ def _nb_can_push(
 
     # 3. Direct push into the bundle
     # level, module, device, seq are 0 for raw CAN ingress
-    return nb_bundle_push(bundle, ts_ns, data, 0, 0, 0, 0, arb_id, flags, 0)
+    return nb_bundle_push(bundle, ts_ns, ts_ns, data, 0, 0, 0, 0, arb_id, flags, 0)
 
 
 class CanLogBatch(PooledLogBatch):
@@ -208,7 +208,7 @@ class CANReader(BaseReader):
             # Request ext_u32_1 for CAN Address and ext_u32_2 for CAN Flags
             return pool_create(CanLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
 
-        batch = None
+        batch: CanLogBatch = None
         bus = None
 
         try:
@@ -270,14 +270,14 @@ class CANReader(BaseReader):
                         batch = None
 
                 except CanError as e:
-                    logger.error("CAN Bus Error detected.", e)
+                    logger.exception("CAN Bus Error detected.", e)
                     if bus:
                         bus.shutdown()
                     bus = None
                     sleep(1.0)
 
                 except Exception as e:
-                    logger.error("Unexpected error in CAN read loop.", e)
+                    logger.exception("Unexpected error in CAN read loop.", e)
                     if bus:
                         bus.shutdown()
                     bus = None
