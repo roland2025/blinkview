@@ -9,7 +9,6 @@ from blinkview.parsers import (
     binary_parser,
     can_bus,
     can_parser,
-    cantools_decoder,
     key_value,
     multi_rule_key_value,
     parser,

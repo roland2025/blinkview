@@ -95,7 +95,7 @@ blink
   * High-speed text search and highlighting.
   * Auto-pause on high-velocity bursts to maintain UI responsiveness.
 * **Parsing & Extraction:**
-  * Key-Value parser *(experimental/non-optimized)* for extracting structured data from raw text streams.
+  * Key-Value parser *(Highly optimized pure Python; Numba JIT backend planned)* for extracting structured data from raw text streams.
 * **Session Persistence:** Automatically remembers window positions and active log filter settings. Pick up exactly where you left off without re-configuring your workspace.
 * **Watch / Command List:** 
   * Monitor specific variables and latest state values.

@@ -5,6 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from types import SimpleNamespace
+from typing import Callable
 
 from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable, configuration_property, override_property
@@ -13,6 +14,17 @@ from blinkview.core.factory import BaseFactory
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.system_context import SystemContext
 from blinkview.parsers.parser import BaseParser, ParserFactory
+from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
+
+# =============================================================================
+# TYPE ALIAS
+# ProcessFn signature:
+#   (b_in, i, module_id, batch) -> None
+#
+# All batch threshold and flush mechanics are evaluated directly within the
+# parser hot loop prior to calling closures, keeping match processors clean.
+# =============================================================================
+ProcessFn = Callable
 
 
 @configurable
@@ -27,8 +39,12 @@ class ExtractionRule:
     module_name: str
     module_suffix: str
 
-    def bundle(self) -> tuple:
-        """Returns a tuple of (base_module_id, compiled_byte_primitives_namespace)"""
+    def bundle(self) -> tuple[int, ProcessFn]:
+        """Returns a tuple of (base_module_id, process_fn).
+
+        process_fn signature:
+            (b_in, i, module_id, batch) -> None
+        """
         raise NotImplementedError
 
 
@@ -37,7 +53,7 @@ class ExtractionRuleFactory(BaseFactory[ExtractionRule]):
 
 
 # =============================================================================
-# 1. DELIMITER EXTRACTION RULE CLASS
+# DELIMITER EXTRACTION RULE
 # =============================================================================
 @configuration_property("module_name", type="string", required=True, ui_order=5, title="Match module")
 @configuration_property("module_suffix", type="string", default="", ui_order=10, title="Module Name Suffix")
@@ -54,32 +70,127 @@ class DelimiterExtractionRule(ExtractionRule):
     field_delimiter: str
     kv_delimiter: str
 
-    def bundle(self):
+    def bundle(self) -> tuple[int, ProcessFn]:
         _resolve_module = self.shared.id_registry.resolve_module
-        base_mod_id = _resolve_module(self.module_name).id
+        _get_module = self.local.device_id.get_module
+        device_id_int = self.local.device_id.id
 
-        print(f"[DelimiterExtractionRule] mod_id={base_mod_id} module_name={self.module_name}")
+        # 1. Resolve parent module metadata ONCE at bundle time
+        parent_mod = _resolve_module(self.module_name)
+        base_mod_id = parent_mod.id
+        parent_name = parent_mod.name
 
         field_delim = getattr(self, "field_delimiter", "&").encode("ascii")
         kv_delim = getattr(self, "kv_delimiter", "=").encode("ascii")
-        suffix = getattr(self, "module_suffix", "").strip()
-        prefix_bytes = getattr(self, "prefix_strip", "").encode("ascii")
+        suffix = getattr(self, "module_suffix", "").strip() or None
+        prefix_bytes = getattr(self, "prefix_strip", "").encode("ascii") or None
 
-        compiled = SimpleNamespace(
-            mode="delimiter",
-            field_delim=field_delim,
-            kv_delim=kv_delim,
-            field_delim_int=field_delim[0] if len(field_delim) == 1 else None,
-            kv_delim_int=kv_delim[0] if len(kv_delim) == 1 else None,
-            prefix_bytes=prefix_bytes if prefix_bytes else None,
-            module_suffix=suffix if suffix else None,
-            static_target_id=None,
-        )
-        return base_mod_id, compiled
+        field_delim_int = field_delim[0] if len(field_delim) == 1 else 38
+        kv_delim_int = kv_delim[0] if len(kv_delim) == 1 else 61
+
+        name_prefix = f"{suffix}." if suffix else f"{parent_name}."
+
+        _len = len
+        _range = range
+
+        # Isolated flat cache: Key is raw `k_bytes` -> Value is target_mod_id
+        module_cache = {}
+        flat_cache = []
+
+        local_ctx = self.local.parser_local
+
+        def process(i, module_id, batch):
+            buffer = local_ctx.buffer_mv
+
+            start = local_ctx.offsets_mv[i]
+            end = start + local_ctx.lengths_mv[i]
+
+            if prefix_bytes:
+                p_len = _len(prefix_bytes)
+                if (end - start) >= p_len:
+                    match = True
+                    for idx in _range(p_len):
+                        if buffer[start + idx] != prefix_bytes[idx]:
+                            match = False
+                            break
+                    if match:
+                        start += p_len
+
+            ts_ns = local_ctx.timestamps_mv[i]
+            rx_ns = local_ctx.rx_timestamps_mv[i]
+            level = local_ctx.levels_mv[i]
+
+            batch_insert = batch.insert
+
+            chunk_start = start
+            kv_pos = -1
+
+            for j in _range(start, end + 1):
+                if j < end:
+                    c = buffer[j]
+                else:
+                    c = field_delim_int
+
+                if c == kv_delim_int and kv_pos == -1 and j < end:
+                    kv_pos = j
+                elif c == field_delim_int:
+                    if kv_pos != -1:
+                        k_start = chunk_start
+                        k_end = kv_pos
+                        while k_start < k_end and buffer[k_start] in (32, 9, 10, 13):
+                            k_start += 1
+                        while k_end > k_start and buffer[k_end - 1] in (32, 9, 10, 13):
+                            k_end -= 1
+
+                        v_start = kv_pos + 1
+                        v_end = j
+                        while v_start < v_end and buffer[v_start] in (32, 9, 10, 13):
+                            v_start += 1
+                        while v_end > v_start and buffer[v_end - 1] in (32, 9, 10, 13):
+                            v_end -= 1
+
+                        if k_start < k_end and v_start < v_end:
+                            k_view = buffer[k_start:k_end]
+                            v_view = buffer[v_start:v_end]
+
+                            target_mod_id = None
+                            for kb, mid in flat_cache:
+                                if k_view == kb:
+                                    target_mod_id = mid
+                                    break
+
+                            # 3. CACHE MISS (Runs exactly once per unique field name encountered)
+                            if target_mod_id is None:
+                                try:
+                                    k_bytes = k_view.tobytes()  # Allocate the permanent key wrapper
+                                    key_str = k_bytes.decode("ascii", errors="ignore")
+                                    target_mod_id = _get_module(f"{name_prefix}{key_str}").id
+
+                                    # Store permanent bytes object and ID in flat lookup list
+                                    flat_cache.append((k_bytes, target_mod_id))
+                                except Exception:
+                                    pass
+                            if target_mod_id is not None:
+                                try:
+                                    batch_insert(
+                                        ts_ns=ts_ns,
+                                        rx_ts_ns=rx_ns,
+                                        msg_bytes=v_view,
+                                        level=level,
+                                        module=target_mod_id,
+                                        device=device_id_int,
+                                    )
+                                except Exception:
+                                    pass
+
+                    chunk_start = j + 1
+                    kv_pos = -1
+
+        return base_mod_id, process
 
 
 # =============================================================================
-# 2. TOKEN EXTRACTION RULE CLASS
+# TOKEN EXTRACTION RULE
 # =============================================================================
 @configuration_property("module_name", type="string", required=True, ui_order=5, title="Match module")
 @configuration_property("module_suffix", type="string", required=True, default="", ui_order=10, title="New module name")
@@ -102,55 +213,176 @@ class DelimiterExtractionRule(ExtractionRule):
 )
 @ExtractionRuleFactory.register("token")
 class TokenExtractionRule(ExtractionRule):
-    """Extract values matching startswith/endswith/contains patterns"""
+    """Extract values matching startswith/endswith/contains patterns."""
 
     token_match_type: str
     token_pattern: str
     token_start_index: int
     token_word_count: int
 
-    def bundle(self):
-
-        _get_module = self.local.device_id.get_module
+    def bundle(self) -> tuple[int, ProcessFn]:
         _resolve_module = self.shared.id_registry.resolve_module
+        _module_from_int = self.shared.id_registry.module_from_int
+        _get_module = self.local.device_id.get_module
+        device_id_int = self.local.device_id.id
+
         base_mod_id = _resolve_module(self.module_name).id
 
-        suffix = getattr(self, "module_suffix", "").strip()
+        pattern_bytes = getattr(self, "token_pattern", "").encode("ascii")
+        match_type = getattr(self, "token_match_type", "contains")
+        z_start = getattr(self, "token_start_index", 0)
+        y_count = getattr(self, "token_word_count", 1)
+        suffix = getattr(self, "module_suffix", "").strip() or None
         static_target_id = None
+
+        module_cache = {}
+
         if suffix:
             try:
                 static_target_id = _get_module(suffix).id
             except Exception:
                 pass
 
-        compiled = SimpleNamespace(
-            mode="token",
-            pattern_bytes=getattr(self, "token_pattern", "").encode("ascii"),
-            match_type=getattr(self, "token_match_type", "contains"),
-            z_start=getattr(self, "token_start_index", 0),
-            y_count=getattr(self, "token_word_count", 1),
-            module_suffix=suffix if suffix else None,
-            static_target_id=static_target_id,
-        )
-        return base_mod_id, compiled
+        pat_len = len(pattern_bytes)
+        _len = len
+        _range = range
+
+        if match_type == "starts_with":
+
+            def _match(buf, start, end) -> bool:
+                if (end - start) < pat_len:
+                    return False
+                for idx in _range(pat_len):
+                    if buf[start + idx] != pattern_bytes[idx]:
+                        return False
+                return True
+
+        elif match_type == "ends_with":
+
+            def _match(buf, start, end) -> bool:
+                if (end - start) < pat_len:
+                    return False
+                offset = end - pat_len
+                for idx in _range(pat_len):
+                    if buf[offset + idx] != pattern_bytes[idx]:
+                        return False
+                return True
+
+        else:  # contains
+
+            def _match(buf, start, end) -> bool:
+                if (end - start) < pat_len:
+                    return False
+
+                # Cache the head byte to build an inline high-speed rejection filter
+                first_byte = pattern_bytes[0]
+
+                for idx in _range(start, end - pat_len + 1):
+                    # Cheap primitive check skips the heavy inner evaluation frame
+                    if buf[idx] != first_byte:
+                        continue
+
+                    match_found = True
+                    # Start scanning from index 1 since index 0 is already validated
+                    for j in _range(1, pat_len):
+                        if buf[idx + j] != pattern_bytes[j]:
+                            match_found = False
+                            break
+                    if match_found:
+                        return True
+                return False
+
+        local_ctx = self.local.parser_local
+
+        def process(i, module_id, batch):
+            buffer = local_ctx.buffer_mv
+
+            start = local_ctx.offsets_mv[i]
+            end = start + local_ctx.lengths_mv[i]
+
+            if not _match(buffer, start, end):
+                return
+
+            start_byte = -1
+            end_byte = -1
+            word_count = 0
+            in_word = False
+
+            for j in _range(start, end):
+                c = buffer[j]
+                is_ws = c == 32 or c == 9 or c == 10 or c == 13
+
+                if not in_word:
+                    if not is_ws:
+                        in_word = True
+                        if word_count == z_start:
+                            start_byte = j
+                else:
+                    if is_ws:
+                        in_word = False
+                        if y_count > 0 and word_count == z_start + y_count - 1:
+                            end_byte = j
+                            break
+                        if word_count >= z_start:
+                            end_byte = j
+                        word_count += 1
+
+            if in_word and word_count >= z_start:
+                if y_count == 0 or word_count < z_start + y_count:
+                    end_byte = end
+
+            if start_byte == -1 or end_byte == -1 or start_byte >= end_byte:
+                return
+
+            v_view = buffer[start_byte:end_byte]
+
+            try:
+                if static_target_id is not None:
+                    target_mod_id = static_target_id
+                else:
+                    cache_key = (module_id, z_start, y_count)
+
+                    try:
+                        target_mod_id = module_cache[cache_key]
+                    except KeyError:
+                        parent_name = _module_from_int(module_id).name
+                        pattern_str = pattern_bytes.decode("ascii", errors="ignore")
+                        sub_mod_name = f"{parent_name}.{pattern_str}_z{z_start}"
+                        target_mod_id = _get_module(sub_mod_name).id
+                        module_cache[cache_key] = target_mod_id
+
+                batch.insert(
+                    ts_ns=local_ctx.timestamps_mv[i],
+                    rx_ts_ns=local_ctx.rx_timestamps_mv[i],
+                    msg_bytes=v_view,
+                    level=local_ctx.levels_mv[i],
+                    module=target_mod_id,
+                    device=device_id_int,
+                )
+            except Exception:
+                pass
+
+        return base_mod_id, process
 
 
 # =============================================================================
-# 3. JSON-LITE EXTRACTION RULE CLASS
+# JSON-LITE EXTRACTION RULE
 # =============================================================================
 @configuration_property("module_name", type="string", required=True, ui_order=5, title="Match module")
 @configuration_property("module_suffix", type="string", default="", ui_order=10, title="New Module Name")
 @configuration_property("json_key", type="string", default="", required=True, ui_order=15, title="JSON Key to Extract")
-# @ExtractionRuleFactory.register("json_lite")
 class JsonLiteExtractionRule(ExtractionRule):
     json_key: str
 
-    def bundle(self):
+    def bundle(self) -> tuple[int, ProcessFn]:
         _get_module = self.local.device_id.get_module
-        base_mod_id = _get_module(self.module_name).id
+        _module_from_int = self.shared.id_registry.module_from_int
+        device_id_int = self.local.device_id.id
 
-        suffix = getattr(self, "module_suffix", "").strip()
+        base_mod_id = _get_module(self.module_name).id
+        suffix = getattr(self, "module_suffix", "").strip() or None
         static_target_id = None
+
         if suffix:
             try:
                 static_target_id = _get_module(f"{self.module_name}.{suffix}").id
@@ -159,18 +391,103 @@ class JsonLiteExtractionRule(ExtractionRule):
 
         json_key_raw = getattr(self, "json_key", "").strip()
         json_key_bytes = f'"{json_key_raw}":'.encode("ascii") if json_key_raw else b""
+        key_len = len(json_key_bytes)
+        key_str_clean = json_key_raw
 
-        compiled = SimpleNamespace(
-            mode="json_lite",
-            json_key_bytes=json_key_bytes,
-            module_suffix=suffix if suffix else None,
-            static_target_id=static_target_id,
-        )
-        return base_mod_id, compiled
+        _len = len
+        module_cache = {}
+
+        if not json_key_bytes:
+
+            def process(i, module_id, batch):
+                pass
+
+            return base_mod_id, process
+
+        _range = range
+
+        local_ctx = self.local.parser_local
+
+        def process(i, module_id, batch):
+            buffer = local_ctx.buffer_mv
+
+            start = local_ctx.offsets_mv[i]
+            end = start + local_ctx.lengths_mv[i]
+            msg_len = end - start
+
+            if msg_len < key_len:
+                return
+
+            # Zero-copy primitive scan over the fast memoryview layout
+            idx = -1
+            for match_idx in _range(start, end - key_len + 1):
+                found = True
+                for k in _range(key_len):
+                    if buffer[match_idx + k] != json_key_bytes[k]:
+                        found = False
+                        break
+                if found:
+                    idx = match_idx
+                    break
+
+            if idx == -1:
+                return
+
+            ts_ns = local_ctx.timestamps_mv[i]
+            level = local_ctx.levels_mv[i]
+
+            pos = idx + key_len
+
+            while pos < end and buffer[pos] == 32:
+                pos += 1
+            if pos >= end:
+                return
+
+            # String or numerical/boolean boundaries tracking
+            if buffer[pos] == 34:  # ASCII for '"'
+                pos += 1
+                end_pos = -1
+                for scan_pos in _range(pos, end):
+                    if buffer[scan_pos] == 34:
+                        end_pos = scan_pos
+                        break
+                if end_pos == -1:
+                    return
+                v_bytes = buffer[pos:end_pos]
+            else:
+                end_pos = pos
+                while end_pos < end and buffer[end_pos] not in (44, 125, 93, 32, 10, 13):
+                    end_pos += 1
+                v_bytes = buffer[pos:end_pos]
+
+            if not v_bytes:
+                return
+
+            try:
+                if static_target_id is not None:
+                    target_mod_id = static_target_id
+                else:
+                    if module_id not in module_cache:
+                        parent_name = _module_from_int(module_id).name
+                        module_cache[module_id] = _get_module(f"{parent_name}.{key_str_clean}").id
+                    target_mod_id = module_cache[module_id]
+
+                batch.insert(
+                    ts_ns=ts_ns,
+                    rx_ts_ns=ts_ns,
+                    msg_bytes=v_bytes,
+                    level=level,
+                    module=target_mod_id,
+                    device=device_id_int,
+                )
+            except Exception:
+                pass
+
+        return base_mod_id, process
 
 
 # =============================================================================
-# 4. LIST DELIMITER EXTRACTION RULE CLASS
+# LIST DELIMITER EXTRACTION RULE
 # =============================================================================
 @configuration_property("module_name", type="string", required=True, ui_order=5, title="Match module")
 @configuration_property("module_suffix", type="string", default="", ui_order=10, title="New Module Name")
@@ -202,12 +519,13 @@ class ListDelimiterExtractionRule(ExtractionRule):
     field_delimiter: str
     field_names: list
 
-    def bundle(self):
+    def bundle(self) -> tuple[int, ProcessFn]:
         _resolve_module = self.shared.id_registry.resolve_module
         _get_module = self.local.device_id.get_module
+        device_id_int = self.local.device_id.id
 
         parent_mod = _resolve_module(self.module_name)
-        base_mod_id = _resolve_module(self.module_name).id
+        base_mod_id = parent_mod.id
 
         suffix = getattr(self, "module_suffix", "").strip()
         if suffix:
@@ -217,45 +535,119 @@ class ListDelimiterExtractionRule(ExtractionRule):
                 pass
 
         field_delim = getattr(self, "field_delimiter", ";").encode("ascii")
-        prefix_bytes = getattr(self, "prefix_strip", "").encode("ascii")
-        start_bytes = getattr(self, "startswith", "").strip().encode("ascii")
+        prefix_bytes = getattr(self, "prefix_strip", "").encode("ascii") or None
+        start_bytes = getattr(self, "startswith", "").strip().encode("ascii") or None
+        field_delim_int = field_delim[0] if len(field_delim) == 1 else 59
 
         static_target_ids = []
         for field_cfg in getattr(self, "field_names", []):
             if not field_cfg:
                 static_target_ids.append(None)
                 continue
-
-            # Safe lookup hook protecting against dynamic dictionary vs object namespace variations
-            get_fval = lambda k, d: field_cfg.get(k, d) if isinstance(field_cfg, dict) else getattr(field_cfg, k, d)
-
+            get_fval = (
+                (lambda k, d: field_cfg.get(k, d))
+                if isinstance(field_cfg, dict)
+                else (lambda k, d: getattr(field_cfg, k, d))
+            )
             ignore = get_fval("ignore", False)
             name = get_fval("name", "").strip()
-
-            # If explicitly ignored or missing an identity name mapping, skip structural ID resolution
             if ignore or not name:
                 static_target_ids.append(None)
                 continue
-
             try:
-                full_name = f"{parent_mod.name}.{name}"
-                static_target_ids.append(_get_module(full_name).id)
+                static_target_ids.append(_get_module(f"{parent_mod.name}.{name}").id)
             except Exception:
                 static_target_ids.append(None)
 
-        compiled = SimpleNamespace(
-            mode="list_delimiter",
-            field_delim=field_delim,
-            field_delim_int=field_delim[0] if len(field_delim) == 1 else None,
-            prefix_bytes=prefix_bytes if prefix_bytes else None,
-            start_bytes=start_bytes if start_bytes else None,
-            static_target_ids=static_target_ids,
-        )
-        return base_mod_id, compiled
+        n_fields = len(static_target_ids)
+        start_len = len(start_bytes) if start_bytes else 0
+        prefix_len = len(prefix_bytes) if prefix_bytes else 0
+        _len = len
+
+        _range = range
+
+        local_ctx = self.local.parser_local
+
+        def process(i, module_id, batch):
+            buffer = local_ctx.buffer_mv
+
+            start = local_ctx.offsets_mv[i]
+            end = start + local_ctx.lengths_mv[i]
+
+            msg_len = end - start
+            scan_start = start
+
+            if start_bytes:
+                if msg_len < start_len:
+                    return
+                for j in _range(start_len):
+                    if buffer[start + j] != start_bytes[j]:
+                        return
+                scan_start = start + start_len
+
+            if prefix_bytes:
+                if (end - scan_start) >= prefix_len:
+                    has_prefix = True
+                    for j in _range(prefix_len):
+                        if buffer[scan_start + j] != prefix_bytes[j]:
+                            has_prefix = False
+                            break
+                    if has_prefix:
+                        scan_start += prefix_len
+
+            field_idx = 0
+            field_start = scan_start
+
+            ts_ns = local_ctx.timestamps_mv[i]
+            rx_ns = local_ctx.rx_timestamps_mv[i]
+            level = local_ctx.levels_mv[i]
+
+            for j in _range(scan_start, end + 1):
+                is_delim = False
+                if j < end:
+                    if buffer[j] == field_delim_int:
+                        is_delim = True
+                else:
+                    is_delim = True
+
+                if is_delim:
+                    target_mod_id = static_target_ids[field_idx]
+
+                    if target_mod_id is not None:
+                        chunk_start = field_start
+                        chunk_end = j
+
+                        # Inline zero-allocation stripping loops
+                        while chunk_start < chunk_end and buffer[chunk_start] in (32, 9, 10, 13):
+                            chunk_start += 1
+                        while chunk_end > chunk_start and buffer[chunk_end - 1] in (32, 9, 10, 13):
+                            chunk_end -= 1
+
+                        if chunk_start < chunk_end:
+                            v_view = buffer[chunk_start:chunk_end]
+
+                            try:
+                                batch.insert(
+                                    ts_ns=ts_ns,
+                                    rx_ts_ns=rx_ns,
+                                    msg_bytes=v_view,
+                                    level=level,
+                                    module=target_mod_id,
+                                    device=device_id_int,
+                                )
+                            except Exception:
+                                pass
+
+                    field_idx += 1
+                    if field_idx >= n_fields:
+                        break
+                    field_start = j + 1
+
+        return base_mod_id, process
 
 
 # =============================================================================
-# 4. PURE WORD INDEX EXTRACTION RULE CLASS
+# PURE WORD INDEX EXTRACTION RULE
 # =============================================================================
 @configuration_property("module_name", type="string", required=True, ui_order=5, title="Match module")
 @configuration_property("module_suffix", type="string", required=True, ui_order=10, title="New Module Name")
@@ -268,28 +660,81 @@ class WordExtractionRule(ExtractionRule):
     word_index: int
     word_count: int
 
-    def bundle(self):
-        _get_module = self.local.device_id.get_module
+    def bundle(self) -> tuple[int, ProcessFn]:
         _resolve_module = self.shared.id_registry.resolve_module
-        base_mod_id = _resolve_module(self.module_name).id
+        _get_module = self.local.device_id.get_module
+        device_id_int = self.local.device_id.id
 
-        suffix = getattr(self, "module_suffix", "").strip()
-        static_target_id = None
-        if suffix:
+        base_mod_id = _resolve_module(self.module_name).id
+        suffix = self.module_suffix.strip()
+        static_target_id = _get_module(suffix).id
+
+        z_start = getattr(self, "word_index", 0)
+        y_count = getattr(self, "word_count", 1)
+        _len = len
+
+        local_ctx = self.local.parser_local
+
+        _range = range
+
+        def process(i, module_id, batch):
+            buffer = local_ctx.buffer_mv
+
+            start = local_ctx.offsets_mv[i]
+            end = start + local_ctx.lengths_mv[i]
+
+            start_byte = -1
+            end_byte = -1
+            word_count = 0
+            in_word = False
+
+            for j in _range(start, end):
+                c = buffer[j]
+                is_ws = c == 32 or c == 9 or c == 10 or c == 13
+
+                if not in_word:
+                    if not is_ws:
+                        in_word = True
+                        if word_count == z_start:
+                            start_byte = j
+                else:
+                    if is_ws:
+                        in_word = False
+                        if y_count > 0 and word_count == z_start + y_count - 1:
+                            end_byte = j
+                            break
+                        if word_count >= z_start:
+                            end_byte = j
+                        word_count += 1
+
+            if in_word:
+                if word_count >= z_start:
+                    if y_count == 0 or word_count < z_start + y_count:
+                        end_byte = end
+
+            if start_byte == -1 or end_byte == -1 or start_byte >= end_byte:
+                return
+
+            v_view = buffer[start_byte:end_byte]
+
             try:
-                static_target_id = _get_module(suffix).id
+                batch.insert(
+                    ts_ns=local_ctx.timestamps_mv[i],
+                    rx_ts_ns=local_ctx.rx_timestamps_mv[i],
+                    msg_bytes=v_view,
+                    level=local_ctx.levels_mv[i],
+                    module=static_target_id,
+                    device=device_id_int,
+                )
             except Exception:
                 pass
 
-        compiled = SimpleNamespace(
-            mode="word",
-            z_start=getattr(self, "word_index", 0),
-            y_count=getattr(self, "word_count", 1),
-            static_target_id=static_target_id,
-        )
-        return base_mod_id, compiled
+        return base_mod_id, process
 
 
+# =============================================================================
+# PARSER
+# =============================================================================
 @configuration_property(
     "rules",
     type="array",
@@ -319,10 +764,8 @@ class MultiRuleKeyValueParser(BaseParser):
 
         self._instantiated_rules = []
         factory_build = self.shared.factories.build
+        local_ctx = SimpleNamespace(device_id=self.local.device_id, parser_local=self.local)
 
-        local_ctx = SimpleNamespace(device_id=self.local.device_id)
-
-        # Build each rule polymorphically based on its specified structural type mapping
         for rule_cfg in config.get("rules", []):
             rule_obj = factory_build("key_value_rule", rule_cfg, system_ctx=self.shared, local_ctx=local_ctx)
             self._instantiated_rules.append(rule_obj)
@@ -332,400 +775,169 @@ class MultiRuleKeyValueParser(BaseParser):
     def run(self):
         # --- Localize Framework Plumbing ---
         _time_ns = self.shared.time_ns
-        _len = len
         _get = self.input_queue.get
         _distribute = self.distribute
-        _module_from_int = self.shared.id_registry.module_from_int
 
-        max_batch = self.max_batch
+        _range = range
+        _len = len
+
         max_timeout = self.delay / 1000.0
         max_timeout_ns = int(max_timeout * 1e9)
 
-        device_identity: DeviceIdentity = self.local.device_id
+        device_identity = self.local.device_id
         device_identity_id = device_identity.id
         system_identity_id = self.shared.id_registry.get_device("SYSTEM").id
-        _get_module = device_identity.get_module
 
         logger = self.logger
 
-        # --- Dynamic Rule Map Compiling ---
-        rules_by_module = {}
+        # --- Compile Rules → callable map ---
+        rules_by_module: dict[int, list[ProcessFn]] = {}
+
         for rule in self._instantiated_rules:
-            # Zero-Overhead Filtering: Skip disabled rules during initialization
             if not getattr(rule, "enabled", True):
-                logger.info(f"Skipping disabled rule for module: '{getattr(rule, 'module_name', 'unknown')}'")
+                logger.info(f"Skipping disabled rule: '{getattr(rule, 'module_name', 'unknown')}'")
                 continue
 
-            base_mod_id, compiled_ns = rule.bundle()
-            logger.debug(f"rule for '{base_mod_id}' compiled: {compiled_ns}")
+            base_mod_id, process_fn = rule.bundle()
+            logger.debug(f"Compiled rule for module_id={base_mod_id}: {rule.__class__.__name__}")
 
-            # Group into arrays to prevent overlapping rules from clobbering each other
             if base_mod_id not in rules_by_module:
                 rules_by_module[base_mod_id] = []
-            rules_by_module[base_mod_id].append(compiled_ns)
+            rules_by_module[base_mod_id].append(process_fn)
 
-        # --- Setup Output Batch Pools ---
+        # Find the maximum module ID present in your rules to size our list
+        max_mod_id = max(rules_by_module.keys()) if rules_by_module else 0
+
+        # Allocate a flat array initialized to None
+        rules_flat_list = [None] * (max_mod_id + 1)
+        for mod_id, process_fns in rules_by_module.items():
+            rules_flat_list[mod_id] = process_fns
+
+        # Localize the list and its length for zero-overhead boundary checking
+        rules_flat_list_len = _len(rules_flat_list)
+
+        del rules_by_module
+
+        # --- Auto-Tuning Trackers ---
+        speed_out = Speedometer(logger=self.logger.child("stats_out"))
+        tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.child("tuner_out"))
+
+        # --- Batch Pool ---
         pool_create = self.shared.array_pool.create
 
         def batch_acquire():
             return pool_create(
-                PooledLogBatch, max_batch, max_batch * 128, has_levels=True, has_modules=True, has_devices=True
+                PooledLogBatch,
+                tuner_out.estimated_capacity,
+                tuner_out.estimated_buffer_bytes,
+                has_levels=True,
+                has_modules=True,
+                has_devices=True,
             )
 
-        parsed_batch = batch_acquire()
-        last_flush_ns = _time_ns()
-        module_cache = {}
-        _SPACE_DELIM = b" "
+        # Flat structural variable tracking instead of tracking an allocation array
+        batch_out = batch_acquire()
+        batch_out_time = _time_ns()
+        batch_out_capacity = batch_out.capacity
+        batch_out_buf_limit = batch_out.buffer_capacity() * 0.9
 
         def flush():
-            nonlocal parsed_batch, last_flush_ns
-            if parsed_batch and parsed_batch.size > 0:
-                with parsed_batch:
-                    _distribute(parsed_batch)
-                parsed_batch = batch_acquire()
-                last_flush_ns = _time_ns()
+            nonlocal batch_out, batch_out_time, batch_out_capacity, batch_out_buf_limit
+            if batch_out and batch_out.size > 0:
+                with batch_out:
+                    tuner_out.update(batch_out.msg_cursor, batch_out.size, target_window_sec=max_timeout)
+                    _distribute(batch_out)
+            batch_out = batch_acquire()
+            batch_out_time = _time_ns()
+            batch_out_capacity = batch_out.capacity
+            batch_out_buf_limit = batch_out.buffer_capacity() * 0.9
 
         stop_is_set = self._stop_event.is_set
 
-        # --- Hot Processing Loop ---
+        local_space = self.local
+
+        # --- Hot Loop ---
         while not stop_is_set():
             now_ns = _time_ns()
 
-            if parsed_batch.size > 0:
-                elapsed_ns = now_ns - last_flush_ns
+            if batch_out.size > 0:
+                elapsed_ns = now_ns - batch_out_time
                 current_timeout = max(0.0, max_timeout - (elapsed_ns / 1e9))
             else:
                 current_timeout = 120.0
 
-            batch = _get(timeout=current_timeout)
+            batch_in = _get(timeout=current_timeout)
 
-            if not batch:
-                if parsed_batch.size > 0:
+            if not batch_in:
+                if batch_out.size > 0:
                     flush()
                 continue
 
-            with batch:
-                for ts_ns, msg_view, level, module_id, device_id, *_ in batch:
-                    if device_id == device_identity_id or device_id == system_identity_id:
+            with batch_in:
+                try:
+                    b_in = batch_in.bundle
+                    if b_in is None:
                         continue
 
-                    # Retrieve the sequence list of extraction rules linked to this module
-                    rules = rules_by_module.get(module_id)
-                    if rules is None:
+                    count = batch_in.size
+                    if count == 0:
                         continue
 
-                    msg_bytes = None
-                    cached_words = None
-                    cached_total = -1
+                    if batch_out.size == 0:
+                        batch_out_time = _time_ns()
 
-                    # Execute all rules registered under this module sequential cascade
-                    for rule in rules:
-                        # =================================================================
-                        # DELIMITER EXTRACTION
-                        # =================================================================
-                        match rule.mode:
-                            case "delimiter":
-                                if rule.kv_delim_int is not None and rule.kv_delim_int not in msg_view:
-                                    continue
-                                if rule.field_delim_int is not None and rule.field_delim_int not in msg_view:
-                                    continue
+                    # Create zero-allocation memoryviews ONCE per batch
+                    modules_mv = memoryview(b_in.modules)
+                    devices_mv = memoryview(b_in.devices)
 
-                                msg_bytes = msg_view.tobytes()
+                    # Map metadata arrays to the shared local context for the rules
+                    local_space.buffer_mv = memoryview(b_in.buffer)
+                    local_space.offsets_mv = memoryview(b_in.offsets)
+                    local_space.lengths_mv = memoryview(b_in.lengths)
+                    local_space.timestamps_mv = memoryview(b_in.timestamps)
+                    local_space.rx_timestamps_mv = memoryview(b_in.rx_timestamps)
+                    local_space.levels_mv = memoryview(b_in.levels)
 
-                                if rule.prefix_bytes and msg_bytes.startswith(rule.prefix_bytes):
-                                    msg_bytes = msg_bytes[_len(rule.prefix_bytes) :]  # Low overhead byte slice
+                    for i in _range(count):
+                        device_id = devices_mv[i]
+                        if device_id == device_identity_id or device_id == system_identity_id:
+                            continue  # The for loop automatically advances 'i' safely!
 
-                                for chunk in msg_bytes.split(rule.field_delim):
-                                    if rule.kv_delim in chunk:
-                                        if _len(parts := chunk.split(rule.kv_delim, 1)) == 2:
-                                            k_bytes, v_bytes = parts[0].strip(), parts[1].strip()
+                        module_id = modules_mv[i]
+                        if module_id < rules_flat_list_len:
+                            rules = rules_flat_list[module_id]
 
-                                            if k_bytes and v_bytes:
-                                                try:
-                                                    cache_key = (module_id, k_bytes)
-                                                    if cache_key not in module_cache:
-                                                        parent_mod = _module_from_int(module_id)
-                                                        key_str = k_bytes.decode("ascii", errors="ignore")
+                            if rules is not None:
+                                if batch_out.size >= batch_out_capacity or batch_out.msg_cursor >= batch_out_buf_limit:
+                                    flush()
 
-                                                        if rule.module_suffix:
-                                                            sub_mod_name = (
-                                                                f"{parent_mod.name}.{key_str}.{rule.module_suffix}"
-                                                            )
-                                                        else:
-                                                            sub_mod_name = f"{parent_mod.name}.{key_str}"
-
-                                                        module_cache[cache_key] = _get_module(sub_mod_name).id
-
-                                                    target_mod_id = module_cache[cache_key]
-
-                                                    if (
-                                                        parsed_batch.size >= parsed_batch.capacity
-                                                        or parsed_batch.msg_cursor + _len(v_bytes)
-                                                        > parsed_batch.buffer_capacity()
-                                                    ):
-                                                        flush()
-
-                                                    parsed_batch.insert(
-                                                        ts_ns=ts_ns,
-                                                        rx_ts_ns=ts_ns,
-                                                        msg_bytes=v_bytes,
-                                                        level=level if level is not None else 0,
-                                                        module=target_mod_id,
-                                                        device=device_identity_id,
-                                                    )
-                                                except Exception:
-                                                    pass
-
-                            # =================================================================
-                            # TOKEN EXTRACTION
-                            # =================================================================
-                            case "token":
-                                pat_len = _len(rule.pattern_bytes)
-
-                                # Fast size reject: if the log line is shorter than the anchor pattern, drop it
-                                if _len(msg_view) < pat_len:
-                                    continue
-
-                                # 1. Zero-Copy Boundary Filtering
-                                if rule.match_type == "starts_with":
-                                    # Check first byte scalar, then evaluate only the exact prefix slice
-                                    if (
-                                        msg_view[0] != rule.pattern_bytes[0]
-                                        or msg_view[:pat_len].tobytes() != rule.pattern_bytes
-                                    ):
-                                        continue
-
-                                elif rule.match_type == "ends_with":
-                                    # Check last byte scalar, then evaluate only the exact suffix slice
-                                    if (
-                                        msg_view[-1] != rule.pattern_bytes[-1]
-                                        or msg_view[-pat_len:].tobytes() != rule.pattern_bytes
-                                    ):
-                                        continue
-
-                                elif rule.match_type == "contains":
-                                    # Fast reject: if the first byte of the pattern isn't even in the array, drop it
-                                    if rule.pattern_bytes[0] not in msg_view:
-                                        continue
-
-                                    # Fall back to a full sequence check only if the first byte hit
-                                    msg_bytes = msg_view.tobytes()
-                                    if rule.pattern_bytes not in msg_bytes:
-                                        continue
-
-                                if rule.match_type != "contains":
-                                    msg_bytes = msg_view.tobytes()
-
-                                words = msg_bytes.split()
-                                total_words = _len(words)
-
-                                if total_words > rule.z_start:
-                                    end_idx = (
-                                        total_words
-                                        if rule.y_count == 0
-                                        else min(rule.z_start + rule.y_count, total_words)
-                                    )
-                                    v_bytes = _SPACE_DELIM.join(words[rule.z_start : end_idx])
-
-                                    if v_bytes:
-                                        try:
-                                            if rule.static_target_id is not None:
-                                                target_mod_id = rule.static_target_id
-                                            else:
-                                                cache_key = (module_id, rule.pattern_bytes, rule.z_start, rule.y_count)
-                                                if cache_key not in module_cache:
-                                                    parent_mod = _module_from_int(module_id)
-                                                    pattern_str = rule.pattern_bytes.decode("ascii", errors="ignore")
-                                                    sub_mod_name = f"{parent_mod.name}.{pattern_str}_z{rule.z_start}"
-                                                    module_cache[cache_key] = _get_module(sub_mod_name).id
-
-                                                target_mod_id = module_cache[cache_key]
-
-                                            if (
-                                                parsed_batch.size >= parsed_batch.capacity
-                                                or parsed_batch.msg_cursor + _len(v_bytes)
-                                                > parsed_batch.buffer_capacity()
-                                            ):
-                                                flush()
-
-                                            parsed_batch.insert(
-                                                ts_ns=ts_ns,
-                                                rx_ts_ns=ts_ns,
-                                                msg_bytes=v_bytes,
-                                                level=level if level is not None else 0,
-                                                module=target_mod_id,
-                                                device=device_identity_id,
-                                            )
-                                        except Exception:
-                                            pass
-
-                            # =================================================================
-                            # JSON-LITE EXTRACTION
-                            # =================================================================
-                            case "json_lite":
-                                if not rule.json_key_bytes or rule.json_key_bytes not in msg_view:
-                                    continue
-
-                                msg_bytes = msg_view.tobytes()
-                                idx = msg_bytes.find(rule.json_key_bytes)
-                                if idx == -1:
-                                    continue
-
-                                pos = idx + _len(rule.json_key_bytes)
-                                msg_len = _len(msg_bytes)
-
-                                while pos < msg_len and msg_bytes[pos] == 32:  # ASCII 32 = Space
-                                    pos += 1
-
-                                if pos >= msg_len:
-                                    continue
-
-                                v_bytes = b""
-                                if msg_bytes[pos] == 34:  # ASCII 34 = '"'
-                                    pos += 1
-                                    end_pos = msg_bytes.find(b'"', pos)
-                                    if end_pos != -1:
-                                        v_bytes = msg_bytes[pos:end_pos]
+                                num_rules = _len(rules)
+                                if num_rules == 1:
+                                    rules[0](i, module_id, batch_out)
+                                elif num_rules == 2:
+                                    # Hard-coded execution vectoring
+                                    rules[0](i, module_id, batch_out)
+                                    rules[1](i, module_id, batch_out)
+                                elif num_rules == 3:
+                                    rules[0](i, module_id, batch_out)
+                                    rules[1](i, module_id, batch_out)
+                                    rules[2](i, module_id, batch_out)
                                 else:
-                                    end_pos = pos
-                                    while end_pos < msg_len and msg_bytes[end_pos] not in (44, 125, 93, 32, 10, 13):
-                                        end_pos += 1
-                                    v_bytes = msg_bytes[pos:end_pos]
+                                    # Zero-allocation manual stack-counter for multi-rule edge-cases
+                                    r_idx = 0
+                                    while r_idx < num_rules:
+                                        rules[r_idx](i, module_id, batch_out)
+                                        r_idx += 1
+                        i += 1
+                except Exception as e:
+                    logger.exception("Poison batch encountered, skipping remainder.", e)
 
-                                if v_bytes:
-                                    try:
-                                        if rule.static_target_id is not None:
-                                            target_mod_id = rule.static_target_id
-                                        else:
-                                            cache_key = (module_id, rule.json_key_bytes)
-                                            if cache_key not in module_cache:
-                                                parent_mod = _module_from_int(module_id)
-                                                key_str = (
-                                                    rule.json_key_bytes[:-2]
-                                                    .decode("ascii", errors="ignore")
-                                                    .replace('"', "")
-                                                )
-                                                module_cache[cache_key] = _get_module(f"{parent_mod.name}.{key_str}").id
-                                            target_mod_id = module_cache[cache_key]
-
-                                        if (
-                                            parsed_batch.size >= parsed_batch.capacity
-                                            or parsed_batch.msg_cursor + _len(v_bytes) > parsed_batch.buffer_capacity()
-                                        ):
-                                            flush()
-
-                                        parsed_batch.insert(
-                                            ts_ns=ts_ns,
-                                            rx_ts_ns=ts_ns,
-                                            msg_bytes=v_bytes,
-                                            level=level if level is not None else 0,
-                                            module=target_mod_id,
-                                            device=device_identity_id,
-                                        )
-                                    except Exception:
-                                        pass
-                            # =================================================================
-                            # LIST DELIMITER (POSITIONAL STRUCT) EXTRACTION
-                            # =================================================================
-                            case "list_delimiter":
-                                # 1. High-Speed Optional Signature Guard
-                                if rule.start_bytes:
-                                    start_len = _len(rule.start_bytes)
-                                    if _len(msg_view) < start_len:
-                                        continue
-                                    # Fast scalar short-circuit + exact sub-slice string matching
-                                    if (
-                                        msg_view[0] != rule.start_bytes[0]
-                                        or msg_view[:start_len].tobytes() != rule.start_bytes
-                                    ):
-                                        continue
-
-                                # 2. Fast delimiter component verification
-                                if rule.field_delim_int is not None and rule.field_delim_int not in msg_view:
-                                    continue
-
-                                msg_bytes = msg_view.tobytes()
-
-                                if rule.prefix_bytes and msg_bytes.startswith(rule.prefix_bytes):
-                                    msg_bytes = msg_bytes[_len(rule.prefix_bytes) :]
-
-                                # 3. Position index parameter loop
-                                for i, chunk in enumerate(msg_bytes.split(rule.field_delim)):
-                                    if i >= _len(rule.static_target_ids):
-                                        break
-
-                                    target_mod_id = rule.static_target_ids[i]
-                                    if target_mod_id is None:
-                                        continue
-
-                                    v_bytes = chunk.strip()
-                                    if not v_bytes:
-                                        continue
-
-                                    if (
-                                        parsed_batch.size >= parsed_batch.capacity
-                                        or parsed_batch.msg_cursor + _len(v_bytes) > parsed_batch.buffer_capacity()
-                                    ):
-                                        flush()
-
-                                    parsed_batch.insert(
-                                        ts_ns=ts_ns,
-                                        rx_ts_ns=ts_ns,
-                                        msg_bytes=v_bytes,
-                                        level=level if level is not None else 0,
-                                        module=target_mod_id,
-                                        device=device_identity_id,
-                                    )
-
-                            # =================================================================
-                            # PURE WORD INDEX SLICE EXTRACTION
-                            # =================================================================
-                            case "word":
-                                # Lazy cache split across all consecutive word rules for this message
-                                if cached_words is None:
-                                    if msg_bytes is None:
-                                        msg_bytes = msg_view.tobytes()
-                                    cached_words = msg_bytes.split()
-                                    cached_total = _len(cached_words)
-
-                                if cached_total > rule.z_start:
-                                    end_idx = (
-                                        cached_total
-                                        if rule.y_count == 0
-                                        else min(rule.z_start + rule.y_count, cached_total)
-                                    )
-                                    v_bytes = _SPACE_DELIM.join(cached_words[rule.z_start : end_idx])
-
-                                    if v_bytes:
-                                        try:
-                                            if (
-                                                parsed_batch.size >= parsed_batch.capacity
-                                                or parsed_batch.msg_cursor + _len(v_bytes)
-                                                > parsed_batch.buffer_capacity()
-                                            ):
-                                                flush()
-
-                                            parsed_batch.insert(
-                                                ts_ns=ts_ns,
-                                                rx_ts_ns=ts_ns,
-                                                msg_bytes=v_bytes,
-                                                level=level if level is not None else 0,
-                                                module=rule.static_target_id
-                                                if rule.static_target_id is not None
-                                                else module_id,
-                                                device=device_identity_id,
-                                            )
-                                        except Exception:
-                                            pass
-
-                    if parsed_batch.size >= max_batch:
-                        flush()
-
-            if parsed_batch.size > 0 and (_time_ns() - last_flush_ns >= max_timeout_ns):
+            if batch_out.size > 0 and (_time_ns() - batch_out_time >= max_timeout_ns):
                 flush()
 
-        if parsed_batch:
-            if parsed_batch.size > 0:
+        # Drain on shutdown
+        if batch_out:
+            if batch_out.size > 0:
                 flush()
             else:
-                parsed_batch.release()
+                batch_out.release()

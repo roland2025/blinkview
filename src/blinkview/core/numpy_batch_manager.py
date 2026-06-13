@@ -347,7 +347,7 @@ class PooledLogBatch:
 
     __str__ = __repr__
 
-    def __iter__(self):
+    def __iter__(self, native=True):
         b = self.bundle
         if b is None:
             return
@@ -357,113 +357,45 @@ class PooledLogBatch:
         if count == 0:
             return
 
-        # 2. Localize all Array references
-        # Pulling these out of the 'b' object once
-        timestamps = b.timestamps
-        offsets = b.offsets
-        lengths = b.lengths
-        buffer = b.buffer
+        # 1. Cast core mandatory boundaries to memoryviews
+        timestamps = memoryview(b.timestamps)
+        offsets = memoryview(b.offsets)
+        lengths = memoryview(b.lengths)
+        buffer = memoryview(b.buffer)
 
-        levels = b.levels
-        modules = b.modules
-        devices = b.devices
-        sequences = b.sequences
+        # Localize Flags
+        has_levels = b.has_levels
+        has_modules = b.has_modules
+        has_devices = b.has_devices
+        has_sequences = b.has_sequences
+        has_ext_u32_1 = b.has_ext_u32_1
+        has_ext_u32_2 = b.has_ext_u32_2
+        has_ext_u64_1 = b.has_ext_u64_1
 
-        ext_u32_1 = b.ext_u32_1
-        ext_u32_2 = b.ext_u32_2
-        ext_u64_1 = b.ext_u64_1
+        # Conditional memoryview allocation (Only touch active metadata arrays)
+        levels = memoryview(b.levels) if has_levels else None
+        modules = memoryview(b.modules) if has_modules else None
+        devices = memoryview(b.devices) if has_devices else None
+        sequences = memoryview(b.sequences) if has_sequences else None
 
-        # 3. Localize Flags
-        has_lvls = b.has_levels
-        has_mods = b.has_modules
-        has_devs = b.has_devices
-        has_seqs = b.has_sequences
-        has_u32_1 = b.has_ext_u32_1
-        has_u32_2 = b.has_ext_u32_2
-        has_u64_1 = b.has_ext_u64_1
+        ext_u32_1 = memoryview(b.ext_u32_1) if has_ext_u32_1 else None
+        ext_u32_2 = memoryview(b.ext_u32_2) if has_ext_u32_2 else None
+        ext_u64_1 = memoryview(b.ext_u64_1) if has_ext_u64_1 else None
 
-        # 4. High-speed Loop
         for i in range(count):
             off = offsets[i]
-            # .tobytes() creates a copy; if you just need to read,
-            # consider yielding a memoryview/slice instead.
-            msg = buffer[off : off + lengths[i]]
 
             yield (
                 timestamps[i],
-                msg,
-                levels[i] if has_lvls else None,
-                modules[i] if has_mods else None,
-                devices[i] if has_devs else None,
-                sequences[i] if has_seqs else None,
-                ext_u32_1[i] if has_u32_1 else None,
-                ext_u32_2[i] if has_u32_2 else None,
-                ext_u64_1[i] if has_u64_1 else None,
+                buffer[off : off + lengths[i]].tobytes() if native else buffer[off : off + lengths[i]],
+                levels[i] if has_levels else None,
+                modules[i] if has_modules else None,
+                devices[i] if has_devices else None,
+                sequences[i] if has_sequences else None,
+                ext_u32_1[i] if has_ext_u32_1 else None,
+                ext_u32_2[i] if has_ext_u32_2 else None,
+                ext_u64_1[i] if has_ext_u64_1 else None,
             )
-
-    def iter_human(self):
-        b = self.bundle
-        if b is None:
-            return
-
-        # 1. Localize the count
-        count = b.size[0]
-        if count == 0:
-            return
-
-        # 2. Localize all Array references
-        # Pulling these out of the 'b' object once
-        timestamps = b.timestamps
-        offsets = b.offsets
-        lengths = b.lengths
-        buffer = b.buffer
-
-        levels = b.levels
-        modules = b.modules
-        devices = b.devices
-        sequences = b.sequences
-
-        ext_u32_1 = b.ext_u32_1
-        ext_u32_2 = b.ext_u32_2
-        ext_u64_1 = b.ext_u64_1
-
-        # 3. Localize Flags
-        has_lvls = b.has_levels
-        has_mods = b.has_modules
-        has_devs = b.has_devices
-        has_seqs = b.has_sequences
-        has_u32_1 = b.has_ext_u32_1
-        has_u32_2 = b.has_ext_u32_2
-        has_u64_1 = b.has_ext_u64_1
-
-        # 4. High-speed Loop
-        for i in range(count):
-            off = offsets[i]
-            # .tobytes() creates a copy; if you just need to read,
-            # consider yielding a memoryview/slice instead.
-            msg = buffer[off : off + lengths[i]].tobytes()
-
-            yield (
-                int(timestamps[i]),
-                msg,
-                int(levels[i]) if has_lvls else None,
-                int(modules[i]) if has_mods else None,
-                int(devices[i]) if has_devs else None,
-                int(sequences[i]) if has_seqs else None,
-                int(ext_u32_1[i]) if has_u32_1 else None,
-                int(ext_u32_2[i]) if has_u32_2 else None,
-                int(ext_u64_1[i]) if has_u64_1 else None,
-            )
-
-    def iter_time_messages(self):
-        b = self.bundle
-        if b is None:
-            return
-
-        for i in range(b.size[0]):
-            offset = b.offsets[i]
-            msg_bytes = b.buffer[offset : offset + b.lengths[i]].tobytes()
-            yield b.timestamps[i], msg_bytes
 
     @property
     def start_ts(self) -> int:
