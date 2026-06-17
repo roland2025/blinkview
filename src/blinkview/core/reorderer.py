@@ -257,29 +257,54 @@ class Reorder(BaseReorder):
             # =================================================================
 
             while not stop_is_set():
-                now = time_ns()
-
                 # 1. Drain input queue
-                first_batch = get(timeout=delay_sec)
-                if first_batch is None:
-                    # Optional: Uncomment below to flush stale data during idle periods
-                    # flush()
-                    continue
+                now_pre_get = time_ns()
 
-                batches_to_ingest = [first_batch]
-                while True:
-                    b = get_nowait()
-                    if b is None:
-                        break
-                    batches_to_ingest.append(b)
+                # --- Calculate Dynamic Timeout ---
+                dynamic_timeout_sec = delay_sec
+                if device_queues:
+                    oldest_ts = -1
+                    for q in device_queues.values():
+                        if q:
+                            qb = q[0]
+                            cursor = int(qb.cursor[0])
+                            # Ensure we don't read past the batch size
+                            if cursor < qb.batch.size:
+                                ts = qb.batch.bundle.timestamps[cursor]
+                                if oldest_ts == -1 or ts < oldest_ts:
+                                    oldest_ts = ts
+
+                    if oldest_ts != -1:
+                        # How much time until the oldest message is ready to be released?
+                        time_to_ready_ns = (oldest_ts + delay_ns) - now_pre_get
+                        time_to_ready_sec = time_to_ready_ns / 1_000_000_000.0
+
+                        # Clamp between 0 (already overdue) and our max delay_sec
+                        dynamic_timeout_sec = max(0.0, min(delay_sec, time_to_ready_sec))
+
+                # 1. Drain input queue (Blocking precisely until the next item is due)
+                first_batch = get(timeout=dynamic_timeout_sec)
+
+                batches_to_ingest = []
+                if first_batch is not None:
+                    batches_to_ingest.append(first_batch)
+                    while True:
+                        b = get_nowait()
+                        if b is None:
+                            break
+                        batches_to_ingest.append(b)
 
                 for b in batches_to_ingest:
                     device_queues[b.get_device()].append(QueuedBatch(b, np.zeros(1, dtype=np.uint32)))
 
                 # 2. Determine "Ready" Chunks
+
+                now = time_ns()
                 safe_ts = now - delay_ns
+
                 if len(ready_chunks) > 0:
                     ready_chunks.clear()
+
                 total_ready_rows = 0
                 total_ready_bytes = 0
                 batches_to_release = []
