@@ -46,6 +46,10 @@ class ParserID:
     # --- Structural ---
     SKIP_WORDS = 15
 
+    # new
+
+    TS_ZEPHYR_REALTIME = 16
+
 
 class CodecID:
     NONE = 0

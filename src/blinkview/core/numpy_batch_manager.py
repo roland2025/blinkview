@@ -256,7 +256,7 @@ class PooledLogBatch:
         #     f"seq: {type(seq).__name__}, "
         #     f"ext_u32_1: {type(ext_u32_1).__name__}, "
         #     f"ext_u32_2: {type(ext_u32_2).__name__}, "
-        #     f"ext_u64_1: {type(ext_u64_1).__name__}"
+        #     f"ext_u64_1: {type(ext_u64_1).__name__}, "
         # )
 
         return nb_bundle_push(
@@ -359,6 +359,7 @@ class PooledLogBatch:
 
         # 1. Cast core mandatory boundaries to memoryviews
         timestamps = memoryview(b.timestamps)
+        rx_timestamps = memoryview(b.rx_timestamps)
         offsets = memoryview(b.offsets)
         lengths = memoryview(b.lengths)
         buffer = memoryview(b.buffer)
@@ -388,6 +389,7 @@ class PooledLogBatch:
             yield (
                 timestamps[i],
                 buffer[off : off + lengths[i]].tobytes() if native else buffer[off : off + lengths[i]],
+                rx_timestamps[i],
                 levels[i] if has_levels else None,
                 modules[i] if has_modules else None,
                 devices[i] if has_devices else None,

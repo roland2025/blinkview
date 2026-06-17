@@ -91,7 +91,7 @@ def estimate_log_batch_size(
     s_lvls = segment.levels
     s_mods = segment.modules
 
-    show_date, show_ts = cfg.show_date, cfg.show_ts
+    show_date, show_ts, show_rx_ts = cfg.show_date, cfg.show_ts, cfg.show_rx_ts
     show_dev, show_lvl, show_mod = cfg.show_dev, cfg.show_lvl, cfg.show_mod
     ts_precision = cfg.ts_precision
 
@@ -101,6 +101,18 @@ def estimate_log_batch_size(
 
         row_size = 0
         is_first = True
+
+        if show_rx_ts:
+            if show_date:
+                row_size += 10  # YYYY-MM-DD
+
+            # If date was shown, add a space separating date and time
+            if show_date:
+                row_size += 1
+
+            # "HH:MM:SS." + precision
+            row_size += 9 + ts_precision
+            is_first = False
 
         # --- Date ---
         if show_date:
@@ -308,6 +320,7 @@ def format_log_batch(
 
     # 2. Unpack Segment (Crucial for Numba stability)
     s_ts = segment.timestamps
+    s_rx_ts = segment.rx_timestamps
     s_lvls = segment.levels
     s_mods = segment.modules
     s_devs = segment.devices
@@ -315,7 +328,7 @@ def format_log_batch(
     s_lens = segment.lengths
     s_buf = segment.buffer
 
-    show_date, show_ts = cfg.show_date, cfg.show_ts
+    show_date, show_ts, show_rx_ts = cfg.show_date, cfg.show_ts, cfg.show_rx_ts
     show_dev, show_lvl, show_mod = cfg.show_dev, cfg.show_lvl, cfg.show_mod
     ts_precision = cfg.ts_precision
 
@@ -325,36 +338,59 @@ def format_log_batch(
     UNKNOWN_DEV = (CHAR_QUESTION, CHAR_QUESTION, CHAR_QUESTION)
     UNKNOWN_MOD = (117, 110, 107, 110, 111, 119, 110)  # "unknown"
 
-    last_sec = np.int64(-1)
-    ts_cache = np.zeros(19, dtype=np.uint8)
+    last_sec = dtypes.TS_TYPE(-1)
+    ts_cache = np.zeros(19, dtype=dtypes.BYTE)
+
+    last_rx_sec = dtypes.TS_TYPE(-1)
+    rx_ts_cache = np.zeros(19, dtype=dtypes.BYTE)
 
     curr = 0
     for i in range(count):
         idx = indices[i]
         first_field = True
 
-        ts_ns = s_ts[idx] + tz_offset_ns
+        if show_rx_ts:
+            rx_ns = s_rx_ts[idx] + tz_offset_ns
+            total_rx_sec = rx_ns // 1_000_000_000
 
-        # 1. Update Timestamp Cache
-        if show_date or show_ts:
-            total_sec = ts_ns // 1_000_000_000
-            if total_sec != last_sec:
-                update_iso8601_timestamp_cache(total_sec, ts_cache)
-                last_sec = total_sec
+            if total_rx_sec != last_rx_sec:
+                update_iso8601_timestamp_cache(total_rx_sec, rx_ts_cache)
+                last_rx_sec = total_rx_sec
 
-        # 2. Date Column (YYYY-MM-DD)
-        if show_date:
-            for j in range(10):
-                out[curr + j] = ts_cache[j]
-            curr += 10
+            # Write RX Date (YYYY-MM-DD)
+            if show_date:
+                for j in range(10):
+                    out[curr + j] = rx_ts_cache[j]
+                curr += 10
+                out[curr] = CHAR_SPACE
+                curr += 1
+
+            # Write RX Time (HH:MM:SS.fffffffff)
+            curr = nb_write_time_from_cache(out, curr, rx_ts_cache, rx_ns, ts_precision)
             first_field = False
 
-        # 1. Timestamp
+            # --- 2. Process Standard Log Timestamp (TS) ---
         if show_ts:
             if not first_field:
                 out[curr] = CHAR_SPACE
                 curr += 1
 
+            ts_ns = s_ts[idx] + tz_offset_ns
+            total_sec = ts_ns // 1_000_000_000
+
+            if total_sec != last_sec:
+                update_iso8601_timestamp_cache(total_sec, ts_cache)
+                last_sec = total_sec
+
+            # Write Log Date (YYYY-MM-DD)
+            if show_date:
+                for j in range(10):
+                    out[curr + j] = ts_cache[j]
+                curr += 10
+                out[curr] = CHAR_SPACE
+                curr += 1
+
+            # Write Log Time (HH:MM:SS.fffffffff)
             curr = nb_write_time_from_cache(out, curr, ts_cache, ts_ns, ts_precision)
             first_field = False
 

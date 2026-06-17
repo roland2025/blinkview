@@ -73,6 +73,7 @@ QToolButton[filterEnabled="true"] {
         self.show_lvl = True
         self.show_mod = True
         self.show_date = False
+        self.show_rx_ts = False
         self.saved_sizes = None
 
         self.ts_precision = 3
@@ -151,6 +152,13 @@ QToolButton[filterEnabled="true"] {
         action_date.toggled.connect(lambda c: self._toggle_col("show_date", c))
         self.column_actions["show_date"] = action_date
         time_button.addAction(action_date)
+
+        action_rx_ts = QAction("Show Receive Time", self)
+        action_rx_ts.setCheckable(True)
+        action_rx_ts.setChecked(self.show_rx_ts)
+        action_rx_ts.toggled.connect(lambda c: self._toggle_col("show_rx_ts", c))
+        self.column_actions["show_rx_ts"] = action_rx_ts
+        time_button.addAction(action_rx_ts)
 
         # 3. Add a visual separator
         separator = QAction(self)
@@ -311,6 +319,7 @@ QToolButton[filterEnabled="true"] {
         self.show_filter_sidebar = None
 
         self.show_date = False
+        self.show_rx_ts = False
         self.ts_precision = 3
 
     def restore(self, state: dict):
@@ -342,6 +351,7 @@ QToolButton[filterEnabled="true"] {
         self.show_lvl = view_state.get("show_lvl", self.show_lvl)
         self.show_mod = view_state.get("show_mod", default_show_mod)
         self.show_date = view_state.get("show_date", self.show_date)
+        self.show_rx_ts = view_state.get("show_rx_ts", self.show_rx_ts)
         self.ts_precision = view_state.get("ts_precision", self.ts_precision)
 
         self.show_telemetry = view_state.get("show_telemetry", self.show_telemetry)
@@ -361,6 +371,7 @@ QToolButton[filterEnabled="true"] {
                 "show_lvl": self.show_lvl,
                 "show_mod": self.show_mod,
                 "show_date": self.show_date,
+                "show_rx_ts": self.show_rx_ts,
                 "ts_precision": self.ts_precision,
                 "show_module_filter": self.show_module_filter,
                 "show_telemetry": self.show_telemetry,
@@ -383,9 +394,13 @@ QToolButton[filterEnabled="true"] {
         """Updates the syntax highlighter's index based on which columns are active."""
         # The level is always at a fixed position based on which columns are shown
         idx = 0
-        if self.show_date:
-            idx += 1
         if self.show_ts:
+            if self.show_date:
+                idx += 1
+            idx += 1
+        if self.show_rx_ts:
+            if self.show_date:
+                idx += 1
             idx += 1
         if self.show_dev:
             idx += 1
@@ -551,6 +566,7 @@ QToolButton[filterEnabled="true"] {
             self.show_mod,
             self.ts_precision,
             show_date=self.show_date,
+            show_rx_ts=self.show_rx_ts,
         )
 
         reached_live_edge = True

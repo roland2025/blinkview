@@ -165,7 +165,7 @@ def process_batch_kernel(
 
                     else:
                         # STATE_COMPLETE: Unified Pipeline Execution
-                        frame_ts = ts_in if is_zero_copy else f_ts_buf[0]
+                        frame_ts = ts_in
 
                         out_b.rx_timestamps[curr_out_idx] = frame_ts
                         out_b.timestamps[curr_out_idx] = frame_ts

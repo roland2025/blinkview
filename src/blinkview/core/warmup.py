@@ -364,7 +364,12 @@ class NumbaWarmupHelper:
                 batch_acquire() as dummy_out,
             ):
                 dummy_in: PooledLogBatch
-                dummy_in.insert(time_ns(), time_ns(), b"       0.00 V     -0.010 mA \n")
+
+                msg_1 = b"       0.00 V     -0.010 mA \n"
+                msg_1_mv = memoryview(msg_1)
+
+                dummy_in.insert(time_ns(), time_ns(), msg_1_mv)
+
                 dummy_in.insert(time_ns(), time_ns(), b"N1 main reg input          0.00 V     -0.010 mA \n")
                 dummy_in.insert(time_ns(), time_ns(), b"N2 ASI switch")
                 dummy_in.insert(time_ns(), time_ns(), b"              0.00 V")
@@ -373,6 +378,16 @@ class NumbaWarmupHelper:
                 dummy_in.append(b" ")
 
                 dummy_in.append_any(b" ")
+
+                # 1. Create a mutable uint8 NumPy array from raw bytes
+                msg_2_arr = np.array(list(b"N2 unique reg input        5.00 V      -0.020 mA \n"), dtype=np.uint8)
+
+                # 2. Extract the memoryview from the NumPy array
+                msg_2_mv = memoryview(msg_2_arr)
+
+                # 3. Pass it into your structured logging pipeline
+                dummy_in.insert(time_ns(), time_ns(), msg_2_mv)
+
                 # 3. Trigger the kernel
                 # This will block the thread while LLVM does its work
                 _ = process_batch_kernel(

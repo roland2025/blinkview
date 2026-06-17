@@ -289,9 +289,70 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
 
 @ParserFactory.register("serial_default")
-@override_property("frame_decoder", default={"type": "line_decoder"})
-# @override_property("_factory_default", default={})
-# @override_property("transform", default={"type": "default", "steps": [{"type": "ansi_filter"}]})
-# @override_property("assembler", default={"type": "default", "message_index": 0})
 class SerialParserThread(BinaryParser):
     __doc__ = "Splitting enabled by default for serial logs, with the split character set to newline (ASCII 10). This is a common configuration for serial log streams, where each log entry is typically separated by a newline character. Users can still customize the split character or disable splitting entirely if their log format differs."
+
+
+@ParserFactory.register("serial_zephyr_minimal")
+@override_property(
+    "frame_decoder",
+    default={"type": "line_decoder", "frame_length_minimum": 4},
+)
+@override_property(
+    "frame_parser",
+    default={"type": "default", "steps": [{"type": "log_level_zephyr_minimal"}]},
+)
+class ZephyrMinimalParser(SerialParserThread):
+    __doc__ = "Default zephyr messages (I: something happened)"
+
+
+@ParserFactory.register("serial_zephyr_deferred")
+@override_property(
+    "frame_decoder",
+    default={
+        "type": "line_decoder",
+        "filter_trim_r": True,
+        "filter_printable": True,
+        "filter_ansi": True,
+        "frame_length_minimum": 29,
+    },
+)
+@override_property(
+    "frame_parser",
+    default={
+        "type": "default",
+        "steps": [
+            {"type": "timestamp_zephyr_uptime_formatted"},
+            {"type": "log_level_zephyr"},
+            {"type": "module_name_normalizer", "max_depth": 8, "max_length": 64},
+        ],
+    },
+)
+class ZephyrDeferredParser(SerialParserThread):
+    __doc__ = "Zephyr deferred messages"
+
+
+@ParserFactory.register("serial_zephyr_realtime")
+@override_property(
+    "frame_decoder",
+    default={
+        "type": "line_decoder",
+        "filter_trim_r": True,
+        "filter_printable": True,
+        "filter_ansi": True,
+        "frame_length_minimum": 29,
+    },
+)
+@override_property(
+    "frame_parser",
+    default={
+        "type": "default",
+        "steps": [
+            {"type": "timestamp_zephyr_realtime"},
+            {"type": "log_level_zephyr"},
+            {"type": "module_name_normalizer", "max_depth": 8, "max_length": 64},
+        ],
+    },
+)
+class ZephyrRealTimeParser(SerialParserThread):
+    __doc__ = "Zephyr deferred messages with realtime"

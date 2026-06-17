@@ -14,3 +14,4 @@ class FormattingConfig(NamedTuple):
     show_mod: bool = True
     ts_precision: int = 3
     show_date: bool = True
+    show_rx_ts: bool = False

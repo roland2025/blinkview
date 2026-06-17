@@ -143,10 +143,14 @@ def nb_auto_sync_fallback(raw_ns, rx_ns, sync: SyncState):
 
     # 2. Track Minimum Offset (Baseline)
     min_offset = sync.auto_window_min_offset[0]
-    if current_offset < min_offset:
+    offset_diff = current_offset - min_offset
+
+    if current_offset < min_offset or offset_diff > 1_000_000_000:  # 1-second gap threshold
         min_offset = current_offset
+        sync.auto_warmup_cnt[0] = 512  # Re-trigger fast PLL convergence
     else:
-        min_offset += 1000  # 1us leaky bucket
+        min_offset += 1000 + (offset_diff // 128)  # Proportional drift tracking
+
     sync.auto_window_min_offset[0] = min_offset
 
     # 3. Hardware Spacing
@@ -167,13 +171,15 @@ def nb_auto_sync_fallback(raw_ns, rx_ns, sync: SyncState):
     correction = error // divisor
 
     # Slew Rate Limiter (CRITICAL for fast-sync)
-    # Even with aggressive correction, we protect the micro-spacing
-    # of logs within a burst by capping the shift to 50% of the gap.
+    # BUG FIX: If we strictly clamp negative correction to -max_adj, the output
+    # timestamp is forced to advance by at least delta_raw // 2 (50% speed).
+    # By relaxing the lower bound to -delta_raw, we allow the timestamp to
+    # functionally "pause" and let real-time catch up when overshooting ideal_rx.
     max_adj = delta_raw // 2
-    if correction < -max_adj:
-        correction = -max_adj
-    elif correction > max_adj:
+    if correction > max_adj:
         correction = max_adj
+    elif correction < -delta_raw:
+        correction = -delta_raw
 
     corrected_rx = predicted_rx + correction
 

@@ -138,6 +138,22 @@ class ZephyrLevelMap(LevelMap):
     pass
 
 
+@FrameSectionParserFactory.register("log_level_zephyr_minimal")
+@override_property(
+    "mapping",
+    title="Zephyr Level Mappings",
+    description="Predefined mapping for Zephyr Minimal RTOS logs.",
+    default={
+        "I:": LogLevel.INFO.value,
+        "E:": LogLevel.ERROR.value,
+        "W:": LogLevel.WARN.value,
+        "D:": LogLevel.DEBUG.value,
+    },
+)
+class ZephyrMinimalLevelMap(LevelMap):
+    pass
+
+
 @FrameSectionParserFactory.register("log_level_custom")
 @override_property("mapping", title="Custom level Mappings", description="Custom mapping for logs.", default={})
 class CustomLevelMap(LevelMap):

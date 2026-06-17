@@ -288,7 +288,7 @@ class ModuleNameParserBase(FrameSectionParser):
         return registry.count > initial_count
 
 
-@FrameSectionParserFactory.register("module_name")
+# @FrameSectionParserFactory.register("module_name") # TODO: missing bundle function
 class ModuleNameParser(ModuleNameParserBase):
     def __init__(self):
         super().__init__()
@@ -419,7 +419,7 @@ TS_PRECISIONS_DESC = [
     "precision", type="integer", enum=TS_PRECISIONS, enum_descriptions=TS_PRECISIONS_DESC, default=TS_PRECISION_MS
 )
 @FrameSectionParserFactory.register("timestamp_integer")
-class ZephyrUptimeFormattedParser(TimestampParser):
+class IntegerTimestampParser(TimestampParser):
     precision: int
 
     def __init__(self):
@@ -483,6 +483,23 @@ class ZephyrUptimeFormattedParser(TimestampParser):
         changed = super().apply_config(config)
 
         self._bundle = ParserID.TS_ZEPHYR_UPTIME_FORMATTED, self.state, EmptyUnifiedParserConfig
+
+        return changed
+
+    def bundle(self):
+        return self._bundle
+
+
+@FrameSectionParserFactory.register("timestamp_zephyr_realtime")
+class ZephyrRealTimeParser(TimestampParser):
+    def __init__(self):
+        super().__init__()
+        self._bundle = None
+
+    def apply_config(self, config: dict):
+        changed = super().apply_config(config)
+
+        self._bundle = ParserID.TS_ZEPHYR_REALTIME, self.state, EmptyUnifiedParserConfig
 
         return changed
 
