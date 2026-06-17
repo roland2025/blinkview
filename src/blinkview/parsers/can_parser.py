@@ -5,18 +5,14 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import Callable, Optional
 
+from ..core.configurable import configuration_property
 from ..core.device_identity import DeviceIdentity
 from ..core.numpy_batch_manager import PooledLogBatch
 from ..utils.log_level import LogLevel
 from ..utils.paths import resolve_config_path
 from ..utils.throughput import Speedometer, ThroughputAutoTuner
-
-if TYPE_CHECKING:
-    from can import Message
-
-from ..core.configurable import configuration_property
 from .parser import BaseParser, ParserFactory
 
 
@@ -74,6 +70,7 @@ class CantoolsParser(BaseParser):
         if getattr(self, "dbc_file", None):
             try:
                 self.logger.info(f"Loading DBC file: {self.dbc_file}")
+                # noinspection PyPackageRequirements
                 from cantools import database
 
                 self.db = database.load_file(resolve_config_path(self.dbc_file))
@@ -140,7 +137,7 @@ class CantoolsParser(BaseParser):
                     has_devices=True,
                 )
 
-            batch_out = None
+            batch_out: Optional[PooledLogBatch] = None
 
             def flush():
                 nonlocal batch_out
@@ -192,7 +189,7 @@ class CantoolsParser(BaseParser):
                         data = buf[off : off + lengths[i]].tobytes()
                         ts = timestamps[i]
 
-                        msg_info = info_map_get(can_id)
+                        msg_info: Optional[DBCMsgInfo] = info_map_get(can_id)
 
                         if msg_info is not None:
                             try:
