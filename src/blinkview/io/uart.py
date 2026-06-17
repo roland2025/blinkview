@@ -5,6 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from time import sleep
+from typing import Optional
 
 from ..core.configurable import configuration_property, override_property
 from ..core.numpy_batch_manager import PooledLogBatch
@@ -84,6 +85,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
         self.serial = None
 
+        self.serial_broken = False
+
     @classmethod
     def get_config_schema(cls) -> dict:
         # Grab the static, merged schema from BaseConfigurable
@@ -132,13 +135,20 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             # Dynamically pull configuration from the tuner's latest projections
             return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
 
-        batch = None
+        batch: PooledLogBatch = None
         ser = None
         self.serial = None
 
         try:
             while not stop_is_set():
                 # 3. Serial Lifecycle Management
+                if self.serial_broken and self.serial is not None:
+                    try:
+                        self.serial.close()
+                    finally:
+                        self.serial = None
+                        ser = None
+
                 if ser is None:
                     ser = self.open()
                     if ser is None:
@@ -209,6 +219,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 finally:
                     self.serial = None
 
+                self.logger.debug("Serial port closed.")
+
     def open(self):
         try:
             from ..parsers.binary_parser import BinaryParser
@@ -243,6 +255,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 self.logger.error("Failed to set buffer size. This may not be supported on all platforms.", e)
                 pass
 
+            self.serial_broken = False
             self.logger.info("Connected")
 
             return ser
@@ -256,6 +269,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 self.serial.write(data.encode())
             except Exception as e:
                 self.logger.exception("Failed to send data", e)
+                self.serial_broken = True
 
     def reset_device(self):
         """
@@ -283,3 +297,4 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             self.logger.info("Reset signal sent.")
         except Exception as e:
             self.logger.error(f"Failed to perform hardware reset: {e}")
+            self.serial_broken = True
