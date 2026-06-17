@@ -52,18 +52,15 @@ class ExtractionRuleFactory(BaseFactory[ExtractionRule]):
     pass
 
 
-# =============================================================================
-# DELIMITER EXTRACTION RULE
-# =============================================================================
 @configuration_property("module_name", type="string", required=True, ui_order=5, title="Match module")
 @configuration_property("module_suffix", type="string", default="", ui_order=10, title="Module Name Suffix")
 @configuration_property(
     "prefix_strip", type="string", default="", ui_order=12, title="Prefix to Strip (e.g., 'Data: ')"
 )
-@configuration_property("field_delimiter", type="string", default="&", ui_order=15, title="Field Delimiter")
+@configuration_property("field_delimiter", type="string", default=" ", ui_order=15, title="Field Delimiter")
 @configuration_property("kv_delimiter", type="string", default="=", ui_order=20, title="Key-Value Delimiter")
 @ExtractionRuleFactory.register("key_value")
-class DelimiterExtractionRule(ExtractionRule):
+class KeyValueExtractionRule(ExtractionRule):
     """Extracts key=value pairs with a delimiter."""
 
     prefix_strip: str
@@ -80,10 +77,10 @@ class DelimiterExtractionRule(ExtractionRule):
         base_mod_id = parent_mod.id
         parent_name = parent_mod.name
 
-        field_delim = getattr(self, "field_delimiter", "&").encode("ascii")
-        kv_delim = getattr(self, "kv_delimiter", "=").encode("ascii")
-        suffix = getattr(self, "module_suffix", "").strip() or None
-        prefix_bytes = getattr(self, "prefix_strip", "").encode("ascii") or None
+        field_delim = self.field_delimiter.encode("ascii")
+        kv_delim = self.kv_delimiter.encode("ascii")
+        suffix = self.module_suffix.strip() or None
+        prefix_bytes = self.prefix_strip.encode("ascii") or None
 
         field_delim_int = field_delim[0] if len(field_delim) == 1 else 38
         kv_delim_int = kv_delim[0] if len(kv_delim) == 1 else 61
@@ -94,7 +91,6 @@ class DelimiterExtractionRule(ExtractionRule):
         _range = range
 
         # Isolated flat cache: Key is raw `k_bytes` -> Value is target_mod_id
-        module_cache = {}
         flat_cache = []
 
         local_ctx = self.local.parser_local
@@ -124,6 +120,7 @@ class DelimiterExtractionRule(ExtractionRule):
 
             chunk_start = start
             kv_pos = -1
+            in_quote = 0  # NEW: Tracks quote state (0 = none, 34 = double ", 39 = single ')
 
             for j in _range(start, end + 1):
                 if j < end:
@@ -131,9 +128,18 @@ class DelimiterExtractionRule(ExtractionRule):
                 else:
                     c = field_delim_int
 
+                # NEW: Toggle quote state if we are currently parsing a value
+                if (c == 34 or c == 39) and kv_pos != -1 and j < end:
+                    if in_quote == 0:
+                        in_quote = c
+                    elif in_quote == c:
+                        in_quote = 0
+
                 if c == kv_delim_int and kv_pos == -1 and j < end:
                     kv_pos = j
-                elif c == field_delim_int:
+
+                # MODIFIED: Ignore field delimiter if inside quotes (unless we hit the end of buffer)
+                elif (c == field_delim_int and in_quote == 0) or j == end:
                     if kv_pos != -1:
                         k_start = chunk_start
                         k_end = kv_pos
@@ -149,6 +155,13 @@ class DelimiterExtractionRule(ExtractionRule):
                         while v_end > v_start and buffer[v_end - 1] in (32, 9, 10, 13):
                             v_end -= 1
 
+                        # NEW: Strip the surrounding quotes from the value, if they exist
+                        if v_start < v_end and buffer[v_start] in (34, 39):
+                            quote_char = buffer[v_start]
+                            if buffer[v_end - 1] == quote_char:
+                                v_start += 1
+                                v_end -= 1
+
                         if k_start < k_end and v_start < v_end:
                             k_view = buffer[k_start:k_end]
                             v_view = buffer[v_start:v_end]
@@ -159,14 +172,12 @@ class DelimiterExtractionRule(ExtractionRule):
                                     target_mod_id = mid
                                     break
 
-                            # 3. CACHE MISS (Runs exactly once per unique field name encountered)
                             if target_mod_id is None:
                                 try:
-                                    k_bytes = k_view.tobytes()  # Allocate the permanent key wrapper
+                                    k_bytes = k_view.tobytes()
                                     key_str = k_bytes.decode("ascii", errors="ignore")
                                     target_mod_id = _get_module(f"{name_prefix}{key_str}").id
 
-                                    # Store permanent bytes object and ID in flat lookup list
                                     flat_cache.append((k_bytes, target_mod_id))
                                 except Exception:
                                     pass
@@ -185,40 +196,32 @@ class DelimiterExtractionRule(ExtractionRule):
 
                     chunk_start = j + 1
                     kv_pos = -1
+                    in_quote = 0  # NEW: Reset quote state for safety on next chunk
 
         return base_mod_id, process
 
 
-# =============================================================================
-# TOKEN EXTRACTION RULE
-# =============================================================================
 @configuration_property("module_name", type="string", required=True, ui_order=5, title="Match module")
 @configuration_property("module_suffix", type="string", required=True, default="", ui_order=10, title="New module name")
 @configuration_property(
-    "token_match_type",
+    "match",
     type="string",
     enum=["starts_with", "contains", "ends_with"],
     required=True,
     default="contains",
     ui_order=15,
 )
-@configuration_property(
-    "token_pattern", type="string", required=True, default="", ui_order=20, title="Token Pattern Anchor"
-)
-@configuration_property(
-    "token_start_index", type="integer", required=True, default=1, ui_order=25, title="Word Start Index"
-)
-@configuration_property(
-    "token_word_count", type="integer", required=False, default=1, ui_order=30, title="Word Count (0 = All)"
-)
-@ExtractionRuleFactory.register("token")
-class TokenExtractionRule(ExtractionRule):
+@configuration_property("pattern", type="string", required=True, default="", ui_order=20, title="Pattern")
+@configuration_property("index", type="integer", required=True, default=1, ui_order=25, title="Start Index")
+@configuration_property("count", type="integer", required=False, default=1, ui_order=30, title="Word Count (0 = All)")
+@ExtractionRuleFactory.register("anchor_word")
+class AnchorWordExtractionRule(ExtractionRule):
     """Extract values matching startswith/endswith/contains patterns."""
 
-    token_match_type: str
-    token_pattern: str
-    token_start_index: int
-    token_word_count: int
+    match: str
+    pattern: str
+    index: int
+    count: int
 
     def bundle(self) -> tuple[int, ProcessFn]:
         _resolve_module = self.shared.id_registry.resolve_module
@@ -228,11 +231,11 @@ class TokenExtractionRule(ExtractionRule):
 
         base_mod_id = _resolve_module(self.module_name).id
 
-        pattern_bytes = getattr(self, "token_pattern", "").encode("ascii")
-        match_type = getattr(self, "token_match_type", "contains")
-        z_start = getattr(self, "token_start_index", 0)
-        y_count = getattr(self, "token_word_count", 1)
-        suffix = getattr(self, "module_suffix", "").strip() or None
+        pattern_bytes = self.pattern.encode("ascii")
+        match_type = self.match
+        z_start = self.index
+        y_count = self.count
+        suffix = self.module_suffix.strip() or None
         static_target_id = None
 
         module_cache = {}
@@ -510,8 +513,8 @@ class JsonLiteExtractionRule(ExtractionRule):
         },
     },
 )
-@ExtractionRuleFactory.register("list_delimiter")
-class ListDelimiterExtractionRule(ExtractionRule):
+@ExtractionRuleFactory.register("dsv")
+class DsvExtractionRule(ExtractionRule):
     """Extract from CSV-like formats using object-mapped positional schema rules."""
 
     startswith: str
@@ -646,15 +649,12 @@ class ListDelimiterExtractionRule(ExtractionRule):
         return base_mod_id, process
 
 
-# =============================================================================
-# PURE WORD INDEX EXTRACTION RULE
-# =============================================================================
 @configuration_property("module_name", type="string", required=True, ui_order=5, title="Match module")
 @configuration_property("module_suffix", type="string", required=True, ui_order=10, title="New Module Name")
 @configuration_property("word_index", type="integer", default=0, ui_order=15, title="Word Index (Z)")
 @configuration_property("word_count", type="integer", default=1, ui_order=20, title="Word Count (0 = All remaining)")
-@ExtractionRuleFactory.register("word")
-class WordExtractionRule(ExtractionRule):
+@ExtractionRuleFactory.register("positional")
+class PositionalExtractionRule(ExtractionRule):
     """Extracts a specific word or slice of words directly by its whitespace-split index."""
 
     word_index: int
@@ -732,9 +732,6 @@ class WordExtractionRule(ExtractionRule):
         return base_mod_id, process
 
 
-# =============================================================================
-# PARSER
-# =============================================================================
 @configuration_property(
     "rules",
     type="array",
