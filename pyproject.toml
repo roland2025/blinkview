@@ -76,6 +76,7 @@ dev = [
     "ruff>=0.15.8",
     "psutil>=6.0.0",
     "blinkview[all]",
+    { include-group = "test" },
 ]
 docs = [
     "mkdocs>=1.6.0",
@@ -85,6 +86,12 @@ docs = [
 
 daemon = [
     "blinkview[hardware]",
+]
+
+
+test = [
+    "pytest>=8.0.0",
+#    "pytest-cov",      # Optional: for coverage reporting
 ]
 
 # --- HATCH SPECIFIC ---
@@ -111,3 +118,12 @@ ignore = ["F401", "E203"]
 [tool.uv]
 managed = true
 package = true
+
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --showlocals --strict-markers"
+testpaths = [
+    "tests",
+]
+pythonpath = ["src"] # Ensures pytest can find your `blinkview` source code
