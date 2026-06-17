@@ -31,7 +31,13 @@ from blinkview.ops.segments import (
     nb_find_next_module_index,
     nb_find_next_module_match,
 )
-from blinkview.ops.telemetry import minmax_downsample_inplace, slice_and_downsample_linear
+from blinkview.ops.telemetry import (
+    PLOT_INTERPOLATION_MODE_LINEAR,
+    minmax_downsample_inplace,
+    nb_downsample_inplace,
+    nb_slice_and_downsample,
+    slice_and_downsample_linear,
+)
 from blinkview.ops.timestamps import nb_project_synced_ns
 from blinkview.parsers.frame_decoders import FrameDecoder
 from blinkview.parsers.frame_parsers import GenericFrameParser
@@ -231,7 +237,7 @@ class NumbaWarmupHelper:
 
             # Exercise Main Plot Downsampler (Linear)
             # This now uses the clean, refactored signature
-            _ = slice_and_downsample_linear(
+            _ = nb_slice_and_downsample(
                 buf_bundle,
                 col_idx=0,
                 out_x=out_x,
@@ -239,9 +245,10 @@ class NumbaWarmupHelper:
                 t_min_s=t_min,
                 t_max_s=t_max,
                 num_bins=num_bins,
+                mode=PLOT_INTERPOLATION_MODE_LINEAR,
             )
 
-            _ = minmax_downsample_inplace(
+            _ = nb_downsample_inplace(
                 x_plot=module_buffer.x_data,
                 x_ts=module_buffer.x_data_int64,
                 y_2d=module_buffer.y_data,
@@ -251,6 +258,7 @@ class NumbaWarmupHelper:
                 out_x=out_x,
                 out_y=out_y,
                 num_bins=num_bins,
+                mode=PLOT_INTERPOLATION_MODE_LINEAR,
             )
 
     def exercise_timesync_kernels(self):

@@ -30,6 +30,10 @@ Focusing on maximizing throughput, optimizing resource utilization, and stabiliz
 
 * Develop an algorithmic calibration wizard to calculate and compensate for transport latency variations across asynchronous sources (e.g., ADB protocol lag vs. direct wire UART/RTT).
 
+### Reorder layer smart delay period
+
+* reorder layer should automaticaly increase the delay up to X seconds if zephyr or some other defferred logging situation is discovered
+
 ---
 
 ## 🌐 Advanced Extensions & Remote Operations
@@ -99,3 +103,13 @@ Support full log and telemetry replay, letting you step through captured data ch
 * Add a built-in data manipulation UI widget to parse and convert raw hex dumps, registers, or binary payloads into readable configurations, and vice versa.
 * Support instant translation of hex bytes into standard primitives (ASCII/UTF-8 strings, unsigned integers, floats) as well as machine timestamps (e.g., converting a hex string or hardware tick count into a human-readable calendar date-time, and back).
 * **Contextual Selection:** Selecting raw text or hex patterns inside the log viewer automatically pops open an inspector sidebar showing all available data type conversions on the fly.
+
+### Manual cross-device log synchronization
+
+Allows aligning logs manually from multiple sources.
+
+* **Define anchor points:** Select matching transient edges (e.g., GPIO state toggles) between different device views in the UI.
+* **Calculate clock skew and offset:** Run a linear regression ($T = mx + c$) on the remote-provided timestamps (`remote_ts`) to find the clock frequency drift ($m$) and boot offset ($c$).
+* **Dynamic viewport shift:** Apply the calculated scale and offset factors to the UI timeline coordinates without modifying the underlying database.
+* **Persist synchronization metadata:** Save anchor pairs to configuration file.
+* 

@@ -18,7 +18,12 @@ from blinkview.core.numpy_log import (
     fetch_telemetry_arrays,
     get_telemetry_anchor,
 )
-from blinkview.ops.telemetry import minmax_downsample_inplace, slice_and_downsample_linear
+from blinkview.ops.telemetry import (
+    PLOT_INTERPOLATION_MODE_DISCRETE,
+    PLOT_INTERPOLATION_MODE_LINEAR,
+    nb_downsample_inplace,
+    nb_slice_and_downsample,
+)
 
 if TYPE_CHECKING:
     import pyqtgraph as pg
@@ -39,6 +44,7 @@ class SeriesContainer:
     name: str
     color: str
     visible: bool = True
+    is_discrete: bool = False
     curve: Optional["pg.PlotDataItem"] = None
     overview_curve: Optional["pg.PlotDataItem"] = None
     plot_item: Optional["pg.PlotItem"] = None
@@ -156,6 +162,9 @@ class TelemetryPlotter(QWidget):
 
         self.channel_btn = self.toolbar.addAction("Channels")
         self.channel_btn.triggered.connect(self._show_channel_menu)
+
+        self.discrete_btn = self.toolbar.addAction("Discrete")
+        self.discrete_btn.triggered.connect(self._show_discrete_menu)
 
         self.toolbar.addSeparator()
         self.toolbar.addAction("Reset view", self.reset_view)
@@ -281,6 +290,7 @@ class TelemetryPlotter(QWidget):
                         name=s["name"],
                         color=self.get_color(i).name(),
                         visible=s["visible"],
+                        is_discrete=s.get("is_discrete", False),
                     )
                 )
 
@@ -516,6 +526,7 @@ class TelemetryPlotter(QWidget):
                     "name": s.name,
                     "color": s.color,
                     "visible": s.visible,
+                    "is_discrete": s.is_discrete,
                 }
             )
         return {
@@ -703,7 +714,7 @@ class TelemetryPlotter(QWidget):
                         s.buf_idx = 1 - s.buf_idx
                         data_start = 0 if buf.size < self.max_points else buf.head
 
-                        n, y_min, y_max = slice_and_downsample_linear(
+                        n, y_min, y_max = nb_slice_and_downsample(
                             bundle,
                             s.index,
                             s.main_x[s.buf_idx],
@@ -711,6 +722,7 @@ class TelemetryPlotter(QWidget):
                             t_min,
                             t_max,
                             num_bins,
+                            PLOT_INTERPOLATION_MODE_DISCRETE if s.is_discrete else PLOT_INTERPOLATION_MODE_LINEAR
                         )
                         s.curve.setData(s.main_x[s.buf_idx][:n], s.main_y[s.buf_idx][:n])
 
@@ -767,7 +779,7 @@ class TelemetryPlotter(QWidget):
                     continue
 
                 # Capture the n, y_min, y_max from Numba
-                n_ov, y_min, y_max = minmax_downsample_inplace(
+                n_ov, y_min, y_max = nb_downsample_inplace(
                     buf.x_data,
                     buf.x_data_int64,
                     buf.y_data,
@@ -777,6 +789,7 @@ class TelemetryPlotter(QWidget):
                     s.ov_x[s.buf_idx],
                     s.ov_y[s.buf_idx],
                     ov_bins,
+                    PLOT_INTERPOLATION_MODE_DISCRETE if s.is_discrete else PLOT_INTERPOLATION_MODE_LINEAR,
                 )
 
                 if n_ov > 0:
@@ -1101,3 +1114,38 @@ class TelemetryPlotter(QWidget):
 
         except Exception as e:
             self.logger.error(f"Range change error: {e}")
+
+    def _show_discrete_menu(self):
+        """Generates a popup menu to toggle discrete (staircase) mode per series.
+        If only one series exists, it toggles instantly and skips the menu.
+        """
+        if not self.series_list:
+            return
+
+        # FAST PATH: If there's only one item, toggle it immediately and exit
+        if len(self.series_list) == 1:
+            single_series = self.series_list[0]
+            # Toggle the boolean state to its opposite value
+            self.toggle_discrete(single_series, not single_series.is_discrete)
+            return
+
+        # MULTI-CHANNEL PATH: Generate the popup menu
+        menu = QMenu(self)
+        for series in self.series_list:
+            action = QAction(series.name, menu, checkable=True)
+            action.setChecked(series.is_discrete)
+            # Use a lambda with default argument to capture current 'series'
+            action.triggered.connect(lambda checked, s=series: self.toggle_discrete(s, checked))
+            menu.addAction(action)
+
+        # Position menu under the toolbar button
+        button_widget = self.toolbar.widgetForAction(self.discrete_btn)
+        if button_widget:
+            menu.exec(button_widget.mapToGlobal(button_widget.rect().bottomLeft()))
+
+    def toggle_discrete(self, series: SeriesContainer, is_discrete: bool):
+        """Updates the discrete mode flag and forces a redraw."""
+        series.is_discrete = is_discrete
+
+        # Force a refresh so your downsampler runs with the new flag immediately
+        self.apply_updates(force=True)

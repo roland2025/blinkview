@@ -101,6 +101,7 @@ blink
   * Monitor specific variables and latest state values.
   * Send structured commands back to the device.
 * **Live Telemetry Plotting:** Real-time visualization of numeric data streams.
+  * **Discrete Mode:** Supports rendering boolean or integer state values by automatically synthesizing intermediate steps. This creates a clean, "staircased" layout that accurately represents step-wise state changes rather than continuous slopes.
 * **Unified Timeline Alignment:**
   * Best-effort time alignment across sources with different transport characteristics.
   * Leverages high-precision internal clocks where the hardware/transport allows (e.g., SEGGER RTT) and provides time-correlated views for higher-latency sources like UART or ADB.

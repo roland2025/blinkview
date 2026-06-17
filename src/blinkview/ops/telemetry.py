@@ -12,6 +12,9 @@ from blinkview.core.numba_config import app_njit
 from blinkview.core.types.log_batch import LogBundle, TelemetryBatch
 from blinkview.core.types.telemetry import TelemetryBufferBundle
 
+PLOT_INTERPOLATION_MODE_LINEAR = 0
+PLOT_INTERPOLATION_MODE_DISCRETE = 1
+
 
 @app_njit(inline="always")
 def extract_floats_from_bytes(buffer, offset, length, out_array):
@@ -231,6 +234,82 @@ def count_module_occurrences_backwards(
 
 
 @app_njit()
+def nb_discrete_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count, out_x, out_y, num_bins):
+    """
+    Extracts discrete state changes for the overview plot.
+    Iterates in reverse to prioritize the newest data.
+    Maintains signature compatibility with minmax_downsample_inplace.
+    """
+    if count == 0:
+        return 0, 0.0, 0.0
+
+    max_out = out_x.shape[0]
+    if max_out < 4:
+        return 0, 0.0, 0.0
+
+    abs_end = start_idx + count - 1
+    abs_start = start_idx
+
+    # Build from the back of the output array
+    out_idx = max_out
+
+    curr_y = y_2d[abs_end, col_idx]
+    overall_min = curr_y
+    overall_max = curr_y
+
+    # 1. Write the absolute newest point
+    out_idx -= 1
+    out_x[out_idx] = x_plot[abs_end]
+    out_y[out_idx] = curr_y
+
+    # Default left-cap is the oldest point in the buffer
+    cap_x = x_plot[abs_start]
+
+    # 2. Iterate backwards from second-to-last down to the oldest
+    for i in range(abs_end - 1, abs_start - 1, -1):
+        test_y = y_2d[i, col_idx]
+
+        # Update hysteresis extents
+        if test_y < overall_min:
+            overall_min = test_y
+        if test_y > overall_max:
+            overall_max = test_y
+
+        # Only emit points if the state actually changes
+        if test_y != curr_y:
+            # Check if we have room for the 2 step points + 1 final cap
+            if out_idx < 3:
+                cap_x = x_plot[i + 1]
+                break
+
+            trans_x = x_plot[i + 1]
+
+            # 2a. Start of the newer state (bottom/top of the vertical jump)
+            out_idx -= 1
+            out_x[out_idx] = trans_x
+            out_y[out_idx] = curr_y
+
+            # 2b. End of the older state (horizontal line extension)
+            out_idx -= 1
+            out_x[out_idx] = trans_x
+            out_y[out_idx] = test_y
+
+            curr_y = test_y
+
+    # 3. Cap off the oldest end
+    out_idx -= 1
+    out_x[out_idx] = cap_x
+    out_y[out_idx] = curr_y
+
+    # 4. Shift the valid data to the front using Numba's optimized slice assignment (memmove)
+    n = max_out - out_idx
+    out_x[:n] = out_x[out_idx : out_idx + n]
+    out_y[:n] = out_y[out_idx : out_idx + n]
+
+    return n, overall_min, overall_max
+
+
+@app_njit()
 def minmax_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count, out_x, out_y, num_bins):
     if count == 0:
         return 0, 0.0, 0.0
@@ -356,14 +435,134 @@ def slice_and_downsample_linear(
     if v_start == -1:
         return 0, 0.0, 0.0
 
+    if v_start > 0:
+        v_start -= 1
+
     v_end = count
     for i in range(v_start, count):
         if x_ts[start_idx + i] > t_max_ns:
             v_end = i
             break
 
+    if v_end < count:
+        v_end += 1
+
     n_vis = v_end - v_start
     return minmax_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx + v_start, n_vis, out_x, out_y, num_bins)
+
+
+@app_njit()
+def nb_slice_and_downsample_discrete(
+    buf,
+    col_idx: int,
+    out_x: np.ndarray,
+    out_y: np.ndarray,
+    t_min_s: float,
+    t_max_s: float,
+    num_bins: int,
+):
+    x_plot = buf.x_data
+    x_ts = buf.x_data_int64
+    y_2d = buf.y_data
+    start_idx = buf.data_start
+    count = buf.data_size
+
+    if count == 0:
+        return 0, 0.0, 0.0
+
+    t_min_ns = np.int64(round(t_min_s * 1e9))
+    t_max_ns = np.int64(round(t_max_s * 1e9))
+
+    max_out = out_x.shape[0]
+    if max_out < 4:
+        return 0, 0.0, 0.0
+
+    # Create a fast Numba array view of the active buffer
+    view_x_ts = x_ts[start_idx : start_idx + count]
+
+    # Find the index of the rightmost point <= t_max_ns
+    # searchsorted(side='right') gives the index of the first element > t_max_ns
+    idx_right = np.searchsorted(view_x_ts, t_max_ns, side="right") - 1
+
+    if idx_right == -1:
+        # All data points are > t_max_ns (the data starts strictly to the right of the screen)
+        return 0, 0.0, 0.0
+
+    # Find the index of the leftmost point <= t_min_ns
+    # This specific point dictates the state entering the left edge of the screen!
+    idx_left = np.searchsorted(view_x_ts, t_min_ns, side="right") - 1
+
+    abs_right = start_idx + idx_right
+    # If idx_left is -1, it means the data starts after t_min_s, so we lock to the first point
+    abs_left = start_idx + max(0, idx_left)
+
+    curr_y = y_2d[abs_right, col_idx]
+    overall_min = curr_y
+    overall_max = curr_y
+
+    out_idx = max_out
+
+    # 1. Right Cap Edge-to-Edge logic
+    out_idx -= 1
+    if idx_right < count - 1:
+        # If there is data *after* the window, state continues off-screen. Cap perfectly at t_max.
+        out_x[out_idx] = t_max_s
+    else:
+        # We are at the bleeding edge of the live data. Don't extrapolate the future.
+        out_x[out_idx] = x_plot[abs_right]
+    out_y[out_idx] = curr_y
+
+    # Left Cap Edge-to-Edge logic (calculated here, applied at the end)
+    if idx_left != -1:
+        # State exists before the window starts. The line should enter perfectly at t_min.
+        cap_x = t_min_s
+    else:
+        # Data starts inside the window. Line starts physically at the first known point.
+        cap_x = x_plot[abs_left]
+
+    # 2. Iterate backwards processing the state transitions
+    for i in range(abs_right - 1, abs_left - 1, -1):
+        test_y = y_2d[i, col_idx]
+
+        # Update hysteresis extents
+        if test_y < overall_min:
+            overall_min = test_y
+        if test_y > overall_max:
+            overall_max = test_y
+
+        if test_y != curr_y:
+            # We need space for 2 jump points + 1 final cap point
+            if out_idx < 3:
+                # We hit the point limit. Safely cap exactly where we abandoned the history.
+                cap_x = x_plot[i + 1]
+                break
+
+            trans_x = x_plot[i + 1]
+
+            # Bottom/Top of the newer state jump
+            out_idx -= 1
+            out_x[out_idx] = trans_x
+            out_y[out_idx] = curr_y
+
+            # End of older state (horizontal extension backwards)
+            out_idx -= 1
+            out_x[out_idx] = trans_x
+            out_y[out_idx] = test_y
+
+            curr_y = test_y
+
+    # 3. Left Cap Implementation
+    out_idx -= 1
+    out_x[out_idx] = cap_x
+    out_y[out_idx] = curr_y
+
+    # 4. Shift valid data to the front for PyQtGraph
+    n = max_out - out_idx
+    for k in range(n):
+        out_x[k] = out_x[out_idx + k]
+        out_y[k] = out_y[out_idx + k]
+
+    return n, overall_min, overall_max
 
 
 @app_njit()
@@ -445,3 +644,21 @@ def fast_insert_mirrored_buffer(
     new_size = min(size + num_new, max_points)
 
     return new_head, new_size
+
+
+@app_njit()
+def nb_slice_and_downsample(
+    buf, col_idx: int, out_x: np.ndarray, out_y: np.ndarray, t_min_s: float, t_max_s: float, num_bins: int, mode: int
+):
+    if mode == PLOT_INTERPOLATION_MODE_DISCRETE:
+        return nb_slice_and_downsample_discrete(buf, col_idx, out_x, out_y, t_min_s, t_max_s, num_bins)
+
+    return slice_and_downsample_linear(buf, col_idx, out_x, out_y, t_min_s, t_max_s, num_bins)
+
+
+@app_njit()
+def nb_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count, out_x, out_y, num_bins, mode: int):
+    if mode == PLOT_INTERPOLATION_MODE_DISCRETE:
+        return nb_discrete_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count, out_x, out_y, num_bins)
+
+    return minmax_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count, out_x, out_y, num_bins)
