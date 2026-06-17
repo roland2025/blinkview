@@ -577,7 +577,19 @@ class DynamicConfigWidget(QWidget):
             state = self.get_config()
             target = state
             for p in path:
-                target = target.setdefault(p, {})
+                if isinstance(target, dict):
+                    target = target.setdefault(p, {})
+                elif isinstance(target, list):
+                    try:
+                        # Paths from UI components often pass indices as strings (e.g., '0')
+                        # We convert it to an integer to index into the list
+                        target = target[int(p)]
+                    except (ValueError, IndexError, TypeError):
+                        # Safe guard: Abort if the index is invalid or out of bounds
+                        return
+                else:
+                    # Encountered a primitive value (str, int, etc.) and can't go deeper
+                    return
 
             if new_key not in target:
                 target[new_key] = deepcopy(schema_template.get("default", {}))

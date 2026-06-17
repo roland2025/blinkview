@@ -136,8 +136,10 @@ class ConfigManager:
                     for key in ("path", "from"):
                         if key in new_op:
                             rel_path = new_op[key]
-                            # Handle leading slash consistency
-                            if rel_path.startswith("/"):
+                            if rel_path == "":
+                                # If relative path is empty, it points exactly to the base path
+                                new_op[key] = base_path if base_path != "" else "/"
+                            elif rel_path.startswith("/"):
                                 new_op[key] = f"{base_path}{rel_path}"
                             else:
                                 new_op[key] = f"{base_path}/{rel_path}"
