@@ -95,6 +95,8 @@ class BlinkMainWindow(QMainWindow):
 
         self.gui_context = GUIContext()
         self.logger = registry.logger_creator("gui")()
+        self.logger_lag = None
+
         self.gui_context.set_logger(self.logger)
         self.gui_context.set_register_log_target(self.register_log_target)
         self.gui_context.set_deregister_log_target(self.deregister_log_target)
@@ -547,8 +549,13 @@ class BlinkMainWindow(QMainWindow):
             # If the gap is significantly larger than our ~16.6ms target, the UI is lagging
             if drift_ns / 1_000_000 > self.timeout_fast * 2:  # More than 2 frames late
                 msg = f"[UI Monitor] 🐌 Thread Lag Detected: {drift_ns / 1_000_000:.1f}ms since last poll!"
-                self.logger.warn(msg)
+
                 print(msg)
+
+                if (logger_lag := self.logger_lag) is None:
+                    logger_lag = self.logger_lag = self.logger.child("lag")
+
+                logger_lag.warn(f"{drift_ns / 1_000_000:.1f} ms")
 
             time_budget = (
                 self.timeout_fast * 0.8 / 1000
