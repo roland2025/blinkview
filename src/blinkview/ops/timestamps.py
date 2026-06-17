@@ -138,43 +138,53 @@ def nb_auto_sync_fallback(raw_ns, rx_ns, sync: SyncState):
         sync.auto_last_raw[0] = raw_ns
         sync.auto_anchor_rx[0] = rx_ns
         sync.auto_window_min_offset[0] = current_offset
-        sync.auto_warmup_cnt[0] = 512  # Reset warmup on reboot
+        sync.auto_warmup_cnt[0] = 512
         return dtypes.TS_TYPE(rx_ns)
+
+    # --- MOVED UP: We need delta_raw for time-based calculations ---
+    delta_raw = np.int64(raw_ns) - np.int64(last_raw)
+    safe_delta_raw = delta_raw if delta_raw > 0 else 1  # Prevent division by zero
 
     # 2. Track Minimum Offset (Baseline)
     min_offset = sync.auto_window_min_offset[0]
     offset_diff = current_offset - min_offset
 
-    if current_offset < min_offset or offset_diff > 1_000_000_000:  # 1-second gap threshold
+    if current_offset < min_offset or offset_diff > 1_000_000_000:
         min_offset = current_offset
-        sync.auto_warmup_cnt[0] = 512  # Re-trigger fast PLL convergence
+        sync.auto_warmup_cnt[0] = 512
     else:
-        min_offset += 1000 + (offset_diff // 128)  # Proportional drift tracking
+        # FIX: Time-based drift allowance instead of a flat 1000ns per message.
+        # This allows ~100 ppm upward drift relaxation (100us per second)
+        # ensuring the envelope tracker decays smoothly regardless of message frequency.
+        drift_allowance = safe_delta_raw // 10_000
+        min_offset += drift_allowance + (offset_diff // 128)
 
     sync.auto_window_min_offset[0] = min_offset
 
     # 3. Hardware Spacing
-    delta_raw = np.int64(raw_ns) - np.int64(last_raw)
     predicted_rx = last_out + delta_raw
 
     # 4. Phase-Locked Loop (PLL) Correction
     ideal_rx = np.int64(raw_ns) + min_offset
     error = ideal_rx - predicted_rx
 
-    # --- DUAL-STAGE CORRECTION ---
+    # --- DUAL-STAGE TIME-BASED CORRECTION ---
+    # FIX: Define a target "Time Constant" (in nanoseconds) and divide by elapsed time.
     if sync.auto_warmup_cnt[0] > 0:
-        divisor = 16  # Fast Lock: ~70 logs to 99% convergence
+        target_tc_ns = 100_000_000  # 100ms fast lock
         sync.auto_warmup_cnt[0] -= 1
     else:
-        divisor = 256  # Stable Track: Resists jitter, handles drift
+        target_tc_ns = 2_500_000_000  # 2.5s stable track
+
+    # If messages are arriving every 10ms, divisor is ~250.
+    # If a message takes 5 seconds, divisor becomes 0 (capped to 1).
+    divisor = target_tc_ns // safe_delta_raw
+    if divisor < 1:
+        divisor = 1  # Cap at 100% correction if the gap is massive
 
     correction = error // divisor
 
-    # Slew Rate Limiter (CRITICAL for fast-sync)
-    # BUG FIX: If we strictly clamp negative correction to -max_adj, the output
-    # timestamp is forced to advance by at least delta_raw // 2 (50% speed).
-    # By relaxing the lower bound to -delta_raw, we allow the timestamp to
-    # functionally "pause" and let real-time catch up when overshooting ideal_rx.
+    # Slew Rate Limiter
     max_adj = delta_raw // 2
     if correction > max_adj:
         correction = max_adj
