@@ -1048,6 +1048,12 @@ class TelemetryWatch(QWidget):
                 lbl = QLabel(entry.label)
                 lbl.setFont(self.font)
 
+                lbl.setContextMenuPolicy(Qt.CustomContextMenu)
+                # We pass 'lbl' instead of 'content' to map coordinates correctly
+                lbl.customContextMenuRequested.connect(
+                    lambda pos, e=entry, w=lbl: self._show_row_context_menu(pos, e, w)
+                )
+
             # If the row is under a section, indent it 20px
             indent = 20 if current_section_active else 5
             lbl.setContentsMargins(indent, 0, 0, 0)
