@@ -688,7 +688,6 @@ class TelemetryPlotter(QWidget):
 
         num_bins = self._get_target_resolution(plot_item_primary)
 
-        # 1. Track bounds per PlotItem for this frame
         # Format: { plot_object: [current_min, current_max, has_data_flag] }
         frame_bounds = {}
 
@@ -700,7 +699,6 @@ class TelemetryPlotter(QWidget):
                     continue
 
                 bundle = buf.bundle()
-
                 buf_newest_ts = buf.x_data[buf.head - 1] if buf.size > 0 else 0
 
                 for s in series_list:
@@ -710,9 +708,9 @@ class TelemetryPlotter(QWidget):
                     view_moved = s._last_t_min != t_min or s._last_t_max != t_max or s._last_bins != num_bins
                     data_visible = self.is_auto_scroll or buf_newest_ts >= t_min
 
+                    # 1. Update data and cache the bounds ONLY if moved or dirty
                     if view_moved or (buf.is_dirty and data_visible):
                         s.buf_idx = 1 - s.buf_idx
-                        data_start = 0 if buf.size < self.max_points else buf.head
 
                         n, y_min, y_max = nb_slice_and_downsample(
                             bundle,
@@ -722,24 +720,33 @@ class TelemetryPlotter(QWidget):
                             t_min,
                             t_max,
                             num_bins,
-                            PLOT_INTERPOLATION_MODE_DISCRETE if s.is_discrete else PLOT_INTERPOLATION_MODE_LINEAR
+                            PLOT_INTERPOLATION_MODE_DISCRETE if s.is_discrete else PLOT_INTERPOLATION_MODE_LINEAR,
                         )
                         s.curve.setData(s.main_x[s.buf_idx][:n], s.main_y[s.buf_idx][:n])
 
                         s._last_t_min, s._last_t_max, s._last_bins = t_min, t_max, num_bins
 
-                        # AGGREGATION: Update the global bounds for this series' plot
+                        # CACHE THE LIMITS FOR THIS SERIES
                         if n > 0:
-                            if s.plot_item not in frame_bounds:
-                                frame_bounds[s.plot_item] = [y_min, y_max, True]
-                            else:
-                                b = frame_bounds[s.plot_item]
-                                if y_min < b[0]:
-                                    b[0] = y_min
-                                if y_max > b[1]:
-                                    b[1] = y_max
+                            s._last_y_min = y_min
+                            s._last_y_max = y_max
+                        else:
+                            s._last_y_min = None
+                            s._last_y_max = None
 
-            # 2. Apply Hysteresis once per PlotItem using aggregated bounds
+                    # 2. AGGREGATION: ALWAYS contribute cached bounds to the frame,
+                    # even if the series didn't physically update this frame.
+                    if getattr(s, "_last_y_min", None) is not None:
+                        if s.plot_item not in frame_bounds:
+                            frame_bounds[s.plot_item] = [s._last_y_min, s._last_y_max, True]
+                        else:
+                            b = frame_bounds[s.plot_item]
+                            if s._last_y_min < b[0]:
+                                b[0] = s._last_y_min
+                            if s._last_y_max > b[1]:
+                                b[1] = s._last_y_max
+
+            # 3. Apply Hysteresis
             for p_item, (y_min, y_max, _) in frame_bounds.items():
                 self._apply_hysteresis_to_plot(p_item, y_min, y_max)
 
