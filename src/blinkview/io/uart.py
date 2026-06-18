@@ -161,8 +161,6 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                     batch = batch_acquire()
 
                 try:
-                    now = time_ns()
-
                     # 5. Read Lead Byte (Establish Arrival Timestamp)
                     first_byte = _read(1)
                     now = time_ns()
@@ -265,8 +263,9 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
     def send_data(self, data: str):
         if self.serial and self.serial.is_open:
             try:
-                # print(f"{self.__class__.__name__}: send {time()} ... {data}")
-                self.serial.write(data.encode())
+                encoded = data.encode()
+                self.logger.debug(f"send: {encoded}")
+                self.serial.write(encoded)
             except Exception as e:
                 self.logger.exception("Failed to send data", e)
                 self.serial_broken = True
@@ -296,5 +295,12 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
             self.logger.info("Reset signal sent.")
         except Exception as e:
-            self.logger.error(f"Failed to perform hardware reset: {e}")
+            self.logger.exception("Failed to perform hardware reset", e)
+            self.serial_broken = True
+
+    def is_connected(self):
+        try:
+            return self.serial is not None and self.serial.is_open
+        except Exception as e:
+            self.logger.exception("Failed to check serial connection", e)
             self.serial_broken = True

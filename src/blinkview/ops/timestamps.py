@@ -126,7 +126,7 @@ def nb_apply_drift_projection(raw_ns, anchor_raw, anchor_rx, drift_m, drift_d):
 
 
 @app_njit(inline="always")
-def nb_auto_sync_fallback(raw_ns, rx_ns, sync: SyncState):
+def nb_auto_sync_fallback_2(raw_ns, rx_ns, sync: SyncState):
     is_init = sync.auto_init[0]
     last_raw = sync.auto_last_raw[0]
     last_out = sync.auto_anchor_rx[0]
@@ -149,15 +149,16 @@ def nb_auto_sync_fallback(raw_ns, rx_ns, sync: SyncState):
     min_offset = sync.auto_window_min_offset[0]
     offset_diff = current_offset - min_offset
 
-    if current_offset < min_offset or offset_diff > 1_000_000_000:
+    if current_offset < min_offset or offset_diff > 5_000_000:
         min_offset = current_offset
-        sync.auto_warmup_cnt[0] = 512
+        sync.auto_warmup_cnt[0] = 64
     else:
-        # FIX: Time-based drift allowance instead of a flat 1000ns per message.
-        # This allows ~100 ppm upward drift relaxation (100us per second)
-        # ensuring the envelope tracker decays smoothly regardless of message frequency.
         drift_allowance = safe_delta_raw // 10_000
-        min_offset += drift_allowance + (offset_diff // 128)
+
+        # FIX: Eliminate integer truncation dead-zones by adding standard rounding
+        # offset instead of standard floor truncation
+        adj = (offset_diff + 64) // 128 if offset_diff >= 0 else (offset_diff - 64) // 128
+        min_offset += drift_allowance + adj
 
     sync.auto_window_min_offset[0] = min_offset
 
@@ -168,21 +169,24 @@ def nb_auto_sync_fallback(raw_ns, rx_ns, sync: SyncState):
     ideal_rx = np.int64(raw_ns) + min_offset
     error = ideal_rx - predicted_rx
 
-    # --- DUAL-STAGE TIME-BASED CORRECTION ---
-    # FIX: Define a target "Time Constant" (in nanoseconds) and divide by elapsed time.
     if sync.auto_warmup_cnt[0] > 0:
-        target_tc_ns = 100_000_000  # 100ms fast lock
+        target_tc_ns = 100_000_000
         sync.auto_warmup_cnt[0] -= 1
     else:
-        target_tc_ns = 2_500_000_000  # 2.5s stable track
+        target_tc_ns = 500_000_000
 
-    # If messages are arriving every 10ms, divisor is ~250.
-    # If a message takes 5 seconds, divisor becomes 0 (capped to 1).
-    divisor = target_tc_ns // safe_delta_raw
+        # FIX: Guard against close-burst packet arrivals clamping the divisor out
+    # Ensure safe_delta_raw doesn't break the PLL tracking weight if packets are side-by-side
+    clamped_delta = max(safe_delta_raw, 5_000_000)  # Floor at 5ms window equivalent weight
+    divisor = target_tc_ns // clamped_delta
     if divisor < 1:
-        divisor = 1  # Cap at 100% correction if the gap is massive
+        divisor = 1
 
-    correction = error // divisor
+        # FIX: Apply rounded integer division to avoid stuck zero-corrections
+    if error >= 0:
+        correction = (error + (divisor // 2)) // divisor
+    else:
+        correction = (error - (divisor // 2)) // divisor
 
     # Slew Rate Limiter
     max_adj = delta_raw // 2
@@ -202,6 +206,49 @@ def nb_auto_sync_fallback(raw_ns, rx_ns, sync: SyncState):
     sync.auto_anchor_rx[0] = corrected_rx
 
     return dtypes.TS_TYPE(corrected_rx)
+
+
+@app_njit(inline="always")
+def nb_auto_sync_fallback(raw_ns, rx_ns, sync: SyncState):
+    is_init = sync.auto_init[0]
+    last_raw = sync.auto_last_raw[0]
+    last_out = sync.auto_anchor_rx[0]
+
+    # We use auto_window_min_offset to hold our fixed baseline anchor
+    anchor_offset = sync.auto_window_min_offset[0]
+
+    # 1. Initialization / Wraparound Reboot
+    # Trigger hard reset ONLY if raw_ns jumps backward by more than 1 second (1,000,000,000 ns).
+    # This protects the anchor from resetting due to minor out-of-order network packets.
+    if not is_init or (raw_ns < last_raw and (last_raw - raw_ns) > 1_000_000_000):
+        sync.auto_init[0] = 1
+        sync.auto_last_raw[0] = raw_ns
+        sync.auto_anchor_rx[0] = rx_ns
+        sync.auto_window_min_offset[0] = np.int64(rx_ns) - np.int64(raw_ns)
+        return dtypes.TS_TYPE(rx_ns)
+
+    # 2. Strict Linear Projection (Zero Algorithm Jitter)
+    # Output spacing is exactly 1:1 with hardware raw_ns spacing.
+    projected_rx = np.int64(raw_ns) + anchor_offset
+
+    # 3. Causality Guard (The "Future" Check)
+    # If projection exceeds receive time, the host clock is slower than the hardware clock.
+    # Clip to reality and drag the anchor backward.
+    if projected_rx > np.int64(rx_ns):
+        anchor_offset = np.int64(rx_ns) - np.int64(raw_ns)
+        projected_rx = np.int64(rx_ns)
+        sync.auto_window_min_offset[0] = anchor_offset
+
+    # 4. Monotonicity Guard
+    # Ensure time always moves forward (handles out-of-order raw_ns or causality clipping)
+    if projected_rx <= last_out:
+        projected_rx = last_out + 1000
+
+    # 5. Persist state
+    sync.auto_last_raw[0] = raw_ns
+    sync.auto_anchor_rx[0] = projected_rx
+
+    return dtypes.TS_TYPE(projected_rx)
 
 
 @app_njit(inline="always")
