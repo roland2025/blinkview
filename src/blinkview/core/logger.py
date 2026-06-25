@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from traceback import format_exc
-from typing import Callable
+from typing import Callable, Optional
 
 from ..utils.log_level import LevelIdentity, LogLevel
 
@@ -56,17 +56,20 @@ class BaseLogger:
 
 
 class SystemLogger(BaseLogger):
+    __slots__ = "category", "owner_name", "module_path", "registry", "_enabled"
+
     """
     A contextual logger that routes system events to the SYSTEM namespace.
-    Supports hierarchical child loggers.
+    Supports hierarchical child loggers, lazy initialization, and dynamic enablement.
     """
 
-    def __init__(self, category: str, owner_name: str, registry, _internal_path: str = None):
-        from .registry import Registry
-
-        self.registry: Registry = registry
+    def __init__(
+        self, category: str, owner_name: str, registry, _internal_path: Optional[str] = None, enabled: bool = True
+    ):
+        self.registry = registry
         self.category = category
         self.owner_name = owner_name
+        self._enabled = enabled
 
         # Determine the module path: either inherited from a parent or built from scratch
         if _internal_path:
@@ -76,27 +79,69 @@ class SystemLogger(BaseLogger):
             if owner_name:
                 self.module_path += f".{owner_name}"
 
-        # Resolve IDs and resources once during initialization
-        mod_id = self.registry.system_device.get_module(self.module_path).id
+        # Assign the appropriate initial log function based on the enabled flag
+        self.log = self._lazy_log if enabled else self._noop_log
 
-        system_log_append = self.registry.log_append
+    @property
+    def enabled(self) -> bool:
+        """Returns the current enabled state of the logger."""
+        return self._enabled
 
+    @enabled.setter
+    def enabled(self, value: bool):
+        """
+        Dynamically toggle the logger.
+        Updates the internal log pointer to ensure zero-overhead no-ops when disabled.
+        """
+        self._enabled = value
+        if not value:
+            self.log = self._noop_log
+        else:
+            # Revert to lazy initialization so resources are fetched on the next log call
+            self.log = self._lazy_log
+
+    def _lazy_log(self, msg: str, level: LevelIdentity):
+        """
+        Invoked only on the first log call. Resolves dependencies and overwrites
+        itself with the highly optimized fast_log closure.
+        """
+        registry = self.registry
+
+        # Resolve IDs and resources just-in-time
+        mod_id = registry.system_device.get_module(self.module_path).id
+        system_log_append = registry.log_append
         time_ns = registry.now_ns
 
         # The fast_log closure remains optimized for speed
-        def fast_log(msg: str, level: LevelIdentity):
-            system_log_append(time_ns(), level.value, mod_id, msg)
+        def fast_log(message: str, lvl: LevelIdentity):
+            system_log_append(time_ns(), lvl.value, mod_id, message)
 
+        # Overwrite self.log so future calls skip the initialization
         self.log = fast_log
 
-    def child(self, name: str) -> "SystemLogger":
+        # Process the current log request
+        fast_log(msg, level)
+
+    def _noop_log(self, msg: str, level: LevelIdentity):
+        """A zero-overhead discard function used when the logger is disabled."""
+        pass
+
+    def child(self, name: str, enabled: Optional[bool] = None) -> "SystemLogger":
         """
         Creates a new SystemLogger instance with an appended module path.
         Example: 'reader.RNG' -> 'reader.RNG.Validator'
         """
         new_path = f"{self.module_path}.{name}"
+
+        # Inherit parent's state unless explicitly overridden
+        child_enabled = enabled if enabled is not None else self._enabled
+
         return SystemLogger(
-            category=self.category, owner_name=self.owner_name, registry=self.registry, _internal_path=new_path
+            category=self.category,
+            owner_name=self.owner_name,
+            registry=self.registry,
+            _internal_path=new_path,
+            enabled=child_enabled,
         )
 
     def child_creator(self, name: str) -> Callable[[], "SystemLogger"]:
