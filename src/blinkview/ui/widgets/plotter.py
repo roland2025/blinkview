@@ -268,11 +268,11 @@ class TelemetryPlotter(QWidget):
         # Restore multiple modules
         self.modules = self.gui_context.id_registry.resolve_modules(state.get("modules", []))
 
-        if self.logger is None:
-            module_name = self.modules[0].name if self.modules else "unknown"
-            self.logger = self.gui_context.logger.child(f"plotter_{module_name}")
-            self.logger_apply = self.logger.child("apply")
-            self.logger_update = self.logger.child("update")
+        # if self.logger is None:
+        #     module_name = self.modules[0].name if self.modules else "unknown"
+        #     self.logger = self.gui_context.logger.child(f"plotter_{module_name}")
+        #     self.logger_apply = self.logger.child("apply")
+        #     self.logger_update = self.logger.child("update")
 
         self.clear()
 
@@ -1120,7 +1120,7 @@ class TelemetryPlotter(QWidget):
             self._update_plots()
 
         except Exception as e:
-            self.logger.error(f"Range change error: {e}")
+            print(f"Range change error: {e}")
 
     def _show_discrete_menu(self):
         """Generates a popup menu to toggle discrete (staircase) mode per series.
