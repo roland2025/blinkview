@@ -20,6 +20,7 @@ from blinkview.ops.codec_adb_long import (
 from blinkview.ops.generic import skip_words_parser
 from blinkview.ops.levels import parse_log_level
 from blinkview.ops.modules import parse_fixed_width_name, parse_module_tags_statemachine
+from blinkview.ops.timestamp_idf import nb_parse_int_timestamp_idf_v1
 from blinkview.ops.timestamps import nb_parse_int_timestamp
 from blinkview.ops.zephyr_timestamp import nb_parse_zephyr_realtime, nb_parse_zephyr_uptime_formatted
 
@@ -35,6 +36,7 @@ TS_ADB_LONG = ParserID.TS_ADB_LONG
 TS_ZEPHYR_UPTIME_FORMATTED = ParserID.TS_ZEPHYR_UPTIME_FORMATTED
 TS_ZEPHYR_REALTIME = ParserID.TS_ZEPHYR_REALTIME
 TS_INTEGER = ParserID.TS_INTEGER
+TS_IDF_V1 = ParserID.TS_IDF_V1
 
 PID_TID_ADB_LONG = ParserID.PID_TID_ADB_LONG
 LEVEL_MAP_ADB_LONG = ParserID.LEVEL_MAP_ADB_LONG
@@ -60,6 +62,9 @@ def _process_bundle(buffer, cursor, end_cursor, out_b, out_idx, bundle):
 
     elif p_id == TS_INTEGER:
         return nb_parse_int_timestamp(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == TS_IDF_V1:
+        return nb_parse_int_timestamp_idf_v1(buffer, cursor, end_cursor, out_b, out_idx, state, config)
 
     elif p_id == TS_ADB_LONG:
         return parse_adb_timestamp_monotonic(buffer, cursor, end_cursor, out_b, out_idx, state, config)

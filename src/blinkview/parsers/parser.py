@@ -51,13 +51,15 @@ TransformFunc = Callable[[Any], Any]
     default="pipeline",
     required=True,
     description="Name of the source device (for logging purposes)",
+    ui_remember=True,
 )
 @configuration_property(
     "_note",
     title="Note",
     type="string",
     ui_order=-1,
-    description="Add a not for your own reference.",
+    description="Add a note for your own reference.",
+    ui_remember=True,
 )
 @configuration_property(
     "time_sync",

@@ -324,7 +324,7 @@ class ZephyrMinimalParser(SerialParserThread):
         "steps": [
             {"type": "timestamp_zephyr_uptime_formatted"},
             {"type": "log_level_zephyr"},
-            {"type": "module_name_normalizer", "max_depth": 8, "max_length": 64},
+            {"type": "module_name_normalizer"},
         ],
     },
 )
@@ -350,9 +350,35 @@ class ZephyrDeferredParser(SerialParserThread):
         "steps": [
             {"type": "timestamp_zephyr_realtime"},
             {"type": "log_level_zephyr"},
-            {"type": "module_name_normalizer", "max_depth": 8, "max_length": 64},
+            {"type": "module_name_normalizer"},
         ],
     },
 )
 class ZephyrRealTimeParser(SerialParserThread):
     __doc__ = "Zephyr deferred messages with realtime"
+
+
+@ParserFactory.register("serial_esp_idf_v1")
+@override_property(
+    "frame_decoder",
+    default={
+        "type": "line_decoder",
+        "filter_trim_r": True,
+        "filter_printable": True,
+        "filter_ansi": True,
+        "frame_length_minimum": 10,
+    },
+)
+@override_property(
+    "frame_parser",
+    default={
+        "type": "default",
+        "steps": [
+            {"type": "log_level_idf"},
+            {"type": "timestamp_idf_v1"},
+            {"type": "module_name_normalizer"},
+        ],
+    },
+)
+class EspIdfV1Parser(SerialParserThread):
+    __doc__ = "ESP-IDF V1 parser"

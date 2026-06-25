@@ -61,10 +61,6 @@ def nb_parse_int_timestamp(
 ):
     cursor = start_cursor
 
-    # 1. Skip leading whitespace
-    # while cursor < end_cursor and (buffer[cursor] == CHAR_SPACE or buffer[cursor] == CHAR_TAB):
-    #     cursor += 1
-
     if cursor >= end_cursor:
         return -1
 

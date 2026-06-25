@@ -50,6 +50,8 @@ class ParserID:
 
     TS_ZEPHYR_REALTIME = 16
 
+    TS_IDF_V1 = 17
+
 
 class CodecID:
     NONE = 0

@@ -439,6 +439,25 @@ class IntegerTimestampParser(TimestampParser):
         return self._bundle
 
 
+@FrameSectionParserFactory.register("timestamp_integer_esp_v1")
+@FrameSectionParserFactory.register("timestamp_idf_v1")
+class Esp32V1IntegerTimestampParser(IntegerTimestampParser):
+    precision: int
+
+    def __init__(self):
+        super().__init__()
+        self._bundle = None
+
+    def apply_config(self, config: dict):
+        changed = super().apply_config(config)
+
+        config = UnifiedParserConfig(timestamp_precision=self.precision)
+
+        self._bundle = ParserID.TS_IDF_V1, self.state, config
+
+        return changed
+
+
 #
 # @FrameSectionParserFactory.register("log_level")
 # class LevelParser(FrameSectionParser):

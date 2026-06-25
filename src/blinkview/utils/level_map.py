@@ -154,6 +154,23 @@ class ZephyrMinimalLevelMap(LevelMap):
     pass
 
 
+@FrameSectionParserFactory.register("log_level_idf")
+@override_property(
+    "mapping",
+    title="ESP-IDF Level Mappings",
+    description="Predefined mapping for ESP_IDF log levels.",
+    default={
+        "I": LogLevel.INFO.value,
+        "E": LogLevel.ERROR.value,
+        "W": LogLevel.WARN.value,
+        "D": LogLevel.DEBUG.value,
+        "V": LogLevel.TRACE.value,
+    },
+)
+class EspIdfLevelMap(LevelMap):
+    pass
+
+
 @FrameSectionParserFactory.register("log_level_custom")
 @override_property("mapping", title="Custom level Mappings", description="Custom mapping for logs.", default={})
 class CustomLevelMap(LevelMap):
