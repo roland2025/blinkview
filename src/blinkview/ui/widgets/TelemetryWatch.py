@@ -1254,37 +1254,41 @@ class TelemetryWatch(QWidget):
 
         # Acquire a single snapshot for the entire batch of entries
         with tracker.get_snapshot() as snap:
-            for entry in self.entries:
-                if not isinstance(entry, RowEntry) or not entry.value_label:
-                    continue
+            sequences = memoryview(snap.bundle().sequence_ids)
+            try:
+                for entry in self.entries:
+                    if not isinstance(entry, RowEntry) or not entry.value_label:
+                        continue
 
-                # Check all modules assigned to this row (for multi-module aggregation)
-                label = entry.value_label
-                best_seq = entry.last_painted_seq
-                new_msg = None
+                    # Check all modules assigned to this row (for multi-module aggregation)
+                    label = entry.value_label
+                    best_seq = entry.last_painted_seq
+                    new_msg = None
 
-                for m in entry.modules:
-                    current_seq = snap.get_sequence(m.id)
+                    for m in entry.modules:
+                        current_seq = sequences[m.id]
 
-                    # If this specific module has a newer sequence than what we've ever seen
-                    if current_seq > best_seq:
-                        best_seq = current_seq
-                        new_msg = snap.get_message(m.id)
+                        # If this specific module has a newer sequence than what we've ever seen
+                        if current_seq > best_seq:
+                            best_seq = current_seq
+                            new_msg = snap.get_message(m.id)
 
-                # Only hit the heavy QLabel.setText if we actually found newer data
-                if new_msg is not None:
-                    entry.last_painted_seq = best_seq
-                    entry.last_painted_msg = new_msg
-                    entry.value_label.setText(new_msg)
-                    entry.last_change_time = now
+                    # Only hit the heavy QLabel.setText if we actually found newer data
+                    if new_msg is not None:
+                        entry.last_painted_seq = best_seq
+                        entry.last_painted_msg = new_msg
+                        entry.value_label.setText(new_msg)
+                        entry.last_change_time = now
 
-                was_flashing = label.is_flashing
-                label.is_flashing = (now - entry.last_change_time) < theme.fade_duration
+                    was_flashing = label.is_flashing
+                    label.is_flashing = (now - entry.last_change_time) < theme.fade_duration
 
-                # 3. Only repaint if state changed OR we are currently in the 'ON' state
-                # (Ensures it stays lit for the full duration and turns off exactly once)
-                if label.is_flashing or was_flashing != label.is_flashing:
-                    label.update()
+                    # 3. Only repaint if state changed OR we are currently in the 'ON' state
+                    # (Ensures it stays lit for the full duration and turns off exactly once)
+                    if label.is_flashing or was_flashing != label.is_flashing:
+                        label.update()
+            finally:
+                sequences.release()
 
     @classmethod
     def new_watch(cls, name, parent: dict = None):

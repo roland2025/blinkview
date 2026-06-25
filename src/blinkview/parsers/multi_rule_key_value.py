@@ -873,11 +873,8 @@ class MultiRuleKeyValueParser(BaseParser):
             with batch_in:
                 try:
                     b_in = batch_in.bundle
-                    if b_in is None:
-                        continue
-
                     count = batch_in.size
-                    if count == 0:
+                    if b_in is None or count == 0:
                         continue
 
                     if batch_out.size == 0:
@@ -895,40 +892,67 @@ class MultiRuleKeyValueParser(BaseParser):
                     local_space.rx_timestamps_mv = memoryview(b_in.rx_timestamps)
                     local_space.levels_mv = memoryview(b_in.levels)
 
-                    for i in _range(count):
-                        device_id = devices_mv[i]
-                        if device_id == device_identity_id or device_id == system_identity_id:
-                            continue  # The for loop automatically advances 'i' safely!
+                    try:
+                        for i in _range(count):
+                            device_id = devices_mv[i]
+                            if device_id == device_identity_id or device_id == system_identity_id:
+                                continue
 
-                        module_id = modules_mv[i]
-                        if module_id < rules_flat_list_len:
-                            rules = rules_flat_list[module_id]
+                            module_id = modules_mv[i]
+                            if module_id < rules_flat_list_len:
+                                rules = rules_flat_list[module_id]
 
-                            if rules is not None:
-                                if batch_out.size >= batch_out_capacity or batch_out.msg_cursor >= batch_out_buf_limit:
-                                    flush()
+                                if rules is not None:
+                                    # Flush check before evaluating rules
+                                    if (
+                                        batch_out.size >= batch_out_capacity
+                                        or batch_out.msg_cursor >= batch_out_buf_limit
+                                    ):
+                                        flush()
 
-                                num_rules = _len(rules)
-                                if num_rules == 1:
-                                    rules[0](i, module_id, batch_out)
-                                elif num_rules == 2:
-                                    # Hard-coded execution vectoring
-                                    rules[0](i, module_id, batch_out)
-                                    rules[1](i, module_id, batch_out)
-                                elif num_rules == 3:
-                                    rules[0](i, module_id, batch_out)
-                                    rules[1](i, module_id, batch_out)
-                                    rules[2](i, module_id, batch_out)
-                                else:
-                                    # Zero-allocation manual stack-counter for multi-rule edge-cases
-                                    r_idx = 0
-                                    while r_idx < num_rules:
-                                        rules[r_idx](i, module_id, batch_out)
-                                        r_idx += 1
-                        i += 1
+                                    num_rules = _len(rules)
+                                    if num_rules == 1:
+                                        rules[0](i, module_id, batch_out)
+                                    elif num_rules == 2:
+                                        # Hard-coded execution vectoring
+                                        rules[0](i, module_id, batch_out)
+                                        rules[1](i, module_id, batch_out)
+                                    elif num_rules == 3:
+                                        rules[0](i, module_id, batch_out)
+                                        rules[1](i, module_id, batch_out)
+                                        rules[2](i, module_id, batch_out)
+                                    else:
+                                        # Zero-allocation manual stack-counter for multi-rule edge-cases
+                                        r_idx = 0
+                                        while r_idx < num_rules:
+                                            rules[r_idx](i, module_id, batch_out)
+                                            r_idx += 1
+
+                            # REMOVED: i += 1 (Iterator handles this natively)
+
+                    finally:
+                        # 1. Release locks on C-contiguous memory explicitly
+                        modules_mv.release()
+                        devices_mv.release()
+                        local_space.buffer_mv.release()
+                        local_space.offsets_mv.release()
+                        local_space.lengths_mv.release()
+                        local_space.timestamps_mv.release()
+                        local_space.rx_timestamps_mv.release()
+                        local_space.levels_mv.release()
+
+                        # 2. Prevent dangling references in the shared local_space
+                        local_space.buffer_mv = None
+                        local_space.offsets_mv = None
+                        local_space.lengths_mv = None
+                        local_space.timestamps_mv = None
+                        local_space.rx_timestamps_mv = None
+                        local_space.levels_mv = None
+
                 except Exception as e:
                     logger.exception("Poison batch encountered, skipping remainder.", e)
 
+            # Final flush check based on max timeout
             if batch_out.size > 0 and (_time_ns() - batch_out_time >= max_timeout_ns):
                 flush()
 

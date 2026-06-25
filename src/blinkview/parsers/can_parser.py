@@ -148,102 +148,123 @@ class CantoolsParser(BaseParser):
                 batch_out = None
 
             while not stop_is_set():
-                batch_in = get(timeout=max_timeout)
+                try:
+                    batch_in = get(timeout=max_timeout)
 
-                if not batch_in:
-                    flush()
-                    continue
-
-                with batch_in:
-                    speed_in.batch(batch_in)
-
-                    # print(f"[cantools] batch_in={batch_in}")
-                    # for ts, msg, _, _, _, _, addr, flags, _ in batch_in:
-                    #     print(f"  ts={ts} addr={addr:04X} flags={flags:02X} data='{msg.tobytes().hex()}'")
-
-                    # Estimate burst size (assume decoded string takes ~80-120 bytes max)
-                    estimated_out_bytes = batch_in.size * 128
-                    tuner_out.ensure_burst_capacity(estimated_out_bytes)
-
-                    if batch_out and batch_out.buffer_capacity() < tuner_out.estimated_buffer_bytes:
+                    if not batch_in:
                         flush()
+                        continue
 
-                    if batch_out is None:
-                        batch_out = batch_acquire()
+                    with batch_in:
+                        speed_in.batch(batch_in)
 
-                    # 1. Localize input array references
-                    b_in = batch_in.bundle
-                    size = batch_in.size
-                    timestamps = memoryview(b_in.timestamps)
-                    offsets = memoryview(b_in.offsets)
-                    lengths = memoryview(b_in.lengths)
-                    buf = memoryview(b_in.buffer)
+                        # print(f"[cantools] batch_in={batch_in}")
+                        # for ts, msg, _, _, _, _, addr, flags, _ in batch_in:
+                        #     print(f"  ts={ts} addr={addr:04X} flags={flags:02X} data='{msg.tobytes().hex()}'")
 
-                    # Extension column coming from CANReader
-                    can_ids = memoryview(b_in.ext_u32_1)
+                        # Estimate burst size (assume decoded string takes ~80-120 bytes max)
+                        estimated_out_bytes = batch_in.size * 128
+                        tuner_out.ensure_burst_capacity(estimated_out_bytes)
 
-                    # 2. Extract, Decode, and Insert Loop
-                    for i in range(size):
-                        can_id = can_ids[i]
-                        off = offsets[i]
-                        data = buf[off : off + lengths[i]].tobytes()
-                        ts = timestamps[i]
+                        if batch_out and batch_out.buffer_capacity() < tuner_out.estimated_buffer_bytes:
+                            flush()
 
-                        msg_info: Optional[DBCMsgInfo] = info_map_get(can_id)
+                        if batch_out is None:
+                            batch_out = batch_acquire()
 
-                        if msg_info is not None:
-                            try:
-                                decoded = msg_info.decode(data)
-                                local_sig_map = msg_info.signal_map
+                        # 1. Localize input array references
+                        b_in = batch_in.bundle
+                        size = batch_in.size
+                        timestamps = memoryview(b_in.timestamps)
+                        offsets = memoryview(b_in.offsets)
+                        lengths = memoryview(b_in.lengths)
+                        buf = memoryview(b_in.buffer)
 
-                                for k, v in decoded.items():
-                                    mod_id = local_sig_map[k]
-                                    out_bytes = str(v).encode()
+                        # Extension column coming from CANReader
+                        can_ids = memoryview(b_in.ext_u32_1)
 
-                                    if not batch_out.insert(
-                                        ts, ts, out_bytes, log_level_info_int, mod_id, device_id_int
-                                    ):
-                                        flush()
-                                        batch_out = batch_acquire()
-                                        batch_out.insert(ts, ts, out_bytes, log_level_info_int, mod_id, device_id_int)
+                        try:
+                            # 2. Extract, Decode, and Insert Loop
+                            for i in range(size):
+                                can_id = can_ids[i]
+                                off = offsets[i]
+                                data = buf[off : off + lengths[i]].tobytes()
+                                ts = timestamps[i]
 
-                            except Exception as e:
-                                out_bytes = (
-                                    f"[{can_id:04X}] {msg_info.name} | {data.hex()} | Decoding error: {e}".encode()
-                                )
+                                msg_info: Optional[DBCMsgInfo] = info_map_get(can_id)
 
-                                if not batch_out.insert(
-                                    ts, ts, out_bytes, log_level_error_int, module_unknown_id_int, device_id_int
-                                ):
-                                    flush()
-                                    batch_out = batch_acquire()
-                                    batch_out.insert(
-                                        ts, ts, out_bytes, log_level_error_int, module_unknown_id_int, device_id_int
-                                    )
-                                self.logger.exception("Failure", e)
+                                if msg_info is not None:
+                                    try:
+                                        decoded = msg_info.decode(data)
+                                        local_sig_map = msg_info.signal_map
 
-                        else:
-                            # --- Unmapped ID Handling ---
-                            if strict:
-                                raise ValueError(f"Unknown CAN ID: {can_id}")
+                                        for k, v in decoded.items():
+                                            mod_id = local_sig_map[k]
+                                            out_bytes = str(v).encode()
 
-                            if not ignore_unknown:
-                                out_bytes = f"[{can_id:04X}] UNMAPPED | {data.hex()}".encode()
-                                if not batch_out.insert(
-                                    ts, ts, out_bytes, log_level_info_int, module_unknown_id_int, device_id_int
-                                ):
-                                    flush()
-                                    batch_out = batch_acquire()
-                                    batch_out.insert(
-                                        ts, ts, out_bytes, log_level_info_int, module_unknown_id_int, device_id_int
-                                    )
+                                            if not batch_out.insert(
+                                                ts, ts, out_bytes, log_level_info_int, mod_id, device_id_int
+                                            ):
+                                                flush()
+                                                batch_out = batch_acquire()
+                                                batch_out.insert(
+                                                    ts, ts, out_bytes, log_level_info_int, mod_id, device_id_int
+                                                )
 
-                # --- Check for Flush Thresholds ---
-                if batch_out and (
-                    batch_out.size >= batch_out.capacity or batch_out.msg_cursor >= (batch_out.buffer_capacity() * 0.9)
-                ):
-                    flush()
+                                    except Exception as e:
+                                        out_bytes = f"[{can_id:04X}] {msg_info.name} | {data.hex()} | Decoding error: {e}".encode()
 
+                                        if not batch_out.insert(
+                                            ts, ts, out_bytes, log_level_error_int, module_unknown_id_int, device_id_int
+                                        ):
+                                            flush()
+                                            batch_out = batch_acquire()
+                                            batch_out.insert(
+                                                ts,
+                                                ts,
+                                                out_bytes,
+                                                log_level_error_int,
+                                                module_unknown_id_int,
+                                                device_id_int,
+                                            )
+                                        self.logger.exception("Failure", e)
+
+                                else:
+                                    # --- Unmapped ID Handling ---
+                                    if strict:
+                                        raise ValueError(f"Unknown CAN ID: {can_id}")
+
+                                    if not ignore_unknown:
+                                        out_bytes = f"[{can_id:04X}] UNMAPPED | {data.hex()}".encode()
+                                        if not batch_out.insert(
+                                            ts, ts, out_bytes, log_level_info_int, module_unknown_id_int, device_id_int
+                                        ):
+                                            flush()
+                                            batch_out = batch_acquire()
+                                            batch_out.insert(
+                                                ts,
+                                                ts,
+                                                out_bytes,
+                                                log_level_info_int,
+                                                module_unknown_id_int,
+                                                device_id_int,
+                                            )
+                        finally:
+                            timestamps.release()
+                            offsets.release()
+                            lengths.release()
+                            buf.release()
+                            can_ids.release()
+
+                    # --- Check for Flush Thresholds ---
+                    if batch_out and (
+                        batch_out.size >= batch_out.capacity
+                        or batch_out.msg_cursor >= (batch_out.buffer_capacity() * 0.9)
+                    ):
+                        flush()
+                except Exception as e:
+                    # Catch batch-level errors, log them, and KEEP GOING
+                    self.logger.exception("Batch processing error (thread continuing)", e)
             # Final flush on exit
             flush()
 

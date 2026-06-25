@@ -1,20 +1,27 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
-#
-# Copyright (c) 2026 Roland Uuesoo
 
+from dataclasses import dataclass
+from time import perf_counter
 from typing import Optional
 
-from qtpy.QtCore import QEvent, QMimeData, QSize, QSortFilterProxyModel, Qt, QTimer
+from qtpy.QtCore import (
+    QAbstractTableModel,
+    QEvent,
+    QMimeData,
+    QModelIndex,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+)
 from qtpy.QtGui import QAction, QColor, QDrag, QFont, QPainter, QPixmap
 from qtpy.QtWidgets import (
     QApplication,
-    QHBoxLayout,
     QHeaderView,
     QLineEdit,
     QMenu,
-    QPushButton,
     QTableView,
     QToolBar,
     QVBoxLayout,
@@ -25,70 +32,109 @@ from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.in_development import set_as_in_development
 from blinkview.ui.widgets.action_button_delegate import TelemetryCol, TelemetryDelegate
-from blinkview.ui.widgets.config.style_config import StyleConfig
-from blinkview.ui.widgets.telemetry_model import TelemetryModel, TelemetryRowState
 
 
-class MultiColumnFilterProxyModel(QSortFilterProxyModel):
-    def __init__(self, parent=None):
+@dataclass(slots=True)
+class TelemetryRowState:
+    module: ModuleIdentity
+    last_painted_seq: int = 0
+    last_painted_msg: str = ""
+    last_painted_level: int = 0
+    last_change_time: float = 0.0
+    last_arrival_time: float = 0.0
+
+
+class TelemetryTableModel(QAbstractTableModel):
+    """
+    A per-table model that handles its own filtering and sorting directly,
+    pulling high-frequency updates straight from the module_value_tracker.
+    """
+
+    layout_changed = Signal()
+
+    def __init__(self, gui_context, parent=None):
         super().__init__(parent)
-        self._positive_groups = []
-        self._global_negatives = []
-        # Store the allowed device name/id (None means allow all)
+        self.context: GUIContext = gui_context
+
+        # Global cache to preserve state (like flash timings) across filter changes
+        self._all_states: dict[int, TelemetryRowState] = {}
+        # The actual rows presented to the View
+        self._visible_states: list[TelemetryRowState] = []
+
+        # Filter settings
+        self._positive_groups: list[list[str]] = []
+        self._global_negatives: list[str] = []
         self.allowed_device: Optional[DeviceIdentity] = None
         self.allowed_module: Optional[ModuleIdentity] = None
         self.allowed_module_children = False
 
-    def setFilterText(self, text):
-        """Space = OR, + = AND, - = Global NOT"""
+        self.hide_empty = False
+
+        # Sort settings
+        self.sort_column = TelemetryCol.DEVICE
+        self.sort_order = Qt.AscendingOrder
+
+        self.prev_apply = perf_counter()
+
+    def set_hide_empty(self, hide: bool):
+        self.hide_empty = hide
+        self.refresh_layout()
+
+    def set_filter_text(self, text: str):
         clean_text = text.lower().strip()
         if not clean_text:
             self._positive_groups = []
             self._global_negatives = []
-            self.invalidateFilter()
-            return
+        else:
+            chunks = clean_text.split()
+            self._global_negatives = [c[1:] for c in chunks if c.startswith("-") and len(c) > 1]
+            pos_chunks = [c for c in chunks if not c.startswith("-")]
+            self._positive_groups = [c.split("+") for c in pos_chunks if c]
+        self.refresh_layout()
 
-        chunks = clean_text.split()
-        self._global_negatives = [c[1:] for c in chunks if c.startswith("-") and len(c) > 1]
-        pos_chunks = [c for c in chunks if not c.startswith("-")]
-        self._positive_groups = [c.split("+") for c in pos_chunks if c]
-
-        self.invalidateFilter()
-
-    def setAllowedDevice(self, device: Optional[DeviceIdentity]):
-        """Sets a strict device filter. Only rows from this device will be shown."""
+    def set_allowed_device(self, device: Optional[DeviceIdentity]):
         if self.allowed_device != device:
             self.allowed_device = device
-            # Re-run the filter over all rows
-            self.invalidateFilter()
+            self.refresh_layout()
 
-    def setAllowedModule(self, module: Optional[ModuleIdentity]):
+    def set_allowed_module(self, module: Optional[ModuleIdentity]):
         self.allowed_module = module
-        self.invalidateFilter()
+        self.refresh_layout()
 
-    def setAllowedModuleChildren(self, allowed: bool):
+    def set_allowed_module_children(self, allowed: bool):
         self.allowed_module_children = allowed
-        self.invalidateFilter()
+        self.refresh_layout()
 
-    def filterAcceptsRow(self, source_row, source_parent):
-        try:
-            # --- DIRECT MODEL ACCESS (High Performance) ---
-            model: "TelemetryModel" = self.sourceModel()
-            state: TelemetryRowState = model._row_states[source_row]
+    def sort(self, column: int, order: Qt.SortOrder = Qt.AscendingOrder):
+        self.sort_column = column
+        self.sort_order = order
+        self.refresh_layout()
 
+    def _sync_registry(self, current_modules):
+        """Ensures all backend modules have a UI state object."""
+        for m in current_modules:
+            if m.id not in self._all_states:
+                self._all_states[m.id] = TelemetryRowState(module=m)
+        self.refresh_layout()
+
+    def refresh_layout(self):
+        """Applies filters and sorts the visible cache. Emits a full reset."""
+        self.beginResetModel()
+
+        filtered = []
+        for state in self._all_states.values():
             module = state.module
 
-            # Strict Device Filter Check
-            # If a device is specified, reject anything that doesn't match immediately
+            # 1. Device Filter
             if self.allowed_device is not None and module.device != self.allowed_device:
-                return False
+                continue
 
+            # 2. Module/Hierarchy Filter
             if self.allowed_module is not None:
                 if module.device != self.allowed_module.device:
-                    return False
+                    continue
 
                 if self.allowed_module_children:
-                    # Traverse parents manually until we hit target_mod or the root (None)
                     curr = module
                     found = False
                     while curr is not None:
@@ -96,11 +142,9 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
                             found = True
                             break
                         curr = curr.parent
-
                     if not found:
-                        return False
+                        continue
                 else:
-                    # allow parent modules siblings only
                     parent = self.allowed_module.parent
                     if parent is not None:
                         curr = module
@@ -110,35 +154,157 @@ class MultiColumnFilterProxyModel(QSortFilterProxyModel):
                                 found = True
                                 break
                             curr = curr.parent
-
                         if not found:
-                            return False
+                            continue
 
-            # Empty Search Filter = Show everything (that passed the device check)
-            if not self._positive_groups and not self._global_negatives:
-                return True
+            # 3. Text Filter
+            if self._positive_groups or self._global_negatives:
+                row_content = f"{module.name} {module.device.name}".lower()
 
-            # Pre-compute the search string.
-            # Accessing state.module directly avoids QModelIndex and QVariant overhead.
-            row_content = f"{module.name} {module.device.name}".lower()
+                if self._global_negatives and any(neg in row_content for neg in self._global_negatives):
+                    continue
 
-            # Check Global Negatives (NOT)
-            if self._global_negatives:
-                if any(neg in row_content for neg in self._global_negatives):
-                    return False
+                if self._positive_groups:
+                    passed_pos = False
+                    for group in self._positive_groups:
+                        if all(term in row_content for term in group if term):
+                            passed_pos = True
+                            break
+                    if not passed_pos:
+                        continue
 
-            # Check Positive Groups (OR / AND)
-            if not self._positive_groups:
-                return True
+            if self.hide_empty and state.last_painted_seq == 0:
+                continue
 
-            for group in self._positive_groups:
-                if all(term in row_content for term in group if term):
-                    return True
+            filtered.append(state)
 
-            return False
-        except Exception as e:
-            print(f"CRASH AVERTED IN PROXY: {e}")
-            return True  # Show the row to be safe if it fails
+        # 4. Sorting
+        reverse = self.sort_order == Qt.DescendingOrder
+        if self.sort_column == TelemetryCol.DEVICE:
+            filtered.sort(key=lambda s: (s.module.device.name, s.module.name), reverse=reverse)
+        elif self.sort_column == TelemetryCol.NAME:
+            filtered.sort(key=lambda s: s.module.name, reverse=reverse)
+        # Value and Actions columns are generally not sorted in real-time displays
+
+        self._visible_states = filtered
+
+        self.endResetModel()
+        self.layout_changed.emit()
+
+    def apply_updates(self):
+        """High-frequency pull from the module_value_tracker."""
+        now = perf_counter()
+        if now - self.prev_apply < 0.1:  # Target ~10-30Hz
+            return
+        self.prev_apply = now
+
+        current_modules = self.context.id_registry.module_list
+        if len(current_modules) != len(self._all_states):
+            self._sync_registry(current_modules)
+
+        tracker = self.context.registry.module_value_tracker
+        theme = self.context.theme
+        fade_dur = theme.fade_duration
+        stale_limit = theme.stale_threshold
+        data_changed_emit = self.dataChanged.emit
+        buffer = 0.02
+
+        # 1. Grab lock-free snapshot from backend
+        with tracker.get_snapshot() as snap:
+            sequences = snap._seq_mv
+            levels = snap._lvl_mv
+            try:
+                # Intercept hidden empty rows receiving their first payloads
+                if getattr(self, "hide_empty", False) and len(self._visible_states) < len(self._all_states):
+                    needs_refresh = False
+                    for state in self._all_states.values():
+                        if state.last_painted_seq == 0:
+                            mod_id = state.module.id
+                            if sequences[mod_id] > 0:
+                                # Pre-populate so it passes the empty filter during refresh
+                                state.last_painted_seq = sequences[mod_id]
+                                state.last_arrival_time = now
+                                state.last_change_time = now
+                                state.last_painted_msg = snap.get_message(mod_id)
+                                state.last_painted_level = levels[mod_id]
+                                needs_refresh = True
+                    if needs_refresh:
+                        self.refresh_layout()
+                        # View fully updates during refresh layout; we can return for this tick
+                        return
+
+                # Check for visible states AFTER checking for new arrivals
+                if not self._visible_states:
+                    return
+
+                for row_idx, state in enumerate(self._visible_states):
+                    mod_id = state.module.id
+                    current_seq = sequences[mod_id]
+
+                    if current_seq == 0:
+                        continue
+
+                    # --- ARRIVAL CHECK ---
+                    if current_seq > state.last_painted_seq:
+                        state.last_arrival_time = now
+                        msg = snap.get_message(mod_id)
+                        level = levels[mod_id]
+
+                        if msg != state.last_painted_msg:
+                            state.last_change_time = now
+                            state.last_painted_msg = msg
+
+                        state.last_painted_seq = current_seq
+                        state.last_painted_level = level
+
+                        idx = self.index(row_idx, TelemetryCol.VALUE)
+                        data_changed_emit(idx, idx)
+                        continue
+
+                    # --- ANIMATION/STALE CHECK ---
+                    elapsed_flash = now - state.last_change_time
+                    elapsed_stale = now - state.last_arrival_time
+
+                    if elapsed_flash <= (fade_dur + buffer) or (stale_limit <= elapsed_stale <= stale_limit + buffer):
+                        idx = self.index(row_idx, TelemetryCol.VALUE)
+                        data_changed_emit(idx, idx)
+            finally:
+                sequences = levels = None
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self._visible_states)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 3
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+
+        state = self._visible_states[index.row()]
+
+        if role == Qt.DisplayRole:
+            col = index.column()
+            if col == TelemetryCol.DEVICE:
+                return state.module.device.name
+            elif col == TelemetryCol.NAME:
+                return str(state.module.name)
+            elif col == TelemetryCol.VALUE:
+                return state.last_painted_msg if state.last_painted_seq > 0 else "---"
+
+        return None
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+            if section == TelemetryCol.NAME:
+                return "Module"
+            elif section == TelemetryCol.VALUE:
+                return "Value"
+            elif section == TelemetryCol.DEVICE:
+                return "Device"
+            elif section == TelemetryCol.ACTIONS:
+                return "Actions"
+        return super().headerData(section, orientation, role)
 
 
 class TelemetryTable(QWidget):
@@ -148,7 +314,6 @@ class TelemetryTable(QWidget):
 
         self.tab_name = ""
 
-        # filter_pattern = None
         self.show_device_column = True
         self.filtered_device: Optional[DeviceIdentity] = None
         self.filtered_module: Optional[ModuleIdentity] = None
@@ -157,54 +322,51 @@ class TelemetryTable(QWidget):
         self.sort_column = TelemetryCol.DEVICE
         self.sort_order = 0
 
+        self.hide_empty = True
+
         self._set_defaults()
 
         self.drag_start_pos = None
-
         self.hovered_row = -1
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(4)  # Small gap between toolbar and table
+        self.layout.setSpacing(4)
 
         # --- CREATE LOCAL TOOLBAR ---
         self.toolbar = QToolBar()
         self.toolbar.setIconSize(QSize(16, 16))
         self.toolbar.setMovable(False)
-        # self.toolbar.setStyleSheet("QToolBar { border: none; background: transparent; }")
 
-        # Add Search Box to Toolbar
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Filter (Space=OR, +=AND, -=NOT)...")
-        # self.search_box.setFixedWidth(200)
         self.search_box.setClearButtonEnabled(True)
         self.search_box.textChanged.connect(self._on_search_changed)
-
         self.toolbar.addWidget(self.search_box)
 
-        # Add Module Toggle Action
         self.action_toggle_module = QAction("Device", self)
         self.action_toggle_module.setCheckable(True)
         self.action_toggle_module.setChecked(True)
         self.action_toggle_module.triggered.connect(self._toggle_device_column)
         self.toolbar.addAction(self.action_toggle_module)
 
-        # Add Settings Action
+        self.action_hide_empty = QAction("Hide Empty", self)
+        self.action_hide_empty.setCheckable(True)
+        self.action_hide_empty.setChecked(self.hide_empty)
+        self.action_hide_empty.triggered.connect(self._toggle_hide_empty)
+        self.toolbar.addAction(self.action_hide_empty)
+
         self.action_settings = QAction("⚙ Options", self)
         self.toolbar.addAction(self.action_settings)
 
         self.layout.addWidget(self.toolbar)
 
-        # --- SETUP PROXY MODEL ---
-        self.proxy_model = MultiColumnFilterProxyModel(self)
-        self.proxy_model.setSourceModel(self.gui_context.telemetry_model)
-
-        self.proxy_model.setDynamicSortFilter(False)
+        # --- SETUP LOCAL MODEL ---
+        self.model = TelemetryTableModel(self.gui_context, self)
 
         # --- SETUP THE VIEW ---
         self.view = QTableView()
-        self.view.setModel(self.proxy_model)
-
+        self.view.setModel(self.model)
         self.view.setStyleSheet("""
             QTableView::item {
                 padding-top: 0px;
@@ -214,22 +376,13 @@ class TelemetryTable(QWidget):
             }
         """)
 
-        # --- FORCE BOLD FONT WITH FALLBACKS ---
         font = self.view.font()
-        # Set the family string (Qt handles comma-separated fallbacks)
         font.setFamily("Segoe UI, Roboto, sans-serif")
-
-        # Force Boldness
         font.setBold(True)
-        # Using Weight 700 (Bold) for better rendering on High-DPI
         font.setWeight(QFont.Weight.Bold)
-
-        # Apply to the TableView
         self.view.setFont(font)
 
-        # Also apply to the Horizontal Header specifically
-
-        # ENABLE SORTING
+        # Sorting is now handled directly by our model hook
         self.view.setSortingEnabled(True)
 
         self.view.clicked.connect(
@@ -237,49 +390,55 @@ class TelemetryTable(QWidget):
         )
         self.view.doubleClicked.connect(self._on_double_clicked)
 
-        # Performance & Appearance
         v_header = self.view.verticalHeader()
         v_header.hide()
         v_header.setSectionResizeMode(QHeaderView.Fixed)
         v_header.setDefaultSectionSize(10)
 
         h_header = self.view.horizontalHeader()
-
         h_header.setFont(font)
         h_header.sortIndicatorChanged.connect(self._on_sort_indicator_changed)
         h_header.setSectionResizeMode(TelemetryCol.VALUE, QHeaderView.Stretch)
         h_header.setSectionResizeMode(TelemetryCol.ACTIONS, QHeaderView.Fixed)
+
         self.view.setColumnWidth(TelemetryCol.ACTIONS, 100)
         self.view.hideColumn(TelemetryCol.ACTIONS)
 
         self.view.setSelectionMode(QTableView.NoSelection)
         self.view.setShowGrid(False)
 
-        # Hover Tracking
         self.view.setMouseTracking(True)
         self.view.entered.connect(self._on_mouse_entered)
         self.view.viewport().installEventFilter(self)
 
-        # Enable custom context menus
         self.view.setContextMenuPolicy(Qt.NoContextMenu)
         self.view.customContextMenuRequested.connect(self._show_context_menu)
 
-        # Delegate
         self.view.setItemDelegateForColumn(TelemetryCol.VALUE, TelemetryDelegate(self.gui_context.theme, self))
 
-        # Add table below the toolbar
         self.layout.addWidget(self.view)
 
-        self.gui_context.telemetry_model.layout_changed.connect(self.auto_size_columns_delayed)
+        self.model.layout_changed.connect(self.auto_size_columns_delayed)
 
         self.resize_timer = QTimer(self)
         self.resize_timer.setSingleShot(True)
         self.resize_timer.timeout.connect(self.auto_size_columns)
 
+        # Hook into global updates
+        self.gui_context.add_updatable(self)
+
         if state:
             self.restore(state)
         else:
             self.auto_size_columns_delayed()
+
+    def closeEvent(self, event):
+        self.gui_context.remove_updatable(self)
+        super().closeEvent(event)
+
+    def apply_updates(self):
+        """Pass update execution to our isolated table model."""
+        self.model.apply_updates()
 
     def _set_defaults(self):
         self.tab_name = self.__class__.__name__
@@ -290,35 +449,37 @@ class TelemetryTable(QWidget):
         self.show_filter_sidebar = None
         self.sort_order = 0
         self.sort_column = TelemetryCol.DEVICE
+        self.hide_empty = True
 
     def restore(self, state: dict):
-        print(f"[TelemetryTable] {self.tab_name} Restoring state from {state}")
         self.tab_name = state.get("tab_name", self.tab_name)
 
         self.filtered_device = self.gui_context.id_registry.resolve_device(
             state.get("filtered_device", self.filtered_device)
         )
-        self.proxy_model.setAllowedDevice(self.filtered_device)
+        self.model.set_allowed_device(self.filtered_device)
 
         self.filtered_module = self.gui_context.id_registry.resolve_module(
             state.get("filtered_module", self.filtered_module)
         )
-        self.proxy_model.setAllowedModule(self.filtered_module)
+        self.model.set_allowed_module(self.filtered_module)
 
         if "show_device_column" in state:
-            # Respect the user's saved configuration explicitly
             self.show_device_column = state["show_device_column"]
         else:
-            # Fall back to smart defaults only if no explicit state exists
             if self.filtered_module is not None:
                 self.show_device_column = False
             elif self.filtered_device is not None:
-                self.show_device_column = False  # Cleaner UI when filtering by a single device
+                self.show_device_column = False
             else:
                 self.show_device_column = True
 
         self.filtered_module_children = state.get("filtered_module_children", self.filtered_module_children)
-        self.proxy_model.setAllowedModuleChildren(self.filtered_module_children)
+        self.model.set_allowed_module_children(self.filtered_module_children)
+
+        self.hide_empty = state.get("hide_empty", self.hide_empty)
+        self.action_hide_empty.setChecked(self.hide_empty)
+        self.model.set_hide_empty(self.hide_empty)
 
         self.action_toggle_module.setChecked(self.show_device_column)
         self._toggle_device_column(self.show_device_column)
@@ -326,18 +487,13 @@ class TelemetryTable(QWidget):
         filter_pattern = state.get("filter_pattern")
         if filter_pattern:
             self.search_box.setText(filter_pattern)
-            self.proxy_model.setFilterText(filter_pattern)  # Initialize the filter
+            self.model.set_filter_text(filter_pattern)
 
         self.sort_column = state.get("sort_column", self.sort_column)
-
-        # Get the integer (default to 0 for Ascending)
         self.sort_order = state.get("sort_order", self.sort_order)
-
-        # Convert integer back to the Enum type
         order = Qt.SortOrder(self.sort_order)
 
         self.view.sortByColumn(self.sort_column, order)
-
         self.auto_size_columns_delayed()
 
     def get_state(self) -> dict:
@@ -349,76 +505,46 @@ class TelemetryTable(QWidget):
             "filtered_module_children": self.filtered_module_children,
             "sort_column": self.sort_column,
             "sort_order": self.sort_order,
+            "hide_empty": self.hide_empty,
         }
 
     def auto_size_columns_delayed(self):
         self.resize_timer.start(50)
 
     def auto_size_columns(self):
-        """
-        Resizes the Name/Module column to fit content.
-        Note: We call this on self.view because self is a QWidget.
-        """
-        # Ensure the view exists and has a header
         header = self.view.horizontalHeader()
 
-        # Resize specifically the Name column (Column 0)
-
         self.view.resizeColumnToContents(TelemetryCol.DEVICE)
-
         if header.sectionSize(TelemetryCol.DEVICE) < 70:
             header.resizeSection(TelemetryCol.DEVICE, 70)
-
         if header.sectionSize(TelemetryCol.DEVICE) > 200:
             header.resizeSection(TelemetryCol.DEVICE, 200)
 
         self.view.resizeColumnToContents(TelemetryCol.NAME)
-
-        # Enforce a reasonable minimum so the UI stays grounded
         if header.sectionSize(TelemetryCol.NAME) < 100:
             header.resizeSection(TelemetryCol.NAME, 100)
-
-        # Optional: Limit the maximum width so a giant string doesn't
-        # push the Value column off-screen
         if header.sectionSize(TelemetryCol.NAME) > 400:
             header.resizeSection(TelemetryCol.NAME, 400)
 
     def _toggle_device_column(self, visible: bool):
-        """Hides or shows the module name column based on button state."""
-        # Use our constant for the Name/Module columnmsg
         self.show_device_column = visible
-
-        column_idx = TelemetryCol.DEVICE
-
-        self.view.setColumnHidden(column_idx, not visible)
-
-        # If we just enabled it, make sure it has a reasonable default width
+        self.view.setColumnHidden(TelemetryCol.DEVICE, not visible)
         if visible:
-            # h_header = self.view.horizontalHeader()
-            # # If it's not set to stretch, give it a fixed starting width
-            # if h_header.sectionResizeMode(column_idx) != QHeaderView.Stretch:
-            #     self.view.setColumnWidth(column_idx, 180)
-
             self.auto_size_columns()
 
     def _on_search_changed(self, text):
-        """Pass the text to our custom proxy model."""
-        self.proxy_model.setFilterText(text)
-        self.gui_context.telemetry_model.refresh_active_cache()
+        self.model.set_filter_text(text)
         self.auto_size_columns_delayed()
 
     def _on_mouse_entered(self, index):
-        """Update which row shows buttons as the mouse moves."""
         if not index.isValid():
             return
 
-        # Check if we are hovering over the NAME column
         if index.column() == TelemetryCol.NAME:
             self.view.setCursor(Qt.PointingHandCursor)
         else:
             self.view.unsetCursor()
 
-        # Use the new helper to update and redraw
         self._set_hovered_row(index.row())
 
     def eventFilter(self, source, event):
@@ -435,19 +561,15 @@ class TelemetryTable(QWidget):
                         return True
 
             case QEvent.MouseMove:
-                # Ensure left button is held and we have a valid start position
                 if not (event.buttons() & Qt.LeftButton) or self.drag_start_pos is None:
                     return False
-
-                # Check if moved beyond the system drag threshold (usually ~4-10px)
                 if (event.pos() - self.drag_start_pos).manhattanLength() < QApplication.startDragDistance():
                     return False
 
-                # Resolve the module under the start position
                 index = self.view.indexAt(self.drag_start_pos)
                 if index.isValid() and index.column() == TelemetryCol.NAME:
                     self._perform_drag(index)
-                    self.drag_start_pos = None  # Reset to prevent double-triggering
+                    self.drag_start_pos = None
                     return True
 
             case QEvent.Leave:
@@ -455,42 +577,12 @@ class TelemetryTable(QWidget):
 
         return super().eventFilter(source, event)
 
-    def get_active_indices(self) -> list:
-        """Called by the Model during refresh_active_cache."""
-        if self.isHidden():
-            return []
-
-        indices = []
-        for proxy_row in range(self.proxy_model.rowCount()):
-            source_idx = self.proxy_model.mapToSource(self.proxy_model.index(proxy_row, 0))
-            if source_idx.isValid():
-                indices.append(source_idx.row())
-        return indices
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self.gui_context.telemetry_model.register_view(self)
-        self.gui_context.telemetry_model.refresh_active_cache()
-
-    def hideEvent(self, event):
-        self.gui_context.telemetry_model.unregister_view(self)
-        super().hideEvent(event)
-
-    def closeEvent(self, event):
-        self.gui_context.telemetry_model.unregister_view(self)
-        super().closeEvent(event)
-
-    def _get_module_at_index(self, proxy_index):
-        """Universal helper to extract the module object from a proxy index."""
-        if not proxy_index.isValid() or proxy_index.column() != TelemetryCol.NAME:
+    def _get_module_at_index(self, index):
+        if not index.isValid() or index.column() != TelemetryCol.NAME:
             return None
-
-        source_index = self.proxy_model.mapToSource(proxy_index)
-        state = self.gui_context.telemetry_model._row_states[source_index.row()]
-        return state.module
+        return self.model._visible_states[index.row()].module
 
     def open_log_viewer(self, module, include_children=False):
-        """The central logic for opening logs."""
         if not module:
             return
 
@@ -502,28 +594,23 @@ class TelemetryTable(QWidget):
             "LogViewerWidget",
             title,
             as_window=True,
-            params={"filtered_module": module, "include_children": include_children},  # Pass the flag to your widget
+            params={"filtered_module": module, "include_children": include_children},
         )
 
     def sort_by_device(self):
         header = self.view.horizontalHeader()
-        # If already sorting by Device, toggle the order
         current_order = header.sortIndicatorOrder()
         new_order = Qt.DescendingOrder if current_order == Qt.AscendingOrder else Qt.AscendingOrder
-
         self.view.sortByColumn(TelemetryCol.DEVICE, new_order)
 
     def sort_by_module(self):
-        # Sorts by the Module Name (TelemetryCol.NAME)
         self.view.sortByColumn(TelemetryCol.NAME, Qt.AscendingOrder)
 
     def _on_sort_indicator_changed(self, column, order):
-        """Saves the current sort state whenever the user clicks a header."""
         self.sort_column = column
         self.sort_order = order.value
 
     def _trigger_module_action(self, action_id, module):
-        """The central brain for all module-based actions."""
         if not module:
             return
 
@@ -531,7 +618,6 @@ class TelemetryTable(QWidget):
 
         match action_id:
             case "view_logs" | "view_logs_children":
-                # Combine logic for both log views
                 with_children = action_id == "view_logs_children"
                 title = f"Logs: {module.name_with_device()}"
                 if with_children:
@@ -548,21 +634,15 @@ class TelemetryTable(QWidget):
                 QApplication.clipboard().setText(module.name)
 
             case "copy_value":
-                # Find the row in the proxy model for this module
-                for row in range(self.proxy_model.rowCount()):
-                    # Get the index for the VALUE column
-                    idx = self.proxy_model.index(row, TelemetryCol.VALUE)
-                    # Check if the NAME column matches our target module
-                    name_idx = self.proxy_model.index(row, TelemetryCol.NAME)
-
-                    if self._get_module_at_index(name_idx) == module:
+                for row, state in enumerate(self.model._visible_states):
+                    if state.module == module:
+                        idx = self.model.index(row, TelemetryCol.VALUE)
                         val = idx.data(Qt.DisplayRole)
                         if val and val != "---":
                             QApplication.clipboard().setText(str(val))
                         break
 
             case "view_graph" | "view_graph_with_children":
-                # Future home of your PyQtGraph widget
                 self.gui_context.create_widget(
                     "TelemetryPlotter",
                     f"Graph: {module.name}",
@@ -570,15 +650,9 @@ class TelemetryTable(QWidget):
                     params={"modules": [module] if action_id == "view_graph" else module.get_all_descendants()},
                 )
 
-            case _:
-                # Catch-all for undefined actions
-                print(f"Warning: No handler for action_id '{action_id}'")
-
-        # Add more elifs here as you build new features!
-
     def _show_context_menu(self, pos):
-        proxy_index = self.view.indexAt(pos)
-        module = self._get_module_at_index(proxy_index)  # Using the helper from the previous turn
+        index = self.view.indexAt(pos)
+        module = self._get_module_at_index(index)
         if not module:
             return
 
@@ -587,7 +661,6 @@ class TelemetryTable(QWidget):
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
 
-        # Title
         title = menu.addAction(f"Module: {module.name}")
         title.setEnabled(False)
         font = title.font()
@@ -595,21 +668,17 @@ class TelemetryTable(QWidget):
         title.setFont(font)
         menu.addSeparator()
 
-        # Define the Action Registry for this menu
-        # Format: (Label, Action_ID, is_wip, issue_no)
         actions = [
             ("View Logs", "view_logs", False, None),
             ("View Logs with Children", "view_logs_children", False, None),
-            (None, None, False, None),  # A None entry acts as a separator
+            (None, None, False, None),
             ("View Graph", "view_graph", False, None),
             ("View Graph with Children", "view_graph_with_children", False, None),
-            (None, None, False, None),  # A None entry acts as a separator
-            # ("Export Statistics", "export_stats", True, None),
+            (None, None, False, None),
             ("Copy Module Name", "copy_name", False, None),
             ("Copy Value", "copy_value", False, None),
         ]
 
-        # Build the menu dynamically
         for label, action_id, is_wip, issue_no in actions:
             if label is None:
                 menu.addSeparator()
@@ -618,34 +687,27 @@ class TelemetryTable(QWidget):
             action = QAction(label, self)
 
             if is_wip:
-                # Use your helper for WIP features
                 set_as_in_development(action, self, feature_name=label, issue_no=issue_no)
             else:
-                # Use the universal dispatcher for working features
                 action.triggered.connect(lambda checked=False, aid=action_id: self._trigger_module_action(aid, module))
 
             menu.addAction(action)
 
         menu.exec_(self.view.viewport().mapToGlobal(pos))
 
-    def _on_double_clicked(self, proxy_index):
-        if proxy_index.column() == TelemetryCol.VALUE:
-            val = proxy_index.data()
+    def _on_double_clicked(self, index):
+        if index.column() == TelemetryCol.VALUE:
+            val = index.data()
             QApplication.clipboard().setText(str(val))
-            # Optional: Show a temporary tooltip or status message "Value Copied!"
 
-    def _perform_drag(self, proxy_index):
-        module = self._get_module_at_index(proxy_index)
+    def _perform_drag(self, index):
+        module = self._get_module_at_index(index)
         if not module:
             return
 
-        # Package the data
         mime_data = QMimeData()
-        # This matches the 'mod_identifier' your Plotter is looking for
         mime_data.setText(module.name_with_device())
 
-        # Create a "Ghost" Pixmap for the cursor
-        # We'll draw a small themed badge for the module
         padding = 10
         font_metrics = self.view.fontMetrics()
         text_width = font_metrics.horizontalAdvance(module.name)
@@ -654,40 +716,36 @@ class TelemetryTable(QWidget):
 
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
-
-        # Draw a rounded background
-        painter.setBrush(QColor(60, 60, 60, 200))  # Semi-transparent dark gray
-        painter.setPen(QColor(100, 100, 255))  # Subtle blue border
+        painter.setBrush(QColor(60, 60, 60, 200))
+        painter.setPen(QColor(100, 100, 255))
         painter.drawRoundedRect(pixmap.rect().adjusted(1, 1, -1, -1), 5, 5)
 
-        # Draw text
         painter.setPen(Qt.white)
         painter.drawText(pixmap.rect(), Qt.AlignCenter, module.name)
         painter.end()
 
-        # Start the Drag
         drag = QDrag(self)
         drag.setMimeData(mime_data)
         drag.setPixmap(pixmap)
-
-        # Center the pixmap on the cursor
         drag.setHotSpot(pixmap.rect().center())
 
-        # This blocks until the drop is finished or cancelled
         drag.exec_(Qt.CopyAction)
 
     def _set_hovered_row(self, row: int):
-        """Safely updates the hovered row and refreshes all styled columns."""
         if self.hovered_row == row:
             return
 
         old_row = self.hovered_row
         self.hovered_row = row
 
-        # Trigger a repaint for both the old and new row across columns that care about hover
         for r in (old_row, self.hovered_row):
             if r != -1:
                 for col in (TelemetryCol.VALUE, TelemetryCol.ACTIONS):
-                    idx = self.proxy_model.index(r, col)
+                    idx = self.model.index(r, col)
                     if idx.isValid():
                         self.view.update(idx)
+
+    def _toggle_hide_empty(self, checked: bool):
+        self.hide_empty = checked
+        self.model.set_hide_empty(checked)
+        self.auto_size_columns_delayed()
