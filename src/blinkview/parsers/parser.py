@@ -91,19 +91,32 @@ class BaseParser(BaseDaemon):
 
         factory_build = self.shared.factories.build
 
-        time_sync_conf = getattr(self, "time_sync", None)
-        self.logger.debug(f"time_sync config: {time_sync_conf}")
-        if time_sync_conf is not None:
-            if self.sync_state is None:
-                self.sync_state: SyncState = create_default_sync(self.shared.time_ns())
+        try:
+            time_sync_conf = getattr(self, "time_sync", None)
+            self.logger.debug(f"time_sync config: {time_sync_conf}")
+            if time_sync_conf is not None:
+                if self.sync_state is None:
+                    self.sync_state: SyncState = create_default_sync(self.shared.time_ns())
 
-                # print(f"BinaryParser initial sync state: {self.sync_state}")
-            sync_ctx = SimpleNamespace(
-                get_logger=self.logger.child_creator("decoder"),
-                parser=self,
-            )
-            self.time_syncer = factory_build("time_sync", time_sync_conf, system_ctx=self.shared, local_ctx=sync_ctx)
+                    # print(f"BinaryParser initial sync state: {self.sync_state}")
+                sync_ctx = SimpleNamespace(
+                    get_logger=self.logger.child_creator("time"),
+                    parser=self,
+                )
+                if self.time_syncer is not None:
+                    self.time_syncer.stop()
 
+                    self.unsubscribe(self.time_syncer)
+
+                    self.unregister_child(self.time_syncer)
+                    self.time_syncer = None
+                self.time_syncer = factory_build(
+                    "time_sync", time_sync_conf, system_ctx=self.shared, local_ctx=sync_ctx
+                )
+                self.subscribe(self.time_syncer)
+                self.register_child(self.time_syncer)
+        except Exception as e:
+            self.logger.exception("failed to init timesync.", e)
         return changed
 
 

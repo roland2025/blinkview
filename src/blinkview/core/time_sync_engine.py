@@ -9,6 +9,7 @@ import numpy as np
 from blinkview.core.types.parsing import SyncState
 from blinkview.ops.timesync import (
     IDX_ARRAY_LENGTH,
+    IDX_ASYM_RATIO,
     IDX_BEST_RTT,
     IDX_LAST_MEAN,
     IDX_LAST_STD,
@@ -22,7 +23,7 @@ from blinkview.ops.timesync import (
 
 
 class TimeSyncEngine:
-    __slots__ = ("sync", "engine", "logger", "logger_sync", "anchor_is_boot")
+    __slots__ = ("sync", "engine", "logger", "logger_ref", "logger_sync", "anchor_is_boot")
 
     def __init__(self, sync_state: SyncState, anchor_is_boot: bool = False, logger=None):
         self.sync = sync_state
@@ -31,6 +32,8 @@ class TimeSyncEngine:
         # Create child logger only if parent exists
         self.logger_sync = logger.child("sync") if logger else None
 
+        # self.logger_ref = logger.child("ref") if logger else None
+
         scalars = np.zeros(IDX_ARRAY_LENGTH, dtype=np.int64)
         scalars[IDX_BEST_RTT] = np.iinfo(np.int64).max
 
@@ -38,20 +41,29 @@ class TimeSyncEngine:
             scalars=scalars, ppb_hist=np.zeros(15, dtype=np.int64), rtt_hist=np.zeros(50, dtype=np.uint64)
         )
 
+    def set_asymmetry(self, val):
+        self.engine.scalars[IDX_ASYM_RATIO] = val
+
     def feed(self, pc_tx: int, phone_mono: int, phone_boot: int, pc_rx: int) -> bool:
         # Pass phone_boot to the kernel
+        sync = self.sync
         success, quality, mean_ms, stddev_ms = nb_sync_kernel(
-            pc_tx, phone_mono, phone_boot, pc_rx, self.engine, self.sync, self.anchor_is_boot
+            pc_tx, phone_mono, phone_boot, pc_rx, self.engine, sync, self.anchor_is_boot
         )
 
         if success:
             if log_s := self.logger_sync:
                 idx = self.sync.active_idx[0]
                 rtt_ms = (pc_rx - pc_tx) / 1e6
-                drift = self.sync.drift_m[idx] / self.sync.drift_d[idx]
-                log_s.info(
-                    f"rtt={rtt_ms:.2f}ms drift={drift:.9f} q={quality:.3f} mean={mean_ms:.3f}ms, std={stddev_ms:.3f}ms"
+                drift = sync.drift_m[idx] / sync.drift_d[idx]
+
+                log_s.debug(
+                    f"rtt={rtt_ms:.3f}ms drift={drift:.9f} q={quality:.3f} mean={mean_ms:.3f}ms, std={stddev_ms:.3f}ms"
                 )
+
+                # ref_time = sync.ref_time[idx]
+                # offset = sync.offset[idx]
+                # self.logger_ref.info(f"ref={ref_time} offset={offset}")
         else:
             if log := self.logger:
                 log.debug(

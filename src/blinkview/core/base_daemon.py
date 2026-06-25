@@ -64,6 +64,9 @@ class BaseDaemon:
         self.gui_mode = False
         self._yield_msg_counter = 0  # Counter for messages distributed, used to trigger fairness yield
 
+        self._children_lock = Lock()
+        self._children: list = []
+
     @property
     def is_running(self) -> bool:
         """The absolute source of truth for thread state."""
@@ -125,6 +128,8 @@ class BaseDaemon:
 
         self._stop_event.clear()
 
+        self._start_children()
+
         input_queue = getattr(self, "input_queue", None)
         if input_queue is not None:
             if hasattr(input_queue, "reset_shutdown"):
@@ -175,6 +180,8 @@ class BaseDaemon:
                 if self.logger:
                     self.logger.info("[DAEMON] Stopped cleanly.")
             self._thread = None  # Clean up the reference
+
+        self._stop_children()
 
     def restart(self):
         self.thread_needs_restart = False
@@ -269,3 +276,39 @@ class BaseDaemon:
         return f"{self.__class__.__name__}(reference_id={getattr(self, 'reference_id', None)}, enabled={self.enabled})"
 
     __str__ = __repr__
+
+    # --- Subthread / Child Management Methods ---
+
+    def register_child(self, child_obj):
+        """Registers a subthread daemon component managed by this daemon."""
+        with self._children_lock:
+            if child_obj not in self._children:
+                if self.logger:
+                    self.logger.info(f"[DAEMON] Registering child thread object: {child_obj}")
+                self._children.append(child_obj)
+
+                # If parent is already actively running, start the child immediately
+                if self.is_running and hasattr(child_obj, "start"):
+                    child_obj.start()
+
+    def unregister_child(self, child_obj):
+        """Stops and removes a managed child component."""
+        with self._children_lock:
+            if child_obj in self._children:
+                if hasattr(child_obj, "stop"):
+                    child_obj.stop()
+                self._children.remove(child_obj)
+
+    def _start_children(self):
+        """Starts all registered sub-components."""
+        with self._children_lock:
+            for child in self._children:
+                if hasattr(child, "start"):
+                    child.start()
+
+    def _stop_children(self, timeout=5.0):
+        """Stops all registered sub-components."""
+        with self._children_lock:
+            for child in self._children:
+                if hasattr(child, "stop"):
+                    child.stop(timeout=timeout)

@@ -12,6 +12,7 @@ from blinkview.parsers import (
     key_value,
     multi_rule_key_value,
     parser,
+    time_sync_profiler,
     transformer,
 )
 

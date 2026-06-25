@@ -3,7 +3,7 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 #
 # Copyright (c) 2026 Roland Uuesoo
-
+from threading import Lock
 from time import sleep
 from typing import Optional
 
@@ -58,6 +58,18 @@ from .BaseReader import BaseReader, DeviceFactory
     default=False,
     description="Prevents the device from resetting when the port opens by pulling DTR and RTS low. Essential for ESP32 and Arduino boards.",
 )
+@configuration_property(
+    "flash_handshake",
+    type="boolean",
+    default=False,
+    description="When enabled, monitors the working directory for a flash lock file, closing the serial port to allow external flashing.",
+)
+@configuration_property(
+    "flash_handshake_id",
+    type="string",
+    default="uart",
+    description="The identifier string used for the handshake files (e.g., if set to 'esp32', files will be '.bv_source_esp32.lock').",
+)
 class UARTReader(BaseReader):
     __doc__ = """The primary data ingestion source for serial and UART communication.
 
@@ -77,15 +89,25 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
     # log_rx_tx: bool
     suppress_auto_reset: bool
 
+    flash_handshake: bool
+    flash_handshake_id: str
+
     def __init__(self):
         super().__init__()
 
         self.logging_type = "default"  # Use the default logging mechanism
         self.logging_processor = "binary"
 
+        self._serial_lock = Lock()
+
         self.serial = None
 
         self.serial_broken = False
+
+        self._handshake_task_id = None
+        self._flash_active = False
+        self._flash_lock_ts = 0
+        self.logger_send = None
 
     @classmethod
     def get_config_schema(cls) -> dict:
@@ -114,11 +136,33 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         # Return the newly enriched schema to your UI generator!
         return schema
 
+    def apply_config(self, config: dict):
+        # 1. Apply configuration via the parent framework
+        super().apply_config(config)
+
+        self.logger_send = self.logger_send or self.logger.child("send")
+
+        # 2. If the feature was turned off but the periodic task is active, kill it
+        if not self.flash_handshake and self._handshake_task_id is not None:
+            try:
+                self.logger.info("Flash handshake disabled via config. Stopping periodic task.")
+                # Assuming your framework's task manager supports cancel/stop/remove
+                self.shared.tasks.stop_periodic(self._handshake_task_id)
+            except Exception as e:
+                self.logger.error(f"Failed to cleanly stop flash handshake task: {e}")
+            finally:
+                self._handshake_task_id = None
+
+        # 3. Always clear lingering handshake artifacts to guarantee a pristine slate
+        self._clear_handshake_files()
+
     def run(self):
         # 1. Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
         time_ns = self.shared.time_ns
         logger = self.logger
+
+        use_flash_handshake = self.flash_handshake
 
         # Tuner configuration
         delay_s = self.delay / 1000.0
@@ -142,12 +186,25 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         try:
             while not stop_is_set():
                 # 3. Serial Lifecycle Management
-                if self.serial_broken and self.serial is not None:
-                    try:
-                        self.serial.close()
-                    finally:
-                        self.serial = None
-                        ser = None
+                if self.serial_broken:
+                    with self._serial_lock:
+                        if self.serial is not None:
+                            try:
+                                self.serial.close()
+                            finally:
+                                self.serial = None
+                                ser = None
+
+                if use_flash_handshake and self._flash_active:
+                    with self._serial_lock:
+                        if ser is not None:
+                            try:
+                                ser.close()
+                            finally:
+                                ser = None
+                                self.serial = None
+                        sleep(0.1)
+                        continue
 
                 if ser is None:
                     ser = self.open()
@@ -210,18 +267,20 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                         self.distribute(batch)
                 else:
                     batch.release()
-
-            if self.serial is not None:
-                try:
-                    self.serial.close()
-                finally:
-                    self.serial = None
-
-                self.logger.debug("Serial port closed.")
+            with self._serial_lock:
+                if self.serial is not None:
+                    try:
+                        self.serial.close()
+                    finally:
+                        self.serial = None
+                        self.logger.debug("Serial port closed.")
 
     def open(self):
         try:
             from ..parsers.binary_parser import BinaryParser
+
+            if self.flash_handshake and self._handshake_task_id is None:
+                self._handshake_task_id = self.shared.tasks.run_periodic(0.3, self._check_flash_handshake)
 
             time_ns = self.shared.time_ns
 
@@ -237,7 +296,10 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
             # Use PySerial's URL handler (handles socket://, rfc2217://, hwgrep://, etc.)
             ser = serial_for_url(self.url, baudrate=self.baudrate, timeout=self.delay / 1000.0, inter_byte_timeout=0.01)
-            self.serial = ser
+
+            with self._serial_lock:
+                self.serial = ser
+                self.serial_broken = False
 
             # --- ESP32 DTR/RTS Logic ---
             if self.suppress_auto_reset:
@@ -253,7 +315,6 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 self.logger.error("Failed to set buffer size. This may not be supported on all platforms.", e)
                 pass
 
-            self.serial_broken = False
             self.logger.info("Connected")
 
             return ser
@@ -261,46 +322,138 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             self.logger.error("Failed to open serial port.", e)
 
     def send_data(self, data: str):
-        if self.serial and self.serial.is_open:
-            try:
-                encoded = data.encode()
-                self.logger.debug(f"send: {encoded}")
-                self.serial.write(encoded)
-            except Exception as e:
-                self.logger.exception("Failed to send data", e)
-                self.serial_broken = True
+        with self._serial_lock:
+            if self.serial and self.serial.is_open:
+                try:
+                    encoded = data.encode()
+                    self.logger_send.debug(str(encoded))
+                    self.serial.write(encoded)
+                except Exception as e:
+                    self.logger_send.exception("Failed to send data", e)
+                    self.serial_broken = True
 
     def reset_device(self):
         """
         Triggers a hardware reset by toggling the DTR/RTS lines.
         Matches the logic used by esptool.py for ESP32 boards.
         """
-        if not self.serial or not self.serial.is_open:
-            self.logger.warning("Cannot reset: Serial port is not open.")
-            return
+        with self._serial_lock:
+            if not self.serial or not self.serial.is_open:
+                self.logger.warning("Cannot reset: Serial port is not open.")
+                return
 
-        try:
-            self.logger.info("Triggering hardware reset sequence...")
+            try:
+                self.logger.info("Triggering hardware reset sequence...")
 
-            # 1. Pull EN (Reset) low
-            # In most ESP32 circuits: RTS high + DTR low = EN low
-            self.serial.dtr = False
-            self.serial.rts = True
-            sleep(0.1)
+                # 1. Pull EN (Reset) low
+                # In most ESP32 circuits: RTS high + DTR low = EN low
+                self.serial.dtr = False
+                self.serial.rts = True
+                sleep(0.1)
 
-            # 2. Bring EN (Reset) back high to let the chip boot
-            # RTS low + DTR low = EN high, GPIO0 high (Normal Run Mode)
-            self.serial.rts = False
-            self.serial.dtr = False
+                # 2. Bring EN (Reset) back high to let the chip boot
+                # RTS low + DTR low = EN high, GPIO0 high (Normal Run Mode)
+                self.serial.rts = False
+                self.serial.dtr = False
 
-            self.logger.info("Reset signal sent.")
-        except Exception as e:
-            self.logger.exception("Failed to perform hardware reset", e)
-            self.serial_broken = True
+                self.logger.info("Reset signal sent.")
+            except Exception as e:
+                self.logger.exception("Failed to perform hardware reset", e)
+                self.serial_broken = True
 
     def is_connected(self):
-        try:
-            return self.serial is not None and self.serial.is_open
-        except Exception as e:
-            self.logger.exception("Failed to check serial connection", e)
-            self.serial_broken = True
+        with self._serial_lock:
+            try:
+                return self.serial is not None and self.serial.is_open
+            except Exception as e:
+                self.logger.exception("Failed to check serial connection", e)
+                self.serial_broken = True
+
+    def _check_flash_handshake(self):
+        import os
+
+        ident = self.flash_handshake_id or "uart"
+        lock_file = f".bv_source_{ident}.lock"
+        closed_file = f".bv_source_{ident}.closed"
+
+        lock_exists = os.path.exists(lock_file)
+        current_time_ns = self.shared.time_ns()
+
+        # 1. Timeout Check
+        if self._flash_active and lock_exists:
+            if (current_time_ns - self._flash_lock_ts) > 60_000_000_000:
+                self.logger.warning("Flash handshake timed out after 60s! Forcing environment reset.")
+                self._clear_handshake_files()
+                return  # Exit early since files are gone and state is reset
+
+        # 2. Existing lock detection block
+        if lock_exists and not self._flash_active:
+            self.logger.warning(f"Flash lock '{lock_file}' detected! Requesting serial loop release...")
+
+            self._flash_active = True
+            self._flash_lock_ts = current_time_ns
+
+            while True:
+                with self._serial_lock:
+                    if self.serial is None:
+                        break
+                sleep(0.02)
+
+            try:
+                with open(closed_file, "w") as f:
+                    f.write("closed")
+            except Exception as e:
+                self.logger.error(f"Failed to create handshake file {closed_file}: {e}")
+
+        # 3. Existing natural cleanup block (when external tool finishes cleanly)
+        elif not lock_exists and self._flash_active:
+            self.logger.info("Flash lock removed. Restoring serial connection availability.")
+            self._flash_active = False
+
+            if os.path.exists(closed_file):
+                try:
+                    os.remove(closed_file)
+                except Exception:
+                    pass
+
+    def _clear_handshake_files(self):
+        """Removes local handshake lock/closed files and resets internal flash state flags."""
+        import os
+
+        if not self.flash_handshake:
+            return
+
+        ident = self.flash_handshake_id or "uart"
+        lock_file = f".bv_source_{ident}.lock"
+        closed_file = f".bv_source_{ident}.closed"
+
+        for file_path in (lock_file, closed_file):
+            if os.path.exists(file_path):
+                try:
+                    self.logger.info(f"Removing handshake file: {file_path}")
+                    os.remove(file_path)
+                except Exception as e:
+                    self.logger.error(f"Failed to remove handshake file '{file_path}': {e}")
+
+        self._flash_active = False
+
+    def get_commands(self) -> list[tuple[str, str]]:
+        """Exposes UART runtime capabilities to GUI/CLI layers."""
+        return [
+            ("reset", "Reset MCU"),
+        ]
+
+    def send_command(self, command: str):
+        """Processes incoming command strings routed from the UI/CLI layers."""
+        command = command.strip()
+
+        self.logger.debug(f"send_command: {command}")
+
+        match command:
+            case "reset":
+                self.logger.info("Initiating hardware reset via DTR/RTS toggle.")
+                self.reset_device()
+
+            case _:
+                # Fall back to raw string transmission over serial
+                self.send_data(command)
