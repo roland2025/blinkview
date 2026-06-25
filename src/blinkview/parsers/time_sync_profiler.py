@@ -258,42 +258,85 @@ class TimeSyncProfiler(BaseParser):
                 rx_timestamps = memoryview(b.rx_timestamps)
                 levels = memoryview(b.levels)
 
-                while True:
-                    found, idx = nb_find_next_module_index(b, dtypes.ID_TYPE(main_module_id), dtypes.SEQ_TYPE(cursor))
+                try:
+                    while True:
+                        found, idx = nb_find_next_module_index(
+                            b, dtypes.ID_TYPE(main_module_id), dtypes.SEQ_TYPE(cursor)
+                        )
 
-                    if not found:
-                        break
+                        if not found:
+                            break
 
-                    # Update: Capture target_val and pin_val instead of discarding them
-                    has_seq, seq, has_target, target_val, has_pin, pin_val = nb_bundle_parse_states(
-                        b, idx, KEY_SEQ, KEY_TARGET_STATE, KEY_PIN_STATE
-                    )
+                        # Update: Capture target_val and pin_val instead of discarding them
+                        has_seq, seq, has_target, target_val, has_pin, pin_val = nb_bundle_parse_states(
+                            b, idx, KEY_SEQ, KEY_TARGET_STATE, KEY_PIN_STATE
+                        )
 
-                    if has_seq:
-                        ts = timestamps[idx]
-                        rx_ts = rx_timestamps[idx]
-                        orig_level = levels[idx]
+                        if has_seq:
+                            ts = timestamps[idx]
+                            rx_ts = rx_timestamps[idx]
+                            orig_level = levels[idx]
 
-                        # --- Handle Server Output ---
-                        if device_id_int == server_device_id_int and has_target:
-                            # Store both timestamp and the target state value
-                            server_seq_times[seq] = (ts, target_val)
+                            # --- Handle Server Output ---
+                            if device_id_int == server_device_id_int and has_target:
+                                # Store both timestamp and the target state value
+                                server_seq_times[seq] = (ts, target_val)
 
-                            if len(server_seq_times) > 50:
-                                del server_seq_times[next(iter(server_seq_times))]
+                                if len(server_seq_times) > 50:
+                                    del server_seq_times[next(iter(server_seq_times))]
 
-                            # Safely cross-match if a consumer packet arrived earlier
-                            for dev_id in source_device_ids:
-                                if seq in consumer_seq_times[dev_id]:
+                                # Safely cross-match if a consumer packet arrived earlier
+                                for dev_id in source_device_ids:
+                                    if seq in consumer_seq_times[dev_id]:
+                                        t_target, stored_target_val = server_seq_times[seq]
+                                        t_pin, stored_pin_val = consumer_seq_times[dev_id][seq]
+
+                                        del consumer_seq_times[dev_id][seq]
+
+                                        # Desync Check: Ensure the target state matches the pin state
+                                        if stored_target_val != stored_pin_val:
+                                            logger.warning(
+                                                f"Desync detected on device {dev_id} at seq {seq}! Expected target state {stored_target_val}, got pin state {stored_pin_val}."
+                                            )
+                                            continue
+
+                                        diff_ns = t_pin - t_target
+                                        diff_ms = diff_ns / 1_000_000.0
+
+                                        # --- Distribute Result Downstream ---
+                                        if dev_id in out_module_ids:
+                                            try:
+                                                batch_out.insert(
+                                                    ts_ns=t_target,
+                                                    rx_ts_ns=rx_ts,
+                                                    msg_bytes=f"{diff_ms:.3f}".encode("ascii"),
+                                                    level=orig_level,
+                                                    module=out_module_ids[dev_id],
+                                                    device=local_device_id_int,
+                                                )
+                                            except Exception:
+                                                pass
+
+                            # --- Handle Consumer Input & Diff Calculation ---
+                            elif device_id_int in source_device_ids and has_pin:
+                                # Safely isolate by ensuring device_id_int belongs to the consumers
+                                if seq not in consumer_seq_times[device_id_int]:
+                                    # Store both timestamp and the pin state value
+                                    consumer_seq_times[device_id_int][seq] = (ts, pin_val)
+
+                                if len(consumer_seq_times[device_id_int]) > 50:
+                                    del consumer_seq_times[device_id_int][next(iter(consumer_seq_times[device_id_int]))]
+
+                                if seq in server_seq_times:
                                     t_target, stored_target_val = server_seq_times[seq]
-                                    t_pin, stored_pin_val = consumer_seq_times[dev_id][seq]
+                                    t_pin, stored_pin_val = consumer_seq_times[device_id_int][seq]
 
-                                    del consumer_seq_times[dev_id][seq]
+                                    del consumer_seq_times[device_id_int][seq]
 
                                     # Desync Check: Ensure the target state matches the pin state
                                     if stored_target_val != stored_pin_val:
                                         logger.warning(
-                                            f"Desync detected on device {dev_id} at seq {seq}! Expected target state {stored_target_val}, got pin state {stored_pin_val}."
+                                            f"Desync detected on device {device_id_int} at seq {seq}! Expected target state {stored_target_val}, got pin state {stored_pin_val}."
                                         )
                                         continue
 
@@ -301,61 +344,25 @@ class TimeSyncProfiler(BaseParser):
                                     diff_ms = diff_ns / 1_000_000.0
 
                                     # --- Distribute Result Downstream ---
-                                    if dev_id in out_module_ids:
+                                    if device_id_int in out_module_ids:
                                         try:
                                             batch_out.insert(
                                                 ts_ns=t_target,
                                                 rx_ts_ns=rx_ts,
                                                 msg_bytes=f"{diff_ms:.3f}".encode("ascii"),
                                                 level=orig_level,
-                                                module=out_module_ids[dev_id],
+                                                module=out_module_ids[device_id_int],
                                                 device=local_device_id_int,
                                             )
                                         except Exception:
                                             pass
 
-                        # --- Handle Consumer Input & Diff Calculation ---
-                        elif device_id_int in source_device_ids and has_pin:
-                            # Safely isolate by ensuring device_id_int belongs to the consumers
-                            if seq not in consumer_seq_times[device_id_int]:
-                                # Store both timestamp and the pin state value
-                                consumer_seq_times[device_id_int][seq] = (ts, pin_val)
-
-                            if len(consumer_seq_times[device_id_int]) > 50:
-                                del consumer_seq_times[device_id_int][next(iter(consumer_seq_times[device_id_int]))]
-
-                            if seq in server_seq_times:
-                                t_target, stored_target_val = server_seq_times[seq]
-                                t_pin, stored_pin_val = consumer_seq_times[device_id_int][seq]
-
-                                del consumer_seq_times[device_id_int][seq]
-
-                                # Desync Check: Ensure the target state matches the pin state
-                                if stored_target_val != stored_pin_val:
-                                    logger.warning(
-                                        f"Desync detected on device {device_id_int} at seq {seq}! Expected target state {stored_target_val}, got pin state {stored_pin_val}."
-                                    )
-                                    continue
-
-                                diff_ns = t_pin - t_target
-                                diff_ms = diff_ns / 1_000_000.0
-
-                                # --- Distribute Result Downstream ---
-                                if device_id_int in out_module_ids:
-                                    try:
-                                        batch_out.insert(
-                                            ts_ns=t_target,
-                                            rx_ts_ns=rx_ts,
-                                            msg_bytes=f"{diff_ms:.3f}".encode("ascii"),
-                                            level=orig_level,
-                                            module=out_module_ids[device_id_int],
-                                            device=local_device_id_int,
-                                        )
-                                    except Exception:
-                                        pass
-
-                    cursor = idx + 1
-
+                        cursor = idx + 1
+                finally:
+                    timestamps.release()
+                    rx_timestamps.release()
+                    levels.release()
+                    timestamps = rx_timestamps = levels = None
             # Flush by age
             if batch_out.size > 0 and (_time_ns() - batch_out_time >= max_timeout_ns):
                 flush()
