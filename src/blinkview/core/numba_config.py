@@ -13,6 +13,7 @@ NUMBA_DISABLE = os.environ.get("BLINKVIEW_DISABLE_NUMBA", "0") == "1"  # or True
 NUMBA_ENABLE_CACHE = os.environ.get("BLINKVIEW_NO_CACHE", "0") == "0"  # and False
 NUMBA_ENABLE_NOGIL = os.environ.get("BLINKVIEW_NO_NOGIL", "0") == "0"
 
+NUMBA_HUNTING_BUGS = False  # or True
 
 if NUMBA_DISABLE:
 
@@ -48,17 +49,23 @@ def app_njit(*args, **kwargs):
 
         return dummy_decorator
 
-    # The Normal Numba Path
-    if "cache" not in kwargs:
-        kwargs["cache"] = NUMBA_ENABLE_CACHE
-    if "nogil" not in kwargs:
-        kwargs["nogil"] = NUMBA_ENABLE_NOGIL
-
-    if "fastmath" not in kwargs:
-        kwargs["fastmath"] = True  # Usually safe and highly beneficial for plotting
-
-    # if "boundscheck" not in kwargs:
-    #     kwargs["boundscheck"] = False  # Use with caution!
+    if NUMBA_HUNTING_BUGS:
+        # 1. Force bounds checking ON
+        kwargs["boundscheck"] = True
+        # 2. Turn fastmath OFF (to catch divide-by-zero/NaNs)
+        kwargs["fastmath"] = False
+        # 3. Prevent inlining so stack traces show the exact helper function
+        kwargs["inline"] = "never"
+    else:
+        # Standard Production Settings
+        if "boundscheck" not in kwargs:
+            kwargs["boundscheck"] = False
+        if "fastmath" not in kwargs:
+            kwargs["fastmath"] = True
+        if "cache" not in kwargs:
+            kwargs["cache"] = NUMBA_ENABLE_CACHE
+        if "nogil" not in kwargs:
+            kwargs["nogil"] = NUMBA_ENABLE_NOGIL
 
     def decorator(func):
         from numba import njit

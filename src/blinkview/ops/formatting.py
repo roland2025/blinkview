@@ -80,12 +80,12 @@ def estimate_log_batch_size(
     tables: RegistryParams,
     cfg: FormattingConfig,
 ) -> int:
-    # 1. Unpack registry lengths
     l_len, l_count = tables.levels.lens, tables.levels.count
+    l_vals = tables.levels.values  # We need this to search raw IDs!
+
     m_len, m_count = tables.modules.lens, tables.modules.count
     d_len, d_count = tables.devices.lens, tables.devices.count
 
-    # 2. Unpack segment metadata
     s_lens = segment.lengths
     s_devs = segment.devices
     s_lvls = segment.levels
@@ -95,67 +95,67 @@ def estimate_log_batch_size(
     show_dev, show_lvl, show_mod = cfg.show_dev, cfg.show_lvl, cfg.show_mod
     ts_precision = cfg.ts_precision
 
+    # If precision is 0, time takes exactly 8 chars (HH:MM:SS)
+    # Otherwise it takes 9 chars (HH:MM:SS.) + the precision length
+    time_len = 8 if ts_precision == 0 else 9 + ts_precision
+
     total_size = 0
     for i in range(count):
         idx = indices[i]
-
         row_size = 0
         is_first = True
 
+        # --- 1. RX Time ---
         if show_rx_ts:
             if show_date:
-                row_size += 10  # YYYY-MM-DD
-
-            # If date was shown, add a space separating date and time
-            if show_date:
-                row_size += 1
-
-            # "HH:MM:SS." + precision
-            row_size += 9 + ts_precision
+                row_size += 10 + 1  # YYYY-MM-DD + Space
+            row_size += time_len
             is_first = False
 
-        # --- Date ---
-        if show_date:
-            row_size += 10  # YYYY-MM-DD
-            is_first = False
-
-        # --- Time ---
+        # --- 2. Standard Time ---
+        # Notice how date is structurally nested inside show_ts in the formatting function
         if show_ts:
-            # "HH:MM:SS." is 9 chars. Then add precision (3, 6, or 9)
-            row_size += 9 + ts_precision
+            if not is_first:
+                row_size += 1  # Space separator from previous field
+
+            if show_date:
+                row_size += 10 + 1  # YYYY-MM-DD + Space
+
+            row_size += time_len
             is_first = False
 
-        # --- Device ---
+        # --- 3. Device (Direct Index) ---
         if show_dev:
             if not is_first:
-                row_size += 1  # space
+                row_size += 1
             d_id = s_devs[idx]
-            row_size += d_len[d_id] if d_id < d_count else 3  # Name or "???"
+            row_size += d_len[d_id] if d_id < d_count else 3
             is_first = False
 
-        # --- Level ---
+        # --- 4. Level (Search Lookup) ---
         if show_lvl:
             if not is_first:
-                row_size += 1  # space
-            l_id = s_lvls[idx]
-            row_size += l_len[l_id] if l_id < l_count else 3  # Name or "???"
+                row_size += 1
+            raw_l_id = s_lvls[idx]
+
+            # CORE FIX: We must search for the raw ID, just like the formatter does
+            tbl_idx = find_id_index(l_vals, l_count, raw_l_id)
+            row_size += l_len[tbl_idx] if tbl_idx != -1 else 3
             is_first = False
 
-        # --- Module ---
+        # --- 5. Module (Direct Index) ---
         if show_mod:
             if not is_first:
-                row_size += 1  # space
+                row_size += 1
             m_id = s_mods[idx]
-            # Name (or "unknown") + ":"
-            row_size += (m_len[m_id] if m_id < m_count else 7) + 1
+            row_size += (m_len[m_id] if m_id < m_count else 7) + 1  # +1 for the colon ':'
             is_first = False
 
-        # --- Message Body ---
+        # --- 6. Message Body ---
         if not is_first:
-            row_size += 1  # space
+            row_size += 1
 
-        # Message content + newline character '\n'
-        row_size += s_lens[idx] + 1
+        row_size += s_lens[idx] + 1  # +1 for the '\n' character
 
         total_size += row_size
 
