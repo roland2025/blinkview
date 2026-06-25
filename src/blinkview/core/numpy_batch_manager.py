@@ -475,3 +475,23 @@ class PooledLogBatch:
         if (b := self.bundle) and b.size[0] > 0:
             return b.sequences[0]
         return SEQ_NONE
+
+
+def log_batch(instance, batch_data, direction="OUT"):
+    """
+    Logs batch data for both incoming and outgoing streams.
+
+    :param instance: The object instance (usually 'self') to get the class name.
+    :param batch_data: An iterable of tuples containing (_ts, _msg, _rx_ts, *rest).
+    :param direction: String indicating traffic direction, e.g., "OUT" or "IN".
+    """
+    cls_name = instance.__class__.__name__
+    direction = direction.upper()
+
+    # Dynamic header line
+    print(f"[{cls_name}_{direction}] {batch_data}")
+
+    # Dynamic detail lines
+    for item in batch_data:
+        _ts, _msg, _rx_ts = item[0], item[1], item[2]
+        print(f"[{cls_name}_{direction}] {_ts}: msg={_msg} hex={_msg.hex()}")
