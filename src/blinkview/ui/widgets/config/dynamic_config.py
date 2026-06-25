@@ -263,6 +263,8 @@ class DynamicConfigWidget(QWidget):
         """Main dispatcher: Prepares the schema, then routes each property to the correct UI builder."""
         current_path = current_path or []
 
+        # print(f"[DynamicConfigWidget] _build_ui current_path={current_path}")
+
         if not current_path:  # Only true for the very first root call!
             description = schema_node.get("description", "").strip()
             if description:
@@ -330,7 +332,8 @@ class DynamicConfigWidget(QWidget):
             elif prop_type == "object":
                 self._build_static_object(key, prop_schema, value, layout, registry, current_path, required_keys)
             else:
-                self._build_primitive(key, prop_schema, value, data, layout, registry, required_keys)
+                # ADD current_path as the final argument here:
+                self._build_primitive(key, prop_schema, value, data, layout, registry, required_keys, current_path)
 
     def _inject_factory_schema(self, schema_node: dict, data: dict, registry: dict):
         """Handles pulling factory schemas and injecting the 'type' dropdown."""
@@ -397,7 +400,7 @@ class DynamicConfigWidget(QWidget):
 
                 if "properties" in sub_schema:
                     for k, v in sub_schema["properties"].items():
-                        properties.setdefault(k, v)
+                        properties[k] = v
                 if "required" in sub_schema:
                     merged_req = set(schema_node.get("required", [])) | set(sub_schema["required"])
                     schema_node["required"] = list(merged_req)
@@ -850,7 +853,7 @@ class DynamicConfigWidget(QWidget):
 
         return group_box, group_layout
 
-    def _build_primitive(self, key, prop_schema, value, data, layout, registry, required_keys):
+    def _build_primitive(self, key, prop_schema, value, data, layout, registry, required_keys, current_path):
         """Builds standard inputs (strings, ints, checkboxes) and handles overrides."""
         is_required = key in required_keys
         title = prop_schema.get("title", key.replace("_", " ").title())
@@ -858,7 +861,10 @@ class DynamicConfigWidget(QWidget):
         has_value = key in data
 
         widget = WidgetFactory.build_widget(
-            schema=prop_schema, value=value, node_context=self.node, factory_callback=self._on_factory_type_changed
+            schema=prop_schema,
+            value=value,
+            node_context=self.node,
+            factory_callback=lambda *_, path=current_path: self._on_factory_type_changed(target_path=path),
         )
         if not widget:
             return
@@ -1044,22 +1050,65 @@ class DynamicConfigWidget(QWidget):
         # Re-apply the alignment flag
         self.scroll_layout.addWidget(self.form_container, alignment=Qt.AlignTop | Qt.AlignHCenter)
 
-    def _on_factory_type_changed(self):
+    def _on_factory_type_changed(self, *_args, target_path=None):
         """Called immediately when ANY factory 'type' dropdown changes."""
-        # Grab the entire current state exactly as it is right now
+
+        # Qt signals send arguments, ensure target_path is cleanly captured
+        if target_path is None:
+            return
+
+        print(f"[DynamicConfigWidget] _on_factory_type_changed target_path={target_path}")
+
         current_state = self.get_config()
 
-        # Reset the schema to the pristine baseline so all factories re-evaluate
-        self.schema = deepcopy(self.original_schema)
+        # 1. Navigate to the specific component dict that triggered the change
+        target = current_state
+        for p in target_path:
+            if isinstance(target, dict):
+                target = target.get(p)
+            elif isinstance(target, list):
+                try:
+                    target = target[int(p)]
+                except (ValueError, IndexError):
+                    target = None
+            if target is None:
+                break
 
-        # Nuke the UI
+        # 2. Discover 'rememberable' keys dynamically from the Schema
+        keys_to_keep = {"type"}  # 'type' MUST always survive to load the new schema
+
+        target_schema = self._get_sub_schema(target_path)
+        for prop_key, prop_val in target_schema.get("properties", {}).items():
+            if prop_val.get("ui_remember") is True:
+                keys_to_keep.add(prop_key)
+
+        # 3. Targeted Nuke: Wipe the local scope except for the protected keys
+        if isinstance(target, dict):
+            keys_to_delete = [k for k in target.keys() if k not in keys_to_keep]
+            for k in keys_to_delete:
+                del target[k]
+
+        # 4. Reset schema & rebuild
+        self.schema = deepcopy(self.original_schema)
         self._clear_layout(self.form_layout)
         self._widget_registry.clear()
 
-        # Rebuild. The _build_ui method will naturally ignore any orphaned data
-        # (like old properties from the previous factory type) because they won't
-        # exist in the freshly injected sub-schema!
         self._build_ui(self.schema, current_state, self.form_layout, self._widget_registry)
-
-        # Check if the Apply button needs to light up
         self._check_for_changes()
+
+    def _get_sub_schema(self, path: list) -> dict:
+        """Safely navigates the JSON schema using a data path."""
+        curr = self.schema
+        for p in path:
+            if "properties" in curr and p in curr["properties"]:
+                # Normal object property
+                curr = curr["properties"][p]
+            elif curr.get("type") == "array" and "items" in curr:
+                # Array traversal: Data path has an index (e.g. '0'), Schema has 'items'
+                curr = curr["items"]
+            elif "additionalProperties" in curr:
+                # Dynamic dictionary traversal
+                curr = curr["additionalProperties"]
+            else:
+                return {}  # Failsafe if path desyncs
+        return curr

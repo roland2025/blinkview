@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import os
 from pathlib import Path
 
 from qtpy.QtCore import QRegularExpression, Qt
@@ -35,7 +36,6 @@ def get_portable_path(absolute_path: str, max_up_levels: int = 2) -> str:
         # Calculate the relative path (this works even for parents)
         # On Python 3.12+ you can use target.relative_to(anchor, walk_up=True)
         # For older versions, we use os.path.relpath which is very robust
-        import os
 
         rel_path_str = os.path.relpath(target, anchor)
 
