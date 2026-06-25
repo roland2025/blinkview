@@ -4,7 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from dataclasses import dataclass
 from threading import Lock
 from typing import TYPE_CHECKING, Iterator, NamedTuple, Tuple
 
@@ -18,6 +17,9 @@ from blinkview.core.types.log_batch import LogBundle
 if TYPE_CHECKING:
     from blinkview.core.id_registry.tables import IndexedStringTable
     from blinkview.core.numpy_log import CircularLogPool
+
+# Constant defining the maximum payload allocation per module in bytes
+MAX_MSG_BYTES = 512
 
 
 class ModuleSnapshotParams(NamedTuple):
@@ -46,7 +48,7 @@ def _copy_snapshot_state(
     new_b.lengths[:old_cnt] = old_b.lengths[:old_cnt]
     new_b.sequence_ids[:old_cnt] = old_b.sequence_ids[:old_cnt]
 
-    bytes_to_copy = old_cnt * 512
+    bytes_to_copy = old_cnt * MAX_MSG_BYTES
     new_b.buffer[:bytes_to_copy] = old_b.buffer[:bytes_to_copy]
 
     # CLEANSE THE TAIL:
@@ -102,12 +104,12 @@ def _update_master_arrays_reverse(
             snap_b_levels[mod_id] = seg_b_levels[i]
 
             m_len = seg_b_lengths[i]
-            # Cap at 511 to guarantee room for the 0-terminator
-            if m_len > 511:
-                m_len = 511
+            # Cap at MAX_MSG_BYTES - 1 to guarantee room for the 0-terminator
+            if m_len > MAX_MSG_BYTES - 1:
+                m_len = MAX_MSG_BYTES - 1
 
             s_off = seg_b_offsets[i]
-            m_off = mod_id * 512  # Computed on the fly
+            m_off = mod_id * MAX_MSG_BYTES  # Computed on the fly
 
             # Copy the message payload
             snap_b_buffer[m_off : m_off + m_len] = seg_b_buffer[s_off : s_off + m_len]
@@ -192,7 +194,7 @@ class ModuleSnapshot:
             return ""
 
         length = b.lengths[module_id]
-        off = module_id * 512
+        off = module_id * MAX_MSG_BYTES
         return b.buffer[off : off + length].tobytes().decode("utf-8", errors="replace")
 
     def get_level(self, module_id: int) -> int:
@@ -222,7 +224,7 @@ class ModuleSnapshot:
                 continue
 
             length = b.lengths[i]
-            off = i * 512
+            off = i * MAX_MSG_BYTES
             msg = b.buffer[off : off + length].tobytes().decode("utf-8", errors="replace")
             yield b.timestamps[i], seq, msg
 
@@ -290,7 +292,7 @@ class LatestModuleValueTracker:
         seq_h = self._array_pool.acquire(capacity, dtype=dtypes.SEQ_TYPE)
         lvl_h = self._array_pool.acquire(capacity, dtype=dtypes.LEVEL_TYPE)
         lens_h = self._array_pool.acquire(capacity, dtype=dtypes.LEN_TYPE)
-        buf_h = self._array_pool.acquire(capacity * 512, dtype=dtypes.BYTE)
+        buf_h = self._array_pool.acquire(capacity * MAX_MSG_BYTES, dtype=dtypes.BYTE)
 
         return ModuleSnapshot(ts_h, seq_h, lvl_h, lens_h, buf_h, count, last_known_seq)
 

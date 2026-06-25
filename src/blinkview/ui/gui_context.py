@@ -29,7 +29,6 @@ class GUIContext(QObject):
         self.id_registry: "IDRegistry" = None
         self.settings: "SettingsManager" = None
 
-        self.telemetry_model = None
         self.theme: "StyleConfig" = None
 
         # Factory function for creating widgets with context (cls_name, name, as_window=False, **kwargs)
@@ -68,9 +67,6 @@ class GUIContext(QObject):
         self.id_registry = registry.id_registry
         self.settings = registry.system_ctx.settings
 
-    def set_telemetry_model(self, telemetry_model):
-        self.telemetry_model = telemetry_model
-
     def set_theme(self, theme: "StyleConfig"):
         self.theme = theme
 
@@ -93,15 +89,10 @@ class GUIContext(QObject):
         self.reattach_tab = reattach_fn
 
     def on_heartbeat(self):
-        """Dispatches the update signal to slow sync components like the TelemetryModel."""
-        self.telemetry_model.sync_registry()
+        pass
 
     def on_update(self):
         """Dispatches the update signal to all registered views for a fast sync."""
-        try:
-            self.telemetry_model.apply_updates()
-        except Exception as e:
-            self.logger.exception("Error telemetry_model.apply_updates", e)
         if self.updatable:
             for updatable in self.updatable:
                 try:

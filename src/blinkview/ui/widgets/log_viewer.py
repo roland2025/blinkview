@@ -727,6 +727,8 @@ QToolButton[filterEnabled="true"] {
         """Clean up by unregistering from the GUI context."""
         self.gui_context.deregister_log_target(self)
         self.gui_context.remove_updatable(self)
+
+        self.gui_context.remove_updatable(self.telemetry_sidebar)
         super().closeEvent(event)
 
     def _set_ts_precision(self, precision: int):

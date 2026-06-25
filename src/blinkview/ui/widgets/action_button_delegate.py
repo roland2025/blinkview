@@ -78,23 +78,28 @@ class TelemetryDelegate(QStyledItemDelegate):
             # Setup Source Model Access
             theme = self.theme
             model = index.model()
-            if hasattr(model, "mapToSource"):
-                source_index = model.mapToSource(index)
-                actual_model = model.sourceModel()
-            else:
-                source_index = index
-                actual_model = model
 
-            from blinkview.ui.widgets.telemetry_model import TelemetryRowState
+            row = index.row()
+            if row >= len(model.visible_mod_ids):
+                return
 
-            state: TelemetryRowState = actual_model._row_states[source_index.row()]
+            mod_id = model.visible_mod_ids[row]
+            module = model.modules[mod_id]
+
+            # --- OPTIMIZATION FIX ---
+            # Read directly from the memoryviews to prevent numpy scalar boxing
+            last_arrival_time = model.arr_mv[mod_id]
+            last_change_time = model.chg_mv[mod_id]
+            last_painted_seq = model.seqs_mv[mod_id]
+            last_painted_level = model.levels_mv[mod_id]
+
             now = perf_counter()
 
-            elapsed_since_arrival = now - state.last_arrival_time
-            is_stale = (state.last_painted_seq > 0) and (elapsed_since_arrival > theme.stale_threshold)
+            elapsed_since_arrival = now - last_arrival_time
+            is_stale = (last_painted_seq > 0) and (elapsed_since_arrival > theme.stale_threshold)
 
             # Use change time for the flash
-            elapsed_since_change = now - state.last_change_time
+            elapsed_since_change = now - last_change_time
 
             painter.save()
 
@@ -107,16 +112,14 @@ class TelemetryDelegate(QStyledItemDelegate):
                 painter.setFont(option.font)
 
             # --- DRAW BACKGROUND FLASH ---
-            # if col == TelemetryCol.VALUE and elapsed_since_change < theme.fade_duration:
-            #     idx = int((elapsed_since_change / theme.fade_duration) * self.steps)
-            #     if 0 <= idx < self.steps:
-            #         painter.fillRect(option.rect, self._flash_brushes[idx])
+            # Restored the smooth gradient fade now that the model is fast enough to handle it
             if col == TelemetryCol.VALUE and elapsed_since_change < theme.fade_duration:
-                # solid green with 100/255 opacity—adjust the alpha (100) as you like
-                painter.fillRect(option.rect, self._flash_brushes[0])
+                idx = int((elapsed_since_change / theme.fade_duration) * self.steps)
+                if 0 <= idx < self.steps:
+                    painter.fillRect(option.rect, self._flash_brushes[idx])
 
             # --- CONFIGURE TEXT COLOR ---
-            if state.last_painted_seq == 0 or is_stale:
+            if last_painted_seq == 0 or is_stale:
                 color = theme.color_text_stale
 
             elif col == TelemetryCol.NAME:
@@ -124,9 +127,7 @@ class TelemetryDelegate(QStyledItemDelegate):
 
             elif col == TelemetryCol.VALUE:
                 # Safe access to the level color
-                lvl_obj = LogLevel.from_value(state.last_painted_level)
-                # color = getattr(state.last_painted_row.level, "color", theme.color_text_default)
-                # color = getattr(lvl_obj, "color", theme.color_text_default)
+                lvl_obj = LogLevel.from_value(last_painted_level)
                 color = QColor(lvl_obj.color)
 
             else:
@@ -136,25 +137,14 @@ class TelemetryDelegate(QStyledItemDelegate):
             # We use the 'option' to handle selection highlights and focus rects
             painter.setPen(color)
 
-            # # Alignment logic
-            # alignment = Qt.AlignVCenter
-            # alignment |= (Qt.AlignLeft if col == TelemetryCol.VALUE else Qt.AlignCenter)
-            #
-            # # Calculate text rectangle with a small margin
-            # text_rect = option.rect.adjusted(5, 0, -5, 0)
-            # text = str(index.data(Qt.DisplayRole))
-            #
-            # painter.drawText(text_rect, alignment, text)
-            #
-            # painter.restore()
             text_rect = option.rect.adjusted(5, 0, -5, 0)
 
             # Default alignment
             alignment = Qt.AlignVCenter
 
             if col == TelemetryCol.NAME:
-                # Shift text based on depth
-                indent = state.module.depth * self.indent_width
+                # Shift text based on depth using the actual module object
+                indent = module.depth * self.indent_width
                 text_rect.setLeft(text_rect.left() + indent)
                 alignment |= Qt.AlignLeft  # Trees must be left-aligned to look right
             elif col == TelemetryCol.VALUE:

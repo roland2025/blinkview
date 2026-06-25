@@ -58,6 +58,8 @@ class IDRegistry:
 
         # Thread-safe Snapshot List
         self.device_list: List[DeviceIdentity] = []
+
+        # non-sequential list of modules
         self.module_list: List[ModuleIdentity] = []
 
         self.level_map = LevelMap()

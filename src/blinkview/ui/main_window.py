@@ -53,7 +53,6 @@ from blinkview.ui.widgets.device_sidebar import DeviceSidebarWidget
 from blinkview.ui.widgets.log_viewer import LogViewerWidget
 from blinkview.ui.widgets.pipelines_sidebar import PipelinesSidebarWidget
 from blinkview.ui.widgets.plotter import TelemetryPlotter
-from blinkview.ui.widgets.telemetry_model import TelemetryModel
 from blinkview.ui.widgets.telemetry_table import TelemetryTable
 from blinkview.ui.widgets.TelemetryWatch import TelemetryWatch
 from blinkview.ui.widgets.title_bar import TitleBar
@@ -292,8 +291,6 @@ class BlinkMainWindow(QMainWindow):
         self.timeout_fast = self.gui_context.theme.ui_update_rate_ms
         self.timer_fast = QTimer(self)
         self.timer_fast.timeout.connect(self.poll_queue)
-
-        self.gui_context.set_telemetry_model(TelemetryModel(gui_context=self.gui_context))
 
         # 1FPS Structure Syncer
         self.timer_slow = QTimer(self)
