@@ -88,6 +88,40 @@ def nb_update_subtree(
                 filter_mask[i] = off_value
 
 
+@app_njit()
+def nb_rebuild_from_explicit(
+    enabled_mask: np.ndarray,
+    level_mask: np.ndarray,
+    filter_mask: np.ndarray,
+    parent_array: np.ndarray,
+    explicit_mask: np.ndarray,
+    count: int,
+    default_enabled: bool,
+    default_level: int,
+    off_value: int,
+):
+    """
+    Rebuilds the entire state tree in a single pass based on explicit overrides.
+    Relies on the chronological guarantee (parent_id < child_id).
+    """
+    for i in range(count):
+        # If this node was NOT explicitly set in the saved state, it inherits
+        if not explicit_mask[i]:
+            p_id = parent_array[i]
+            if p_id != NO_PARENT and p_id < i:
+                enabled_mask[i] = enabled_mask[p_id]
+                level_mask[i] = level_mask[p_id]
+            else:
+                enabled_mask[i] = default_enabled
+                level_mask[i] = default_level
+
+        # Always bake the optimized filter mask
+        if enabled_mask[i]:
+            filter_mask[i] = level_mask[i]
+        else:
+            filter_mask[i] = off_value
+
+
 class TempLogFilter(QObject):
     filter_changed = Signal()
 
@@ -203,39 +237,56 @@ class TempLogFilter(QObject):
 
     def get_state(self):
         """
-        Serializes the current filter state.
-        Only saves modules that deviate from the default state (acting as our 'override' check).
+        Serializes the current filter state efficiently.
+        Only saves modules whose state DIFFERS from their inherited parent state.
         """
         state = {}
         enabled_mask = self.enabled_mask
         level_mask = self.level_mask
+        parent_array = self.registry._parent_array
         module_from_int = self.registry.module_from_int
-        level_from_value = LogLevel.from_value
 
-        loglevel_all_value = LogLevel.ALL.value
+        # Determine global defaults for root modules
+        is_constrained = self.log_filter.filtered_module is not None
+        default_enabled = not is_constrained
+        default_level = LogLevel.ALL.value
 
-        for mod_id in range(self._initialized_count):
-            is_enabled = bool(enabled_mask[mod_id])
-            level_val = level_mask[mod_id]
+        for i in range(self._initialized_count):
+            p_id = parent_array[i]
 
-            # If it deviates from the default state, we save it
-            if not is_enabled or level_val != loglevel_all_value:
-                module = module_from_int(mod_id)
-                m_d_id = module.name_with_device()
-                level = level_from_value(level_val)
-                # print(
-                #     f"TempLogFilter: mod_id={mod_id} name='{m_d_id}' is_enabled={is_enabled} level_val={level_val} level={level}"
-                # )
+            # What would this module naturally inherit?
+            if p_id != NO_PARENT and p_id < i:
+                expected_enabled = enabled_mask[p_id]
+                expected_level = level_mask[p_id]
+            else:
+                expected_enabled = default_enabled
+                expected_level = default_level
 
-                state[m_d_id] = {"enabled": is_enabled, "level": level.name_conf}
+            actual_enabled = enabled_mask[i]
+            actual_level = level_mask[i]
 
-        # print(f"TempLogFilter: state={json.dumps(state, indent=4)}")
+            # If it deviates from its inherited expectation, it's an explicit override. Save it.
+            if actual_enabled != expected_enabled or actual_level != expected_level:
+                module = module_from_int(i)
+                if module:
+                    m_d_id = module.name_with_device()
+                    level = LogLevel.from_value(actual_level)
+                    state[m_d_id] = {"enabled": bool(actual_enabled), "level": level.name_conf}
+
         return state
 
     def restore_state(self, state):
-        """Restores state from a serialized dictionary directly into NumPy masks."""
+        """Restores state efficiently by applying explicit overrides and inheriting the rest."""
         if not state:
             return
+
+        is_constrained = self.log_filter.filtered_module is not None
+        default_enabled = not is_constrained
+        default_level = LogLevel.ALL.value
+
+        # 1. Identify which modules have explicit overrides mapped to their integer ID
+        explicit_states = {}
+        max_id = self._initialized_count - 1  # Track max ID to expand arrays if needed
 
         for path_str, mod_state in state.items():
             module = self.registry.resolve_module(path_str)
@@ -243,28 +294,37 @@ class TempLogFilter(QObject):
                 print(f"[TempLogFilter] Warning: Module '{path_str}' not found during state restore.")
                 continue
 
-            # Ensure our arrays are big enough to hold this module ID
-            mod_id = module.id
-            self.ensure_capacity(mod_id + 1)
+            explicit_states[module.id] = mod_state
+            if module.id > max_id:
+                max_id = module.id
 
-            # Extract the saved state
-            is_enabled = mod_state.get("enabled", True)
+        # Ensure our arrays are big enough to hold the highest restored module ID
+        self.ensure_capacity(max_id + 1)
+
+        # 2. Create an explicit mask to feed to Numba
+        explicit_mask = np.zeros(self._initialized_count, dtype=np.bool_)
+
+        for mod_id, mod_state in explicit_states.items():
+            explicit_mask[mod_id] = True
+            self.enabled_mask[mod_id] = mod_state.get("enabled", True)
+
             level_obj = LogLevel.from_string(mod_state.get("level"), default=LogLevel.ALL)
-            level_val = level_obj.value
+            self.level_mask[mod_id] = level_obj.value
 
-            # print(f"TempLogFilter.restore: mod_id={mod_id} is_enabled={is_enabled} level_val={level_val}")
+        # 3. Use a fast Numba pass to rebuild the arrays based on inheritance
+        nb_rebuild_from_explicit(
+            self.enabled_mask,
+            self.level_mask,
+            self.filter_mask,
+            self.registry._parent_array,
+            explicit_mask,
+            self._initialized_count,
+            default_enabled,
+            default_level,
+            LogLevel.OFF.value,
+        )
 
-            # Update the NumPy masks directly
-            self.enabled_mask[mod_id] = is_enabled
-            self.level_mask[mod_id] = level_val
-
-            self.filter_mask[mod_id] = level_val if is_enabled else LogLevel.OFF.value
-
-        # print(
-        #     f"TempLogFilter.restored: enabled_mask={self.enabled_mask[: self._initialized_count]} level_mask={self.level_mask[: self._initialized_count]}"
-        # )
-
-        # Emit once after all restorations are complete
+        # Emit once after all restorations and inheritances are complete
         self.filter_changed.emit()
 
     def sync_modules(self):
