@@ -73,7 +73,7 @@ def update_iso8601_timestamp_cache(total_sec: int, ts_cache: np.ndarray):
 
 
 @app_njit()
-def estimate_log_batch_size(
+def nb_segment_estimate_out_size(
     indices: np.ndarray,
     count,
     segment: LogBundle,
@@ -81,7 +81,7 @@ def estimate_log_batch_size(
     cfg: FormattingConfig,
 ) -> int:
     l_len, l_count = tables.levels.lens, tables.levels.count
-    l_vals = tables.levels.values  # We need this to search raw IDs!
+    # l_vals is no longer needed here since we aren't searching IDs row-by-row!
 
     m_len, m_count = tables.modules.lens, tables.modules.count
     d_len, d_count = tables.devices.lens, tables.devices.count
@@ -99,6 +99,9 @@ def estimate_log_batch_size(
     # Otherwise it takes 9 chars (HH:MM:SS.) + the precision length
     time_len = 8 if ts_precision == 0 else 9 + ts_precision
 
+    # --- Precalculate Max Level Length ---
+    max_lvl_len = nb_table_get_max_string_len(tables.levels, fallback_default=3)
+
     total_size = 0
     for i in range(count):
         idx = indices[i]
@@ -113,7 +116,6 @@ def estimate_log_batch_size(
             is_first = False
 
         # --- 2. Standard Time ---
-        # Notice how date is structurally nested inside show_ts in the formatting function
         if show_ts:
             if not is_first:
                 row_size += 1  # Space separator from previous field
@@ -132,15 +134,11 @@ def estimate_log_batch_size(
             row_size += d_len[d_id] if d_id < d_count else 3
             is_first = False
 
-        # --- 4. Level (Search Lookup) ---
+        # --- 4. Level (Cached Max Length) ---
         if show_lvl:
             if not is_first:
                 row_size += 1
-            raw_l_id = s_lvls[idx]
-
-            # CORE FIX: We must search for the raw ID, just like the formatter does
-            tbl_idx = find_id_index(l_vals, l_count, raw_l_id)
-            row_size += l_len[tbl_idx] if tbl_idx != -1 else 3
+            row_size += max_lvl_len
             is_first = False
 
         # --- 5. Module (Direct Index) ---
@@ -179,7 +177,7 @@ def write_bytes_direct(out: np.ndarray, curr: int, data: tuple) -> int:
 
 
 @app_njit(inline="always")
-def write_table_entry(out: np.ndarray, curr: int, table: StringTableParams, idx: int, fallback: tuple) -> int:
+def nb_table_copy_entry(out: np.ndarray, curr: int, table: StringTableParams, idx: int, fallback: tuple) -> int:
     """Helper for Device/Module where the ID is the index."""
     if idx < table.count:
         return copy_bytes(out, curr, table.buffer, table.offsets[idx], table.lens[idx])
@@ -187,7 +185,9 @@ def write_table_entry(out: np.ndarray, curr: int, table: StringTableParams, idx:
 
 
 @app_njit(inline="always")
-def write_table_lookup(out: np.ndarray, curr: int, table: StringTableParams, raw_id: int, fallback: tuple) -> int:
+def nb_table_lookup_copy_entry(
+    out: np.ndarray, curr: int, table: StringTableParams, raw_id: int, fallback: tuple
+) -> int:
     """Helper for Levels where we must find the index first."""
     tbl_idx = find_id_index(table.values, table.count, raw_id)
     if tbl_idx != -1:
@@ -202,6 +202,29 @@ def find_id_index(val_arr: np.ndarray, count: int, target_id: int) -> int:
         if val_arr[i] == target_id:
             return i
     return -1
+
+
+@app_njit(inline="always")
+def nb_table_get_max_string_len(table: StringTableParams, fallback_default: int = 3) -> int:
+    """
+    Returns the maximum string length within the valid elements of a StringTableParams.
+    If the table is empty (count == 0), returns the fallback_default.
+    """
+    count = table.count
+    if count <= 0:
+        return fallback_default
+
+    # Direct array access
+    lens = table.lens
+    max_len = lens[0]
+
+    # Simple, branch-friendly loop optimized for Numba's auto-vectorization
+    for i in range(1, count):
+        if lens[i] > max_len:
+            max_len = lens[i]
+
+    # Optional: Ensure it respects your minimum fallback boundary
+    return max_len if max_len > fallback_default else fallback_default
 
 
 @app_njit(inline="always")
@@ -301,7 +324,7 @@ def nb_write_time_from_cache(out: np.ndarray, curr: int, ts_cache: np.ndarray, t
 
 
 @app_njit()
-def format_log_batch(
+def nb_segment_format(
     out: np.ndarray,
     indices: np.ndarray,
     count,
@@ -399,7 +422,7 @@ def format_log_batch(
             if not first_field:
                 out[curr] = CHAR_SPACE
                 curr += 1
-            curr = write_table_entry(out, curr, devices_tbl, s_devs[idx], UNKNOWN_DEV)
+            curr = nb_table_copy_entry(out, curr, devices_tbl, s_devs[idx], UNKNOWN_DEV)
             first_field = False
 
         # --- 3. Level (Search Lookup) ---
@@ -407,7 +430,7 @@ def format_log_batch(
             if not first_field:
                 out[curr] = CHAR_SPACE
                 curr += 1
-            curr = write_table_lookup(out, curr, levels_tbl, s_lvls[idx], UNKNOWN_LEVEL)
+            curr = nb_table_lookup_copy_entry(out, curr, levels_tbl, s_lvls[idx], UNKNOWN_LEVEL)
             first_field = False
 
         # --- 4. Module (Direct Index) ---
@@ -415,7 +438,7 @@ def format_log_batch(
             if not first_field:
                 out[curr] = CHAR_SPACE
                 curr += 1
-            curr = write_table_entry(out, curr, modules_tbl, s_mods[idx], UNKNOWN_MOD)
+            curr = nb_table_copy_entry(out, curr, modules_tbl, s_mods[idx], UNKNOWN_MOD)
             out[curr] = CHAR_COLON
             curr += 1
             first_field = False
@@ -500,17 +523,17 @@ def format_log_row_batch(
         curr += 9
 
         # --- 2. Level (Lookup) ---
-        curr = write_table_lookup(out, curr, tables.levels, s_lvls[idx], UNKNOWN_LEVEL)
+        curr = nb_table_lookup_copy_entry(out, curr, tables.levels, s_lvls[idx], UNKNOWN_LEVEL)
         out[curr] = CHAR_SPACE
         curr += 1
 
         # --- 3. Device (Direct) ---
-        curr = write_table_entry(out, curr, tables.devices, s_devs[idx], UNKNOWN_DEV)
+        curr = nb_table_copy_entry(out, curr, tables.devices, s_devs[idx], UNKNOWN_DEV)
         out[curr] = CHAR_SPACE
         curr += 1
 
         # --- 4. Module (Direct) ---
-        curr = write_table_entry(out, curr, tables.modules, s_mods[idx], UNKNOWN_MOD)
+        curr = nb_table_copy_entry(out, curr, tables.modules, s_mods[idx], UNKNOWN_MOD)
         out[curr], out[curr + 1] = CHAR_COLON, CHAR_SPACE
         curr += 2
 

@@ -105,7 +105,7 @@ def fast_find_first_gt(arr, count, val):
 
 
 @app_njit()
-def filter_segment_reversed(
+def nb_segment_filter_reversed(
     segment,  # LogBundle
     effective_mask,
     out_indices,

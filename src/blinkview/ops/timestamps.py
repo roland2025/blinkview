@@ -75,7 +75,7 @@ def nb_parse_int_timestamp(
     while cursor < end_cursor:
         c = buffer[cursor]
         if CHAR_ZERO <= c <= CHAR_NINE:
-            raw_val = raw_val * 10 + (c - CHAR_ZERO)
+            raw_val = raw_val * 10 + int(c - CHAR_ZERO)
             found_digits = True
             cursor += 1
         else:

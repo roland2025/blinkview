@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 from blinkview.core.configurable import configuration_property, on_config_change, override_property
 from blinkview.core.device_identity import DeviceIdentity
-from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.core.numpy_batch_manager import PooledLogBatch, log_batch
 from blinkview.core.time_sync_engine import TimeSyncEngine
 from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import SyncState, create_default_sync
@@ -207,6 +207,9 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 if batch_out is not None and batch_out.size > 0:
                     with batch_out:
                         tuner_out.update(batch_out.msg_cursor, batch_out.size, target_window_sec=max_timeout)
+
+                        # log_batch(self, batch_out, "OUT")
+
                         self.distribute(batch_out)
                 batch_out = None
                 batch_out_time = 0
@@ -229,10 +232,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                     continue
 
                 with batch_in:
-                    # cls_name = self.__class__.__name__
-                    # print(f"{cls_name}: {batch_in}")
-                    # for ts, msg, *_ in batch_in.iter_human():
-                    #     print(f"{cls_name} >> {ts}: msg={msg}")
+                    # log_batch(self, batch_in, "IN")
 
                     batch_size_bytes = batch_in.msg_cursor
                     tuner_out.ensure_burst_capacity(batch_size_bytes)

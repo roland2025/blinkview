@@ -218,3 +218,64 @@ def skip_n_words(buffer, cursor, end_cursor, n):
         cursor += 1
 
     return cursor
+
+
+@app_njit()
+def nb_find_and_parse_int(buffer, offset, length, key):
+    """
+    Pure algorithmic parser. Decoupled from LogBundle for easy unit testing.
+    Returns: (found: bool, value: int)
+    """
+    key_len = len(key)
+    payload_end = offset + length
+
+    i = offset
+    while i <= payload_end - key_len:
+        if buffer[i] == key[0]:
+            match = True
+            for j in range(1, key_len):
+                if buffer[i + j] != key[j]:
+                    match = False
+                    break
+
+            if match:
+                is_start_valid = i == offset or buffer[i - 1] == 32
+
+                if is_start_valid and (i + key_len < payload_end) and (buffer[i + key_len] == 61):
+                    idx = i + key_len + 1
+                    res = 0
+                    is_negative = False
+                    has_digits = False
+
+                    if idx < payload_end and buffer[idx] == 45:  # '-'
+                        is_negative = True
+                        idx += 1
+
+                    while idx < payload_end and buffer[idx] != 32:
+                        val = buffer[idx]
+                        if 48 <= val <= 57:
+                            res = res * 10 + (val - 48)
+                            has_digits = True
+                        else:
+                            return False, 0
+                        idx += 1
+
+                    if not has_digits:
+                        return False, 0
+
+                    if is_negative:
+                        res = -res
+
+                    return True, res
+        i += 1
+
+    return False, 0
+
+
+@app_njit()
+def nb_bundle_find_and_parse_int(bundle, index, key):
+    """
+    Thin wrapper to keep the Python hot loop clean.
+    Delegates immediately to the pure parsing algorithm.
+    """
+    return nb_find_and_parse_int(bundle.buffer, bundle.offsets[index], bundle.lengths[index], key)

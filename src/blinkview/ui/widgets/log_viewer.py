@@ -4,9 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from collections import deque
-from datetime import datetime
-from typing import Iterable
 
 import numpy as np
 from qtpy.QtCore import Qt
@@ -14,11 +11,10 @@ from qtpy.QtGui import QAction
 from qtpy.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.core import dtypes
-from blinkview.core.dtypes import ID_UNSPECIFIED, LEVEL_UNSPECIFIED, SEQ_NONE
-from blinkview.core.types.empty import EMPTY_ID
+from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.types.formatting import FormattingConfig
-from blinkview.ops.formatting import estimate_log_batch_size, format_log_batch
-from blinkview.ops.segments import filter_segment, filter_segment_reversed
+from blinkview.ops.formatting import nb_segment_estimate_out_size, nb_segment_format
+from blinkview.ops.segments import nb_segment_filter_reversed
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
 from blinkview.ui.widgets.log_highlighter import LogHighlighter
@@ -593,7 +589,7 @@ QToolButton[filterEnabled="true"] {
 
                 allowed_matches = self.max_rows - total_new_rows
 
-                match_count = filter_segment_reversed(
+                match_count = nb_segment_filter_reversed(
                     segment.bundle,
                     effective_mask=self._effective_mask,
                     out_indices=indices.array,
@@ -602,12 +598,12 @@ QToolButton[filterEnabled="true"] {
                 )
 
                 if match_count > 0:
-                    req_bytes = estimate_log_batch_size(
+                    req_bytes = nb_segment_estimate_out_size(
                         indices.array, match_count, segment.bundle, reg.bundle(), format_cfg
                     )
 
                     with array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
-                        bytes_written = format_log_batch(
+                        bytes_written = nb_segment_format(
                             handle.array,
                             indices.array,
                             match_count,

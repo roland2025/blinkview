@@ -24,12 +24,12 @@ from blinkview.core.types.formatting import FormattingConfig
 from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import create_default_sync
 from blinkview.ops.dispatch import process_batch_kernel
-from blinkview.ops.formatting import estimate_log_batch_size, format_log_batch
+from blinkview.ops.formatting import nb_segment_estimate_out_size, nb_segment_format
 from blinkview.ops.segments import (
     filter_segment,
-    filter_segment_reversed,
     nb_find_next_module_index,
     nb_find_next_module_match,
+    nb_segment_filter_reversed,
 )
 from blinkview.ops.telemetry import (
     PLOT_INTERPOLATION_MODE_LINEAR,
@@ -170,7 +170,7 @@ class NumbaWarmupHelper:
                     start_seq=s_seq,
                 )
 
-                _ = filter_segment_reversed(
+                _ = nb_segment_filter_reversed(
                     segment.bundle,
                     effective_mask=effective_mask,
                     out_indices=indices.array,
@@ -180,12 +180,12 @@ class NumbaWarmupHelper:
 
                 if match_count > 0:
                     # Trigger: Size Estimation Kernel
-                    req_bytes = estimate_log_batch_size(
+                    req_bytes = nb_segment_estimate_out_size(
                         indices.array, match_count, segment.bundle, self.registry.bundle(), self.format_cfg
                     )
                     # Trigger: Formatting Kernel
                     with self.array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
-                        format_log_batch(
+                        nb_segment_format(
                             handle.array,
                             indices.array,
                             match_count,

@@ -31,6 +31,8 @@ CHAR_RBRACKET = 93  # ]
 CHAR_UNDERSCORE = 95  # _
 CHAR_NULL = 0
 CHAR_NBSP = 160  # Non-breaking space
+CHAR_LPAREN = 40
+CHAR_RPAREN = 41
 
 CHAR_T = 84
 
