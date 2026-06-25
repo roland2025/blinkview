@@ -13,6 +13,18 @@ class Speedometer:
     and lifetime totals. Optionally logs stats every update interval.
     """
 
+    __slots__ = (
+        "update_interval_ns",
+        "logger",
+        "total_bytes",
+        "total_msgs",
+        "_bytes_acc",
+        "_msgs_acc",
+        "_last_time_ns",
+        "bytes_per_sec",
+        "msgs_per_sec",
+    )
+
     def __init__(self, update_interval_ns: int = 1_000_000_000, logger=None):
         self.update_interval_ns = update_interval_ns
         self.logger = logger
@@ -45,17 +57,17 @@ class Speedometer:
 
         if elapsed_ns >= self.update_interval_ns:
             elapsed_sec = elapsed_ns / 1e9
-            self.bytes_per_sec = self._bytes_acc / elapsed_sec
-            self.msgs_per_sec = self._msgs_acc / elapsed_sec
+            bytes_per_sec = self.bytes_per_sec = self._bytes_acc / elapsed_sec
+            msgs_per_sec = self.msgs_per_sec = self._msgs_acc / elapsed_sec
 
             # Reset window
             self._bytes_acc = 0
             self._msgs_acc = 0
             self._last_time_ns = now
 
-            if self.logger:
-                self.logger.info(
-                    f"mb_s={self.bytes_per_sec / 1024 / 1024:.0f} bytes_s={self.bytes_per_sec:.0f} msg_s={self.msgs_per_sec:.0f}"  # total_bytes={self.total_bytes} total_msgs={self.total_msgs}"
+            if logger := self.logger:
+                logger.debug(
+                    f"mb_s={bytes_per_sec / 1024 / 1024:.0f} bytes_s={bytes_per_sec:.0f} msg_s={msgs_per_sec:.0f}"  # total_bytes={self.total_bytes} total_msgs={self.total_msgs}"
                 )
             return True
         return False
@@ -74,6 +86,17 @@ class ThroughputAutoTuner:
     Uses a Speedometer to project required buffer sizes in bytes.
     Logs specifically when it recalculates resource projections.
     """
+
+    __slots__ = (
+        "speedo",
+        "default_buffer_bytes",
+        "msg_size_bytes",
+        "safety_factor",
+        "logger",
+        "estimated_buffer_bytes",
+        "estimated_capacity",
+        "default_capacity",
+    )
 
     def __init__(
         self,
@@ -97,17 +120,18 @@ class ThroughputAutoTuner:
 
     def update(self, bytes_in: int, msgs_in: int, target_window_sec: float) -> bool:
         # Speedometer logs its own stats internally
-        if self.speedo.update(bytes_in, msgs_in):
-            bytes_needed = self.speedo.bytes_per_sec * target_window_sec * self.safety_factor
-            msgs_needed = self.speedo.msgs_per_sec * target_window_sec * self.safety_factor
+        speedo = self.speedo
+        if speedo.update(bytes_in, msgs_in):
+            bytes_needed = speedo.bytes_per_sec * target_window_sec * self.safety_factor
+            msgs_needed = speedo.msgs_per_sec * target_window_sec * self.safety_factor
 
-            self.estimated_buffer_bytes = max(self.default_buffer_bytes, int(bytes_needed))
-            self.estimated_capacity = max(self.default_capacity, int(msgs_needed))
+            estimated_buffer_bytes = self.estimated_buffer_bytes = max(self.default_buffer_bytes, int(bytes_needed))
+            estimated_capacity = self.estimated_capacity = max(self.default_capacity, int(msgs_needed))
 
-            if self.logger:
+            if logger := self.logger:
                 # Log state specifically; we can format to KB here for readability
-                kb = self.estimated_buffer_bytes / 1024
-                self.logger.debug(f"Tuner Projection: {kb:.1f} KB, {self.estimated_capacity} rows")
+                kb = estimated_buffer_bytes / 1024
+                logger.debug(f"size_kb={kb:.1f} rows={estimated_capacity}")
             return True
         return False
 
