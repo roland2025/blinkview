@@ -47,7 +47,7 @@ class BaseLogger:
 
     log: Callable[[str, LevelIdentity], None]
 
-    def child(self, name: str) -> "BaseLogger":
+    def child(self, name: str, enabled: Optional[bool] = None, essential: Optional[bool] = None) -> "BaseLogger":
         """
         Creates a child logger with an appended module path.
         This method should be overridden by subclasses to return the correct type.
@@ -56,7 +56,7 @@ class BaseLogger:
 
 
 class SystemLogger(BaseLogger):
-    __slots__ = "category", "owner_name", "module_path", "registry", "_enabled"
+    __slots__ = "category", "owner_name", "module_path", "registry", "_enabled", "is_essential"
 
     """
     A contextual logger that routes system events to the SYSTEM namespace.
@@ -64,12 +64,19 @@ class SystemLogger(BaseLogger):
     """
 
     def __init__(
-        self, category: str, owner_name: str, registry, _internal_path: Optional[str] = None, enabled: bool = True
+        self,
+        category: str,
+        owner_name: str,
+        registry,
+        _internal_path: Optional[str] = None,
+        enabled: bool = True,
+        essential: bool = False,
     ):
         self.registry = registry
         self.category = category
         self.owner_name = owner_name
         self._enabled = enabled
+        self.is_essential = essential
 
         # Determine the module path: either inherited from a parent or built from scratch
         if _internal_path:
@@ -108,7 +115,9 @@ class SystemLogger(BaseLogger):
         registry = self.registry
 
         # Resolve IDs and resources just-in-time
-        mod_id = registry.system_device.get_module(self.module_path).id
+        module = registry.system_device.get_module(self.module_path)
+        module.set_essential(self.is_essential)
+        mod_id = module.id
         system_log_append = registry.log_append
         time_ns = registry.now_ns
 
@@ -126,7 +135,7 @@ class SystemLogger(BaseLogger):
         """A zero-overhead discard function used when the logger is disabled."""
         pass
 
-    def child(self, name: str, enabled: Optional[bool] = None) -> "SystemLogger":
+    def child(self, name: str, enabled: Optional[bool] = None, essential: Optional[bool] = None) -> "SystemLogger":
         """
         Creates a new SystemLogger instance with an appended module path.
         Example: 'reader.RNG' -> 'reader.RNG.Validator'
@@ -136,12 +145,15 @@ class SystemLogger(BaseLogger):
         # Inherit parent's state unless explicitly overridden
         child_enabled = enabled if enabled is not None else self._enabled
 
+        child_essential = essential if essential is not None else self.is_essential
+
         return SystemLogger(
             category=self.category,
             owner_name=self.owner_name,
             registry=self.registry,
             _internal_path=new_path,
             enabled=child_enabled,
+            essential=child_essential,
         )
 
     def child_creator(self, name: str) -> Callable[[], "SystemLogger"]:
@@ -157,13 +169,23 @@ class SystemLogger(BaseLogger):
 
 
 class PrintLogger(BaseLogger):
-    __slots__ = ("ctx", "queue_put", "time_ns")
+    __slots__ = ("ctx", "queue_put", "time_ns", "is_essential")
 
-    def __init__(self, category: str, owner_name: str = None, queue_put=None, time_ns=None, _internal_ctx: str = None):
+    def __init__(
+        self,
+        category: str,
+        owner_name: str = None,
+        queue_put=None,
+        time_ns=None,
+        _internal_ctx: str = None,
+        essential: bool = False,
+    ):
         """
         Dummy Logger: Bypasses Registry/Queue and prints directly to console.
         Supports hierarchical child loggers.
         """
+        self.is_essential = essential
+
         # Determine the context string (inherited if internal, otherwise built)
         if _internal_ctx:
             self.ctx = _internal_ctx
@@ -197,13 +219,21 @@ class PrintLogger(BaseLogger):
 
         self.log = fast_log
 
-    def child(self, name: str) -> "PrintLogger":
+    def child(self, name: str, enabled: Optional[bool] = None, essential: Optional[bool] = None) -> "PrintLogger":
         """
         Creates a new PrintLogger instance with an appended context path.
+        Matches BaseLogger signature to support enabled/essential overrides.
         """
         new_path = f"{self.ctx}.{name}"
+        child_essential = essential if essential is not None else self.is_essential
+
         return PrintLogger(
-            category="", owner_name="", queue_put=self.queue_put, time_ns=self.time_ns, _internal_ctx=new_path
+            category="",
+            owner_name="",
+            queue_put=self.queue_put,
+            time_ns=self.time_ns,
+            _internal_ctx=new_path,
+            essential=child_essential,
         )
 
     def child_creator(self, name: str) -> Callable[[], "PrintLogger"]:

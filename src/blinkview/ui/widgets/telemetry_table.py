@@ -3,7 +3,7 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 from dataclasses import dataclass
-from time import perf_counter
+from time import perf_counter, perf_counter_ns
 from typing import Optional
 
 import numpy as np
@@ -54,11 +54,13 @@ def _initialize_new_modules(
     painted_buffers: np.ndarray,
     now: float,
     max_msg_bytes: int,
-) -> bool:
+    newly_active_ids: np.ndarray,  # NEW: Output buffer for IDs
+) -> int:
     """
-    Initializes modules and returns True if at least one module was initialized.
+    Initializes modules and returns the count of newly initialized modules.
+    Populates `newly_active_ids` with the activated mod_ids.
     """
-    initialized = False
+    count = 0
     for mod_id in range(n_mods):
         if painted_seqs[mod_id] == 0 and sequences[mod_id] > 0:
             painted_seqs[mod_id] = sequences[mod_id]
@@ -73,9 +75,10 @@ def _initialize_new_modules(
             for b in range(c_len):
                 painted_buffers[off + b] = current_buffers[off + b]
 
-            initialized = True
+            newly_active_ids[count] = mod_id
+            count += 1
 
-    return initialized
+    return count
 
 
 @app_njit()
@@ -169,11 +172,23 @@ class TelemetryTableModel(QAbstractTableModel):
         super().__init__(parent)
         self.context: GUIContext = gui_context
 
-        self.modules: list[ModuleIdentity] = []
-        self.visible_mod_ids = np.empty(0, dtype=np.int32)
+        self.system_device = self.context.id_registry.get_device("system")
 
+        self.logger = self.context.logger.child("telem", enabled=False)
+
+        self.logger_count = self.logger.child("count")
+        self.logger_total = self.logger.child("total_ms")
+
+        self.logger_filter = self.logger.child("filter")
+
+        self.modules: list[ModuleIdentity] = []
         # Pre-allocate parallel columnar arrays
         self.capacity = 1024
+
+        self._visible_sort_keys: list = []
+        self.visible_mod_ids = np.empty(0, dtype=np.int32)
+        self.is_visible = np.zeros(self.capacity, dtype=np.bool_)
+
         self.painted_seqs = np.zeros(self.capacity, dtype=dtypes.SEQ_TYPE)
         self.painted_levels = np.zeros(self.capacity, dtype=dtypes.LEVEL_TYPE)
         self.arrival_times = np.zeros(self.capacity, dtype=np.float64)
@@ -197,6 +212,7 @@ class TelemetryTableModel(QAbstractTableModel):
         self.allowed_module_children = False
 
         self.hide_empty = False
+        self.show_non_essential = False
 
         # Sort settings
         self.sort_column = TelemetryCol.DEVICE
@@ -219,6 +235,122 @@ class TelemetryTableModel(QAbstractTableModel):
     def set_hide_empty(self, hide: bool):
         self.hide_empty = hide
         self.refresh_layout()
+
+    def set_show_non_essential(self, show: bool):
+        self.show_non_essential = show
+        self.refresh_layout()
+
+    def _passes_filters(self, mod_id: int) -> bool:
+        """Evaluates if a single module passes the current UI filters."""
+        module = self.modules[mod_id]
+
+        # Essential Filter
+        if module.device is self.system_device:
+            if not self.show_non_essential and not module.is_essential:
+                return False
+
+        # Device Filter
+        if self.allowed_device is not None and module.device != self.allowed_device:
+            return False
+
+        # Module/Hierarchy Filter
+        if self.allowed_module is not None:
+            if module.device != self.allowed_module.device:
+                return False
+
+            if self.allowed_module_children:
+                curr = module
+                found = False
+                while curr is not None:
+                    if curr == self.allowed_module:
+                        found = True
+                        break
+                    curr = curr.parent
+                if not found:
+                    return False
+            else:
+                parent = self.allowed_module.parent
+                if parent is not None:
+                    curr = module
+                    found = False
+                    while curr is not None:
+                        if curr == parent:
+                            found = True
+                            break
+                        curr = curr.parent
+                    if not found:
+                        return False
+
+        # Text Search Filters
+        if self._positive_groups or self._global_negatives:
+            row_content = f"{module.name} {module.device.name}".lower()
+
+            if self._global_negatives and any(neg in row_content for neg in self._global_negatives):
+                return False
+
+            if self._positive_groups:
+                passed_pos = False
+                for group in self._positive_groups:
+                    if all(term in row_content for term in group if term):
+                        passed_pos = True
+                        break
+                if not passed_pos:
+                    return False
+
+        # Hide Empty Filter
+        if self.hide_empty and self.seqs_mv[mod_id] == 0:
+            return False
+
+        return True
+
+    def _sort_key(self, mod_id: int):
+        module = self.modules[mod_id]
+        if self.sort_column == TelemetryCol.DEVICE:
+            return (module.device.name, module.name)
+        return module.name
+
+    def _bisect_insert_index(self, key) -> int:
+        """O(log n) replacement for the old linear scan. visible_mod_ids/_visible_sort_keys
+        are always kept sorted, so we can binary-search for the insertion point instead
+        of comparing against every existing row."""
+        keys = self._visible_sort_keys
+        lo, hi = 0, len(keys)
+        descending = self.sort_order == Qt.DescendingOrder
+        while lo < hi:
+            mid = (lo + hi) // 2
+            mid_key = keys[mid]
+            go_right = (mid_key >= key) if descending else (mid_key <= key)
+            if go_right:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
+    def _insert_visible_module(self, mod_id: int):
+        """Safely inserts a new module into the model while maintaining sort order."""
+        if self.is_visible[mod_id]:
+            return  # Already has a row — prevents duplicates when both
+            # _sync_registry (on registration) and
+            # _initialize_new_modules (on first data) add the same mod_id.
+
+        filter_passed = self._passes_filters(mod_id)
+        if not filter_passed:
+            return
+
+        start_time = perf_counter_ns()
+
+        key = self._sort_key(mod_id)
+        insert_idx = self._bisect_insert_index(key)
+
+        self.beginInsertRows(QModelIndex(), insert_idx, insert_idx)
+        self.visible_mod_ids = np.insert(self.visible_mod_ids, insert_idx, mod_id)
+        self._visible_sort_keys.insert(insert_idx, key)
+        self.endInsertRows()
+        self.is_visible[mod_id] = True
+
+        end_time = perf_counter_ns()
+
+        self.logger_filter.debug(f"{(end_time - start_time) / 1_000_000:.6f}")
 
     def set_filter_text(self, text: str):
         clean_text = text.lower().strip()
@@ -264,17 +396,20 @@ class TelemetryTableModel(QAbstractTableModel):
 
     def _sync_registry(self, current_modules):
         """Ensures backend modules have UI state tracked in parallel arrays."""
+        old_capacity = len(self.modules)
         n_mods = len(current_modules)
 
         # Build by real module.id, not by list position — module_list's
         # append order is not guaranteed to match id order.
-        modules_by_id: list = [None] * n_mods
+        modules_by_id = [None] * len(current_modules)
         for module in current_modules:
             modules_by_id[module.id] = module
         self.modules = modules_by_id
 
         if n_mods > self.capacity:
             self.capacity = max(n_mods, self.capacity * 2)
+
+            self.is_visible = self._grow(self.is_visible, dtype=np.bool_)
             self.painted_seqs = self._grow(self.painted_seqs, dtypes.SEQ_TYPE)
             self.painted_levels = self._grow(self.painted_levels, dtypes.LEVEL_TYPE)
             self.arrival_times = self._grow(self.arrival_times, np.float64)
@@ -288,7 +423,8 @@ class TelemetryTableModel(QAbstractTableModel):
 
             self._init_memoryviews()
 
-        self.refresh_layout()
+        for mod_id in range(old_capacity, len(self.modules)):
+            self._insert_visible_module(mod_id)
 
     def refresh_layout(self):
         """Applies filters to the id tracking array and executes sorting."""
@@ -296,6 +432,11 @@ class TelemetryTableModel(QAbstractTableModel):
 
         filtered_ids = []
         for mod_id, module in enumerate(self.modules):
+            # Essential Filter
+            if module.device is self.system_device:
+                if not self.show_non_essential and not module.is_essential:
+                    continue
+
             if self.allowed_device is not None and module.device != self.allowed_device:
                 continue
 
@@ -357,6 +498,12 @@ class TelemetryTableModel(QAbstractTableModel):
 
         self.visible_mod_ids = np.array(filtered_ids, dtype=np.int32)
 
+        self._visible_sort_keys = [self._sort_key(m) for m in filtered_ids]
+
+        self.is_visible[:] = False
+        if self.visible_mod_ids.size > 0:
+            self.is_visible[self.visible_mod_ids] = True
+
         self.endResetModel()
         self.layout_changed.emit()
 
@@ -366,6 +513,8 @@ class TelemetryTableModel(QAbstractTableModel):
         if now - self.prev_apply < 0.1:  # Target ~10Hz limit
             return
         self.prev_apply = now
+
+        start_time = perf_counter_ns()
 
         current_modules = self.context.id_registry.module_list
         if len(current_modules) != len(self.modules):
@@ -378,6 +527,8 @@ class TelemetryTableModel(QAbstractTableModel):
         data_changed_emit = self.dataChanged.emit
         buffer_time = 0.02
 
+        newly_active_ids = np.zeros(len(self.modules), dtype=np.int32)
+
         with tracker.get_snapshot() as snap:
             b = snap.bundle()
             sequences = b.sequence_ids
@@ -385,29 +536,27 @@ class TelemetryTableModel(QAbstractTableModel):
             b_lengths = b.lengths
             b_buffer = b.buffer
 
-            # Intercept hidden empty rows receiving their first payloads
-            b = snap.bundle()
-            sequences = b.sequence_ids
-
             # --- REPLACE THE OLD PYTHON LOOP WITH THIS ---
-            if self.hide_empty:
-                if _initialize_new_modules(
-                    len(self.modules),
-                    sequences,
-                    self.painted_seqs,
-                    self.arrival_times,
-                    self.change_times,
-                    levels,
-                    self.painted_levels,
-                    b_lengths,
-                    self.painted_lengths,
-                    b_buffer,
-                    self.painted_buffers,
-                    now,
-                    MAX_MSG_BYTES,
-                ):
-                    self.refresh_layout()
-                    return
+            new_count = _initialize_new_modules(
+                len(self.modules),
+                sequences,
+                self.painted_seqs,
+                self.arrival_times,
+                self.change_times,
+                levels,
+                self.painted_levels,
+                b_lengths,
+                self.painted_lengths,
+                b_buffer,
+                self.painted_buffers,
+                now,
+                MAX_MSG_BYTES,
+                newly_active_ids,  # Pass the new output buffer
+            )
+
+            if new_count > 0:
+                for i in range(new_count):
+                    self._insert_visible_module(newly_active_ids[i])
 
             if len(self.visible_mod_ids) == 0:
                 return
@@ -433,12 +582,30 @@ class TelemetryTableModel(QAbstractTableModel):
             )
 
             # The only thing left in Python is the Qt UI boundary
+            # indices_to_update_np = np.nonzero(needs_update)[0]
+            # indices_to_update = memoryview(indices_to_update_np)
+            # for i in indices_to_update:
+            #     # Int casting keeps Qt index creation clean of np.int64 types
+            #     idx = self.index(int(i), TelemetryCol.VALUE)
+            #     data_changed_emit(idx, idx)
             indices_to_update_np = np.nonzero(needs_update)[0]
-            indices_to_update = memoryview(indices_to_update_np)
-            for i in indices_to_update:
-                # Int casting keeps Qt index creation clean of np.int64 types
-                idx = self.index(int(i), TelemetryCol.VALUE)
-                data_changed_emit(idx, idx)
+
+            if indices_to_update_np.size > 0:
+                # Grab the highest and lowest modified rows
+                min_row = int(indices_to_update_np[0])
+                max_row = int(indices_to_update_np[-1])
+
+                # Create a bounding box covering the changed area in the VALUE column
+                top_idx = self.index(min_row, TelemetryCol.VALUE)
+                bottom_idx = self.index(max_row, TelemetryCol.VALUE)
+
+                # Emit ONE signal. Qt will clip this to the visible viewport automatically.
+                data_changed_emit(top_idx, bottom_idx, [Qt.DisplayRole, Qt.BackgroundRole, Qt.ForegroundRole])
+
+        end_time = perf_counter_ns()
+
+        self.logger_total.debug(f"{(end_time - start_time) / 1_000_000:.6f}")
+        self.logger_count.debug(f"{len(self.modules)}")
 
     def rowCount(self, parent=None):
         # Table models must return 0 for child nodes, or Qt gets confused
@@ -523,6 +690,7 @@ class TelemetryTable(QWidget):
         self.sort_order = 0
 
         self.hide_empty = True
+        self.show_non_essential = False
 
         self._set_defaults()
 
@@ -563,6 +731,12 @@ class TelemetryTable(QWidget):
         self.action_hide_empty.setChecked(self.hide_empty)
         self.action_hide_empty.triggered.connect(self._toggle_hide_empty)
         self.options_menu.addAction(self.action_hide_empty)
+
+        self.action_show_non_essential = QAction("Show Non-Essential", self)
+        self.action_show_non_essential.setCheckable(True)
+        self.action_show_non_essential.setChecked(self.show_non_essential)
+        self.action_show_non_essential.triggered.connect(self._toggle_show_non_essential)
+        self.options_menu.addAction(self.action_show_non_essential)
 
         self.options_button.setMenu(self.options_menu)
 
@@ -629,6 +803,8 @@ class TelemetryTable(QWidget):
 
         self.model.layout_changed.connect(self.auto_size_columns_delayed)
 
+        self.model.rowsInserted.connect(self.auto_size_columns_delayed)
+
         self.resize_timer = QTimer(self)
         self.resize_timer.setSingleShot(True)
         self.resize_timer.timeout.connect(self.auto_size_columns)
@@ -647,6 +823,7 @@ class TelemetryTable(QWidget):
 
     def apply_updates(self):
         """Pass update execution to our isolated table model."""
+        # pass
         self.model.apply_updates()
 
     def _set_defaults(self):
@@ -659,6 +836,7 @@ class TelemetryTable(QWidget):
         self.sort_order = 0
         self.sort_column = TelemetryCol.DEVICE
         self.hide_empty = True
+        self.show_non_essential = False
 
     def restore(self, state: dict):
         self.tab_name = state.get("tab_name", self.tab_name)
@@ -690,6 +868,10 @@ class TelemetryTable(QWidget):
         self.action_hide_empty.setChecked(self.hide_empty)
         self.model.set_hide_empty(self.hide_empty)
 
+        self.show_non_essential = state.get("show_non_essential", self.show_non_essential)
+        self.action_show_non_essential.setChecked(self.show_non_essential)
+        self.model.set_show_non_essential(self.show_non_essential)
+
         self.action_toggle_module.setChecked(self.show_device_column)
         self._toggle_device_column(self.show_device_column)
 
@@ -715,6 +897,7 @@ class TelemetryTable(QWidget):
             "sort_column": self.sort_column,
             "sort_order": self.sort_order,
             "hide_empty": self.hide_empty,
+            "show_non_essential": self.show_non_essential,
         }
 
     def auto_size_columns_delayed(self):
@@ -959,4 +1142,9 @@ class TelemetryTable(QWidget):
     def _toggle_hide_empty(self, checked: bool):
         self.hide_empty = checked
         self.model.set_hide_empty(checked)
+        self.auto_size_columns_delayed()
+
+    def _toggle_show_non_essential(self, checked: bool):
+        self.show_non_essential = checked
+        self.model.set_show_non_essential(checked)
         self.auto_size_columns_delayed()

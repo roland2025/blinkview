@@ -99,9 +99,15 @@ def nb_parse_int_timestamp(
 
     raw_ns = raw_val * multiplier
 
+    timestamp_unix = config.timestamp_unix
+    if timestamp_unix:
+        ts = raw_ns
+    else:
+        rx_ns = out_b.rx_timestamps[out_idx]
+        ts = nb_project_synced_ns(raw_ns, rx_ns, state.timestamp.sync)
     # 4. Project and Store
-    rx_ns = out_b.rx_timestamps[out_idx]
-    out_b.timestamps[out_idx] = nb_project_synced_ns(raw_ns, rx_ns, state.timestamp.sync)
+
+    out_b.timestamps[out_idx] = ts
 
     # 5. Clean up trailing whitespace
     while cursor < end_cursor and (buffer[cursor] == CHAR_SPACE or buffer[cursor] == CHAR_TAB):

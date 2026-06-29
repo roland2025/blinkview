@@ -157,7 +157,7 @@ class Registry:
         )
         self.file_manager.set_context(self.system_ctx)
 
-        self.system_device = self.id_registry.get_device("SYSTEM")
+        self.system_device = self.id_registry.get_device("SYSTEM", essential=False)
         self.log_device_id = self.system_device.id
 
         self.sources = None
@@ -194,14 +194,23 @@ class Registry:
         if target is None:
             return
 
-        ctx = target.logger.ctx
-        target.logger = self.logger_creator(ctx)()
+        if hasattr(target, "init_logger") and callable(target.init_logger):
+            target.init_logger(self.logger_creator)
+            return
 
-    def logger_creator(self, category: str, name: str = None):
+        # Safely extract context depending on whether the previous logger was PrintLogger or SystemLogger
+        ctx = getattr(target.logger, "ctx", getattr(target.logger, "module_path", ""))
+
+        # Extract the essential flag to pass it over
+        is_essential = getattr(target.logger, "is_essential", False)
+
+        target.logger = self.logger_creator(category=ctx, essential=is_essential)()
+
+    def logger_creator(self, category: str, name: str = None, essential: bool = False):
         if not self.initialized:
-            return lambda: PrintLogger(category, name, self._temp_log_queue.put, self.now_ns)
+            return lambda: PrintLogger(category, name, self._temp_log_queue.put, self.now_ns, essential=essential)
 
-        return lambda: SystemLogger(category, name, self)
+        return lambda: SystemLogger(category, name, self, essential=essential)
 
     def get_device(self, device_name):
         return self.id_registry.get_device(device_name)

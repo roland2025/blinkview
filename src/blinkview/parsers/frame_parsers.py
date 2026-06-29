@@ -16,6 +16,7 @@ from blinkview.core.configurable import configurable, configuration_property
 from blinkview.core.factory import BaseFactory
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.system_context import SystemContext
+from blinkview.core.types.empty import EMPTY_BYTES, EMPTY_BYTES_RO
 from blinkview.core.types.modules import (
     MODULE_TEMP_ID_BASE,
     DynamicWidthConfig,
@@ -352,6 +353,23 @@ class FixedWidthModuleNameParser(ModuleNameParserBase):
     required=False,
     default=False,
 )
+@configuration_property("prefix", type="string", required=False, help="Prefix to match or remove", default="")
+@configuration_property(
+    "prefix_match",
+    type="boolean",
+    title="Match prefix",
+    required=False,
+    default=False,
+    help="Name must start with prefix",
+)
+@configuration_property(
+    "prefix_remove",
+    type="boolean",
+    title="Remove prefix",
+    required=False,
+    default=False,
+    help="Remove prefix from name",
+)
 @FrameSectionParserFactory.register("module_name_normalizer")
 class ModuleNameNormalizer(ModuleNameParserBase):
     """This parser extracts module names from variable-width fields by scanning for common delimiters (spaces, tabs, brackets) and normalizing them. It is designed for log formats where module names may be of varying lengths and may include hierarchical components separated by dots or enclosed in brackets."""
@@ -360,21 +378,41 @@ class ModuleNameNormalizer(ModuleNameParserBase):
     max_depth: int
     enable_brackets: bool
     enable_dot_separator: bool
+    prefix: str
+    prefix_match: bool
+    prefix_remove: bool
 
     def __init__(self):
         super().__init__()
+
+        self.module_config = None
+
+    def apply_config(self, config: dict):
+        changed = super().apply_config(config)
+
+        if self.prefix:
+            prefix_bytes = np.frombuffer(self.prefix.encode("ascii"), dtype=dtypes.BYTE)
+        else:
+            prefix_bytes = EMPTY_BYTES_RO
+
+        self.module_config = DynamicWidthConfig(
+            max_length=self.max_length,
+            max_depth=self.max_depth,
+            enable_brackets=self.enable_brackets,
+            enable_dot_separator=self.enable_dot_separator,
+            prefix_bytes=prefix_bytes,
+            prefix_match=self.prefix_match,
+            prefix_remove=self.prefix_remove,
+        )
+
+        return changed
 
     def bundle(self):
         # 1. Build the IMMUTABLE config snapshot
         # Note: 'tracker' is removed from here.
         config = UnifiedParserConfig(
             string_table=self.local.device_id.modules_table.bundle(),
-            module_config=DynamicWidthConfig(
-                max_length=self.max_length,
-                max_depth=self.max_depth,
-                enable_brackets=self.enable_brackets,
-                enable_dot_separator=self.enable_dot_separator,
-            ),
+            module_config=self.module_config,
         )
 
         # 2. Return the universal 3-tuple: (Function, Mutable State, Immutable Config)
@@ -418,6 +456,7 @@ TS_PRECISIONS_DESC = [
 @configuration_property(
     "precision", type="integer", enum=TS_PRECISIONS, enum_descriptions=TS_PRECISIONS_DESC, default=TS_PRECISION_MS
 )
+@configuration_property("unix_timestamp", type="boolean", default=False, required=False)
 @FrameSectionParserFactory.register("timestamp_integer")
 class IntegerTimestampParser(TimestampParser):
     precision: int

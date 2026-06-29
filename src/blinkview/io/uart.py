@@ -107,6 +107,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         self._handshake_task_id = None
         self._flash_active = False
         self._flash_lock_ts = 0
+
         self.logger_send = None
 
     @classmethod
@@ -138,7 +139,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
     def apply_config(self, config: dict):
         # 1. Apply configuration via the parent framework
-        super().apply_config(config)
+        changed = super().apply_config(config)
 
         self.logger_send = self.logger_send or self.logger.child("send")
 
@@ -156,6 +157,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         # 3. Always clear lingering handshake artifacts to guarantee a pristine slate
         self._clear_handshake_files()
 
+        return changed
+
     def run(self):
         # 1. Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
@@ -167,6 +170,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         # Tuner configuration
         delay_s = self.delay / 1000.0
         delay_ns = int(self.delay * 1_000_000)
+
+        self.logger_state_open.info("0")
 
         # 2. Stats and Auto-Tuning Setup
         # We set msg_size_bytes to 20 to maintain your ~50 chunks/KB density preference
@@ -194,6 +199,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                             finally:
                                 self.serial = None
                                 ser = None
+                                self.logger_link.warn("Broken, port closed.")
+                                self.logger_state_open.warning("0")
 
                 if use_flash_handshake and self._flash_active:
                     with self._serial_lock:
@@ -203,6 +210,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                             finally:
                                 ser = None
                                 self.serial = None
+                                self.logger_state_open.info("0")
                         sleep(0.1)
                         continue
 
@@ -252,9 +260,10 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                         batch = None
 
                 except Exception as e:
-                    logger.error(f"Serial read error: {e}")
+                    self.logger_link.error("Closed, read error", e)
                     ser = None
                     self.serial = None
+                    self.logger_state_open.warning("0")
                     sleep(1.0)
 
         except Exception as e:
@@ -273,7 +282,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                         self.serial.close()
                     finally:
                         self.serial = None
-                        self.logger.debug("Serial port closed.")
+                        self.logger_link.info("Port closed.")
+                        self.logger_state_open.info("0")
 
     def open(self):
         try:
@@ -290,7 +300,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
             BUF_SIZE = 64 * 1024  # 64KB buffer for incoming serial data
 
-            self.logger.info(f"Opening '{self.url}' at {self.baudrate} baud")
+            self.logger_link.info(f"Opening '{self.url}' at {self.baudrate} baud")
 
             from serial import serial_for_url
 
@@ -315,11 +325,12 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 self.logger.error("Failed to set buffer size. This may not be supported on all platforms.", e)
                 pass
 
-            self.logger.info("Connected")
+            self.logger_link.info("Connected")
+            self.logger_state_open.info("1")
 
             return ser
         except Exception as e:
-            self.logger.error("Failed to open serial port.", e)
+            self.logger_link.error("Failed to open serial port.", e)
 
     def send_data(self, data: str):
         with self._serial_lock:
@@ -329,7 +340,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                     self.logger_send.debug(str(encoded))
                     self.serial.write(encoded)
                 except Exception as e:
-                    self.logger_send.exception("Failed to send data", e)
+                    self.logger_link.exception("Failed to send data", e)
                     self.serial_broken = True
 
     def reset_device(self):
@@ -358,7 +369,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
                 self.logger.info("Reset signal sent.")
             except Exception as e:
-                self.logger.exception("Failed to perform hardware reset", e)
+                self.logger.error("Failed to perform hardware reset", e)
                 self.serial_broken = True
 
     def is_connected(self):
@@ -366,7 +377,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             try:
                 return self.serial is not None and self.serial.is_open
             except Exception as e:
-                self.logger.exception("Failed to check serial connection", e)
+                self.logger.error("Failed to check serial connection", e)
                 self.serial_broken = True
 
     def _check_flash_handshake(self):
@@ -451,7 +462,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
         match command:
             case "reset":
-                self.logger.info("Initiating hardware reset via DTR/RTS toggle.")
+                self.logger_link.info("Initiating hardware reset via DTR/RTS toggle.")
                 self.reset_device()
 
             case _:

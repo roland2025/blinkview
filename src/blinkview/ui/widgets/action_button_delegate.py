@@ -7,6 +7,7 @@
 from enum import IntEnum, auto
 from time import perf_counter
 
+from PySide6.QtCore import QSize
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QBrush, QColor, QFont, QPalette
 from qtpy.QtWidgets import QApplication, QStyle, QStyledItemDelegate, QStyleOptionButton
@@ -91,6 +92,7 @@ class TelemetryDelegate(QStyledItemDelegate):
             last_arrival_time = model.arr_mv[mod_id]
             last_change_time = model.chg_mv[mod_id]
             last_painted_seq = model.seqs_mv[mod_id]
+
             last_painted_level = model.levels_mv[mod_id]
 
             now = perf_counter()
@@ -111,12 +113,19 @@ class TelemetryDelegate(QStyledItemDelegate):
                 # Use the default font provided by the View/Option
                 painter.setFont(option.font)
 
+            # if option.state & QStyle.State_MouseOver:
+            #     option.state |= QStyle.State_Selected
+
+            # option.palette.setCurrentColorGroup(QPalette.Active)
+            # QApplication.style().drawPrimitive(QStyle.PE_PanelItemViewItem, option, painter)
+
             # --- DRAW BACKGROUND FLASH ---
             # Restored the smooth gradient fade now that the model is fast enough to handle it
             if col == TelemetryCol.VALUE and elapsed_since_change < theme.fade_duration:
-                idx = int((elapsed_since_change / theme.fade_duration) * self.steps)
-                if 0 <= idx < self.steps:
-                    painter.fillRect(option.rect, self._flash_brushes[idx])
+                # idx = int((elapsed_since_change / theme.fade_duration) * self.steps)
+                # if 0 <= idx < self.steps:
+                #     painter.fillRect(option.rect, self._flash_brushes[idx])
+                painter.fillRect(option.rect, self.theme.color_flash_base)
 
             # --- CONFIGURE TEXT COLOR ---
             if last_painted_seq == 0 or is_stale:
@@ -164,10 +173,13 @@ class TelemetryDelegate(QStyledItemDelegate):
 
             traceback.print_exc()
 
+    # def sizeHint(self, option, index):
+    #     # Get the original size hint
+    #     size = super().sizeHint(option, index)
+    #     # Force the height to the minimum required by the font
+    #     # or a hardcoded small value
+    #     size.setHeight(10)
+    #     return size
     def sizeHint(self, option, index):
-        # Get the original size hint
-        size = super().sizeHint(option, index)
-        # Force the height to the minimum required by the font
-        # or a hardcoded small value
-        size.setHeight(10)
-        return size
+        # Bypass the expensive font-metric calculation completely
+        return QSize(50, 10)

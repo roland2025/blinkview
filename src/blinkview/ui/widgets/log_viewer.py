@@ -72,6 +72,8 @@ QToolButton[filterEnabled="true"] {
         self.show_rx_ts = False
         self.saved_sizes = None
 
+        self.show_hidden = False
+
         self.ts_precision = 3
 
         self._set_defaults()
@@ -242,7 +244,7 @@ QToolButton[filterEnabled="true"] {
         )
 
         self.filter_sidebar = ModuleFilterSidebar(
-            gui_context=self.gui_context, target_filter=self.log_filter, parent=self
+            gui_context=self.gui_context, target_filter=self.log_filter, parent=self, show_hidden=self.show_hidden
         )
 
         self.filter_sidebar.restore_state(self.filter_sidebar_state)
@@ -277,6 +279,7 @@ QToolButton[filterEnabled="true"] {
                 "filtered_device": self.allowed_device,
                 "filtered_module": self.filtered_module,
                 "filtered_module_children": self.filtered_module_children,
+                "show_non_essential": self.show_hidden,
             },
             parent=self,
         )
@@ -320,6 +323,8 @@ QToolButton[filterEnabled="true"] {
 
     def restore(self, state: dict):
         self.tab_name = state.get("tab_name", self.tab_name)
+
+        self.show_hidden = state.get("show_hidden", self.show_hidden)
 
         self.allowed_device = self.gui_context.id_registry.resolve_device(
             state.get("allowed_device", self.allowed_device)
@@ -375,6 +380,7 @@ QToolButton[filterEnabled="true"] {
             },
             "log_level": self.log_filter.log_level.name_conf,
             "filter_sidebar": self.filter_sidebar.get_state(),
+            "show_hidden": self.filter_sidebar.action_show_non_essential.isChecked(),
         }
 
     def _handle_level_change(self, index):
@@ -542,12 +548,24 @@ QToolButton[filterEnabled="true"] {
                     self._effective_mask = raw_effective
             else:
                 # Path 2: Tab Fallback Mode
-                self._effective_mask = np.full(mod_count, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
+                show_hidden = self.filter_sidebar.action_show_non_essential.isChecked()
+
+                if show_hidden:
+                    # Show everything up to the global threshold
+                    self._effective_mask = np.full(mod_count, global_threshold, dtype=dtypes.LEVEL_TYPE)
+                else:
+                    essential_mask = reg._essential_array[:mod_count]
+                    # Apply threshold only to essential modules
+                    self._effective_mask = np.where(essential_mask, global_threshold, LogLevel.OFF.value).astype(
+                        dtypes.LEVEL_TYPE
+                    )
 
                 if self._filter_cache is not None:
-                    self._effective_mask[self._filter_cache] = global_threshold
-                else:
-                    self._effective_mask[:] = global_threshold
+                    # Constrain to the tab's allowed cache
+                    mask = np.full(mod_count, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
+                    mask[self._filter_cache] = self._effective_mask[self._filter_cache]
+                    self._effective_mask = mask
+
         t_mask_end = time.time_ns()
 
         # if (t_mask_end - t_mask_start) > 1_000_000:  # Only log if mask baking took more than 1ms

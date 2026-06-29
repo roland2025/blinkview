@@ -151,7 +151,9 @@ class BlinkMainWindow(QMainWindow):
 
         self.btn_open_system_logs = QAction("System Logs", self)
         self.btn_open_system_logs.triggered.connect(
-            lambda _: self.create_widget("LogViewerWidget", "System Logs", params={"allowed_device": "SYSTEM"})
+            lambda _: self.create_widget(
+                "LogViewerWidget", "System Logs", params={"allowed_device": "SYSTEM", "show_hidden": True}
+            )
         )
         self.toolbar.addAction(self.btn_open_system_logs)
 

@@ -10,6 +10,7 @@ from blinkview.parsers import (
     can_bus,
     can_parser,
     key_value,
+    module_gen,
     multi_rule_key_value,
     parser,
     time_sync_profiler,

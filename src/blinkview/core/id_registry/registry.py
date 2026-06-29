@@ -5,6 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from threading import RLock
+from time import perf_counter_ns
 from typing import Dict, List
 
 import numpy as np
@@ -30,6 +31,7 @@ class IDRegistry:
         "device_lookup",
         "level_map",
         "logger",
+        "logger_device",
         "module_list",
         "modules",
         "modules_table",
@@ -37,11 +39,14 @@ class IDRegistry:
         "devices_table",
         "_parent_capacity",
         "_parent_array",
+        "_essential_array",
     )
 
     def __init__(self, array_pool):
         self._lock = RLock()
         self.logger = PrintLogger("id_registry")
+
+        self.logger_device = self.logger.child("new_device")
 
         self._device_id_counter = 0
         self._module_id_counter = 0
@@ -49,6 +54,8 @@ class IDRegistry:
         # Pre-allocate the parent array
         self._parent_capacity = 1024
         self._parent_array = np.full(self._parent_capacity, NO_PARENT, dtype=dtypes.ID_TYPE)
+
+        self._essential_array = np.zeros(self._parent_capacity, dtype=np.bool_)
 
         # Fast Lookups
         self.devices: Dict[int, DeviceIdentity] = {}
@@ -102,17 +109,16 @@ class IDRegistry:
         with self._lock:
             required_capacity = self._module_id_counter
             if required_capacity > self._parent_capacity:
-                # Double the capacity until it fits
                 new_cap = max(required_capacity, self._parent_capacity * 2)
 
-                # Create new array filled with NO_PARENT
                 new_array = np.full(new_cap, NO_PARENT, dtype=dtypes.ID_TYPE)
-
-                # Copy old data over
                 new_array[: self._parent_capacity] = self._parent_array
 
-                # Swap the reference (atomic in Python)
+                new_essential = np.zeros(new_cap, dtype=np.bool_)
+                new_essential[: self._parent_capacity] = self._essential_array
+
                 self._parent_array = new_array
+                self._essential_array = new_essential
                 self._parent_capacity = new_cap
 
             for module, parent_id in registration_data:
@@ -127,13 +133,18 @@ class IDRegistry:
                 if parent_id != NO_PARENT:
                     self._parent_array[module.id] = parent_id
 
-    def get_device(self, name: str) -> DeviceIdentity:
+                # 4. Capture the essential flag set at construction time
+                self._essential_array[module.id] = module.is_essential
+
+    def get_device(self, name: str, essential: bool = True) -> DeviceIdentity:
         """Retrieve or create a DeviceIdentity by name."""
         name = name.lower()
 
         # HOT PATH: Simple lookup (Dicts are thread-safe for reading in CPython)
         if name in self.device_lookup:
             return self.device_lookup[name]
+
+        start_time = perf_counter_ns()
 
         # DISCOVERY PATH: Locked
         with self._lock:
@@ -144,7 +155,7 @@ class IDRegistry:
             new_id = self._device_id_counter
             self._device_id_counter += 1
 
-            new_device = DeviceIdentity(new_id, name, self)
+            new_device = DeviceIdentity(new_id, name, self, default_essential=essential)
 
             # Update Registries
             self.devices[new_id] = new_device
@@ -153,9 +164,11 @@ class IDRegistry:
             # Atomic Swap for the list
             self.device_list = self.device_list + [new_device]  # noqa
 
-            self.logger.info(f"[Device] {new_id} -> {name}")
-
             self.devices_table.register_name(new_id, name)
+
+            end_time = perf_counter_ns()
+
+            self.logger_device.info(f"id={new_id} tm_ms={(end_time - start_time) / 1_000_000:.4f} name={name}")
 
             return new_device
 
@@ -239,6 +252,40 @@ class IDRegistry:
         if parent_id == NO_PARENT:
             return None
         return self.modules.get(parent_id)
+
+    def is_module_essential(self, mod_id: int) -> bool:
+        return bool(self._essential_array[mod_id])
+
+    def init_logger(self, logger_creator):
+        """
+        Re-initializes loggers using the provided factory.
+        Safely extracts the context path and essential flag from the existing loggers.
+        """
+
+        def recreate(existing_logger):
+            if not existing_logger:
+                return None
+
+            # Safely grab the context string depending on the logger type
+            ctx = getattr(existing_logger, "ctx", getattr(existing_logger, "module_path", ""))
+
+            # Preserve the essential flag
+            is_essential = getattr(existing_logger, "is_essential", False)
+
+            # The creator returns a lambda, so we call it immediately with ()
+            return logger_creator(category=ctx, essential=is_essential)()
+
+        self.logger = recreate(self.logger)
+
+        if hasattr(self, "logger_device"):
+            self.logger_device = recreate(self.logger_device)
+
+        for dev in self.device_list:
+            if hasattr(dev, "logger"):
+                dev.logger = recreate(dev.logger)
+
+    def set_module_essential(self, mod_id: int, is_essential: bool):
+        self._essential_array[mod_id] = is_essential
 
 
 def create_mock_modules(iterations=1_000):

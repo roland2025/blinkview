@@ -5,8 +5,9 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import re
-from threading import Lock
-from typing import TYPE_CHECKING
+from threading import Lock, RLock
+from time import perf_counter_ns
+from typing import TYPE_CHECKING, Optional
 
 from blinkview.core import dtypes
 from blinkview.core.id_registry.tables import IndexedStringTable
@@ -25,14 +26,27 @@ class ModuleIdentity:
         "device",
         "submodules",
         "submodule_list",
+        "is_essential",
     )
 
-    def __init__(self, module_id: int, name: str, full_path: str, depth: int, device_identity: "DeviceIdentity"):
+    def __init__(
+        self,
+        module_id: int,
+        name: str,
+        full_path: str,
+        depth: int,
+        device_identity: "DeviceIdentity",
+        is_essential: bool = True,
+    ):
         self.id = module_id
         self.name = full_path
         self.short_name = name
         self.depth = depth
         self.device = device_identity
+
+        self.is_essential = (
+            is_essential  # used primarily for system modules to automatically filter out user-visible fields
+        )
 
         self.submodules: dict[str, "ModuleIdentity"] = {}
         self.submodule_list: list["ModuleIdentity"] = []
@@ -48,6 +62,10 @@ class ModuleIdentity:
 
     def name_with_device(self) -> str:
         return f"{self.device.name}.{self.name}"
+
+    def set_essential(self, is_essential: bool):
+        self.is_essential = is_essential
+        self.device.id_registry.set_module_essential(self.id, is_essential)
 
     def __str__(self):
         return self.name
@@ -74,17 +92,23 @@ class DeviceIdentity:
         "device_ref",
         "_lock",
         "modules_table",
+        "logger",
+        "default_essential",
     )
 
     _VALID_NAME_REGEX = re.compile(r"^[a-z0-9_.]+$")
 
-    def __init__(self, device_id: int, name: str, id_registry: "IDRegistry", device_ref=None):
+    def __init__(self, device_id: int, name: str, id_registry: "IDRegistry", device_ref=None, default_essential=True):
         self.id = device_id
         self.name = name
         self.device_ref = device_ref
         self.id_registry = id_registry
 
-        self._lock = Lock()
+        self.default_essential = default_essential
+
+        self._lock = RLock()
+
+        self.logger = id_registry.logger.child(name)
 
         self.modules_table = IndexedStringTable(initial_capacity=1024, use_hashes=True)
 
@@ -114,7 +138,7 @@ class DeviceIdentity:
 
         if not self._VALID_NAME_REGEX.match(path):
             raise ValueError(f"Invalid path: {path.encode()}")
-
+        start_time = perf_counter_ns()
         # print(f"[DeviceIdentity] '{self.name}' => '{path}'")
 
         parts = path.split(".")
@@ -142,6 +166,7 @@ class DeviceIdentity:
                         full_path=current_full_path,
                         depth=parent_node.depth + 1,
                         device_identity=self,
+                        is_essential=self.default_essential,
                     )
 
                     self.path_lookup[current_full_path] = target_node
@@ -158,6 +183,12 @@ class DeviceIdentity:
             # Hand off the batch with parent context
             if new_registrations:
                 self.id_registry.register_new_modules(new_registrations)
+
+                end_time = perf_counter_ns()
+                for _node, _id in new_registrations:
+                    self.logger.info(
+                        f"id={_id} tm_ms={(end_time - start_time) / 1_000_000:.4f} len={len(new_registrations)} name={_node.name}"
+                    )
 
         return target_node
 

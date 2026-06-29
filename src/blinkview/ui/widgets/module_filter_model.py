@@ -23,6 +23,8 @@ class FastModuleFilterModel(QAbstractTableModel):
         self.registry = registry
         self.filter = temp_log_filter
 
+        self.system_device = self.registry.get_device("system")
+
         # The Magic List: Maps UI Row -> Module ID
         self.row_to_id = np.empty(0, dtype=dtypes.ID_TYPE)
         # Track the global count we synced against
@@ -30,7 +32,7 @@ class FastModuleFilterModel(QAbstractTableModel):
 
         self.root_module_depth = 0
 
-    def sync_registry(self, allowed_device=None, root_module=None, include_children=False):
+    def sync_registry(self, allowed_device=None, root_module=None, include_children=False, show_non_essential=False):
         """
         Rebuilds the row map based on tab constraints.
         Filters out modules that are not part of the allowed scope.
@@ -40,7 +42,7 @@ class FastModuleFilterModel(QAbstractTableModel):
         self.known_module_count = self.registry.module_count()
         self.filter.ensure_capacity(self.known_module_count)
 
-        # 1. Determine which modules belong in this table
+        # Determine which modules belong in this table
         if root_module:
             self.root_module_depth = root_module.depth
             if include_children:
@@ -56,7 +58,22 @@ class FastModuleFilterModel(QAbstractTableModel):
             if allowed_device:
                 modules = [m for m in modules if m.device == allowed_device]
 
-        # 2. Sort and map to IDs
+        if not show_non_essential:
+            valid_modules = set()
+
+            for m in modules:
+                # Check if this specific module passes the essential rule
+                if m.is_essential:
+                    # It passed! Now walk up the tree and approve all parents
+                    curr = m
+                    while curr is not None and curr.id not in valid_modules:
+                        valid_modules.add(curr.id)
+                        curr = curr.parent
+
+            # Filter the master list using our O(1) set to maintain sort order
+            modules = [m for m in modules if m.id in valid_modules]
+
+        # Sort and map to IDs
         modules.sort(key=lambda m: (m.device.name, m.name))
         self.row_to_id = np.array([m.id for m in modules], dtype=np.uint32)
 

@@ -18,7 +18,7 @@ class ModuleFilterSidebar(QWidget):
     A self-contained sidebar that wraps the ModuleFilterTable and adds a toolbar.
     """
 
-    def __init__(self, gui_context: GUIContext, target_filter: LogFilter, parent=None):
+    def __init__(self, gui_context: GUIContext, target_filter: LogFilter, show_hidden: bool = False, parent=None):
         super().__init__(parent)
         self.gui_context = gui_context
         self.log_filter = TempLogFilter(gui_context, target_filter)
@@ -42,6 +42,11 @@ class ModuleFilterSidebar(QWidget):
         self.action_enable.setChecked(self.log_filter.enabled)
         self.action_enable.toggled.connect(self._on_enable_toggled)
 
+        self.action_show_non_essential = self.toolbar.addAction("Show Hidden")
+        self.action_show_non_essential.setCheckable(True)
+        self.action_show_non_essential.setChecked(show_hidden)
+        self.action_show_non_essential.toggled.connect(self._on_show_non_essential_toggled)
+
         # Add Pause Indicator
         self.pause_label = QLabel(" ⏸ Sync Paused ")
         # self.pause_label.setStyleSheet("color: #888; font-style: italic; font-size: 10px;")
@@ -50,7 +55,7 @@ class ModuleFilterSidebar(QWidget):
         self.pause_action.setVisible(False)
 
         # Add the Table (The existing logic)
-        self.table = ModuleFilterTable(gui_context, self.log_filter, self)
+        self.table = ModuleFilterTable(gui_context, self.log_filter, show_hidden, self)
         self.table.setEnabled(self.action_enable.isChecked())
         self.layout.addWidget(self.table)
 
@@ -58,7 +63,6 @@ class ModuleFilterSidebar(QWidget):
 
     def _on_enable_toggled(self, checked: bool):
         """Toggle whether this tab uses surgical filtering or pass-through."""
-        self.log_filter.set_enabled(checked)
 
         # Visually dim the table when disabled to prevent confusion
         self.table.setEnabled(checked)
@@ -67,10 +71,13 @@ class ModuleFilterSidebar(QWidget):
             self.sync_modules()
             self.table.check_for_new_modules()
 
+        self.log_filter.set_enabled(checked)
+
     def get_state(self):
         return {
             "enabled": self.log_filter.enabled,
             "module_filters": self.log_filter.get_state(),
+            "show_non_essential": self.action_show_non_essential.isChecked(),
         }
 
     def restore_state(self, state):
@@ -78,6 +85,10 @@ class ModuleFilterSidebar(QWidget):
             return
 
         self.action_enable.setChecked(state.get("enabled", False))
+
+        show_hidden = state.get("show_non_essential", False)
+        self.action_show_non_essential.setChecked(show_hidden)
+        self.table.set_show_non_essential(show_hidden)
 
         self.log_filter.restore_state(state.get("module_filters", {}))
 
@@ -93,3 +104,7 @@ class ModuleFilterSidebar(QWidget):
         if checked:
             self.sync_modules()
             self.table.check_for_new_modules()
+
+    def _on_show_non_essential_toggled(self, checked: bool):
+        self.table.set_show_non_essential(checked)
+        self.log_filter.set_show_hidden(checked)

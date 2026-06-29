@@ -249,6 +249,7 @@ class UnifiedParserConfig(NamedTuple):
     module_config: DynamicWidthConfig = EmptyDynamicWidthConfig
 
     timestamp_precision: int = TS_PRECISION_MS  # For time parsers, indicates the expected timestamp format/precision
+    timestamp_unix: bool = False  # specifies, it the received timestamp is unix timestamp
 
 
 EmptyUnifiedParserConfig = UnifiedParserConfig()

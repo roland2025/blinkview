@@ -66,8 +66,15 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
         self.numba_needs_compile = False
 
+        self.logger_batch = None
+        self.logger_post = None
+
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
+
+        self.logger_post = self.logger.child("post", enabled=False)
+
+        self.logger_batch = self.logger.child("batch", enabled=False)
 
         if self.sync_state is None:
             self.sync_state: SyncState = create_default_sync(self.shared.time_ns())
@@ -266,12 +273,20 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
                         out_bundle = batch_out.bundle
 
+                        start_time = time_ns()
                         out_is_full = process_batch_kernel(
                             f_config, f_state, in_bundle, parser_bundle, o_config, out_bundle
                         )
 
+                        end_time = time_ns()
+
+                        self.logger_batch.debug(f"{(end_time - start_time) / 1_000_000:.6f}")
+                        start_time = time_ns()
                         if parser.post_process(batch_out):
                             parser_bundle = parser.bundle()
+                        end_time = time_ns()
+
+                        self.logger_post.debug(f"{(end_time - start_time) / 1_000_000:.6f}")
 
                         if out_is_full:
                             flush()

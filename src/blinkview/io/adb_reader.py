@@ -5,6 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import datetime
+import os
 import statistics
 import subprocess
 from threading import Lock
@@ -110,7 +111,9 @@ ensuring high throughput without pipeline stalls."""
 
         # 2. Stats and Auto-Tuning Setup
         stats = Speedometer(logger=self.logger.child("stats"))
-        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=20, logger=self.logger.child("tuner"))
+        tuner = ThroughputAutoTuner(
+            speedometer=stats, default_buffer_bytes=65536, msg_size_bytes=64, logger=self.logger.child("tuner")
+        )
 
         pool_create = self.shared.array_pool.create
 
@@ -118,7 +121,7 @@ ensuring high throughput without pipeline stalls."""
             # Dynamically pull configuration from the tuner's latest projections
             return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
 
-        batch = None
+        batch: PooledLogBatch = None
 
         try:
             while not stop_is_set():
@@ -151,10 +154,12 @@ ensuring high throughput without pipeline stalls."""
                         sleep(0.2)
                         continue
 
-                # We localize the read method for performance
-                # read1(size) blocks until *at least* 1 byte is available,
-                # then returns whatever is buffered up to the size limit.
-                _read1 = self._process.stdout.read1
+                    # We localize the read method for performance
+                    # read1(size) blocks until *at least* 1 byte is available,
+                    # then returns whatever is buffered up to the size limit.
+                    _read1 = self._process.stdout.read1
+                    fd = self._process.stdout.fileno()
+                    os_read = os.read
 
                 # 4. Acquire batch using current Tuner projections
                 if batch is None:
@@ -163,7 +168,8 @@ ensuring high throughput without pipeline stalls."""
                 try:
                     # 5. Read incoming chunk
                     # 65536 is a standard healthy OS buffer size
-                    chunk = _read1(65536)
+                    # chunk = _read1(65536)
+                    chunk = os_read(fd, 65536)
 
                     if chunk:
                         now = time_ns()
@@ -190,6 +196,10 @@ ensuring high throughput without pipeline stalls."""
                                 self.distribute(batch)
                                 tuner.update(batch.msg_cursor, batch.size, delay_s)
                             batch = None
+
+                        # if len(chunk) < 2048:
+                        # sleep(0.016)
+
                     else:
                         # If read1 returns empty bytes, the subprocess reached EOF (ADB died)
                         logger.warning("ADB process stream ended. Restarting...")
@@ -385,6 +395,8 @@ ensuring high throughput without pipeline stalls."""
         # Use ps -A -o NAME,PID for modern Android compatibility
         lines = self.query("ps -A -o NAME,PID")
 
+        logger = self.logger
+
         pids: dict[str, int] = {}
 
         # We skip the header 'NAME PID' if it exists in the output
@@ -396,12 +408,12 @@ ensuring high throughput without pipeline stalls."""
                     # The PID is usually the second column
                     pid = int(parts[1])
                     pids[name] = pid
-                    # print(f"AdbReader name={name} pid={pid}")
+                    logger.debug(f"pid={pid} name={name}")
                 except ValueError:
                     continue
 
         self._process_ids = pids
-        self.logger.info(f"Captured {len(self._process_ids)} application PIDs via shell.")
+        logger.info(f"Captured {len(self._process_ids)} application PIDs via shell.")
 
     def get_name_from_pid(self, pid: int) -> str | None:
         """

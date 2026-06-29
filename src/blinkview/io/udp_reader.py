@@ -70,7 +70,7 @@ class UDPReader(BaseReader):
 
     def open(self):
         try:
-            self.logger.info(f"Binding UDP socket to {self.host}:{self.port}")
+            self.logger_link.info(f"Binding UDP socket to {self.host}:{self.port}")
 
             # Initialize an IPv4 UDP Socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -85,11 +85,13 @@ class UDPReader(BaseReader):
             sock.settimeout(self.delay / 1000.0 / 2)
 
             self.sock = sock
-            self.logger.info("UDP Socket bound and listening.")
+            self.logger_link.info("Listening")
+
+            self.logger_state_open.info("1")
             return sock
 
         except Exception as e:
-            self.logger.error("Failed to bind UDP socket.", e)
+            self.logger_link.error("Failed to bind UDP socket.", e)
             return None
 
     def run(self):
@@ -101,6 +103,8 @@ class UDPReader(BaseReader):
         # Tuner configuration
         delay_s = self.delay / 1000.0
         delay_ns = int(self.delay * 1_000_000)
+
+        self.logger_state_open.info("0")
 
         # 2. Stats and Auto-Tuning Setup
         # Using a slightly larger baseline message size for UDP vs Serial
@@ -167,11 +171,13 @@ class UDPReader(BaseReader):
                     # and gives us a chance to flush the current batch if it's sitting idle.
                     pass
                 except Exception as e:
-                    logger.error(f"UDP receive error: {e}")
+                    self.logger_link.error("Receive error", e)
                     sock = None
                     if self.sock:
                         self.sock.close()
                         self.sock = None
+
+                        self.logger_state_open.error("0")
                     sleep(1.0)
                     continue
 
@@ -198,6 +204,8 @@ class UDPReader(BaseReader):
                 try:
                     self.sock.close()
                 finally:
+                    self.logger_state_open.info("0")
+                    self.logger_link.info("Closed")
                     self.sock = None
 
     def send_data(self, data: str):

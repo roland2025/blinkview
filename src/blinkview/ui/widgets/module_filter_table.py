@@ -30,12 +30,15 @@ def nb_inherit_states(
     new_level: np.ndarray,
     new_filter: np.ndarray,
     parent_array: np.ndarray,
+    essential_mask: np.ndarray,
+    show_hidden: bool,
     start_idx: int,
     end_idx: int,
+    off_value: int,
 ):
     """
     Fast-path inheritance for newly allocated UI masks.
-    Mutates new_enabled and new_level arrays in place.
+    Mutates new_enabled, new_level, and new_filter arrays in place.
     """
     for i in range(start_idx, end_idx):
         parent_id = parent_array[i]
@@ -44,7 +47,16 @@ def nb_inherit_states(
         if parent_id != NO_PARENT and parent_id < i:
             new_enabled[i] = new_enabled[parent_id]
             new_level[i] = new_level[parent_id]
-            new_filter[i] = new_filter[parent_id]
+
+        # Bake the filter fresh from THIS node's own enabled/level/essential
+        # rather than copying the parent's already-baked filter. essential
+        # is per-node and must NOT cascade through inheritance -- an
+        # essential leaf sitting under an auto-created, non-essential
+        # parent path segment should still filter normally.
+        if new_enabled[i] and (show_hidden or essential_mask[i]):
+            new_filter[i] = new_level[i]
+        else:
+            new_filter[i] = off_value
 
 
 @app_njit()
@@ -53,6 +65,8 @@ def nb_update_subtree(
     level_mask: np.ndarray,
     filter_mask: np.ndarray,
     parent_array: np.ndarray,
+    essential_mask: np.ndarray,
+    show_hidden: bool,
     root_id: int,
     count: int,
     update_enabled: bool,
@@ -82,7 +96,7 @@ def nb_update_subtree(
                 level_mask[i] = new_level
 
             # Update the optimized baked mask
-            if enabled_mask[i]:
+            if enabled_mask[i] and (show_hidden or essential_mask[i]):
                 filter_mask[i] = level_mask[i]
             else:
                 filter_mask[i] = off_value
@@ -95,6 +109,8 @@ def nb_rebuild_from_explicit(
     filter_mask: np.ndarray,
     parent_array: np.ndarray,
     explicit_mask: np.ndarray,
+    essential_mask: np.ndarray,
+    show_hidden: bool,
     count: int,
     default_enabled: bool,
     default_level: int,
@@ -116,7 +132,7 @@ def nb_rebuild_from_explicit(
                 level_mask[i] = default_level
 
         # Always bake the optimized filter mask
-        if enabled_mask[i]:
+        if enabled_mask[i] and (show_hidden or essential_mask[i]):
             filter_mask[i] = level_mask[i]
         else:
             filter_mask[i] = off_value
@@ -134,25 +150,49 @@ class TempLogFilter(QObject):
         # Start with current capacity
         cap = self.registry._parent_capacity
 
-        # Determine global default based on whether the tab is constrained
-        # If filtered_module is set, we start everything as False (Disabled)
         is_constrained = self.log_filter.filtered_module is not None
         start_enabled = not is_constrained
+
+        self.show_hidden = False
 
         self.enabled_mask = np.full(cap, start_enabled, dtype=np.bool_)
         self.level_mask = np.full(cap, LogLevel.ALL.value, dtype=dtypes.LEVEL_TYPE)
 
-        # The optimized combined mask
-        self.filter_mask = np.full(cap, LogLevel.ALL.value, dtype=dtypes.LEVEL_TYPE)
+        # 1. Grab the real essential mask IMMEDIATELY
+        self.essential_mask = np.zeros(cap, dtype=np.bool_)
+        reg_cap = len(self.registry._essential_array)
+        copy_len = min(cap, reg_cap)
+        self.essential_mask[:copy_len] = self.registry._essential_array[:copy_len]
+
+        # 2. Bake the initial filter_mask correctly using the essential mask
+        if is_constrained:
+            self.filter_mask = np.full(cap, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
+        else:
+            self.filter_mask = np.where(self.essential_mask, LogLevel.ALL.value, LogLevel.OFF.value).astype(
+                dtypes.LEVEL_TYPE
+            )
 
         self.enabled = False
-
-        # Track how many modules we've run inheritance on
         self._initialized_count = 0
 
         # If constrained, immediately enable only the allowed subtree/module
         if is_constrained:
             self._apply_tab_constraints()
+
+    def set_show_hidden(self, show: bool):
+        if self.show_hidden == show:
+            return
+
+        self.show_hidden = show
+        old_mask = self.filter_mask.copy()
+
+        # Instantly re-bake the entire filter mask in C using NumPy
+        active_mask = self.enabled_mask & (self.show_hidden | self.essential_mask)
+        self.filter_mask[:] = np.where(active_mask, self.level_mask, LogLevel.OFF.value)
+
+        # If the mask changed, emit to redraw the log viewer immediately
+        if not np.array_equal(old_mask, self.filter_mask):
+            self.filter_changed.emit()
 
     def _apply_tab_constraints(self):
         """Force the masks to respect the tab's module/subtree limits."""
@@ -171,6 +211,7 @@ class TempLogFilter(QObject):
     def ensure_capacity(self, target_count: int):
         current_cap = len(self.enabled_mask)
 
+        # Only run this block if we actually need to allocate larger arrays
         if target_count > current_cap:
             new_cap = max(target_count, current_cap * 2)
 
@@ -180,47 +221,60 @@ class TempLogFilter(QObject):
             new_level = np.full(new_cap, LogLevel.ALL.value, dtype=np.uint8)
             new_level[:current_cap] = self.level_mask
 
-            # NEW: Resize filter mask
             new_filter = np.full(new_cap, LogLevel.ALL.value, dtype=np.uint8)
             new_filter[:current_cap] = self.filter_mask
+
+            # Default to false for safety when resizing
+            new_essential = np.zeros(new_cap, dtype=np.bool_)
+            new_essential[:current_cap] = self.essential_mask
 
             self.enabled_mask = new_enabled
             self.level_mask = new_level
             self.filter_mask = new_filter
+            self.essential_mask = new_essential
 
+        # THIS block runs anytime there are new modules to process,
+        # even if we didn't need to resize the arrays above.
         if target_count > self._initialized_count:
+            # Sync essential flags from registry for the newly initialized chunk
+            self.essential_mask[self._initialized_count : target_count] = self.registry._essential_array[
+                self._initialized_count : target_count
+            ]
+
             nb_inherit_states(
                 self.enabled_mask,
                 self.level_mask,
                 self.filter_mask,
                 self.registry._parent_array,
+                self.essential_mask,
+                self.show_hidden,
                 self._initialized_count,
                 target_count,
+                LogLevel.OFF.value,
             )
+
             self._initialized_count = target_count
 
     def set_module_enabled(self, module_id: int, enabled: bool):
         self.ensure_capacity(module_id + 1)
         self.enabled_mask[module_id] = enabled
 
-        # Calculate what the new filter value should be
-        new_filter_val = self.level_mask[module_id] if enabled else LogLevel.OFF.value
+        # Calculate new filter val respecting essential/hidden logic
+        is_active = enabled and (self.show_hidden or self.essential_mask[module_id])
+        new_filter_val = self.level_mask[module_id] if is_active else LogLevel.OFF.value
 
-        # Only emit if the "effective" filter used by Numba actually changes
         if self.filter_mask[module_id] != new_filter_val:
             self.filter_mask[module_id] = new_filter_val
             self.filter_changed.emit()
 
     def set_module_level(self, module_id: int, level: LevelIdentity):
         self.ensure_capacity(module_id + 1)
-
         if self.level_mask[module_id] == level.value:
-            return  # No change to level
-
+            return
         self.level_mask[module_id] = level.value
-        # If the module is currently enabled, changing the level
-        # changes the filter_mask, so we must emit.
-        if self.enabled_mask[module_id]:
+
+        is_active = self.enabled_mask[module_id] and (self.show_hidden or self.essential_mask[module_id])
+        if is_active:
             self.filter_mask[module_id] = level.value
             self.filter_changed.emit()
 
@@ -318,6 +372,8 @@ class TempLogFilter(QObject):
             self.filter_mask,
             self.registry._parent_array,
             explicit_mask,
+            self.registry._essential_array,
+            self.show_hidden,
             self._initialized_count,
             default_enabled,
             default_level,
@@ -343,6 +399,8 @@ class TempLogFilter(QObject):
             self.level_mask,
             self.filter_mask,
             self.registry._parent_array,
+            self.registry._essential_array,
+            self.show_hidden,
             root_module_id,
             self._initialized_count,
             update_enabled=True,
@@ -364,6 +422,8 @@ class TempLogFilter(QObject):
             self.level_mask,
             self.filter_mask,
             self.registry._parent_array,
+            self.registry._essential_array,
+            self.show_hidden,
             root_module_id,
             self._initialized_count,
             update_enabled=False,
@@ -377,10 +437,7 @@ class TempLogFilter(QObject):
             self.filter_changed.emit()
 
     def reset_all(self):
-        """Restores modules to the default state allowed by this specific tab."""
-        # Optimization: Take a snapshot of the mask to see if we actually change anything
         old_mask = self.filter_mask.copy()
-
         is_constrained = self.log_filter.filtered_module is not None
         self.enabled_mask[:] = not is_constrained
         self.level_mask[:] = LogLevel.ALL.value
@@ -388,9 +445,10 @@ class TempLogFilter(QObject):
         if is_constrained:
             self._apply_tab_constraints()
         else:
-            self.filter_mask[:] = LogLevel.ALL.value
+            # Respect the show_hidden toggle during reset
+            active = self.show_hidden | self.essential_mask
+            self.filter_mask[:] = np.where(active, LogLevel.ALL.value, LogLevel.OFF.value)
 
-        # Only redraw the logs if the effective filter changed
         if not np.array_equal(old_mask, self.filter_mask):
             self.filter_changed.emit()
 
@@ -421,7 +479,7 @@ class ModuleFilterTable(QTableView):
 
     sync_paused = Signal(bool)
 
-    def __init__(self, gui_context, log_filter: "TempLogFilter", parent=None):
+    def __init__(self, gui_context, log_filter: "TempLogFilter", show_hidden=False, parent=None):
         super().__init__(parent)
         self.gui_context = gui_context
         self.log_filter = log_filter
@@ -435,12 +493,15 @@ class ModuleFilterTable(QTableView):
         self.fast_model = FastModuleFilterModel(gui_context.id_registry, log_filter, self)
         self.setModel(self.fast_model)
 
+        self.show_non_essential = show_hidden
+
         # 2. Trigger the initial sync to build the rows
         f = self.log_filter.log_filter
         self.fast_model.sync_registry(
             allowed_device=f.allowed_device,
             root_module=f.filtered_module,
             include_children=f.filtered_module_children,
+            show_non_essential=self.show_non_essential,
         )
 
         # View Styling
@@ -497,6 +558,7 @@ class ModuleFilterTable(QTableView):
                 allowed_device=f.allowed_device,
                 root_module=f.filtered_module,
                 include_children=f.filtered_module_children,
+                show_non_essential=self.show_non_essential,
             )
 
     # --- Visibility Events: Start/Stop the Timer ---
@@ -584,3 +646,15 @@ class ModuleFilterTable(QTableView):
 
         # Show the menu at the cursor position
         menu.exec_(self.viewport().mapToGlobal(pos))
+
+    def set_show_non_essential(self, show: bool):
+        self.show_non_essential = show
+
+        # Force a rebuild of the list immediately
+        f = self.log_filter.log_filter
+        self.fast_model.sync_registry(
+            allowed_device=f.allowed_device,
+            root_module=f.filtered_module,
+            include_children=f.filtered_module_children,
+            show_non_essential=self.show_non_essential,
+        )

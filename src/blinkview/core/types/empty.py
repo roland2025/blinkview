@@ -9,6 +9,7 @@ import numpy as np
 from blinkview.core import dtypes
 
 EMPTY_BYTES = np.empty(0, dtype=dtypes.BYTE)
+EMPTY_BYTES_RO = np.frombuffer(b"", dtype=dtypes.BYTE)
 EMPTY_OFF = np.empty(0, dtype=dtypes.OFFSET_TYPE)
 EMPTY_LEN = np.empty(0, dtype=dtypes.LEN_TYPE)
 EMPTY_HASH = np.empty(0, dtype=dtypes.HASH_TYPE)

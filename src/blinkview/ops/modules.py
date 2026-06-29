@@ -164,6 +164,42 @@ def parse_module_tags_statemachine(
     curr = cursor
     in_bracket_mode = False
 
+    prefix_len = config.prefix_bytes.size
+    if prefix_len > 0 and (config.prefix_match or config.prefix_remove):
+        temp_curr = cursor
+
+        # 1. Skip any leading whitespace leading up to the tag
+        while temp_curr < end_cursor and is_whitespace(buffer[temp_curr]):
+            temp_curr += 1
+
+        # 2. Check if the remaining buffer is even long enough to hold the prefix
+        if temp_curr + prefix_len > end_cursor:
+            if config.prefix_match:
+                return -1  # Bail early: Line too short
+        else:
+            # 3. Direct Numba-friendly byte comparison
+            has_prefix = True
+            for i in range(prefix_len):
+                if buffer[temp_curr + i] != config.prefix_bytes[i]:
+                    has_prefix = False
+                    break
+
+            # 4. BAIL EARLY if it doesn't match
+            if config.prefix_match and not has_prefix:
+                return -1
+
+            # 5. Remove the prefix by simply jumping the cursor forward
+            if config.prefix_remove and has_prefix:
+                cursor = temp_curr + prefix_len
+
+                # Optional: If you want to strip the trailing dot (e.g. "Elixir.")
+                # and your prefix config doesn't include the dot, do it here.
+                if cursor < end_cursor and buffer[cursor] == CHAR_DOT:
+                    cursor += 1
+
+    # Update the starting position for the main state machine
+    curr = cursor
+
     while curr < end_cursor:
         # 1. Skip whitespace using utility
         while curr < end_cursor and is_whitespace(buffer[curr]):

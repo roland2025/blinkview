@@ -9,7 +9,15 @@ from typing import NamedTuple
 import numpy as np
 
 from blinkview.core.id_registry.types import StringTableParams
-from blinkview.core.types.empty import EMPTY_BYTES, EMPTY_HASH, EMPTY_LEN, EMPTY_OFF, ZERO_COUNT, ZERO_CURSOR
+from blinkview.core.types.empty import (
+    EMPTY_BYTES,
+    EMPTY_BYTES_RO,
+    EMPTY_HASH,
+    EMPTY_LEN,
+    EMPTY_OFF,
+    ZERO_COUNT,
+    ZERO_CURSOR,
+)
 
 MODULE_TEMP_ID_BASE = 0xF0000000
 
@@ -49,6 +57,10 @@ class DynamicWidthConfig(NamedTuple):
     max_depth: int = 0
     enable_brackets: bool = False
     enable_dot_separator: bool = False
+
+    prefix_bytes: np.ndarray = EMPTY_BYTES_RO
+    prefix_match: bool = False
+    prefix_remove: bool = False
 
 
 EmptyDynamicWidthConfig = DynamicWidthConfig()
