@@ -115,16 +115,16 @@ class BaseDaemon:
     def start(self):
         if not self.enabled:
             if self.logger:
-                self.logger.info("[DAEMON] Not enabled, skipping start.")
+                self.logger.info("Not enabled, skipping start.")
             return
 
         if self.is_running:
             if self.logger:
-                self.logger.info("[DAEMON] Already running, skipping start.")
+                self.logger.info("Already running, skipping start.")
             return
 
         if self.logger:
-            self.logger.info("[DAEMON] Starting...")
+            self.logger.info("Starting...")
 
         self._stop_event.clear()
 
@@ -163,7 +163,7 @@ class BaseDaemon:
             return
 
         if self.logger:
-            self.logger.info("[DAEMON] Stopping...")
+            self.logger.info("Stopping...")
 
         self._stop_event.set()  # Signals the loop to exit
 
@@ -175,10 +175,10 @@ class BaseDaemon:
             self._thread.join(timeout)
             if self._thread.is_alive():
                 if self.logger:
-                    self.logger.warn(f"[DAEMON] Did not stop within {timeout} seconds.")
+                    self.logger.warn(f"Did not stop within {timeout} seconds.")
             else:
                 if self.logger:
-                    self.logger.info("[DAEMON] Stopped cleanly.")
+                    self.logger.info("Stopped cleanly.")
             self._thread = None  # Clean up the reference
 
         self._stop_children()
@@ -186,7 +186,7 @@ class BaseDaemon:
     def restart(self):
         self.thread_needs_restart = False
         if self.logger:
-            self.logger.info("[DAEMON] Restarting...")
+            self.logger.info("Restarting...")
         if self.is_running:
             self.stop()
         self.start()
@@ -197,7 +197,7 @@ class BaseDaemon:
             self.run()
         except Exception as e:
             if self.logger:
-                self.logger.exception(f"[DAEMON] Crashed during run.", e)
+                self.logger.exception("Crashed during run.", e)
 
     def run(self):
         """Override this in subclasses. Use `while not self._stop_event.is_set():`"""
@@ -284,7 +284,7 @@ class BaseDaemon:
         with self._children_lock:
             if child_obj not in self._children:
                 if self.logger:
-                    self.logger.info(f"[DAEMON] Registering child thread object: {child_obj}")
+                    self.logger.info(f"Registering child thread object: {child_obj}")
                 self._children.append(child_obj)
 
                 # If parent is already actively running, start the child immediately
