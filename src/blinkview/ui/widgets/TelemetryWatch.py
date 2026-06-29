@@ -305,6 +305,10 @@ class TelemetryWatch(QWidget):
         # self.toolbar.setStyleSheet("QWidget { border: 1px solid red; }")
         self.toolbar.setMovable(False)
 
+        self.edit_toolbar = QToolBar()
+        self.edit_toolbar.setMovable(False)
+        self.edit_toolbar.setVisible(self.edit_mode)
+
         # Create a Stacked Widget to hold the Name Label and Name Edit
         self.name_stack = ShiftingStackedWidget()
 
@@ -402,24 +406,20 @@ class TelemetryWatch(QWidget):
         # Add Actions (Hidden by default)
         self.add_section_action = QAction("+ Section", self)
         self.add_section_action.triggered.connect(self.prompt_add_section)
-        self.add_section_action.setVisible(False)
 
         self.add_row_action = QAction("+ Row", self)
         self.add_row_action.triggered.connect(self.prompt_add_row)
-        self.add_row_action.setVisible(False)
 
         self.add_button_action = QAction("+ Button", self)
         self.add_button_action.triggered.connect(self.prompt_add_button)
-        self.add_button_action.setVisible(False)
 
         self.add_button_group_action = QAction("+ Button Group", self)
         self.add_button_group_action.triggered.connect(self.prompt_add_button_group)
-        self.add_button_group_action.setVisible(False)
 
-        self.toolbar.addAction(self.add_section_action)
-        self.toolbar.addAction(self.add_row_action)
-        self.toolbar.addAction(self.add_button_action)
-        self.toolbar.addAction(self.add_button_group_action)
+        self.edit_toolbar.addAction(self.add_section_action)
+        self.edit_toolbar.addAction(self.add_row_action)
+        self.edit_toolbar.addAction(self.add_button_action)
+        self.edit_toolbar.addAction(self.add_button_group_action)
 
         # Edit Toggle Action
         self.edit_action = QAction("✎ Edit", self)
@@ -438,6 +438,7 @@ class TelemetryWatch(QWidget):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
         self.main_layout.addWidget(self.toolbar)
+        self.main_layout.addWidget(self.edit_toolbar)
         self.main_layout.addWidget(self.scroll_area)
 
         self.entries: List = []
@@ -739,8 +740,10 @@ class TelemetryWatch(QWidget):
         # self.tab_name = new_name
         self.save_config()
 
-    def toggle_edit_mode(self):
-        edit_mode = self.edit_mode = self.edit_action.isChecked()
+    def toggle_edit_mode(self, edit_mode):
+        self.edit_mode = edit_mode
+
+        self.edit_toolbar.setVisible(edit_mode)
 
         self.edit_action.setText("✓ Done Editing" if edit_mode else "✎ Edit")
 
@@ -752,11 +755,6 @@ class TelemetryWatch(QWidget):
             self.name_edit.selectAll()
         else:
             self.name_label.setText(self.name.upper() if self.name else "UNNAMED WATCH")
-
-        self.add_section_action.setVisible(edit_mode)
-        self.add_row_action.setVisible(edit_mode)
-        self.add_button_action.setVisible(edit_mode)
-        self.add_button_group_action.setVisible(edit_mode)
 
         self.default_target_label_action.setVisible(edit_mode)
         self.default_target_combo_action.setVisible(edit_mode)
