@@ -139,6 +139,16 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         self.jlink: Optional[pylink.JLink] = None
         self._jlink_lock = RLock()
 
+        self.logger_send = None
+
+    def apply_config(self, config: dict):
+        # 1. Apply configuration via the parent framework
+        changed = super().apply_config(config)
+
+        self.logger_send = self.logger_send or self.logger.child("send")
+
+        return changed
+
     @classmethod
     def get_config_schema(cls) -> dict:
         schema = super().get_config_schema()
@@ -180,6 +190,8 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         channel = self.channel
 
         read_size = 64 * 1024
+
+        self.logger_state_open.info("0")
 
         c_buf = (ctypes.c_ubyte * read_size)()
         np_buf = np.frombuffer(c_buf, dtype=dtypes.BYTE)
@@ -261,7 +273,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                         batch = None
 
                 except Exception as e:
-                    logger.error("J-Link RTT Runtime Error", e)
+                    self.logger_link.error("Problem.", e)
                     self.cleanup_jlink()
                     sleep(1.0)
 
@@ -294,6 +306,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                 except Exception:
                     pass
 
+                self.logger_state_open.warn("0")
                 self.jlink = None
 
     def _drain_stale_data(self, jl):
@@ -340,7 +353,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
             try:
                 import pylink
 
-                self.logger.info(f"Connecting to J-Link: {self.target_device}")
+                self.logger_link.info(f"Connecting to J-Link: {self.serial_number}")
                 jl = pylink.JLink()
                 jl.exec_command("SuppressGUI")
 
@@ -360,10 +373,14 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
                 self._drain_stale_data(jl)
 
-                self.logger.info("Connected")
+                self.logger_link.info("Connected")
+
+                self.logger_state_open.info("1")
                 return jl
             except Exception as e:
-                self.logger.error("Failed to open J-Link.", e)
+                self.logger_link.error("Failed to connect", e)
+
+                self.logger_state_open.error("0")
                 if jl is not None:
                     try:
                         jl.close()
@@ -379,11 +396,12 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         with self._jlink_lock:
             if self.jlink and self.jlink.opened():
                 try:
-                    self.logger.info(f"Sending data to J-Link: {self.target_device}")
+                    encoded = data.encode()
+                    self.logger_send.debug(str(encoded))
                     # rtt_write returns the number of bytes actually written
-                    return self.jlink.rtt_write(channel, data.encode())
+                    return self.jlink.rtt_write(channel, encoded)
                 except Exception as e:
-                    self.logger.error("RTT Write failed", e)
+                    self.logger_link.error("RTT Write failed", e)
             return 0
 
     def get_commands(self) -> list[tuple[str, str]]:
