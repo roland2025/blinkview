@@ -320,9 +320,17 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
             self.logger.info(f"Draining RTT (Target Buffer: {horizon} bytes)...")
 
             total_drained = 0
-            poll_attempts = 100  # 1.0s timeout
+
+            time_ns = self.shared.time_ns
+            start_time = time_ns()
+            timeout_ns = 1_500_000_000  # 1.5 seconds in nanoseconds
 
             while True:
+                # Absolute Timeout
+                if (time_ns() - start_time) > timeout_ns:
+                    self.logger.warn("Drain: Timed out after 1.5s. Handing off.")
+                    break
+
                 # Always read in 4k chunks for efficiency during drain
                 junk = jl.rtt_read(self.channel, 4096)
 
@@ -331,20 +339,19 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
                     # --- THE HORIZON CHECK ---
                     if total_drained >= horizon:
-                        self.logger.info(f"Drain: Horizon reached ({total_drained} bytes). Handing off to main loop.")
+                        self.logger.info(f"Drain: Horizon reached ({total_drained} bytes). Handing off.")
                         break
+
+                    # Fast-Drain: DO NOT SLEEP if data was found
+                    continue
+
                 else:
                     # If we've seen data and it suddenly stops, we're dry.
                     if total_drained > 0:
                         self.logger.debug(f"Drain: Buffer dry after {total_drained} bytes.")
                         break
 
-                    # If we haven't seen anything yet, wait for the DLL to sync
-                    poll_attempts -= 1
-                    if poll_attempts <= 0:
-                        self.logger.debug("Drain: No data found in 1s window.")
-                        break
-
+                # Wait State: Sleep ONLY if no data was found yet
                 sleep(0.01)
 
     def open(self):
