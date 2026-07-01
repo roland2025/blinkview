@@ -159,7 +159,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             logger_in = self.logger.child("batch_in")
             logger_out = self.logger.child("batch_out")
 
-            def batch_acquire():
+            def batch_acquire() -> PooledLogBatch:
                 return pool_create(
                     PooledLogBatch,
                     tuner_out.estimated_capacity,

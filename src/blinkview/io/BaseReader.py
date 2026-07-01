@@ -23,6 +23,7 @@ PutFnType = Callable[[Iterable[tuple]], None]
     required=False,
     ui_order=1,
     description="Name of the source device (for logging purposes)",
+    ui_remember=True,
 )
 @configuration_property(
     "_note", title="Note", type="string", ui_order=-1, description="Add a not for your own reference."

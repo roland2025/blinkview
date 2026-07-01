@@ -127,7 +127,7 @@ class CantoolsParser(BaseParser):
             speed_out = Speedometer(logger=self.logger.child("stats_out"))
             tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.child("tuner_out"))
 
-            def batch_acquire():
+            def batch_acquire() -> PooledLogBatch:
                 return pool_create(
                     PooledLogBatch,
                     tuner_out.estimated_capacity,
@@ -137,7 +137,7 @@ class CantoolsParser(BaseParser):
                     has_devices=True,
                 )
 
-            batch_out: Optional[PooledLogBatch] = None
+            batch_out = None
 
             def flush():
                 nonlocal batch_out

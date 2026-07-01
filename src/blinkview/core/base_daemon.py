@@ -25,6 +25,7 @@ from blinkview.utils.settings_updater import update_object_from_config
     default=False,
     required=True,
     description="Whether this daemon is enabled and should run.",
+    ui_remember="True",
 )
 @configuration_property(
     "logging",
