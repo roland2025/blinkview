@@ -334,7 +334,7 @@ class TelemetryWatch(QWidget):
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.toolbar_delete_spacer = self.toolbar.addWidget(spacer)
 
-        self.delete_watch_action = QAction("🗑 Delete Watch", self)
+        self.delete_watch_action = QAction("🗑 Delete", self)
         self.delete_watch_action.triggered.connect(self.prompt_delete_watch)
         self.delete_watch_action.setVisible(False)
         # Optional: Make it look destructive
@@ -791,9 +791,11 @@ class TelemetryWatch(QWidget):
         in_button_group = False
         current_btn_layout = None
 
-        self.command_input_combo_action.setVisible(
-            len(self.default_target) and self.default_target != "None" and not self.edit_mode
-        )
+        cmd_combo_visible = len(self.default_target) and self.default_target != "None" and not self.edit_mode
+
+        self.command_input_combo_action.setVisible(cmd_combo_visible)
+
+        self.send_command_btn_action.setVisible(cmd_combo_visible)
 
         for row, entry in enumerate(self.entries):
             # --- Section Logic ---
@@ -1072,7 +1074,7 @@ class TelemetryWatch(QWidget):
                     pill_layout.setContentsMargins(6, 2, 4, 2)
                     pill_layout.setSpacing(4)
 
-                    mod_lbl = QLabel(mod.name)
+                    mod_lbl = QLabel(f"{mod.device.name}.{mod.name}")
                     mod_lbl.setStyleSheet("color: #ccc; font-weight: normal;")
 
                     btn = QPushButton("✖")
