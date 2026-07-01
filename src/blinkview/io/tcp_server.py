@@ -7,7 +7,9 @@
 import socket
 from time import sleep
 
-from ..core.configurable import configuration_property
+from ..core.configurable import configuration_property, override_property
+from ..core.numpy_batch_manager import PooledLogBatch
+from ..utils.throughput import Speedometer, ThroughputAutoTuner
 from .BaseReader import BaseReader, DeviceFactory
 
 
@@ -16,152 +18,223 @@ from .BaseReader import BaseReader, DeviceFactory
     "host",
     type="string",
     default="0.0.0.0",
-    required=True,
-    description="The IP interface to bind to ('0.0.0.0' for all interfaces, 'localhost' for local only).",
+    description="The IP address or hostname to bind the TCP listening server to.",
 )
 @configuration_property(
     "port",
     type="integer",
-    default=9000,
+    default=5000,
     required=True,
-    description="The TCP port to listen on for incoming connections.",
+    description="The local TCP port to listen on for incoming streaming connections.",
 )
 @configuration_property(
-    "maxlen", type="integer", default=1_000_000, description="The maximum internal byte buffer size before flushing."
+    "buffer_size",
+    type="integer",
+    default=65535,
+    description="Chunk size in bytes extracted from the TCP socket buffer per read operation.",
 )
 @configuration_property(
     "delay",
     type="integer",
     default=100,
-    description="The maximum time (in milliseconds) to hold incoming bytes before flushing a batch downstream.",
+    description="The maximum time (in milliseconds) to hold incoming stream bytes before flushing a batch downstream.",
 )
-class TcpServerSource(BaseReader):
-    __doc__ = """A TCP Server ingestion source for networked telemetry.
+@override_property(
+    "logging",
+    hidden=False,
+    required=True,
+    default={"enabled": True, "processor": {"type": "binary"}},
+    description="Enable logging of raw byte data.",
+)
+class TCPReader(BaseReader):
+    __doc__ = """The data ingestion source for continuous TCP streaming sockets.
 
-* Acts as a TCP Server (Listens for incoming Client connections).
-* Ideal for receiving logs from transient clients that may start or stop unpredictably.
-* Reads continuous binary streams and passes raw byte chunks downstream.
-* Handles client disconnections gracefully and automatically resumes listening.
-"""
+* Binds to a local port as a listening server and manages a single active streaming client.
+* Guarantees packet delivery and ordering via TCP flow-control windows.
+* Efficiently batches stream fragments into the pipeline using the auto-tuning batch manager."""
 
     type: str
     host: str
     port: int
-    maxlen: int
+    buffer_size: int
     delay: int
 
     def __init__(self):
         super().__init__()
 
+        self.logging_type = "default"
+        self.logging_processor = "binary"
+
+        self.server_sock = None  # The main listening server socket
+        self.client_sock = None  # The active connected client data socket
+
+    def open(self):
+        """Initializes the listening TCP Master Server Socket."""
+        try:
+            self.logger_link.info(f"Binding TCP server socket to {self.host}:{self.port}")
+
+            # Initialize an IPv4 TCP Streaming Socket
+            server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+            # Prevent "Address already in use" kernel lockouts on rapid server restarts
+            server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+            # Keepalive keeps connections alive across quiet telemetry periods
+            server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+            server_sock.bind((self.host, self.port))
+
+            # Allow backlogging connections. 1 represents a strict single-producer design
+            server_sock.listen(1)
+
+            # Short timeout on the master accept socket so it can periodically check if the reader loop is stopping
+            server_sock.settimeout(1.0)
+
+            self.server_sock = server_sock
+            self.logger_link.info("TCP Listening Server Ready")
+            return server_sock
+
+        except Exception as e:
+            self.logger_link.error("Failed to bind TCP server socket.", e)
+            return None
+
     def run(self):
-        # Localize method lookups
         stop_is_set = self._stop_event.is_set
         time_ns = self.shared.time_ns
         logger = self.logger
 
+        delay_s = self.delay / 1000.0
         delay_ns = int(self.delay * 1_000_000)
-        maxlen = self.maxlen
 
-        logger.info(f"Starting TCP Server Source on {self.host}:{self.port}")
+        self.logger_state_open.info("0")
 
-        pool_acquire = self.shared.pool.get(TimeDataEntry, self.__class__.__name__).acquire
+        stats = Speedometer(logger=self.logger.child("stats"))
+        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=1024, logger=self.logger.child("tuner"))
+        pool_create = self.shared.array_pool.create
 
-        batch = pool_acquire()
-        batch_append = batch.append
+        def batch_acquire() -> PooledLogBatch:
+            return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
 
-        last_flush_time = time_ns()
-        batch_bytes = 0
+        batch = None
 
-        server_sock = None
+        waiting_logged = False
 
-        def flush():
-            nonlocal batch, batch_bytes, last_flush_time, batch_append
-            if batch:
-                last_flush_time = time_ns()
-                self.distribute(batch)
-
-                with batch:
-                    self.distribute(batch)
-                batch = pool_acquire()
-                batch_append = batch.append
-
-                batch_bytes = 0
-
-        while not stop_is_set():
-            # Start the Server Socket if it isn't running
-            if server_sock is None:
-                try:
-                    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    # SO_REUSEADDR prevents the "Address already in use" error if you restart quickly
-                    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    server_sock.bind((self.host, self.port))
-                    server_sock.listen(1)
-
-                    # 1-second timeout so accept() doesn't block the thread from shutting down
-                    server_sock.settimeout(1.0)
-                    logger.info(f"🎧 Listening for incoming connections on port {self.port}...")
-                except Exception as e:
-                    logger.error(f"Failed to bind server socket", e)
-                    if server_sock:
-                        server_sock.close()
-                    server_sock = None
-                    sleep(1.0)
-                    continue
-
-            conn = None
-            try:
-                # Wait for a client (sender) to connect
-                try:
-                    conn, addr = server_sock.accept()
-                    logger.info(f"Client connected from {addr}")
-
-                    # Short timeout for the active connection to allow flushing during idle times
-                    conn.settimeout(0.1)
-                except socket.timeout:
-                    # No client connected yet; loop around and check stop_is_set()
-                    continue
-
-                # Read loop for the active connection
-                while not stop_is_set():
-                    try:
-                        bytes_to_read = max(4096, maxlen - batch_bytes)
-                        chunk = conn.recv(bytes_to_read)
-
-                        # print(f"Received chunk of {len(chunk)} bytes from {addr}")
-
-                        if not chunk:
-                            logger.info(f"Client {addr} disconnected gracefully.")
-                            break  # Break inner loop to go back to listening
-
-                        batch_append(time_ns(), chunk)
-                        batch_bytes += len(chunk)
-
-                    except socket.timeout:
-                        pass  # Normal timeout on an idle connection
-                    except ConnectionResetError:
-                        logger.warning(f"Client {addr} disconnected abruptly.")
-                        break  # Break inner loop to go back to listening
-
-                    # Flush Checks
-                    now = time_ns()
-                    if batch_bytes >= maxlen:
-                        flush()
+        try:
+            while not stop_is_set():
+                # 1. Master Server Socket Lifecycle Management
+                if self.server_sock is None:
+                    if self.open() is None:
+                        sleep(1.0)
                         continue
 
-                    if batch and (now - last_flush_time >= delay_ns):
-                        flush()
+                # 2. Connection Management Loop
+                if self.client_sock is None:
+                    try:
+                        if not waiting_logged:
+                            self.logger_link.info("Awaiting client connection...")
+                            waiting_logged = True
 
-            except Exception as e:
-                logger.error(f"Server error", e)
-                sleep(1.0)
+                        client_conn, client_addr = self.server_sock.accept()
+
+                        # Set timeout on data transfer to prevent infinite blocks
+                        # matching your exact latency window constraints
+                        client_conn.settimeout(self.delay / 1000.0 / 2)
+
+                        self.client_sock = client_conn
+                        self.logger_link.info(f"Client connected from {client_addr[0]}:{client_addr[1]}")
+                        self.logger_state_open.info("1")
+
+                        waiting_logged = False
+                    except socket.timeout:
+                        continue  # Let the loop poll stop_is_set()
+                    except Exception as e:
+                        self.logger_link.error("Error accepting incoming client connection", e)
+                        waiting_logged = False
+                        sleep(1.0)
+                        continue
+
+                if batch is None:
+                    batch = batch_acquire()
+
+                # 3. Active Stream Data Read
+                try:
+                    data = self.client_sock.recv(self.buffer_size)
+                    now = time_ns()
+
+                    if not data:
+                        # TCP Fin received. Remote peer closed connection cleanly.
+                        self.logger_link.warning("Remote client disconnected.")
+                        self._close_client()
+                        continue
+
+                    # 4. Insert or Append stream chunk into high-throughput layer
+                    if not batch.insert(now, now, data):
+                        with batch:
+                            self.distribute(batch)
+                            tuner.update(batch.msg_cursor, batch.size, delay_s)
+                        batch = batch_acquire()
+                        batch.insert(now, now, data)
+
+                except socket.timeout:
+                    # Expected. Allows timed evaluation of batch flushing windows
+                    pass
+                except Exception as e:
+                    self.logger_link.error("Stream receive error occurred", e)
+                    self._close_client()
+                    sleep(0.5)
+                    continue
+
+                # 5. Flush evaluation window
+                now = time_ns()
+                if batch is not None and batch.start_ts > 0 and (now - batch.start_ts) >= delay_ns:
+                    with batch:
+                        self.distribute(batch)
+                        tuner.update(batch.msg_cursor, batch.size, delay_s)
+                    batch = None
+
+        except Exception as e:
+            logger.exception("Fatal error in TCP Reader execution loop", e)
+        finally:
+            # 6. Final Cleanup
+            if batch is not None:
+                if len(batch) > 0:
+                    with batch:
+                        self.distribute(batch)
+                else:
+                    batch.release()
+            self._close_client()
+            self._close_server()
+
+    def _close_client(self):
+        """Safely tears down the active client data pipe."""
+        if self.client_sock:
+            try:
+                self.client_sock.close()
+            except Exception:
+                pass
             finally:
-                # Flush whatever is left from that client and close their connection
-                flush()
-                if conn:
-                    conn.close()
+                self.client_sock = None
+                self.logger_state_open.info("0")
 
-        # Final cleanup on thread exit
-        flush()
-        batch.release()
-        if server_sock:
-            server_sock.close()
+    def _close_server(self):
+        """Safely tears down the master listening server."""
+        if self.server_sock:
+            try:
+                self.server_sock.close()
+            except Exception:
+                pass
+            finally:
+                self.server_sock = None
+                self.logger_link.info("TCP Listening Server Closed")
+
+    def send_data(self, data: str):
+        """Sends bidirectional telemetry strings back down the established TCP pipe."""
+        if not self.client_sock:
+            self.logger.warning("Cannot transmit command payload: No active TCP client connection exists.")
+            return
+
+        try:
+            self.client_sock.sendall(data.encode())
+        except Exception as e:
+            self.logger.exception("Failed to transmit data across active client TCP socket", e)
+            self._close_client()

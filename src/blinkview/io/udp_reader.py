@@ -113,7 +113,7 @@ class UDPReader(BaseReader):
 
         pool_create = self.shared.array_pool.create
 
-        def batch_acquire():
+        def batch_acquire() -> PooledLogBatch:
             # Dynamically pull configuration from the tuner's latest projections
             return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
 
@@ -147,24 +147,13 @@ class UDPReader(BaseReader):
                         # print(f"[UDPReader] data={data} add={addr}")
                         self.target_address = addr
                         # 6. Insert or Append data
-                        if batch.start_ts == 0:
-                            # First item in the batch
-                            if not batch.insert(now, now, data):
-                                with batch:
-                                    self.distribute(batch)
-                                    tuner.update(batch.msg_cursor, batch.size, delay_s)
+                        if not batch.insert(now, now, data):
+                            with batch:
+                                self.distribute(batch)
+                                tuner.update(batch.msg_cursor, batch.size, delay_s)
 
-                                batch = batch_acquire()
-                                batch.insert(now, now, data)
-                        else:
-                            # Append to existing batch
-                            if not batch.append(data):
-                                with batch:
-                                    self.distribute(batch)
-                                    tuner.update(batch.msg_cursor, batch.size, delay_s)
-
-                                batch = batch_acquire()
-                                batch.insert(now, now, data)
+                            batch = batch_acquire()
+                            batch.insert(now, now, data)
 
                 except socket.timeout:
                     # This is an expected condition. The timeout ensures we don't hang infinitely
