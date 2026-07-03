@@ -175,3 +175,20 @@ class EspIdfLevelMap(LevelMap):
 @override_property("mapping", title="Custom level Mappings", description="Custom mapping for logs.", default={})
 class CustomLevelMap(LevelMap):
     pass
+
+
+@FrameSectionParserFactory.register("log_level_python")
+@override_property(
+    "mapping",
+    title="Python Logging levels",
+    description="Predefined mapping for python logging module levels.",
+    default={
+        "INFO": LogLevel.INFO.value,
+        "ERROR": LogLevel.ERROR.value,
+        "WARNING": LogLevel.WARN.value,
+        "DEBUG": LogLevel.DEBUG.value,
+        "CRITICAL": LogLevel.CRITICAL.value,
+    },
+)
+class PythonLoggingLevelMap(LevelMap):
+    pass
