@@ -382,6 +382,12 @@ class NumbaWarmupHelper:
 
                 dummy_in.insert_view(time_ns(), time_ns(), msg_1_data_view, len(msg_1))
 
+                msg_1_bytearray = bytearray(msg_1)
+
+                msg_1_data_view_2 = np.frombuffer(msg_1_bytearray, dtype=dtypes.BYTE)
+
+                dummy_in.insert_view(time_ns(), time_ns(), msg_1_data_view_2, len(msg_1))
+
                 dummy_in.insert(time_ns(), time_ns(), b"N1 main reg input          0.00 V     -0.010 mA \n")
                 dummy_in.insert(time_ns(), time_ns(), b"N2 ASI switch")
                 dummy_in.insert(time_ns(), time_ns(), b"              0.00 V")
