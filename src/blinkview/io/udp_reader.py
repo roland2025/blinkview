@@ -7,6 +7,9 @@
 import socket
 from time import sleep
 
+import numpy as np
+
+from ..core import dtypes
 from ..core.configurable import configuration_property, override_property
 from ..core.numpy_batch_manager import PooledLogBatch
 from ..utils.throughput import Speedometer, ThroughputAutoTuner
@@ -104,12 +107,19 @@ class UDPReader(BaseReader):
         delay_s = self.delay / 1000.0
         delay_ns = int(self.delay * 1_000_000)
 
+        buffer_size = self.buffer_size
+
         self.logger_state_open.info("0")
 
         # 2. Stats and Auto-Tuning Setup
         # Using a slightly larger baseline message size for UDP vs Serial
         stats = Speedometer(logger=self.logger.child("stats"))
-        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=1024, logger=self.logger.child("tuner"))
+        tuner = ThroughputAutoTuner(
+            speedometer=stats,
+            default_buffer_bytes=self.buffer_size,
+            msg_size_bytes=1024,
+            logger=self.logger.child("tuner"),
+        )
 
         pool_create = self.shared.array_pool.create
 
@@ -118,6 +128,10 @@ class UDPReader(BaseReader):
             return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
 
         batch = None
+
+        recv_buffer = bytearray(self.buffer_size)
+        data_view = np.frombuffer(recv_buffer, dtype=dtypes.BYTE)
+
         sock = None
 
         try:
@@ -129,6 +143,8 @@ class UDPReader(BaseReader):
                         sleep(1.0)
                         continue
 
+                    recvfrom_into = sock.recvfrom_into
+
                 # 4. Acquire batch using current Tuner projections
                 if batch is None:
                     batch = batch_acquire()
@@ -136,24 +152,24 @@ class UDPReader(BaseReader):
                 try:
                     # 5. Wait for incoming datagrams
                     # This will block until data arrives OR the socket timeout (self.delay) is reached
-                    data, addr = sock.recvfrom(self.buffer_size)
+                    bytes_read, addr = recvfrom_into(recv_buffer)
                     now = time_ns()
 
                     # if self.target_address is None and data:
                     #     self.target_address = addr
                     #     self.logger.info(f"UDP Reader automatically bound return target to {addr[0]}:{addr[1]}")
 
-                    if data:
+                    if bytes_read:
                         # print(f"[UDPReader] data={data} add={addr}")
                         self.target_address = addr
                         # 6. Insert or Append data
-                        if not batch.insert(now, now, data):
+
+                        if not batch.insert_view(now, now, data_view, bytes_read):
                             with batch:
                                 self.distribute(batch)
-                                tuner.update(batch.msg_cursor, batch.size, delay_s)
-
+                                tuner.update(batch.msg_cursor + bytes_read, batch.size, delay_s)
                             batch = batch_acquire()
-                            batch.insert(now, now, data)
+                            batch.insert_view(now, now, data_view, bytes_read)
 
                 except socket.timeout:
                     # This is an expected condition. The timeout ensures we don't hang infinitely

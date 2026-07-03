@@ -13,6 +13,7 @@ from . import (
     logging,
     rtt,
     serial_time_syncer,
+    tcp_client,
     tcp_server,
     uart,
     udp_reader,

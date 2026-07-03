@@ -16,19 +16,20 @@ from ..utils.throughput import Speedometer, ThroughputAutoTuner
 from .BaseReader import BaseReader, DeviceFactory
 
 
-@DeviceFactory.register("tcp_server")
+@DeviceFactory.register("tcp_client")
 @configuration_property(
     "host",
     type="string",
-    default="0.0.0.0",
-    description="The IP address or hostname to bind the TCP listening server to.",
+    default="127.0.0.1",
+    required=True,
+    description="The remote server IP address or hostname to connect to.",
 )
 @configuration_property(
     "port",
     type="integer",
     default=5000,
     required=True,
-    description="The local TCP port to listen on for incoming streaming connections.",
+    description="The remote TCP port to connect to.",
 )
 @configuration_property(
     "buffer_size",
@@ -42,6 +43,12 @@ from .BaseReader import BaseReader, DeviceFactory
     default=100,
     description="The maximum time (in milliseconds) to hold incoming stream bytes before flushing a batch downstream.",
 )
+@configuration_property(
+    "reconnect_interval",
+    type="integer",
+    default=5,
+    description="Time in seconds to wait before attempting to reconnect if the connection drops.",
+)
 @override_property(
     "logging",
     hidden=False,
@@ -49,11 +56,11 @@ from .BaseReader import BaseReader, DeviceFactory
     default={"enabled": True, "processor": {"type": "binary"}},
     description="Enable logging of raw byte data.",
 )
-class TCPReader(BaseReader):
-    __doc__ = """The data ingestion source for continuous TCP streaming sockets.
+class TCPClientReader(BaseReader):
+    __doc__ = """The data ingestion source for outbound TCP streaming sockets.
 
-* Binds to a local port as a listening server and manages a single active streaming client.
-* Guarantees packet delivery and ordering via TCP flow-control windows.
+* Connects actively to a remote TCP server and pulls a continuous data stream.
+* Automatically handles connection failures, remote dropouts, and reconnection loops.
 * Efficiently batches stream fragments into the pipeline using the auto-tuning batch manager."""
 
     type: str
@@ -61,6 +68,7 @@ class TCPReader(BaseReader):
     port: int
     buffer_size: int
     delay: int
+    reconnect_interval: int
 
     def __init__(self):
         super().__init__()
@@ -68,37 +76,35 @@ class TCPReader(BaseReader):
         self.logging_type = "default"
         self.logging_processor = "binary"
 
-        self.server_sock = None  # The main listening server socket
-        self.client_sock = None  # The active connected client data socket
+        self.client_sock = None  # The active outbound connected socket
 
     def open(self):
-        """Initializes the listening TCP Master Server Socket."""
+        """Initializes the outbound connection to the remote TCP server."""
         try:
-            self.logger_link.info(f"Binding TCP server socket to {self.host}:{self.port}")
+            self.logger_link.info(f"Connecting to: {self.host}:{self.port}")
 
             # Initialize an IPv4 TCP Streaming Socket
-            server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-            # Prevent "Address already in use" kernel lockouts on rapid server restarts
-            server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Prevent connection hang ups during link setup
+            sock.settimeout(self.delay / 1000.0)
 
             # Keepalive keeps connections alive across quiet telemetry periods
-            server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
-            server_sock.bind((self.host, self.port))
+            sock.connect((self.host, self.port))
 
-            # Allow backlogging connections. 1 represents a strict single-producer design
-            server_sock.listen(1)
+            # Set data transfer timeout matching your latency window constraints
+            sock.settimeout(self.delay / 1000.0 / 2)
 
-            # Short timeout on the master accept socket so it can periodically check if the reader loop is stopping
-            server_sock.settimeout(1.0)
-
-            self.server_sock = server_sock
-            self.logger_link.info("TCP Listening Server Ready")
-            return server_sock
+            self.client_sock = sock
+            self.logger_link.info(f"Connected to: {self.host}:{self.port}")
+            self.logger_state_open.info("1")
+            return sock
 
         except Exception as e:
-            self.logger_link.error("Failed to bind TCP server socket.", e)
+            self.logger_link.error(f"Connection failed to: {self.host}:{self.port}", e)
+            self._close_client()
             return None
 
     def run(self):
@@ -128,58 +134,32 @@ class TCPReader(BaseReader):
         recv_buffer = bytearray(self.buffer_size)
         data_view = np.frombuffer(recv_buffer, dtype=dtypes.BYTE)
 
-        waiting_logged = False
-
         try:
             while not stop_is_set():
-                # 1. Master Server Socket Lifecycle Management
-                if self.server_sock is None:
-                    if self.open() is None:
-                        sleep(1.0)
-                        continue
-
-                # 2. Connection Management Loop
+                # 1. Active Client Socket Lifecycle Management
                 if self.client_sock is None:
-                    try:
-                        if not waiting_logged:
-                            self.logger_link.info("Awaiting client connection...")
-                            waiting_logged = True
-
-                        client_conn, client_addr = self.server_sock.accept()
-
-                        # Set timeout on data transfer to prevent infinite blocks
-                        # matching your exact latency window constraints
-                        client_conn.settimeout(self.delay / 1000.0 / 2)
-
-                        self.client_sock = client_conn
-
-                        recv_into = self.client_sock.recv_into
-
-                        self.logger_link.info(f"Client connected from {client_addr[0]}:{client_addr[1]}")
-                        self.logger_state_open.info("1")
-
-                        waiting_logged = False
-                    except socket.timeout:
-                        continue  # Let the loop poll stop_is_set()
-                    except Exception as e:
-                        self.logger_link.error("Error accepting incoming client connection", e)
-                        waiting_logged = False
-                        sleep(1.0)
+                    if self.open() is None:
+                        # Wait for the user-configured interval before retrying connection
+                        sleep(float(self.reconnect_interval))
                         continue
+
+                    recv_into = self.client_sock.recv_into
 
                 if batch is None:
                     batch = batch_acquire()
 
-                # 3. Active Stream Data Read
+                # 2. Active Stream Data Read
                 try:
                     bytes_read = recv_into(recv_buffer)
                     now = time_ns()
 
                     if bytes_read == 0:
+                        # TCP Fin received. Remote server closed connection cleanly.
+                        self.logger_link.warning("Remote server closed the connection.")
                         self._close_client()
                         continue
 
-                    # 4. Insert or Append stream chunk into high-throughput layer
+                    # 3. Insert or Append stream chunk into high-throughput layer
                     if not batch.insert_view(now, now, data_view, bytes_read):
                         with batch:
                             self.distribute(batch)
@@ -191,23 +171,23 @@ class TCPReader(BaseReader):
                     # Expected. Allows timed evaluation of batch flushing windows
                     pass
                 except Exception as e:
-                    self.logger_link.error("Stream receive error occurred", e)
+                    self.logger_link.error("Stream receive error occurred on client connection", e)
                     self._close_client()
                     sleep(0.5)
                     continue
 
-                # 5. Flush evaluation window
+                # 4. Flush evaluation window
                 now = time_ns()
                 if batch is not None and batch.start_ts > 0 and (now - batch.start_ts) >= delay_ns:
                     with batch:
-                        self.distribute(batch)
                         tuner.update(batch.msg_cursor, batch.size, delay_s)
+                        self.distribute(batch)
                     batch = None
 
         except Exception as e:
-            logger.exception("Fatal error in TCP Reader execution loop", e)
+            logger.exception("Fatal error in TCP Client Reader execution loop", e)
         finally:
-            # 6. Final Cleanup
+            # 5. Final Cleanup
             if batch is not None:
                 if len(batch) > 0:
                     with batch:
@@ -215,7 +195,6 @@ class TCPReader(BaseReader):
                 else:
                     batch.release()
             self._close_client()
-            self._close_server()
 
     def _close_client(self):
         """Safely tears down the active client data pipe."""
@@ -227,26 +206,16 @@ class TCPReader(BaseReader):
             finally:
                 self.client_sock = None
                 self.logger_state_open.info("0")
-
-    def _close_server(self):
-        """Safely tears down the master listening server."""
-        if self.server_sock:
-            try:
-                self.server_sock.close()
-            except Exception:
-                pass
-            finally:
-                self.server_sock = None
-                self.logger_link.info("TCP Listening Server Closed")
+                self.logger_link.info("TCP Client Socket Closed")
 
     def send_data(self, data: str):
-        """Sends bidirectional telemetry strings back down the established TCP pipe."""
+        """Sends bidirectional telemetry strings back up the established TCP pipe to the server."""
         if not self.client_sock:
-            self.logger.warning("Cannot transmit command payload: No active TCP client connection exists.")
+            self.logger.warning("Cannot transmit command payload: No active TCP connection exists.")
             return
 
         try:
             self.client_sock.sendall(data.encode())
         except Exception as e:
-            self.logger.exception("Failed to transmit data across active client TCP socket", e)
+            self.logger.exception("Failed to transmit data across client TCP socket", e)
             self._close_client()
