@@ -53,7 +53,8 @@ class Settings:
                 content = load(f)
                 if isinstance(content, dict):
                     self._data = content
-
+        except FileNotFoundError:
+            pass
         except Exception as e:
             print(f"[ProjectSettings] Failed to read project settings: {e}")
 
