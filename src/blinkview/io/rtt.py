@@ -243,17 +243,13 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                         bytes_read = _dll_rtterminal_read(channel, c_buf, read_size)
 
                     if bytes_read > 0:
-                        # Zero-copy slice of the pre-allocated Numpy memory view
-                        chunk_view = np_buf[:bytes_read]
-
                         # 5. Insert Chunk
-                        if not batch.insert(now, now, chunk_view):
+                        if not batch.insert_view(now, now, np_buf, bytes_read):
                             with batch:
                                 self.distribute(batch)
-                                tuner.update(batch.msg_cursor, batch.size, delay_s)
-
+                                tuner.update(batch.msg_cursor + bytes_read, batch.size, delay_s)
                             batch = batch_acquire()
-                            batch.insert(now, now, chunk_view)
+                            batch.insert_view(now, now, np_buf, bytes_read)
 
                     elif bytes_read == 0:
                         # No data? Sleep 1ms to yield the CPU
@@ -385,7 +381,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                 self.logger_state_open.info("1")
                 return jl
             except Exception as e:
-                self.logger_link.error("Failed to connect", e)
+                self.logger_link.error(str(e))
 
                 self.logger_state_open.error("0")
                 if jl is not None:
