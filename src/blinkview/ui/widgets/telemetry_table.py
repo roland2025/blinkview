@@ -1017,11 +1017,17 @@ class TelemetryTable(QWidget):
                 if with_children:
                     title += " (+Children)"
 
+                show_hidden = module.device == self.gui_context.registry.system_device
+
                 self.gui_context.create_widget(
                     "LogViewerWidget",
                     title,
                     as_window=True,
-                    params={"filtered_module": module, "filtered_module_children": with_children},
+                    params={
+                        "filtered_module": module,
+                        "filtered_module_children": with_children,
+                        "show_hidden": show_hidden,
+                    },
                 )
 
             case "copy_name":

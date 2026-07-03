@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING
 from qtpy.QtCore import QObject
 
 if TYPE_CHECKING:
-    from blinkview import Registry
     from blinkview.core.id_registry import IDRegistry
     from blinkview.core.logger import SystemLogger
+    from blinkview.core.registry import Registry
     from blinkview.core.settings_manager import SettingsManager
     from blinkview.ui.utils.config_node_manager import ConfigNodeManager
     from blinkview.ui.widgets.config.style_config import StyleConfig
