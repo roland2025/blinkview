@@ -266,13 +266,27 @@ def nb_find_next_module_index(segment: LogBundle, target_module, start_idx):
 def nb_bundle_push(
     bundle: LogBundle, ts_ns, rx_ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
 ):
+    """
+    Convenience wrapper that infers the length directly from the buffer
+    and delegates execution to the core length-aware Numba kernel.
+    """
+    msg_len = len(msg_bytes)
+
+    return nb_bundle_push_len(
+        bundle, ts_ns, rx_ts_ns, msg_bytes, msg_len, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
+    )
+
+
+@app_njit(inline="always")
+def nb_bundle_push_len(
+    bundle: LogBundle, ts_ns, rx_ts_ns, msg_bytes, msg_len, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
+):
     # 1. Early Exit & Pre-flight
     size_ptr = bundle.size
     idx = size_ptr[0]
     if idx >= bundle.capacity:
         return False
 
-    msg_len = len(msg_bytes)
     cursor_ptr = bundle.msg_cursor
     cursor = cursor_ptr[0]
 

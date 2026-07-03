@@ -13,7 +13,7 @@ from blinkview.core import dtypes
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.types.empty import EMPTY_ID, EMPTY_LEVEL, EMPTY_SEQ
 from blinkview.core.types.log_batch import LogBundle
-from blinkview.ops.segments import nb_bundle_extend, nb_bundle_push
+from blinkview.ops.segments import nb_bundle_extend, nb_bundle_push, nb_bundle_push_len
 
 
 class PooledLogBatch:
@@ -223,6 +223,31 @@ class PooledLogBatch:
 
         return nb_bundle_push(
             b, ts_ns, rx_ts_ns, data_view, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
+        )
+
+    def insert_view(
+        self,
+        ts_ns: int,
+        rx_ts_ns: int,
+        data_view: np.ndarray,
+        msg_length: int,
+        level: int = 0,
+        module: int = 0,
+        device: int = 0,
+        seq: int = 0,
+        ext_u32_1: int = 0,
+        ext_u32_2: int = 0,
+        ext_u64_1: int = 0,
+    ) -> bool:
+        """
+        Directly passes a pre-allocated zero-copy NumPy view to the Numba kernel.
+        Achieves absolute minimum Python overhead.
+        """
+        if not (b := self.bundle):
+            return False
+
+        return nb_bundle_push_len(
+            b, ts_ns, rx_ts_ns, data_view, msg_length, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
         )
 
     def insert(

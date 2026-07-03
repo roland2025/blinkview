@@ -378,6 +378,10 @@ class NumbaWarmupHelper:
 
                 dummy_in.insert(time_ns(), time_ns(), msg_1_mv)
 
+                msg_1_data_view = np.frombuffer(msg_1, dtype=dtypes.BYTE)
+
+                dummy_in.insert_view(time_ns(), time_ns(), msg_1_data_view, len(msg_1))
+
                 dummy_in.insert(time_ns(), time_ns(), b"N1 main reg input          0.00 V     -0.010 mA \n")
                 dummy_in.insert(time_ns(), time_ns(), b"N2 ASI switch")
                 dummy_in.insert(time_ns(), time_ns(), b"              0.00 V")

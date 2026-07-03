@@ -135,6 +135,38 @@ def filter_ansi_inplace(out_buf, start_cursor, end_cursor):
     return write_cursor
 
 
+@app_njit(inline="always")
+def nb_skip_whitespace(buffer, cursor, end_cursor):
+    """
+    Advances the cursor past any space (32) or tab (9) characters.
+    """
+    while cursor < end_cursor and is_whitespace(buffer[cursor]):
+        cursor += 1
+    return cursor
+
+
+@app_njit(inline="always")
+def nb_skip_whitespace_reverse(buffer, start_cursor, end_cursor):
+    """
+    Moves the end_cursor backward past any trailing space (32) or tab (9) characters.
+    Stops if it hits the start_cursor boundary.
+    """
+    while end_cursor > start_cursor and is_whitespace(buffer[end_cursor]):
+        end_cursor -= 1
+    return end_cursor
+
+
+@app_njit(inline="always")
+def nb_skip_non_whitespace(buffer, cursor, end_cursor):
+    """
+    Advances the cursor past any non-whitespace characters.
+    Stops when it hits an inline space (32), tab (9), or the end of the buffer.
+    """
+    while cursor < end_cursor and not is_whitespace(buffer[cursor]):
+        cursor += 1
+    return cursor
+
+
 @app_njit()
 def squash_spaces_inplace(buffer, start_cursor, end_cursor):
     """
@@ -170,9 +202,7 @@ def squash_spaces_inplace(buffer, start_cursor, end_cursor):
     # Final step: Strip trailing space.
     # If the last character written was a space, we back up.
     # This is a single potential branch at the very end of the record.
-    if write_idx > start_cursor:
-        is_trailing_space = buffer[write_idx - 1] == 32
-        write_idx -= is_trailing_space
+    write_idx = nb_skip_whitespace_reverse(buffer, start_cursor, write_idx)
 
     return start_cursor, write_idx
 
@@ -184,12 +214,10 @@ def trim_spaces(buffer, start_cursor, end_cursor):
     Returns (new_start, new_end).
     """
     # Trim trailing first
-    while end_cursor > start_cursor and buffer[end_cursor - 1] == CHAR_SPACE:
-        end_cursor -= 1
+    end_cursor = nb_skip_whitespace_reverse(buffer, start_cursor, end_cursor)
 
     # Trim leading
-    while start_cursor < end_cursor and buffer[start_cursor] == CHAR_SPACE:
-        start_cursor += 1
+    start_cursor = nb_skip_whitespace(buffer, start_cursor, end_cursor)
 
     return start_cursor, end_cursor
 
@@ -200,24 +228,17 @@ def skip_n_words(buffer, cursor, end_cursor, n):
     words_skipped = 0
     while cursor < end_cursor and words_skipped < n:
         # 1. Skip leading whitespace to find the start of a word
-        while cursor < end_cursor and is_whitespace(buffer[cursor]):
-            cursor += 1
+        cursor = nb_skip_whitespace(buffer, cursor, end_cursor)
 
         if cursor >= end_cursor:
             break
 
         # 2. Skip the word itself
-        while cursor < end_cursor and not is_whitespace(buffer[cursor]):
-            cursor += 1
+        cursor = nb_skip_non_whitespace(buffer, cursor, end_cursor)
 
         words_skipped += 1
 
-    # 3. HOIST: Skip trailing whitespace after the final word
-    # This ensures the cursor sits on the start of the NEXT field.
-    while cursor < end_cursor and is_whitespace(buffer[cursor]):
-        cursor += 1
-
-    return cursor
+    return nb_skip_whitespace(buffer, cursor, end_cursor)
 
 
 @app_njit()

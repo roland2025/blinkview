@@ -17,6 +17,7 @@ from blinkview.ops.constants import (
     CHAR_TAB,
     CHAR_ZERO,
 )
+from blinkview.ops.strings import nb_skip_whitespace
 from blinkview.ops.timestamps import nb_project_synced_ns
 
 
@@ -81,11 +82,7 @@ def nb_parse_zephyr_uptime_formatted(
     out_b.timestamps[out_idx] = nb_project_synced_ns(raw_ns, rx_ns, state.timestamp.sync)
 
     # Move cursor past the closing bracket ']' and skip trailing whitespace
-    cursor = ts_end + 1
-    while cursor < end_cursor and (buffer[cursor] == CHAR_SPACE or buffer[cursor] == CHAR_TAB):
-        cursor += 1
-
-    return cursor
+    return nb_skip_whitespace(buffer, ts_end + 1, end_cursor)
 
 
 @app_njit(inline="always")
@@ -178,8 +175,4 @@ def nb_parse_zephyr_realtime(
     out_b.timestamps[out_idx] = nb_project_synced_ns(raw_ns, rx_ns, state.timestamp.sync)
 
     # 5. Advance Cursor
-    cursor = ts_end + 1
-    while cursor < end_cursor and (buffer[cursor] == CHAR_SPACE or buffer[cursor] == CHAR_TAB):
-        cursor += 1
-
-    return cursor
+    return nb_skip_whitespace(buffer, ts_end + 1, end_cursor)

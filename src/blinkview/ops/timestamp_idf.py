@@ -1,5 +1,6 @@
 from blinkview.core.numba_config import app_njit
 from blinkview.ops.constants import CHAR_LPAREN, CHAR_RPAREN, CHAR_SPACE
+from blinkview.ops.strings import nb_skip_whitespace
 from blinkview.ops.timestamps import nb_parse_int_timestamp
 
 
@@ -39,8 +40,4 @@ def nb_parse_int_timestamp_idf_v1(
         return -1
     cursor += 1  # Move past ')'
 
-    # Clean up any whitespace trailing the closing parenthesis
-    while cursor < end_cursor and (buffer[cursor] == CHAR_SPACE):
-        cursor += 1
-
-    return cursor
+    return nb_skip_whitespace(buffer, cursor, end_cursor)

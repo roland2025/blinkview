@@ -21,6 +21,7 @@ from blinkview.ops.strings import (
     is_alpha,
     is_digit,
     is_whitespace,
+    nb_skip_whitespace,
     to_lower,
 )
 
@@ -337,4 +338,5 @@ def parse_module_tags_statemachine(
         return -1
 
     out_b.modules[out_idx] = mod_id
-    return curr
+    
+    return nb_skip_whitespace(buffer, curr, end_cursor)

@@ -7,6 +7,7 @@
 from blinkview.core.id_registry.types import StringTableParams
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.parsing import UnifiedParserConfig
+from blinkview.ops.strings import nb_skip_whitespace
 
 
 @app_njit(inline="always")
@@ -60,6 +61,7 @@ def parse_log_level(buffer, start_cursor, end_cursor, out_b, out_idx, state, uni
 
             # 5. SUCCESS
             out_b.levels[out_idx] = values[i]
-            return next_idx
+
+            return nb_skip_whitespace(buffer, next_idx, end_cursor)
 
     return -1

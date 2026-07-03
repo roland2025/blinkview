@@ -27,6 +27,7 @@ from blinkview.ops.constants import (
 )
 from blinkview.ops.discovery import resolve_module_id
 from blinkview.ops.modules import normalize_name_inplace
+from blinkview.ops.strings import nb_skip_whitespace
 from blinkview.ops.timestamps import nb_project_synced_ns, parse_iso8601_to_ns
 
 
@@ -261,14 +262,8 @@ def parse_adb_pid_tid(
     # --- 5. Final Scan to Log Level ---
     # Move the cursor past any trailing whitespace so it sits
     # exactly at the start of the Log Level (e.g., 'I/...')
-    while cursor < end_cursor:
-        val = buffer[cursor]
-        if val == CHAR_SPACE or val == CHAR_TAB or val == CHAR_NBSP:
-            cursor += 1
-        else:
-            break
 
-    return cursor
+    return nb_skip_whitespace(buffer, cursor, end_cursor)
 
 
 @app_njit(inline="always")
@@ -289,7 +284,7 @@ def parse_adb_level(buffer, start_cursor, end_cursor, out_b, out_idx, state, uni
     for i in range(count):
         if ref_buf[offsets[i]] == level_char:
             out_b.levels[out_idx] = values[i]
-            return start_cursor + 2
+            return nb_skip_whitespace(buffer, start_cursor + 2, end_cursor)
 
     return -1
 
@@ -371,15 +366,15 @@ def parse_adb_tag(
 
         if peek_idx == header_delimiter_idx:
             # It's 'bt: ]' -> Skip the colon and the ' ]'
-            return header_delimiter_idx + 2
+            return nb_skip_whitespace(buffer, header_delimiter_idx + 2, end_cursor)
 
         if buffer[peek_idx] == CHAR_LBRACKET:
             # It's 'vri: [Settings]' -> Jump to bracket
-            return peek_idx
+            return nb_skip_whitespace(buffer, peek_idx, end_cursor)
 
         # Standard metadata: Inject '[' over the colon
         buffer[actual_end] = CHAR_LBRACKET
-        return actual_end
+        return nb_skip_whitespace(buffer, actual_end, end_cursor)
 
     elif meta_type == 2:
         # LBRACKET SHIFT: VRI[NotificationShade]
@@ -387,13 +382,10 @@ def parse_adb_tag(
         shift_dist = 2
         for i in range(prefix_len - 1, -1, -1):
             buffer[actual_end + shift_dist + i] = buffer[actual_end + i]
-        return actual_end + shift_dist
+        return nb_skip_whitespace(buffer, actual_end + shift_dist, end_cursor)
 
     # STANDARD CASE: Just jump past the ' ]'
-    cursor = header_delimiter_idx + 2
-    while cursor < end_cursor and (buffer[cursor] == CHAR_SPACE or buffer[cursor] == CHAR_LF):
-        cursor += 1
-    return cursor
+    return nb_skip_whitespace(buffer, header_delimiter_idx + 2, end_cursor)
 
 
 @app_njit(inline="always")
@@ -503,8 +495,4 @@ def parse_adb_timestamp_monotonic(
     out_b.timestamps[out_idx] = nb_project_synced_ns(raw_ns, rx_ns, state.timestamp.sync)
 
     # Move cursor past the timestamp and skip whitespace to reach the PID
-    cursor = ts_end
-    while cursor < end_cursor and (buffer[cursor] == 32 or buffer[cursor] == 9):
-        cursor += 1
-
-    return cursor
+    return nb_skip_whitespace(buffer, ts_end, end_cursor)
