@@ -502,6 +502,9 @@ class PooledLogBatch:
         return SEQ_NONE
 
 
+lock_log_batch = Lock()
+
+
 def log_batch(instance, batch_data, direction="OUT"):
     """
     Logs batch data for both incoming and outgoing streams.
@@ -513,10 +516,11 @@ def log_batch(instance, batch_data, direction="OUT"):
     cls_name = instance.__class__.__name__
     direction = direction.upper()
 
-    # Dynamic header line
-    print(f"[{cls_name}_{direction}] {batch_data}")
+    with lock_log_batch:
+        # Dynamic header line
+        print(f"[{cls_name}_{direction}] {batch_data}")
 
-    # Dynamic detail lines
-    for item in batch_data:
-        _ts, _msg, _rx_ts = item[0], item[1], item[2]
-        print(f"[{cls_name}_{direction}] {_ts}: msg={_msg} hex={_msg.hex()}")
+        # Dynamic detail lines
+        for item in batch_data:
+            _ts, _msg, _rx_ts = item[0], item[1], item[2]
+            print(f"[{cls_name}_{direction}] ts={_ts}: msg={_msg} hex={_msg.hex()}")
