@@ -12,7 +12,7 @@ from numba.typed import List as NumbaList
 
 from blinkview.core import dtypes
 from blinkview.core.bindable import bindable
-from blinkview.core.configurable import configurable, configuration_property
+from blinkview.core.configurable import configurable, configuration_property, override_property
 from blinkview.core.factory import BaseFactory
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.system_context import SystemContext
@@ -468,7 +468,10 @@ class IntegerTimestampParser(TimestampParser):
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
 
-        config = UnifiedParserConfig(timestamp_precision=getattr(self, "precision", TS_PRECISION_MS))
+        config = UnifiedParserConfig(
+            timestamp_precision=getattr(self, "precision", TS_PRECISION_MS),
+            timestamp_unix=getattr(self, "unix_timestamp", False),
+        )
 
         self._bundle = ParserID.TS_INTEGER, self.state, config
 
@@ -478,8 +481,8 @@ class IntegerTimestampParser(TimestampParser):
         return self._bundle
 
 
-@FrameSectionParserFactory.register("timestamp_integer_esp_v1")
 @FrameSectionParserFactory.register("timestamp_idf_v1")
+@override_property("unix_timestamp", hidden=True, default=False)
 class Esp32V1IntegerTimestampParser(IntegerTimestampParser):
     precision: int
 
