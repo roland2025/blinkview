@@ -425,13 +425,28 @@ QToolButton[filterEnabled="true"] {
         return action
 
     def _toggle_all_columns(self, is_checked):
-        """Sets all column toggles to match the 'ALL' button state."""
+        """Sets all column toggles to applicable core columns, or clears all when unchecked."""
         # Block signals temporarily so we don't trigger a redraw 4 times
         self.blockSignals(True)
 
+        # Base columns we always want when enabled
+        applicable_cols = {"show_ts", "show_lvl"}
+
+        # Add Device only if we aren't already restricted to a specific device or module
+        if self.filtered_module is None and self.allowed_device is None:
+            applicable_cols.add("show_dev")
+
+        # Add Module only if we aren't restricted to a single module (no children)
+        if self.filtered_module is None or self.filtered_module_children:
+            applicable_cols.add("show_mod")
+
         for attr_name, action in self.column_actions.items():
-            action.setChecked(is_checked)
-            setattr(self, attr_name, is_checked)
+            # If checking 'ALL', enable only if it's in our applicable set (disables date/rx_ts).
+            # If unchecking 'ALL', target_state is False for everything.
+            target_state = is_checked and (attr_name in applicable_cols)
+
+            action.setChecked(target_state)
+            setattr(self, attr_name, target_state)
 
         self.blockSignals(False)
 
@@ -459,9 +474,19 @@ QToolButton[filterEnabled="true"] {
         """Updates individual flag and handles the 'ALL' button state."""
         setattr(self, attr_name, is_checked)
 
-        # UI Polish: If all individual columns are checked, 'ALL' should be checked.
-        # If any are unchecked, 'ALL' should probably be unchecked.
-        all_active = all(action.isChecked() for action in self.column_actions.values())
+        # Base columns we expect to be checked for "ALL" to be active
+        applicable_cols = {"show_ts", "show_lvl"}
+
+        # Add Device only if we aren't already restricted to a specific device or module
+        if self.filtered_module is None and self.allowed_device is None:
+            applicable_cols.add("show_dev")
+
+        # Add Module only if we aren't restricted to a single module (no children)
+        if self.filtered_module is None or self.filtered_module_children:
+            applicable_cols.add("show_mod")
+
+        # Check if ALL applicable columns are currently checked
+        all_active = all(self.column_actions[col].isChecked() for col in applicable_cols)
 
         # Block signals so checking the 'ALL' button doesn't trigger _toggle_all_columns
         self.action_all.blockSignals(True)
