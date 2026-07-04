@@ -151,7 +151,7 @@ def nb_skip_whitespace_reverse(buffer, start_cursor, end_cursor):
     Moves the end_cursor backward past any trailing space (32) or tab (9) characters.
     Stops if it hits the start_cursor boundary.
     """
-    while end_cursor > start_cursor and is_whitespace(buffer[end_cursor]):
+    while end_cursor > start_cursor and is_whitespace(buffer[end_cursor - 1]):
         end_cursor -= 1
     return end_cursor
 
