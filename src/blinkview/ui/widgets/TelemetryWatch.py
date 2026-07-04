@@ -188,7 +188,9 @@ class RowEntry(TelemetryEntry):
     modules: List[ModuleIdentity] = field(default_factory=list)
 
     # UI/Runtime State
-    value_label: Optional[QLabel] = None
+    value_label: Optional[FlashLabel] = None
+    sub_labels: List[QLabel] = field(default_factory=list)  # Track sub-module rows
+    is_expanded: bool = False  # Persistent expanded state
     last_painted_seq: dtypes.SEQ_TYPE = dtypes.SEQ_NONE
     last_painted_msg: str = ""
     last_change_time: float = 0.0
@@ -200,11 +202,12 @@ class RowEntry(TelemetryEntry):
             "key": self.key,
             "label": self.label,
             "modules": [m.name_with_device() for m in self.modules],
+            "is_expanded": self.is_expanded,  # Keep across layout rebuilds
         }
 
     def clear_widgets(self):
-        """Release the reference to the QLabel."""
         self.value_label = None
+        self.sub_labels.clear()
 
 
 @dataclass(slots=True)
@@ -566,20 +569,26 @@ class TelemetryWatch(QWidget):
         if not self.entries:
             return 0, "below"
 
+        visual_row_index = 0
         for i, entry in enumerate(self.entries):
-            item = self.layout.itemAtPosition(i, 1)
+            # Check the primary item label position at the calculated visual row
+            item = self.layout.itemAtPosition(visual_row_index, 1)
+
             if item and item.widget():
                 rect = item.widget().geometry()
 
+                # Calculate structural block heights (including expanded sub-lines)
+                # so dragging over child lines correctly references the parent group block
+                if not self.edit_mode and isinstance(entry, RowEntry) and entry.is_expanded and len(entry.modules) > 1:
+                    last_sub_item = self.layout.itemAtPosition(visual_row_index + len(entry.modules), 1)
+                    if last_sub_item and last_sub_item.widget():
+                        rect = rect.united(last_sub_item.widget().geometry())
+
                 if local_pos.y() <= rect.bottom():
                     # --- FIXED AUTO EXPAND ---
-                    # Only auto-expand in normal mode. In edit mode,
-                    # widgets aren't hidden, so there's no need to expand.
                     if not self.edit_mode and isinstance(entry, SectionEntry) and entry.collapsed:
                         entry.collapsed = False
                         self.rebuild_ui()
-                        # Exit immediately! The current layout is now invalid.
-                        # The next dragMoveEvent will re-calculate correctly.
                         return i, "above"
                     # -------------------------
 
@@ -599,6 +608,11 @@ class TelemetryWatch(QWidget):
                         else:
                             return i, "above"
 
+            # Replicate visual offset accumulation pattern
+            visual_row_index += 1
+            if not self.edit_mode and isinstance(entry, RowEntry) and entry.is_expanded and len(entry.modules) > 1:
+                visual_row_index += len(entry.modules)
+
         return len(self.entries) - 1, "below"
 
     def _update_drop_indicator(self, index, action):
@@ -607,19 +621,25 @@ class TelemetryWatch(QWidget):
             self.drop_indicator.hide()
             return
 
-        item_label = self.layout.itemAtPosition(index, 1)
-        item_content = self.layout.itemAtPosition(index, 2)
+        # Calculate visual grid row matching the entries sequence index
+        visual_row_index = 0
+        for i in range(index):
+            entry = self.entries[i]
+            visual_row_index += 1
+            if not self.edit_mode and isinstance(entry, RowEntry) and entry.is_expanded and len(entry.modules) > 1:
+                visual_row_index += len(entry.modules)
+
+        item_label = self.layout.itemAtPosition(visual_row_index, 1)
+        item_content = self.layout.itemAtPosition(visual_row_index, 2)
 
         if not item_label or not item_label.widget():
             self.drop_indicator.hide()
             return
 
-        # Calculate bounding rect for the entire row
         rect = item_label.widget().geometry()
         if item_content and item_content.widget():
             rect = rect.united(item_content.widget().geometry())
 
-        # Expand rect to container width
         rect.setX(0)
         rect.setWidth(self.container.width())
 
@@ -627,17 +647,14 @@ class TelemetryWatch(QWidget):
         self.drop_indicator.show()
 
         if action == "into":
-            # Highlight box for merging
             self.drop_indicator.setStyleSheet(
                 "background-color: rgba(85, 170, 255, 60); border: 2px solid #55aaff; border-radius: 4px;"
             )
             self.drop_indicator.setGeometry(rect)
         elif action == "above":
-            # Thin line above
             self.drop_indicator.setStyleSheet("background-color: #55aaff; border: none;")
             self.drop_indicator.setGeometry(rect.x(), rect.top() - 2, rect.width(), 4)
         elif action == "below":
-            # Thin line below
             self.drop_indicator.setStyleSheet("background-color: #55aaff; border: none;")
             self.drop_indicator.setGeometry(rect.x(), rect.bottom() - 2, rect.width(), 4)
 
@@ -781,23 +798,20 @@ class TelemetryWatch(QWidget):
             self._stashed_scroll_pos = scrollbar.value()
 
         self._clear_layout()
-
         theme = self.gui_context.theme
 
         current_section_active = False
         is_hidden = False
-
-        # State tracking for flat button groups
         in_button_group = False
         current_btn_layout = None
 
         cmd_combo_visible = len(self.default_target) and self.default_target != "None" and not self.edit_mode
-
         self.command_input_combo_action.setVisible(cmd_combo_visible)
-
         self.send_command_btn_action.setVisible(cmd_combo_visible)
 
-        for row, entry in enumerate(self.entries):
+        current_layout_row = 0
+
+        for entry in self.entries:
             # --- Section Logic ---
             if isinstance(entry, (SectionEntry, RowEntry)):
                 in_button_group = False
@@ -807,24 +821,15 @@ class TelemetryWatch(QWidget):
                 current_section_active = True
                 is_hidden = False
 
-                # Col 0: Drag Handle
                 if self.edit_mode:
-                    handle = DragHandle(row, self)
-                    self.layout.addWidget(handle, row, 0)
+                    handle = DragHandle(current_layout_row, self)
+                    self.layout.addWidget(handle, current_layout_row, 0)
 
-                # Col 1: Section Title
                 if self.edit_mode:
                     lbl = QLineEdit(entry.label)
-                    # Styling sections to stand out in Edit Mode
-                    lbl.setStyleSheet("""
-                        QLineEdit { 
-                            font-weight: bold; 
-                            color: #55aaff; 
-                            background-color: #2a2a2a; 
-                            border: 1px solid #444;
-                            padding: 2px;
-                        }
-                    """)
+                    lbl.setStyleSheet(
+                        "QLineEdit { font-weight: bold; color: #55aaff; background-color: #2a2a2a; border: 1px solid #444; padding: 2px; }"
+                    )
                     lbl.textEdited.connect(lambda text, e=entry: setattr(e, "label", text))
                 else:
                     lbl = QLabel(f"{entry.label.upper()}  {'▾' if not entry.collapsed else '▸'}")
@@ -832,193 +837,139 @@ class TelemetryWatch(QWidget):
                     lbl.setStyleSheet("color: #55aaff; font-weight: bold;")
                     lbl.mousePressEvent = lambda event, e=entry: self.toggle_section(e)
 
-                self.layout.addWidget(lbl, row, 1)
+                self.layout.addWidget(lbl, current_layout_row, 1)
 
-                # Col 2: Section Divider Line
                 line = QFrame()
                 line.setFrameShape(QFrame.HLine)
                 line.setFrameShadow(QFrame.Plain)
                 line.setStyleSheet("color: #55aaff;" if self.edit_mode else "color: #333;")
-                self.layout.addWidget(line, row, 2)
+                self.layout.addWidget(line, current_layout_row, 2)
 
-                # Col 3: Remove Button (ADDED FOR SECTIONS)
                 if self.edit_mode:
                     del_btn = QPushButton("Remove")
                     del_btn.setStyleSheet("color: #ff5555; font-weight: bold;")
-                    del_btn.clicked.connect(lambda checked, r=row: self.remove_item(r))
-                    self.layout.addWidget(del_btn, row, 3)
+                    del_btn.clicked.connect(lambda checked, idx=self.entries.index(entry): self.remove_item(idx))
+                    self.layout.addWidget(del_btn, current_layout_row, 3)
 
+                current_layout_row += 1
                 if entry.collapsed and not self.edit_mode:
                     is_hidden = True
                 continue
 
-            # --- Group Start Marker ---
             elif isinstance(entry, GroupStartEntry):
                 in_button_group = True
-
                 if is_hidden:
                     continue
 
                 if self.edit_mode:
-                    handle = DragHandle(row, self)
-                    self.layout.addWidget(handle, row, 0)
-
+                    handle = DragHandle(current_layout_row, self)
+                    self.layout.addWidget(handle, current_layout_row, 0)
                     lbl = QLineEdit(entry.label)
                     lbl.setStyleSheet("font-weight: bold; color: #aaa; background: #222; border: 1px dashed #55aaff;")
                     lbl.textEdited.connect(lambda text, e=entry: setattr(e, "label", text))
-                    self.layout.addWidget(lbl, row, 1)
-
+                    self.layout.addWidget(lbl, current_layout_row, 1)
                     line = QLabel("┌───────── GROUP START ─────────")
                     line.setStyleSheet("color: #55aaff;")
-                    self.layout.addWidget(line, row, 2)
-
+                    self.layout.addWidget(line, current_layout_row, 2)
                     del_btn = QPushButton("Remove")
                     del_btn.setStyleSheet("color: #ff5555;")
-                    del_btn.clicked.connect(lambda checked, r=row: self.remove_item(r))
-                    self.layout.addWidget(del_btn, row, 3)
+                    del_btn.clicked.connect(lambda checked, idx=self.entries.index(entry): self.remove_item(idx))
+                    self.layout.addWidget(del_btn, current_layout_row, 3)
                 else:
-                    # Normal Mode: Add Label, create the horizontal container
                     lbl = QLabel(entry.label)
                     lbl.setFont(self.font)
                     indent = 20 if current_section_active else 5
                     lbl.setContentsMargins(indent, 0, 0, 0)
-                    self.layout.addWidget(lbl, row, 1)
-
+                    self.layout.addWidget(lbl, current_layout_row, 1)
                     container = QWidget()
                     current_btn_layout = QHBoxLayout(container)
                     current_btn_layout.setContentsMargins(0, 0, 0, 0)
                     current_btn_layout.setSpacing(5)
                     current_btn_layout.setAlignment(Qt.AlignLeft)
-                    self.layout.addWidget(container, row, 2)
+                    self.layout.addWidget(container, current_layout_row, 2)
+
+                current_layout_row += 1
                 continue
 
-            # --- Group End Marker ---
             elif isinstance(entry, GroupEndEntry):
                 in_button_group = False
                 current_btn_layout = None
-
                 if is_hidden:
                     continue
 
                 if self.edit_mode:
-                    # handle = DragHandle(row, self)
-                    # self.layout.addWidget(handle, row, 0)
-
                     lbl = QLabel("└─")
                     lbl.setStyleSheet("color: #55aaff; font-weight: bold;")
                     lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                    self.layout.addWidget(lbl, row, 1)
-
+                    self.layout.addWidget(lbl, current_layout_row, 1)
                     line = QLabel("└───────── GROUP END ─────────")
                     line.setStyleSheet("color: #55aaff;")
-                    self.layout.addWidget(line, row, 2)
-
+                    self.layout.addWidget(line, current_layout_row, 2)
                     del_btn = QPushButton("Remove")
                     del_btn.setStyleSheet("color: #ff5555;")
-                    del_btn.clicked.connect(lambda checked, r=row: self.remove_item(r))
-                    self.layout.addWidget(del_btn, row, 3)
-                # In Normal mode, the Group End does absolutely nothing visually, it just resets the state.
+                    del_btn.clicked.connect(lambda checked, idx=self.entries.index(entry): self.remove_item(idx))
+                    self.layout.addWidget(del_btn, current_layout_row, 3)
+
+                current_layout_row += 1
                 continue
 
-            # --- Button Logic ---
             elif isinstance(entry, ButtonEntry):
                 if is_hidden:
                     continue
 
                 if self.edit_mode:
-                    # Col 0: Drag Handle
-                    handle = DragHandle(row, self)
-                    self.layout.addWidget(handle, row, 0)
-
-                    # Col 1: Action Label
+                    handle = DragHandle(current_layout_row, self)
+                    self.layout.addWidget(handle, current_layout_row, 0)
                     lbl = QLineEdit(entry.label)
-                    # Use a distinct color (Amber) and styling for "Actions"
                     lbl.setStyleSheet(
-                        """
-                                    QLineEdit {
-                                        color: #ffaa00; 
-                                        font-weight: bold;
-                                        background: transparent;
-                                        border: none;
-                                        border-bottom: 1px solid #444;
-                                        margin-left: """
+                        "QLineEdit { color: #ffaa00; font-weight: bold; background: transparent; border: none; border-bottom: 1px solid #444; margin-left: "
                         + ("15px;" if in_button_group else "0px;")
-                        + """
-                                    }
-                                    QLineEdit:focus { border-bottom: 1px solid #ffaa00; }
-                                """
+                        + " } QLineEdit:focus { border-bottom: 1px solid #ffaa00; }"
                     )
                     lbl.textEdited.connect(lambda text, e=entry: setattr(e, "label", text))
-                    self.layout.addWidget(lbl, row, 1)
+                    self.layout.addWidget(lbl, current_layout_row, 1)
 
-                    # Col 2: Content (Styled Command Card)
                     content = QWidget()
-                    # Apply a distinct background to the config area
-                    content.setStyleSheet("""
-                                    QWidget#CommandCard {
-                                        background-color: #2b2b2b;
-                                        border: 1px solid #3d3d3d;
-                                        border-radius: 4px;
-                                    }
-                                """)
+                    content.setStyleSheet(
+                        "QWidget#CommandCard { background-color: #2b2b2b; border: 1px solid #3d3d3d; border-radius: 4px; }"
+                    )
                     content.setObjectName("CommandCard")
-
                     btn_layout = QHBoxLayout(content)
                     btn_layout.setContentsMargins(8, 4, 8, 4)
                     btn_layout.setSpacing(8)
 
-                    # Device Dropdown
                     device_combo = RequestComboBox()
                     device_combo.aboutToShowPopup.connect(self._trigger_device_fetch)
-                    # Add a "Default" option to the button's own dropdown
                     if entry.target_device:
                         device_combo.addItem(f"ID: {entry.target_device}", entry.target_device)
                     else:
                         device_combo.addItem("None", "")
-
-                        # Save the ID (userData), not the display text
                     device_combo.currentIndexChanged.connect(
                         lambda idx, e=entry, cb=device_combo: self._handle_button_target_change(cb, e)
                     )
 
-                    # Command Payload (Monospace/Code Style)
                     payload_input = QLineEdit(entry.command_payload)
                     payload_input.setPlaceholderText("Command (JSON/Raw)...")
-                    payload_input.setStyleSheet("""
-                                    QLineEdit {
-                                        font-family: 'Consolas', 'Monaco', monospace;
-                                        background-color: #1e1e1e;
-                                        color: #9cdcfe;
-                                        border: 1px solid #333;
-                                        padding: 2px 5px;
-                                    }
-                                """)
+                    payload_input.setStyleSheet(
+                        "QLineEdit { font-family: 'Consolas', 'Monaco', monospace; background-color: #1e1e1e; color: #9cdcfe; border: 1px solid #333; padding: 2px 5px; }"
+                    )
                     payload_input.textEdited.connect(lambda text, e=entry: setattr(e, "command_payload", text))
 
-                    btn_layout.addWidget(QLabel("🎯"))  # Target Icon
+                    btn_layout.addWidget(QLabel("🎯"))
                     btn_layout.addWidget(device_combo)
-                    btn_layout.addWidget(QLabel("⌨"))  # Payload Icon
+                    btn_layout.addWidget(QLabel("⌨"))
                     btn_layout.addWidget(payload_input)
+                    self.layout.addWidget(content, current_layout_row, 2)
 
-                    self.layout.addWidget(content, row, 2)
-
-                    # Col 3: Remove Row Button
                     del_btn = QPushButton("Remove")
                     del_btn.setStyleSheet("color: #ff5555; padding: 4px;")
-                    del_btn.clicked.connect(lambda checked, r=row: self.remove_item(r))
-                    self.layout.addWidget(del_btn, row, 3)
-
+                    del_btn.clicked.connect(lambda checked, idx=self.entries.index(entry): self.remove_item(idx))
+                    self.layout.addWidget(del_btn, current_layout_row, 3)
                 else:
-                    # Normal Mode: (Keep your current Button styling)
                     content = QPushButton(entry.label)
-                    content.setStyleSheet("""
-                                    QPushButton {
-                                        background-color: #444; color: #eee; 
-                                        border-radius: 4px; padding: 4px 12px; font-weight: bold;
-                                    }
-                                    QPushButton:hover { background-color: #555; }
-                                    QPushButton:pressed { background-color: #333; }
-                                """)
+                    content.setStyleSheet(
+                        "QPushButton { background-color: #444; color: #eee; border-radius: 4px; padding: 4px 12px; font-weight: bold; } QPushButton:hover { background-color: #555; } QPushButton:pressed { background-color: #333; }"
+                    )
                     content.clicked.connect(lambda checked, e=entry: self.execute_button_command(e))
                     entry.button_widget = content
 
@@ -1026,44 +977,58 @@ class TelemetryWatch(QWidget):
                         current_btn_layout.addWidget(content)
                     else:
                         lbl = QLabel("")
-                        self.layout.addWidget(lbl, row, 1)
-                        self.layout.addWidget(content, row, 2)
+                        self.layout.addWidget(lbl, current_layout_row, 1)
+                        self.layout.addWidget(content, current_layout_row, 2)
 
+                current_layout_row += 1
                 continue
 
             # --- Row Logic ---
             if is_hidden:
                 continue
 
-            # Col 0: Drag Handle
             if self.edit_mode:
-                handle = DragHandle(row, self)
-                self.layout.addWidget(handle, row, 0)
+                handle = DragHandle(current_layout_row, self)
+                self.layout.addWidget(handle, current_layout_row, 0)
 
-            # Col 1: Item Name
+            # --- Column 1: Title Label & Expand Action ---
             if self.edit_mode:
                 lbl = QLineEdit(entry.label)
                 lbl.textEdited.connect(lambda text, e=entry: setattr(e, "label", text))
             else:
-                lbl = QLabel(entry.label)
+                # Add folder icon prefix directly before the title text if multiple modules exist
+                display_text = entry.label
+                has_multiple = len(entry.modules) > 1
+                if has_multiple:
+                    prefix = "▼ " if entry.is_expanded else "▶ "
+                    display_text = prefix + display_text
+
+                lbl = QLabel(display_text)
                 lbl.setFont(self.font)
 
+                # Make the title clickable instead of the values
+                if has_multiple:
+                    lbl.setCursor(Qt.PointingHandCursor)
+                    lbl.mousePressEvent = lambda event, target_entry=entry: (
+                        self._toggle_row_expanded(target_entry)
+                        if event.button() == Qt.LeftButton
+                        else super(QLabel, lbl).mousePressEvent(event)
+                    )
+
                 lbl.setContextMenuPolicy(Qt.CustomContextMenu)
-                # We pass 'lbl' instead of 'content' to map coordinates correctly
                 lbl.customContextMenuRequested.connect(
                     lambda pos, e=entry, w=lbl: self._show_row_context_menu(pos, e, w)
                 )
 
-            # If the row is under a section, indent it 20px
             indent = 20 if current_section_active else 5
             lbl.setContentsMargins(indent, 0, 0, 0)
-            self.layout.addWidget(lbl, row, 1)
+            self.layout.addWidget(lbl, current_layout_row, 1)
 
-            # Col 2: Content (Values or Module Pills)
+            # --- Column 2: Value Displays ---
             if self.edit_mode:
                 content = QWidget()
                 mod_layout = QHBoxLayout(content)
-                mod_layout.setContentsMargins(5, 0, 0, 0)  # Slight indent
+                mod_layout.setContentsMargins(5, 0, 0, 0)
                 mod_layout.setSpacing(5)
                 mod_layout.setAlignment(Qt.AlignLeft)
 
@@ -1073,15 +1038,14 @@ class TelemetryWatch(QWidget):
                     pill_layout = QHBoxLayout(pill)
                     pill_layout.setContentsMargins(6, 2, 4, 2)
                     pill_layout.setSpacing(4)
-
                     mod_lbl = QLabel(f"{mod.device.name}.{mod.name}")
                     mod_lbl.setStyleSheet("color: #ccc; font-weight: normal;")
-
                     btn = QPushButton("✖")
                     btn.setFixedSize(16, 16)
                     btn.setStyleSheet("border: none; color: #ff5555; font-weight: bold;")
-                    btn.clicked.connect(lambda checked, r=row, m=mod_idx: self.remove_module_from_row(r, m))
-
+                    btn.clicked.connect(
+                        lambda checked, r=self.entries.index(entry), m=mod_idx: self.remove_module_from_row(r, m)
+                    )
                     pill_layout.addWidget(mod_lbl)
                     pill_layout.addWidget(btn)
                     mod_layout.addWidget(pill)
@@ -1092,30 +1056,53 @@ class TelemetryWatch(QWidget):
                 content.setFont(self.font)
                 content.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
+                # Value label context menu remains intact
                 content.setContextMenuPolicy(Qt.CustomContextMenu)
-                # We pass the entry and the widget itself so we can map the position correctly
                 content.customContextMenuRequested.connect(
                     lambda pos, e=entry, w=content: self._show_row_context_menu(pos, e, w)
                 )
-
                 entry.value_label = content
 
-            self.layout.addWidget(content, row, 2)
+            self.layout.addWidget(content, current_layout_row, 2)
 
-            # Col 3: Remove Row Button
             if self.edit_mode:
                 del_btn = QPushButton("Remove")
-                del_btn.clicked.connect(lambda checked, r=row: self.remove_item(r))
-                self.layout.addWidget(del_btn, row, 3)
+                del_btn.clicked.connect(lambda checked, idx=self.entries.index(entry): self.remove_item(idx))
+                self.layout.addWidget(del_btn, current_layout_row, 3)
+
+            current_layout_row += 1
+
+            entry.sub_labels.clear()
+
+            # --- RENDER SUBMODULES IF EXPANDED ---
+            if not self.edit_mode and entry.is_expanded and len(entry.modules) > 1:
+                for mod in entry.modules:
+                    # Submodule Name label (Indented relative to parent title)
+                    sub_name_lbl = QLabel(f"{mod.device.name}.{mod.name}")  # └─
+                    sub_name_lbl.setStyleSheet("font-weight: normal; font-size: 12px;")  # color: #aaa;
+                    sub_name_lbl.setContentsMargins(indent + 15, 0, 0, 0)
+                    self.layout.addWidget(sub_name_lbl, current_layout_row, 1)
+
+                    # Submodule Value text label
+                    sub_val_lbl = QLabel("---")
+                    sub_val_lbl.setStyleSheet("font-family: monospace; font-size: 12px;")  # color: #ccc;
+                    self.layout.addWidget(sub_val_lbl, current_layout_row, 2)
+
+                    entry.sub_labels.append(sub_val_lbl)
+                    current_layout_row += 1
 
         self.container.setUpdatesEnabled(True)
 
         if scroll_to_bottom:
-            self._stashed_scroll_pos = 0  # Clear stash for next time
+            self._stashed_scroll_pos = 0
             QTimer.singleShot(50, lambda: scrollbar.setValue(scrollbar.maximum()))
         else:
-            # Restore from the class-level stash to survive the "Double Rebuild" race
             QTimer.singleShot(50, lambda: scrollbar.setValue(self._stashed_scroll_pos))
+
+    def _toggle_row_expanded(self, entry: RowEntry):
+        entry.is_expanded = not entry.is_expanded
+        self.save_config()
+        self.rebuild_ui()
 
     def _clear_layout(self):
         for entry in self.entries:
@@ -1204,7 +1191,9 @@ class TelemetryWatch(QWidget):
                 )
             else:
                 mods = self.gui_context.id_registry.resolve_modules(e.get("modules", []))
-                self.entries.append(RowEntry(key=e["key"], label=e["label"], modules=mods))
+                self.entries.append(
+                    RowEntry(key=e["key"], label=e["label"], modules=mods, is_expanded=e.get("is_expanded", False))
+                )
 
         self.rebuild_ui()
 
@@ -1241,7 +1230,6 @@ class TelemetryWatch(QWidget):
 
     def apply_updates(self):
         now = perf_counter()
-        # 100ms = 10Hz refresh. Perfect for human reading.
         if now - self.prev_apply < 0.1:
             return
         self.prev_apply = now
@@ -1252,7 +1240,6 @@ class TelemetryWatch(QWidget):
 
         theme = self.gui_context.theme
 
-        # Acquire a single snapshot for the entire batch of entries
         with tracker.get_snapshot() as snap:
             sequences = memoryview(snap.bundle().sequence_ids)
             try:
@@ -1260,21 +1247,30 @@ class TelemetryWatch(QWidget):
                     if not isinstance(entry, RowEntry) or not entry.value_label:
                         continue
 
-                    # Check all modules assigned to this row (for multi-module aggregation)
                     label = entry.value_label
                     best_seq = entry.last_painted_seq
                     new_msg = None
+                    row_updated = False
 
+                    # 1. Update Sub-Labels first if expanded
+                    if entry.is_expanded and entry.sub_labels and len(entry.sub_labels) == len(entry.modules):
+                        for idx, m in enumerate(entry.modules):
+                            current_seq = sequences[m.id]
+                            # Submodules get instant separate tracking updates
+                            mod_msg = snap.get_message(m.id)
+                            if mod_msg:
+                                entry.sub_labels[idx].setText(mod_msg)
+
+                    # 2. Main combined row calculation loop
                     for m in entry.modules:
                         current_seq = sequences[m.id]
 
-                        # If this specific module has a newer sequence than what we've ever seen
                         if current_seq > best_seq:
                             best_seq = current_seq
                             new_msg = snap.get_message(m.id)
+                            row_updated = True
 
-                    # Only hit the heavy QLabel.setText if we actually found newer data
-                    if new_msg is not None:
+                    if row_updated and new_msg is not None:
                         entry.last_painted_seq = best_seq
                         entry.last_painted_msg = new_msg
                         entry.value_label.setText(new_msg)
@@ -1283,8 +1279,6 @@ class TelemetryWatch(QWidget):
                     was_flashing = label.is_flashing
                     label.is_flashing = (now - entry.last_change_time) < theme.fade_duration
 
-                    # 3. Only repaint if state changed OR we are currently in the 'ON' state
-                    # (Ensures it stays lit for the full duration and turns off exactly once)
                     if label.is_flashing or was_flashing != label.is_flashing:
                         label.update()
             finally:
@@ -1516,16 +1510,36 @@ class TelemetryWatch(QWidget):
 
         match action_id:
             case "view_logs":
-                # If multiple modules, we pick the first one as the primary
-                # or you could loop and open multiple windows.
-                # Here we follow the Table logic for the first module:
-                primary = entry.modules[0]
                 title = f"Logs: {entry.label}"
+
+                # Build an explicit filter dictionary for the sidebar
+                module_filters = {}
+                reg = self.gui_context.id_registry
+
+                # 1. Explicitly disable EVERY known module to override default inheritance
+                for i in range(reg.module_count()):
+                    mod = reg.module_from_int(i)
+                    if mod:
+                        module_filters[mod.name_with_device()] = {"enabled": False, "level": "ALL"}
+
+                # 2. Re-enable ONLY the specific modules assigned to this row
+                for mod in entry.modules:
+                    module_filters[mod.name_with_device()] = {"enabled": True, "level": "ALL"}
+
+                # Open the LogViewerWidget with surgical filtering enabled
                 self.gui_context.create_widget(
                     "LogViewerWidget",
                     title,
                     as_window=True,
-                    params={"filtered_module": primary, "filtered_module_children": False},
+                    params={
+                        "filtered_module": None,  # Remove the single-module hard constraint
+                        "filtered_module_children": False,
+                        "filter_sidebar": {
+                            "enabled": True,
+                            "module_filters": module_filters,
+                            "show_non_essential": True,
+                        },
+                    },
                 )
 
             case "view_graph":
