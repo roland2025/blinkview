@@ -4,7 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from math import ceil
 from types import SimpleNamespace
 
 from blinkview.core.configurable import configuration_property, on_config_change, override_property

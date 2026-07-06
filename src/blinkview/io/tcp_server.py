@@ -142,7 +142,7 @@ class TCPReader(BaseReader):
                 if self.client_sock is None:
                     try:
                         if not waiting_logged:
-                            self.logger_link.info("Awaiting client connection...")
+                            self.logger_link.info("Waiting connection...")
                             waiting_logged = True
 
                         client_conn, client_addr = self.server_sock.accept()
@@ -155,7 +155,7 @@ class TCPReader(BaseReader):
 
                         recv_into = self.client_sock.recv_into
 
-                        self.logger_link.info(f"Client connected from {client_addr[0]}:{client_addr[1]}")
+                        self.logger_link.info(f"{client_addr[0]}:{client_addr[1]} connected")
                         self.logger_state_open.info("1")
 
                         waiting_logged = False

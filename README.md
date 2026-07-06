@@ -58,7 +58,7 @@ git clone https://github.com/roland2025/blinkview.git
 cd blinkview
 
 # Install the tool
-uv tool install ".[all]" --python 3.14
+uv tool install ".[all]"
 ```
 
 ---

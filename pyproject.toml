@@ -7,9 +7,10 @@ name = "blinkview"
 dynamic = ["version"]
 description = "High-performance embedded telemetry, log viewer, and plotting tool."
 readme = "README.md"
-# We allow 3.10+, but our 'daemon' env will target 3.14t for No-GIL
+
+
 requires-python = ">=3.10, <3.15"
-license = { text = "MPL-2.0" }
+license = "MPL-2.0"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)", # Correct format
@@ -99,7 +100,6 @@ test = [
 features = ["all"]
 
 [tool.hatch.envs.daemon]
-# Target for 3.14t (No-GIL) - naming the env 'daemon' but using 'hardware' features
 features = ["hardware"]
 
 [tool.hatch.version]
@@ -108,7 +108,7 @@ path = "src/blinkview/__init__.py"
 [tool.ruff]
 line-length = 120
 
-[tool.lint]
+[tool.ruff.lint]
 # "E" is Pycodestyle, "F" is Pyflakes, "I" is Isort
 select = ["E", "F", "I"]
 # F401: Unused imports (your choice)
