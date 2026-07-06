@@ -4,19 +4,19 @@
 
 It aligns and analyzes logs from multiple sources—such as firmware (UART/RTT), CAN bus, and Android—in a single, time-synchronized timeline. Trace events across devices to understand real system behavior.
 
-#### LogViewer and filter with telemetry table
+### LogViewer and filter with telemetry table
 
 Log Viewer view with one source filtered out, with latest values per module visible in telemetry table.
 
 ![BlinkView LogViewer and filter](https://raw.githubusercontent.com/roland2025/blinkview-extra/refs/heads/main/screenshots/python_client_server_logviewer.png)
 
-#### Main Ui and Watch window
+### Main Ui and Watch window
 
 Ingestion from 2 TCP sources, with a custom watch list example. Latest values from all parsed modules visible in telemetry table
 
 ![BlinkView Unified Dashboard](https://raw.githubusercontent.com/roland2025/blinkview-extra/2ff3462bb25204d3e35a07b450bcbfbe858da952/screenshots/python_client_server_main.jpg)
 
-#### Split plot view with discrete mode enabled on one channel
+### Split plot view with discrete mode enabled on one channel
 
 ![BlinkView Plotting](https://raw.githubusercontent.com/roland2025/blinkview-extra/refs/heads/main/screenshots/python_client_server_plot.png)
 
