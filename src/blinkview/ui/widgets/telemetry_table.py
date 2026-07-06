@@ -1093,6 +1093,25 @@ class TelemetryTable(QWidget):
 
             menu.addAction(action)
 
+        parent_module = module.parent
+        if parent_module is not None:
+            menu.addSeparator()
+            parent_menu = menu.addMenu(f"Parent ({parent_module.name})")
+
+            # Action 1: View Parent Logs
+            view_parent_logs = QAction("View Logs", self)
+            view_parent_logs.triggered.connect(
+                lambda checked=False: self._trigger_module_action("view_logs", parent_module)
+            )
+            parent_menu.addAction(view_parent_logs)
+
+            # Action 2: View Parent Logs with Children
+            view_parent_children_logs = QAction("View Logs with Children", self)
+            view_parent_children_logs.triggered.connect(
+                lambda checked=False: self._trigger_module_action("view_logs_children", parent_module)
+            )
+            parent_menu.addAction(view_parent_children_logs)
+
         menu.exec_(self.view.viewport().mapToGlobal(pos))
 
     def _on_double_clicked(self, index):
