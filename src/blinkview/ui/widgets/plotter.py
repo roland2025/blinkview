@@ -556,6 +556,9 @@ class TelemetryPlotter(QWidget):
         # Track the vertical row index in the GraphicsLayout
         current_row = 0
         LEFT_AXIS_WIDTH = 65
+
+        has_name_collisions = self.has_name_collisions()
+
         # --- 1. Setup Overview Plot (Conditional) ---
         if self.show_overview:
             self.overview_plot = self.graph_view.addPlot(
@@ -609,12 +612,13 @@ class TelemetryPlotter(QWidget):
 
         # --- 3. Create Curves and Split Plots ---
         for i, s in enumerate(self.series_list):
+            title_text = s.module.name_with_device() if has_name_collisions else s.name
             if self.is_split:
                 # MULTI-PLOT MODE (One per channel)
                 p = self.graph_view.addPlot(
                     row=current_row + i, col=0, axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}
                 )
-                p.setTitle(f'<span style="color: {s.color}; font-weight: bold;">{s.name}</span>')
+                p.setTitle(title_text)
                 p.enableAutoRange(axis="y", enable=False)
                 p.showGrid(x=False, y=True)
                 p.getAxis("left").setWidth(LEFT_AXIS_WIDTH)
@@ -637,7 +641,7 @@ class TelemetryPlotter(QWidget):
 
             # Create/Update Main Curves
             # s.curve = s.plot_item.plot(pen=s.color, name=s.name, clipToView=True, skipFiniteCheck=True, antialias=False)
-            s.curve = pg.PlotCurveItem(pen=s.color, name=s.name, clipToView=True, skipFiniteCheck=True)
+            s.curve = pg.PlotCurveItem(pen=s.color, name=title_text, clipToView=True, skipFiniteCheck=True)
             s.curve.setZValue(len(self.series_list) - i)
             s.plot_item.addItem(s.curve)
             s.curve.setVisible(s.visible)
@@ -923,9 +927,11 @@ class TelemetryPlotter(QWidget):
 
     def _show_channel_menu(self):
         """Generates a popup menu to toggle specific series visibility."""
+        is_name_collisions = self.has_name_collisions()
         menu = QMenu(self)
         for series in self.series_list:
-            action = QAction(series.name, menu, checkable=True)
+            title = series.module.name_with_device() if is_name_collisions else series.name
+            action = QAction(title, menu, checkable=True)
             action.setChecked(series.visible)
             # Use a lambda with default argument to capture current 'series'
             action.triggered.connect(lambda checked, s=series: self.toggle_series(s, checked))
@@ -1136,10 +1142,13 @@ class TelemetryPlotter(QWidget):
             self.toggle_discrete(single_series, not single_series.is_discrete)
             return
 
+        is_name_collisions = self.has_name_collisions()
+
         # MULTI-CHANNEL PATH: Generate the popup menu
         menu = QMenu(self)
         for series in self.series_list:
-            action = QAction(series.name, menu, checkable=True)
+            title = series.module.name_with_device() if is_name_collisions else series.name
+            action = QAction(title, menu, checkable=True)
             action.setChecked(series.is_discrete)
             # Use a lambda with default argument to capture current 'series'
             action.triggered.connect(lambda checked, s=series: self.toggle_discrete(s, checked))
@@ -1156,3 +1165,7 @@ class TelemetryPlotter(QWidget):
 
         # Force a refresh so your downsampler runs with the new flag immediately
         self.apply_updates(force=True)
+
+    def has_name_collisions(self):
+        all_names = [s.name for s in self.series_list]
+        return len(all_names) != len(set(all_names))
