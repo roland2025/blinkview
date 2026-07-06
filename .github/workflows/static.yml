@@ -72,7 +72,7 @@ jobs:
           EOF
 
           # 2. Compile the Markdown to standalone HTML using Pandoc
-          pandoc README.md -s -c custom.css -o public/index.html --metadata
+          pandoc README.md -s -c custom.css -o public/index.html
 
           # 3. Inject the Mermaid JS Engine right before the closing </body> tag
           # This automatically finds `<pre class="mermaid">` blocks and draws them dynamically!
