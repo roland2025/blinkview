@@ -6,19 +6,21 @@
 
 from builtins import print as builtin_print
 from dataclasses import dataclass, field
+from datetime import datetime
 from time import perf_counter
-from typing import List, Optional, Union
+from typing import List, Optional
 
+from PySide6.QtCore import QRect
+from PySide6.QtGui import QColor, QCursor, QPen
+from PySide6.QtWidgets import QToolTip
 from qtpy.QtCore import QMimeData, Qt, QTimer, Signal
 from qtpy.QtGui import QAction, QDrag, QFont, QPainter, QPalette, QPixmap
 from qtpy.QtWidgets import (
     QApplication,
     QComboBox,
-    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -133,10 +135,18 @@ class DragHandle(QLabel):
 
 
 class FlashLabel(QLabel):
-    def __init__(self, msg, theme: StyleConfig, parent=None):
+    def __init__(self, msg, theme: StyleConfig, entry: "RowEntry" = None, initially_flashing=False, parent=None):
         super().__init__(msg, parent)
         self.color_flash_base = theme.color_flash_base
-        self.is_flashing = False
+        self.is_flashing = initially_flashing
+
+        self.entry: "RowEntry" = entry
+
+        # self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+        self._tooltip_timer = QTimer(self)
+        self._tooltip_timer.setSingleShot(True)
+        self._tooltip_timer.timeout.connect(self._show_delayed_tooltip)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -152,6 +162,47 @@ class FlashLabel(QLabel):
         rect = self.contentsRect().adjusted(5, 0, -5, 0)
         painter.drawText(rect, self.alignment(), self.text())
         painter.end()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._tooltip_timer.start(300)  # Start 300ms countdown on enter
+
+    def leaveEvent(self, event):
+        self._tooltip_timer.stop()  # Surgical cancel if they leave before 300ms
+        QToolTip.hideText()  # Clean up instantly if it was already showing
+        super().leaveEvent(event)
+
+    def _show_delayed_tooltip(self):
+        if not self.underMouse():
+            return
+
+        if self.entry is None:
+            return
+
+        # 1. Gather all associated module names
+        modules_str = "<br>".join([f"{m.device.name}.{m.name}" for m in self.entry.modules]) or "None"
+
+        # 2. Format the local timestamp drift cleanly
+        if self.entry.last_change_time > 0:
+            # Reconstruct an approx wall-time or print the absolute high-res clock
+            time_str = datetime.fromtimestamp(
+                datetime.now().timestamp() - (perf_counter() - self.entry.last_change_time)
+            ).strftime("%H:%M:%S.%f")[:-3]
+        else:
+            time_str = "Never Updated"
+
+        # 3. Construct a clean, structured multi-line tool-tip string
+        tooltip_lines = [
+            f"<span style='font-family: monospace; white-space: pre-wrap;'>{self.entry.last_painted_msg or '---'}</span>",
+            "",
+            f"<b>Metric:</b> {self.entry.label}",
+            f"<b>Modules:</b> {modules_str}",
+            f"<b>Last Updated:</b> {time_str}",
+            f"<b>Sequence ID:</b> {self.entry.last_painted_seq}",
+        ]
+
+        # Join using <br> instead of \n to satisfy the rich text layout engine
+        QToolTip.showText(QCursor.pos(), "<br>".join(tooltip_lines), self)
 
 
 @dataclass(slots=True)
@@ -189,11 +240,15 @@ class RowEntry(TelemetryEntry):
 
     # UI/Runtime State
     value_label: Optional[FlashLabel] = None
-    sub_labels: List[QLabel] = field(default_factory=list)  # Track sub-module rows
+    sub_labels: List[FlashLabel] = field(default_factory=list)  # Track sub-module rows
     is_expanded: bool = False  # Persistent expanded state
     last_painted_seq: dtypes.SEQ_TYPE = dtypes.SEQ_NONE
     last_painted_msg: str = ""
     last_change_time: float = 0.0
+
+    sub_seqs: List[dtypes.SEQ_TYPE] = field(default_factory=list)
+    sub_change_times: List[float] = field(default_factory=list)
+
     type: str = "row"
 
     def to_dict(self) -> dict:
@@ -208,6 +263,13 @@ class RowEntry(TelemetryEntry):
     def clear_widgets(self):
         self.value_label = None
         self.sub_labels.clear()
+
+    def first_module_name(self):
+        try:
+            modul = self.modules[0]
+            return modul.name_with_device()
+        except IndexError:
+            return ""
 
 
 @dataclass(slots=True)
@@ -259,6 +321,95 @@ class GroupEndEntry(TelemetryEntry):
         pass
 
 
+class HighlightingContainer(QWidget):
+    """Lightweight layout container that supports a single-row geometric overlay."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.highlight_rect = None
+
+    def paintEvent(self, event):
+        super().paintEvent(event)  # Safely chains to QWidget natively
+
+        if self.highlight_rect:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.fillRect(self.highlight_rect, QColor(85, 170, 255, 25))
+
+            pen = QPen(QColor("#55aaff"), 1.0, Qt.SolidLine)
+            painter.setPen(pen)
+            painter.drawRect(self.highlight_rect.adjusted(0, 0, -1, -1))
+            painter.end()
+
+
+class DraggableRowLabel(QLabel):
+    """A specialized QLabel that differentiates between clicking to expand
+    and dragging a full module path out to external windows."""
+
+    def __init__(self, display_text, entry, parent_watch, parent=None):
+        super().__init__(display_text, parent)
+        self.entry = entry
+        self.watch = parent_watch
+        self.drag_start_pos = None
+
+        if len(self.entry.modules) > 1:
+            self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_start_pos = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.LeftButton) or self.drag_start_pos is None:
+            return
+
+        if (event.pos() - self.drag_start_pos).manhattanLength() < QApplication.startDragDistance():
+            return
+
+        # Threshold passed -> Initialize the MIME drag
+        if self.entry.modules:
+            # Join multiple paths into a single string separated by newlines
+            paths = [m.name_with_device() for m in self.entry.modules]
+            mime_text = "\n".join(paths)
+
+            mime_data = QMimeData()
+            mime_data.setText(mime_text)
+
+            padding = 10
+            font_metrics = self.fontMetrics()
+            text_width = font_metrics.horizontalAdvance(self.entry.label)
+            pixmap = QPixmap(text_width + (padding * 2), 24)
+            pixmap.fill(Qt.transparent)
+
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setBrush(QColor(60, 60, 60, 200))
+            painter.setPen(QPen(QColor(100, 100, 255), 1))
+            painter.drawRoundedRect(pixmap.rect().adjusted(1, 1, -1, -1), 5, 5)
+
+            painter.setPen(Qt.white)
+            painter.drawText(pixmap.rect(), Qt.AlignCenter, self.entry.label)
+            painter.end()
+
+            drag = QDrag(self)
+            drag.setMimeData(mime_data)
+            drag.setPixmap(pixmap)
+            drag.setHotSpot(pixmap.rect().center())
+
+            self.drag_start_pos = None
+            drag.exec_(Qt.CopyAction)
+
+    def mouseReleaseEvent(self, event):
+        # If they released without exceeding the drag threshold, handle the tap/click
+        if self.drag_start_pos is not None and event.button() == Qt.LeftButton:
+            if len(self.entry.modules) > 1:
+                self.watch._toggle_row_expanded(self.entry)
+
+        self.drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+
 @add_custom_print
 class TelemetryWatch(QWidget):
     signal_destroy = Signal(QWidget)
@@ -277,7 +428,7 @@ class TelemetryWatch(QWidget):
 
         self.setAcceptDrops(True)
 
-        self.container = QWidget()
+        self.container = HighlightingContainer()
         self.font = QFont()
         self.font.setBold(True)
         self.container.setFont(self.font)
@@ -800,6 +951,8 @@ class TelemetryWatch(QWidget):
         self._clear_layout()
         theme = self.gui_context.theme
 
+        now = perf_counter()
+
         current_section_active = False
         is_hidden = False
         in_button_group = False
@@ -998,22 +1151,13 @@ class TelemetryWatch(QWidget):
             else:
                 # Add folder icon prefix directly before the title text if multiple modules exist
                 display_text = entry.label
-                has_multiple = len(entry.modules) > 1
-                if has_multiple:
+                if len(entry.modules) > 1:
                     prefix = "▼ " if entry.is_expanded else "▶ "
                     display_text = prefix + display_text
 
-                lbl = QLabel(display_text)
+                # Clean, object-oriented instantiation
+                lbl = DraggableRowLabel(display_text, entry, parent_watch=self)
                 lbl.setFont(self.font)
-
-                # Make the title clickable instead of the values
-                if has_multiple:
-                    lbl.setCursor(Qt.PointingHandCursor)
-                    lbl.mousePressEvent = lambda event, target_entry=entry: (
-                        self._toggle_row_expanded(target_entry)
-                        if event.button() == Qt.LeftButton
-                        else super(QLabel, lbl).mousePressEvent(event)
-                    )
 
                 lbl.setContextMenuPolicy(Qt.CustomContextMenu)
                 lbl.customContextMenuRequested.connect(
@@ -1052,7 +1196,9 @@ class TelemetryWatch(QWidget):
                 mod_layout.addStretch()
             else:
                 msg = entry.last_painted_msg if entry.last_painted_msg else "---"
-                content = FlashLabel(msg, theme)
+                still_flashing = (now - entry.last_change_time) < theme.fade_duration
+
+                content = FlashLabel(msg, theme, entry, still_flashing)
                 content.setFont(self.font)
                 content.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
@@ -1076,18 +1222,22 @@ class TelemetryWatch(QWidget):
 
             # --- RENDER SUBMODULES IF EXPANDED ---
             if not self.edit_mode and entry.is_expanded and len(entry.modules) > 1:
-                for mod in entry.modules:
+                if len(entry.sub_seqs) != len(entry.modules):
+                    entry.sub_seqs = [dtypes.SEQ_NONE] * len(entry.modules)
+                    entry.sub_change_times = [0.0] * len(entry.modules)
+
+                for idx, mod in enumerate(entry.modules):
                     # Submodule Name label (Indented relative to parent title)
-                    sub_name_lbl = QLabel(f"{mod.device.name}.{mod.name}")  # └─
-                    sub_name_lbl.setStyleSheet("font-weight: normal; font-size: 12px;")  # color: #aaa;
+                    sub_name_lbl = QLabel(f"{mod.device.name}.{mod.name}")
+                    sub_name_lbl.setStyleSheet("font-weight: normal; font-size: 12px;")
                     sub_name_lbl.setContentsMargins(indent + 15, 0, 0, 0)
                     self.layout.addWidget(sub_name_lbl, current_layout_row, 1)
 
-                    # Submodule Value text label
-                    sub_val_lbl = QLabel("---")
-                    sub_val_lbl.setStyleSheet("font-family: monospace; font-size: 12px;")  # color: #ccc;
-                    self.layout.addWidget(sub_val_lbl, current_layout_row, 2)
+                    sub_val_lbl = FlashLabel("---", theme)
+                    sub_val_lbl.setStyleSheet("font-family: monospace; font-size: 12px;")
+                    sub_val_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
+                    self.layout.addWidget(sub_val_lbl, current_layout_row, 2)
                     entry.sub_labels.append(sub_val_lbl)
                     current_layout_row += 1
 
@@ -1138,6 +1288,13 @@ class TelemetryWatch(QWidget):
         raw_entries = config_.get("entries", [])
         self.print(f"id: {self.watch_id}")
         self.name = config_.get("name")
+
+        existing_by_key = {}
+        for entry in self.entries:
+            # Check if entry has a key attribute (RowEntry, ButtonEntry, GroupStartEntry, GroupEndEntry)
+            if isinstance(entry, RowEntry):
+                # Sections use labels as their structural identity since they lack random IDs
+                existing_by_key[entry.key] = entry
 
         self.default_target = config_.get("default_target", "")
         self.command_history = list(config_.get("command_history", []))
@@ -1190,10 +1347,20 @@ class TelemetryWatch(QWidget):
                     )
                 )
             else:
+                row_key = e.get("key")
                 mods = self.gui_context.id_registry.resolve_modules(e.get("modules", []))
-                self.entries.append(
-                    RowEntry(key=e["key"], label=e["label"], modules=mods, is_expanded=e.get("is_expanded", False))
+                row_entry = RowEntry(
+                    key=row_key, label=e["label"], modules=mods, is_expanded=e.get("is_expanded", False)
                 )
+
+                try:
+                    old_row = existing_by_key[row_key]
+                    row_entry.last_painted_seq = old_row.last_painted_seq
+                    row_entry.last_painted_msg = old_row.last_painted_msg
+                    row_entry.last_change_time = old_row.last_change_time
+                except KeyError:
+                    pass
+                self.entries.append(row_entry)
 
         self.rebuild_ui()
 
@@ -1239,6 +1406,7 @@ class TelemetryWatch(QWidget):
             return
 
         theme = self.gui_context.theme
+        fade_duration = theme.fade_duration
 
         with tracker.get_snapshot() as snap:
             sequences = memoryview(snap.bundle().sequence_ids)
@@ -1252,14 +1420,27 @@ class TelemetryWatch(QWidget):
                     new_msg = None
                     row_updated = False
 
-                    # 1. Update Sub-Labels first if expanded
+                    if len(entry.sub_seqs) != len(entry.modules):
+                        entry.sub_seqs = [dtypes.SEQ_NONE] * len(entry.modules)
+                        entry.sub_change_times = [0.0] * len(entry.modules)
+
+                        # 1. Update Sub-Labels and track flashes independently if expanded
                     if entry.is_expanded and entry.sub_labels and len(entry.sub_labels) == len(entry.modules):
                         for idx, m in enumerate(entry.modules):
-                            current_seq = sequences[m.id]
-                            # Submodules get instant separate tracking updates
-                            mod_msg = snap.get_message(m.id)
-                            if mod_msg:
-                                entry.sub_labels[idx].setText(mod_msg)
+                            current_sub_seq = sequences[m.id]
+                            sub_label = entry.sub_labels[idx]
+
+                            if current_sub_seq > entry.sub_seqs[idx]:
+                                entry.sub_seqs[idx] = current_sub_seq
+                                mod_msg = snap.get_message(m.id)
+                                if mod_msg:
+                                    sub_label.setText(mod_msg)
+                                entry.sub_change_times[idx] = now
+
+                            was_sub_flashing = sub_label.is_flashing
+                            sub_label.is_flashing = (now - entry.sub_change_times[idx]) < fade_duration
+                            if sub_label.is_flashing or was_sub_flashing != sub_label.is_flashing:
+                                sub_label.update()
 
                     # 2. Main combined row calculation loop
                     for m in entry.modules:
@@ -1277,7 +1458,7 @@ class TelemetryWatch(QWidget):
                         entry.last_change_time = now
 
                     was_flashing = label.is_flashing
-                    label.is_flashing = (now - entry.last_change_time) < theme.fade_duration
+                    label.is_flashing = (now - entry.last_change_time) < fade_duration
 
                     if label.is_flashing or was_flashing != label.is_flashing:
                         label.update()
@@ -1459,6 +1640,11 @@ class TelemetryWatch(QWidget):
             print(f"Error sending to '{target}': {e}")
 
     def _show_row_context_menu(self, pos, entry: RowEntry, widget: QLabel):
+        rect = self._calculate_entry_row_rect(entry)
+        if rect:
+            self.container.highlight_rect = rect
+            self.container.update()
+
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
 
@@ -1501,7 +1687,11 @@ class TelemetryWatch(QWidget):
                 menu.addAction(action)
 
         # Execute menu (supports right-click -> drag -> release)
-        menu.exec_(widget.mapToGlobal(pos))
+        try:
+            menu.exec_(widget.mapToGlobal(pos))
+        finally:
+            self.container.highlight_rect = None
+            self.container.update()
 
     def _handle_row_action(self, action_id: str, entry: RowEntry):
         """Dispatches actions for the modules assigned to a RowEntry."""
@@ -1545,7 +1735,7 @@ class TelemetryWatch(QWidget):
             case "view_graph":
                 self.gui_context.create_widget(
                     "TelemetryPlotter",
-                    f"Graph: {entry.label}",
+                    f"Graph: {entry.label} ({entry.first_module_name()})",
                     as_window=True,
                     params={"modules": entry.modules},
                 )
@@ -1553,3 +1743,47 @@ class TelemetryWatch(QWidget):
             case "copy_names":
                 names = ", ".join([m.name for m in entry.modules])
                 QApplication.clipboard().setText(names)
+
+    def _calculate_entry_row_rect(self, entry: TelemetryEntry) -> Optional[QRect]:
+        """Calculates the absolute container-space QRect enclosing a given entry and its children."""
+        try:
+            idx = self.entries.index(entry)
+        except ValueError:
+            return None
+
+        # Map structural list index to layout grid row index (handling expanded child modules)
+        visual_row_index = 0
+        for i in range(idx):
+            visual_row_index += 1
+            if (
+                not self.edit_mode
+                and isinstance(self.entries[i], RowEntry)
+                and self.entries[i].is_expanded
+                and len(self.entries[i].modules) > 1
+            ):
+                visual_row_index += len(self.entries[i].modules)
+
+        # Get geometry of the primary label component (Column 1)
+        item_lbl = self.layout.itemAtPosition(visual_row_index, 1)
+        if not item_lbl or not item_lbl.widget():
+            return None
+
+        combined_rect = item_lbl.widget().geometry()
+
+        # If it's an expanded RowEntry with multiple modules, span down to encapsulate the final sub-label row
+        if not self.edit_mode and isinstance(entry, RowEntry) and entry.is_expanded and len(entry.modules) > 1:
+            last_sub_item = self.layout.itemAtPosition(visual_row_index + len(entry.modules), 2)
+            if last_sub_item and last_sub_item.widget():
+                combined_rect = combined_rect.united(last_sub_item.widget().geometry())
+        else:
+            # Otherwise just combine it with the main value widget in Column 2
+            item_val = self.layout.itemAtPosition(visual_row_index, 2)
+            if item_val and item_val.widget():
+                combined_rect = combined_rect.united(item_val.widget().geometry())
+
+        # Stretch the bounding box across the full width of the container layout view
+        combined_rect.setX(0)
+        combined_rect.setWidth(self.container.width())
+
+        # Return with a tiny 1px padding adjustment for crisp vertical alignment
+        return combined_rect.adjusted(0, -1, 0, 1)
