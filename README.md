@@ -4,6 +4,10 @@
 
 It aligns and analyzes logs from multiple sources—such as firmware (UART/RTT), CAN bus, and Android—in a single, time-synchronized timeline. Trace events across devices to understand real system behavior.
 
+![BlinkView LogViewer and filter](https://raw.githubusercontent.com/roland2025/blinkview-extra/refs/heads/main/screenshots/python_client_server_logviewer.png)
+
+![BlinkView Unified Dashboard](https://raw.githubusercontent.com/roland2025/blinkview-extra/2ff3462bb25204d3e35a07b450bcbfbe858da952/screenshots/python_client_server_main.jpg)
+
 ---
 
 ## The Problem: "Manual Glue"
