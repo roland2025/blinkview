@@ -11,7 +11,7 @@ from .base_daemon import BaseDaemon
 from .batch_queue import BatchQueue
 from .configurable import configuration_factory, configuration_property, override_property
 from .factory import BaseFactory
-from .limits import CENTRAL_STORAGE_MAXLEN
+from .limits import CENTRAL_STORAGE_BUFFER_SIZE_MB, CENTRAL_STORAGE_MAX_PIECES, CENTRAL_STORAGE_MAXLEN
 from .numpy_log import (
     CircularLogPool,
 )
@@ -36,16 +36,31 @@ class CentralFactory(BaseFactory[BaseCentralStorage]):
     description="Maximum number of log entries to keep in memory",
     ui_order=10,
 )
+@configuration_property(
+    "max_pieces",
+    type="integer",
+    default=CENTRAL_STORAGE_MAX_PIECES,
+    description="Maximum number of pieces in the circular log pool",
+    ui_order=11,
+)
+@configuration_property(
+    "buffer_size_mb",
+    type="integer",
+    default=CENTRAL_STORAGE_BUFFER_SIZE_MB,
+    description="Total in memory = max_pieces * buffer_size_mb",
+    ui_order=12,
+)
 @override_property(
     "logging", hidden=False, required=True, default={"enabled": True, "processor": {"type": "log_row"}}, ui_order=20
 )
 class CentralStorage(BaseCentralStorage):
     maxlen: int
+    max_pieces: int
+    buffer_size_mb: int
 
     def __init__(self):
         super().__init__()
         self.name = "central"
-
         self.input_queue = BatchQueue()  # messages that have not yet been pushed to subscribers
 
         self.put = self.input_queue.put
@@ -55,7 +70,16 @@ class CentralStorage(BaseCentralStorage):
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
         if self.log_pool is None:
-            self.log_pool = CircularLogPool(self.shared.array_pool)
+            buffer_bytes = self.buffer_size_mb * 1024 * 1024
+            self.log_pool = CircularLogPool(
+                self.shared.array_pool, max_pieces=self.max_pieces, final_buffer_bytes=buffer_bytes
+            )
+        else:
+            # Runtime dynamic updates
+            self.log_pool.update_max_pieces(self.max_pieces)
+
+            new_bytes = self.buffer_size_mb * 1024 * 1024
+            self.log_pool.update_final_buffer_bytes(new_bytes)
 
         return changed
 

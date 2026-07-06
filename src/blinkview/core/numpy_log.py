@@ -210,6 +210,43 @@ class CircularLogPool:
         req_cap = capacity if capacity is not None else self.segment_capacity
         return self._global_pool.acquire(req_cap, dtype=np.int64)
 
+    def update_max_pieces(self, new_max_pieces: int):
+        """
+        Dynamically updates the lookback window ceiling.
+        Trims older segments immediately if the new ceiling is smaller than the current pool size.
+        """
+        if new_max_pieces <= 0:
+            raise ValueError("max_pieces must be greater than 0")
+
+        with self._lock:
+            if self.max_pieces == new_max_pieces:
+                return
+
+            self.max_pieces = new_max_pieces
+
+            # Immediately evict excess historical chunks if the window was shrunk
+            while len(self.segments) > self.max_pieces:
+                oldest = self.segments.popleft()
+                oldest.release()
+
+    def update_final_buffer_bytes(self, new_buffer_bytes: int):
+        """
+        Dynamically updates the target buffer byte size for future segments.
+        Resets optimization state to recalculate structural row capacities based on heuristics.
+        """
+        if new_buffer_bytes <= 0:
+            raise ValueError("final_buffer_bytes must be greater than 0")
+
+        with self._lock:
+            if self.final_buffer_bytes == new_buffer_bytes:
+                return
+
+            self.final_buffer_bytes = new_buffer_bytes
+
+            # Reset optimization flag so the next _rotate_segment recalculates
+            # the optimal row capacity (`segment_capacity`) using the new byte budget.
+            self._optimized = False
+
 
 def allocate_telemetry_workspace(num_channels: int) -> np.ndarray:
     """
