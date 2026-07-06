@@ -42,14 +42,55 @@ jobs:
         run: |
           mkdir public
           
-          # Assemble a layout block that respects system dark/light targets natively
-          echo '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>BlinkView Documentation</title>' > public/index.html
-          echo '<style>body{max-width:800px;margin:40px auto;padding:0 10px;font-family:sans-serif;line-height:1.6;color:#333;background:#fff;} pre{background:#f4f4f4;padding:15px;overflow:auto;} code{font-family:monospace;} @media (prefers-color-scheme: dark) { body{color:#f0f6fc;background:#0d1117;} pre{background:#161b22;} a{color:#58a6ff;} }</style></head><body>' >> public/index.html
-          
-          # Append the parsed markdown body
-          pandoc README.md -t html >> public/index.html
-          
-          echo '</body></html>' >> public/index.html
+          # 1. Create the fixed custom style sheet (Fixes dark mode and large images)
+          cat << 'EOF' > public/custom.css
+          /* The absolute critical fix for your images: */
+          img { 
+            max-width: 100%; /* Image is constrained to parent width */
+            height: auto;     /* Aspect ratio is maintained */
+            display: block;    /* Centers and structures image blocks */
+            margin: 1em auto;
+          }
+
+          /* General styling (fixes the previous light theme issue) */
+          html {
+            color: #e0e0e0;
+            background-color: #0d1117; /* GitHub Dark-mode gray */
+            color-scheme: dark;       /* Helps render native elements natively dark */
+          }
+          a, a:visited {
+            color: #58a6ff;
+          }
+          blockquote {
+            border-left: 2px solid #30363d;
+            color: #8b949e;
+          }
+          code {
+            background-color: rgba(110, 118, 129, 0.4);
+            padding: 0.2em 0.4em;
+            border-radius: 6px;
+          }
+          pre {
+            background-color: #161b22;
+            padding: 16px;
+            border-radius: 6px;
+            border: 1px solid #30363d;
+          }
+          /* Ensure the content is centered and readable on wide screens */
+          body {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px;
+            line-height: 1.6;
+          }
+          @media (max-width: 600px) {
+            body { padding: 15px; }
+          }
+          EOF
+
+          # 2. Run Pandoc conversion using the custom stylesheet
+          # Note: The custom CSS will override the conflicting Pandoc default rules.
+          pandoc README.md -s -c custom.css -o public/index.html --metadata title="BlinkView Documentation"
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
