@@ -282,6 +282,10 @@ class Reorder(BaseReorder):
                         # Clamp between 0 (already overdue) and our max delay_sec
                         dynamic_timeout_sec = max(0.0, min(delay_sec, time_to_ready_sec))
 
+                # prevent massive thread context switching
+                if dynamic_timeout_sec < 0.02:
+                    dynamic_timeout_sec = 0.02
+
                 # 1. Drain input queue (Blocking precisely until the next item is due)
                 first_batch = get(timeout=dynamic_timeout_sec)
 
