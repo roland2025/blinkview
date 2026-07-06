@@ -1053,22 +1053,36 @@ class TelemetryPlotter(QWidget):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        mod_identifier = event.mimeData().text()
-        module = self.gui_context.id_registry.resolve_module(mod_identifier)
-
-        if not module:
-            print(f"Cannot resolve module: {mod_identifier}")
+        raw_text = event.mimeData().text().strip()
+        if not raw_text:
             return
 
-        if module in self.modules:
-            print(f"Module {module.short_name} already in plot.")
-            return
+        # Split lines to automatically handle single or multiple modules
+        mod_identifiers = raw_text.split("\n")
+        any_added = False
 
-        # Add to our tracking list
-        self.modules.append(module)
+        for mod_identifier in mod_identifiers:
+            mod_identifier = mod_identifier.strip()
+            if not mod_identifier:
+                continue
 
-        # Accept the action
-        event.acceptProposedAction()
+            module = self.gui_context.id_registry.resolve_module(mod_identifier)
+
+            if not module:
+                print(f"Cannot resolve module: {mod_identifier}")
+                continue
+
+            if module in self.modules:
+                print(f"Module {module.short_name} already in plot.")
+                continue
+
+            # Add to tracking list
+            self.modules.append(module)
+            any_added = True
+
+        if any_added:
+            # Trigger your layout updates / plot redraws here if needed
+            event.acceptProposedAction()
 
     def _get_target_resolution(self, plot_item) -> int:
         """Returns the number of bins required based on pixel width."""
