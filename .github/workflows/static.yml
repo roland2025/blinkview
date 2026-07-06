@@ -42,55 +42,41 @@ jobs:
         run: |
           mkdir public
           
-          # 1. Create the fixed custom style sheet (Fixes dark mode and large images)
+          # 1. Create your custom stylesheet (Handles dark mode and image sizing)
           cat << 'EOF' > public/custom.css
-          /* The absolute critical fix for your images: */
           img { 
-            max-width: 100%; /* Image is constrained to parent width */
-            height: auto;     /* Aspect ratio is maintained */
-            display: block;    /* Centers and structures image blocks */
+            max-width: 100%; 
+            height: auto;     
+            display: block;    
             margin: 1em auto;
           }
-
-          /* General styling (fixes the previous light theme issue) */
           html {
             color: #e0e0e0;
-            background-color: #0d1117; /* GitHub Dark-mode gray */
-            color-scheme: dark;       /* Helps render native elements natively dark */
+            background-color: #0d1117; 
+            color-scheme: dark;       
           }
-          a, a:visited {
-            color: #58a6ff;
-          }
-          blockquote {
-            border-left: 2px solid #30363d;
-            color: #8b949e;
-          }
-          code {
-            background-color: rgba(110, 118, 129, 0.4);
-            padding: 0.2em 0.4em;
-            border-radius: 6px;
-          }
+          a, a:visited { color: #58a6ff; }
           pre {
             background-color: #161b22;
             padding: 16px;
             border-radius: 6px;
             border: 1px solid #30363d;
+            overflow: auto;
           }
-          /* Ensure the content is centered and readable on wide screens */
           body {
             max-width: 800px;
             margin: 0 auto;
             padding: 40px;
             line-height: 1.6;
           }
-          @media (max-width: 600px) {
-            body { padding: 15px; }
-          }
           EOF
 
-          # 2. Run Pandoc conversion using the custom stylesheet
-          # Note: The custom CSS will override the conflicting Pandoc default rules.
-          pandoc README.md -s -c custom.css -o public/index.html --metadata title="BlinkView Documentation"
+          # 2. Compile the Markdown to standalone HTML using Pandoc
+          pandoc README.md -s -c custom.css -o public/index.html --metadata
+
+          # 3. Inject the Mermaid JS Engine right before the closing </body> tag
+          # This automatically finds `<pre class="mermaid">` blocks and draws them dynamically!
+          sed -i 's|</body>|<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs"; mermaid.initialize({ startOnLoad: true, theme: "dark" });</script></body>|' public/index.html
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
