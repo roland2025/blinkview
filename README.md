@@ -1,5 +1,7 @@
 # BlinkView
 
+[🖥️ GitHub Repository](https://github.com/roland2025/blinkview) | [🐛 Report a Bug](https://github.com/roland2025/blinkview/issues)
+
 **BlinkView** is a cross-device debugging tool for embedded systems. 
 
 It aligns and analyzes logs from multiple sources—such as firmware (UART/RTT), CAN bus, and Android—in a single, time-synchronized timeline. Trace events across devices to understand real system behavior.
@@ -14,7 +16,7 @@ Log Viewer view with one source filtered out, with latest values per module visi
 
 Ingestion from 2 TCP sources, with a custom watch list example. Latest values from all parsed modules visible in telemetry table
 
-![BlinkView Unified Dashboard](https://raw.githubusercontent.com/roland2025/blinkview-extra/2ff3462bb25204d3e35a07b450bcbfbe858da952/screenshots/python_client_server_main.jpg)
+![BlinkView Unified Dashboard](https://raw.githubusercontent.com/roland2025/blinkview-extra/refs/heads/main/screenshots/python_client_server_main.png)
 
 ### Split plot view with discrete mode enabled on one channel
 
@@ -49,6 +51,16 @@ This makes it possible to:
 - trace behavior across components
 - measure delays between steps
 - identify where failures occur
+---
+
+### 🚀 Live Integration Demo
+
+Want to see BlinkView coordinate a live system right now? Explore this fully configured client-backend simulation package, ready to clone and run:
+
+👉 **[BlinkView Python Client-Backend Demo Repository](https://github.com/roland2025/blinkview-python-demo)**
+
+This demo includes a multi-threaded Qt Client and a headless Backend service. It lets you click buttons, adjust sliders, and generate synthetic log streams so you can watch BlinkView extract, plot, and align the network telemetry in real time.
+
 ---
 
 ## Installation

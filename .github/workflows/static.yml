@@ -38,50 +38,8 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
-      - name: Convert README to Index HTML
-        run: |
-          mkdir public
-          
-          # 1. Create custom stylesheet
-          cat << 'EOF' > public/custom.css
-          img { max-width: 100%; height: auto; display: block; margin: 1em auto; }
-          html { color: #e0e0e0; background-color: #0d1117; color-scheme: dark; }
-          a, a:visited { color: #58a6ff; }
-          pre { background-color: #161b22; padding: 16px; border-radius: 6px; border: 1px solid #30363d; overflow: auto; }
-          body { max-width: 800px; margin: 0 auto; padding: 40px; line-height: 1.6; }
-          EOF
-
-          # 2. Compile Markdown to HTML
-          pandoc README.md -s -c custom.css -o public/index.html
-
-          # 3. Clean up HTML entities AND strip <code> wrapper from mermaid blocks
-          python3 -c "
-          import html
-          with open('public/index.html', 'r+') as f:
-              content = f.read()
-              
-              # Target the explicit container pandoc produces
-              bad_start = '<pre class=\"mermaid\"><code>'
-              bad_end = '</code></pre>'
-              
-              if bad_start in content:
-                  parts = content.split(bad_start)
-                  for i in range(1, len(parts)):
-                      subparts = parts[i].split(bad_end, 1)
-                      # 1. Unescape connectors safely
-                      cleaned_text = html.unescape(subparts[0])
-                      # 2. Re-join but remove the inner <code> wrapper entirely
-                      parts[i] = subparts[1]
-                      parts[i-1] = parts[i-1] + '<pre class=\"mermaid\">' + cleaned_text + '</pre>'
-                  content = ''.join(parts)
-                  
-              f.seek(0)
-              f.write(content)
-              f.truncate()
-          "
-
-          # 4. Inject Mermaid engine at the bottom
-          sed -i 's|</body>|<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs"; mermaid.initialize({ startOnLoad: true, theme: "dark" });</script></body>|' public/index.html
+      - name: Run Python Build Script
+        run: python3 scripts/build_pages.py
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
