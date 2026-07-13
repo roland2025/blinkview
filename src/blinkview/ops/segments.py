@@ -10,10 +10,11 @@ from numba import types, uint32, uint64
 from blinkview.core.dtypes import ID_TYPE, ID_UNSPECIFIED, LEVEL_UNSPECIFIED, SEQ_NONE, SEQ_TYPE, TS_UNSPECIFIED
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.log_batch import LogBundle
+from blinkview.ops.kv_filter import EMPTY_KV_BYTES, EMPTY_KV_LENGTHS, EMPTY_KV_OFFSETS, nb_row_matches_kv_conditions
 
 
 @app_njit()
-def copy_batch_to_segment(segment: LogBundle, batch: LogBundle, batch_start_idx: int, start_seq_id: int):
+def nb_copy_batch_to_segment(segment: LogBundle, batch: LogBundle, batch_start_idx: int, start_seq_id: int):
     # 1. READ INTERNAL STATE
     # We read the current write-head and count from the shared arrays
     seg_cursor = segment.msg_cursor[0]
@@ -77,7 +78,7 @@ def copy_batch_to_segment(segment: LogBundle, batch: LogBundle, batch_start_idx:
 # Inline Binary Search Helpers (Zero NumPy Overhead)
 # ---------------------------------------------------------
 @app_njit(inline="always")
-def fast_find_first_ge(arr, count, val):
+def nb_fast_find_first_ge(arr, count, val):
     """Finds first index where arr[i] >= val"""
     left = 0
     right = count
@@ -91,7 +92,7 @@ def fast_find_first_ge(arr, count, val):
 
 
 @app_njit(inline="always")
-def fast_find_first_gt(arr, count, val):
+def nb_fast_find_first_gt(arr, count, val):
     """Finds first index where arr[i] > val"""
     left = 0
     right = count
@@ -114,6 +115,15 @@ def nb_segment_filter_reversed(
     end_seq=SEQ_NONE,
     start_ts=TS_UNSPECIFIED,
     end_ts=TS_UNSPECIFIED,
+    kv_cond_keys_buf=EMPTY_KV_BYTES,
+    kv_cond_keys_off=EMPTY_KV_OFFSETS,
+    kv_cond_keys_len=EMPTY_KV_LENGTHS,
+    kv_cond_vals_buf=EMPTY_KV_BYTES,
+    kv_cond_vals_off=EMPTY_KV_OFFSETS,
+    kv_cond_vals_len=EMPTY_KV_LENGTHS,
+    kv_num_conditions=0,
+    kv_field_delim=32,
+    kv_kv_delim=61,
 ):
     count = segment.size[0]
     timestamps = segment.timestamps
@@ -126,24 +136,24 @@ def nb_segment_filter_reversed(
     loop_end = count
 
     if start_seq != SEQ_NONE:
-        idx = fast_find_first_gt(seqs, count, start_seq)
+        idx = nb_fast_find_first_gt(seqs, count, start_seq)
         if idx > loop_start:
             loop_start = idx
 
     # end_seq is an INCLUSIVE upper bound (only rows with seq <= end_seq are eligible) - used to
     # anchor a "history before X" backward scan that must not include rows at/after the anchor.
     if end_seq != SEQ_NONE:
-        idx = fast_find_first_gt(seqs, count, end_seq)
+        idx = nb_fast_find_first_gt(seqs, count, end_seq)
         if idx < loop_end:
             loop_end = idx
 
     if start_ts != TS_UNSPECIFIED:
-        idx = fast_find_first_ge(timestamps, count, start_ts)
+        idx = nb_fast_find_first_ge(timestamps, count, start_ts)
         if idx > loop_start:
             loop_start = idx
 
     if end_ts != TS_UNSPECIFIED:
-        idx = fast_find_first_gt(timestamps, count, end_ts)
+        idx = nb_fast_find_first_gt(timestamps, count, end_ts)
         if idx < loop_end:
             loop_end = idx
 
@@ -154,7 +164,24 @@ def nb_segment_filter_reversed(
 
     # 2. Scan BACKWARDS from the newest valid log
     for i in range(loop_end - 1, loop_start - 1, -1):
-        is_match = levels[i] >= effective_mask[modules[i]]
+        level_ok = levels[i] >= effective_mask[modules[i]]
+        is_match = level_ok and (
+            kv_num_conditions == 0
+            or nb_row_matches_kv_conditions(
+                segment.buffer,
+                segment.offsets[i],
+                segment.lengths[i],
+                kv_cond_keys_buf,
+                kv_cond_keys_off,
+                kv_cond_keys_len,
+                kv_cond_vals_buf,
+                kv_cond_vals_off,
+                kv_cond_vals_len,
+                kv_num_conditions,
+                kv_field_delim,
+                kv_kv_delim,
+            )
+        )
 
         if is_match:
             out_indices[match_count] = i
@@ -234,7 +261,7 @@ def nb_segment_extract_fields(
 
 
 @app_njit()
-def filter_segment(
+def nb_filter_segment(
     segment,  # LogBundle
     effective_mask,
     out_indices,
@@ -242,6 +269,15 @@ def filter_segment(
     start_seq=SEQ_NONE,
     start_ts=TS_UNSPECIFIED,
     end_ts=TS_UNSPECIFIED,
+    kv_cond_keys_buf=EMPTY_KV_BYTES,
+    kv_cond_keys_off=EMPTY_KV_OFFSETS,
+    kv_cond_keys_len=EMPTY_KV_LENGTHS,
+    kv_cond_vals_buf=EMPTY_KV_BYTES,
+    kv_cond_vals_off=EMPTY_KV_OFFSETS,
+    kv_cond_vals_len=EMPTY_KV_LENGTHS,
+    kv_num_conditions=0,
+    kv_field_delim=32,
+    kv_kv_delim=61,
 ):
     count = segment.size[0]
     timestamps = segment.timestamps
@@ -254,17 +290,17 @@ def filter_segment(
     loop_end = count
 
     if start_seq != SEQ_NONE:
-        idx = fast_find_first_gt(seqs, count, start_seq)
+        idx = nb_fast_find_first_gt(seqs, count, start_seq)
         if idx > loop_start:
             loop_start = idx
 
     if start_ts != TS_UNSPECIFIED:
-        idx = fast_find_first_ge(timestamps, count, start_ts)
+        idx = nb_fast_find_first_ge(timestamps, count, start_ts)
         if idx > loop_start:
             loop_start = idx
 
     if end_ts != TS_UNSPECIFIED:
-        idx = fast_find_first_gt(timestamps, count, end_ts)
+        idx = nb_fast_find_first_gt(timestamps, count, end_ts)
         if idx < loop_end:
             loop_end = idx
 
@@ -275,7 +311,24 @@ def filter_segment(
     for i in range(loop_start, loop_end):
         # The ultimate O(1) check:
         # Is the log level >= the threshold baked for this module?
-        is_match = levels[i] >= effective_mask[modules[i]]
+        level_ok = levels[i] >= effective_mask[modules[i]]
+        is_match = level_ok and (
+            kv_num_conditions == 0
+            or nb_row_matches_kv_conditions(
+                segment.buffer,
+                segment.offsets[i],
+                segment.lengths[i],
+                kv_cond_keys_buf,
+                kv_cond_keys_off,
+                kv_cond_keys_len,
+                kv_cond_vals_buf,
+                kv_cond_vals_off,
+                kv_cond_vals_len,
+                kv_num_conditions,
+                kv_field_delim,
+                kv_kv_delim,
+            )
+        )
 
         # Branchless Append
         out_indices[match_count] = i

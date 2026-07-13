@@ -16,7 +16,7 @@ from blinkview.core.time_sync_engine import TimeSyncEngine
 from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import SyncState, create_default_sync
 from blinkview.core.warmup_registry import register_warmup
-from blinkview.ops.dispatch import process_batch_kernel
+from blinkview.ops.dispatch import nb_process_batch_kernel
 from blinkview.parsers.frame_decoders import FrameDecoder
 from blinkview.parsers.frame_parsers import GenericFrameParser
 from blinkview.parsers.parser import BaseParser, ParserFactory
@@ -234,7 +234,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                         out_bundle = batch_out.bundle
 
                         start_time = time_ns()
-                        out_is_full = process_batch_kernel(
+                        out_is_full = nb_process_batch_kernel(
                             f_config, f_state, in_bundle, parser_bundle, o_config, out_bundle
                         )
 
@@ -263,7 +263,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
     @staticmethod
     def _warmup_config(helper: "NumbaWarmupHelper", frame_config, parser_config):
         """Builds one frame_decoder/frame_parser pair from the given configs and drives a dummy
-        batch through process_batch_kernel + the batch processors, to trigger compilation for
+        batch through nb_process_batch_kernel + the batch processors, to trigger compilation for
         that particular combination of decoder/parser steps."""
         frame_codec = None
         frame_parser = None
@@ -357,7 +357,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
                 # 3. Trigger the kernel
                 # This will block the thread while LLVM does its work
-                _ = process_batch_kernel(
+                _ = nb_process_batch_kernel(
                     f_config,
                     f_state,
                     dummy_in.bundle,

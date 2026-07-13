@@ -6,15 +6,15 @@
 
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.modules import MODULE_ID_FULL, MODULE_ID_UNKNOWN, MODULE_TEMP_ID_BASE
-from blinkview.utils.fnv1a_64 import fnv1a_64_fast
+from blinkview.utils.fnv1a_64 import nb_fnv1a_64_fast
 
 
 @app_njit()
-def resolve_module_id(name_buffer, name_start, name_len, table, tracker):
+def nb_resolve_module_id(name_buffer, name_start, name_len, table, tracker):
     if name_len == 0:
         return MODULE_ID_UNKNOWN
 
-    name_hash = fnv1a_64_fast(name_buffer, name_start, name_len)
+    name_hash = nb_fnv1a_64_fast(name_buffer, name_start, name_len)
 
     # Check Permanent Registry (ByteMap)
     bm_buffer = table.buffer
@@ -71,7 +71,7 @@ def resolve_module_id(name_buffer, name_start, name_len, table, tracker):
     if t_count >= len(t_starts):
         return MODULE_ID_FULL  # Signal: Tracker is completely full
 
-    # The string is already sitting in tracker.name_bytes (written by parse_fixed_width_name).
+    # The string is already sitting in tracker.name_bytes (written by nb_parse_fixed_width_name).
     # We just need to save its coordinates and advance the cursor so it isn't overwritten.
     t_starts[t_count] = name_start
     t_lens[t_count] = name_len

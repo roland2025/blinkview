@@ -17,7 +17,7 @@ def fnv1a_64_python(buffer, start, length) -> int:
 
 
 @app_njit(fallback=fnv1a_64_python)
-def fnv1a_64_fast(buffer, start, length) -> int:
+def nb_fnv1a_64_fast(buffer, start, length) -> int:
     """Numba-compiled FNV-1a. Refactored to prevent array slice allocations."""
     hash_val = np.uint64(14695981039346656037)
     fnv_prime = np.uint64(1099511628211)

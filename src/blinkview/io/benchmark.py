@@ -17,7 +17,7 @@ from blinkview.io.BaseReader import BaseReader, DeviceFactory
 
 
 @app_njit()
-def _blast_benchmark_cache(
+def nb_blast_benchmark_cache(
     bundle,  # LogBundle (NamedTuple of Numpy arrays)
     start_ts,
     chunks,  # Generation params
@@ -153,7 +153,7 @@ class Benchmark(BaseReader):
                     logger.info("Warming up benchmark JIT kernels...")
                     # Create a tiny dummy batch (1 chunk, 1KB buffer)
                     with pool_create(PooledLogBatch, 1, 1) as dummy_batch:
-                        _ = _blast_benchmark_cache(dummy_batch.bundle, time_ns(), 1, c_buf, c_offs, c_lens, c_items)
+                        _ = nb_blast_benchmark_cache(dummy_batch.bundle, time_ns(), 1, c_buf, c_offs, c_lens, c_items)
                     logger.info("Benchmark kernels warmed up.")
                 except Exception as e:
                     logger.exception("Failed to warm up benchmark kernels", e)
@@ -241,7 +241,7 @@ class Benchmark(BaseReader):
                     estimated_bytes = sum(c_lens[i % c_items] for i in range(chunks))
 
                     batch = pool_create(PooledLogBatch, chunks, estimated_bytes)
-                    written_bytes = _blast_benchmark_cache(
+                    written_bytes = nb_blast_benchmark_cache(
                         batch.bundle, current_time, chunks, c_buf, c_offs, c_lens, c_items
                     )
 

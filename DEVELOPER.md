@@ -28,14 +28,17 @@ We use the standard library `unittest` framework for both logic and performance 
 ### Running All Tests
 To run the full suite with discovery:
 ```bash
-uv run python -m unittest discover tests -v
+uv run pytest -v
 ```
 
 ### Running Specific Suites
 If you are working on core logic or memory:
 ```bash
 # Memory & Registry Integrity
-uv run python -m unittest tests/test_registry_memory.py -v
+
+uv run pytest tests/test_registry_memory.py  -m memory -v -s -k test_initial_import_baseline
+uv run pytest tests/test_registry_memory.py -v
+
 ```
 
 ## Memory & Performance Standards
@@ -78,3 +81,10 @@ $env:UV_PROJECT_ENVIRONMENT=".venvd"; uv sync --only-group daemon --python 3.14t
 ```
 
 ---
+
+### Format code
+
+```bash
+# Memory & Registry Integrity
+uv run ruff format .
+```

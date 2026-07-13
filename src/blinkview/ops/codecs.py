@@ -9,7 +9,7 @@ from blinkview.core.types.parsing import STATE_COMPLETE
 
 
 @app_njit()
-def process_byte_filters(val, ansi_state, filter_ansi, filter_printable):
+def nb_process_byte_filters(val, ansi_state, filter_ansi, filter_printable):
     """
     Evaluates a single byte against ANSI and printable filters.
     Returns (should_write: bool, new_ansi_state: int)
@@ -37,7 +37,7 @@ def process_byte_filters(val, ansi_state, filter_ansi, filter_printable):
 
 
 @app_njit(inline="always")
-def decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg, f_state):
+def nb_decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg, f_state):
     # For standard newline frames, we always consume the entire chunk up to the \n
     bytes_consumed = end - start
 
@@ -109,7 +109,7 @@ def decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg, f_state)
 
 
 @app_njit()
-def decode_newline_frame_no_filters(f_buf, start, end, out_buf, out_cursor, f_cfg):
+def nb_decode_newline_frame_no_filters(f_buf, start, end, out_buf, out_cursor, f_cfg):
     """
     ULTRA-FAST PATH: Optimized for zero filtering.
     Performs O(1) trailing strip and O(N) vectorized copy.
@@ -140,7 +140,7 @@ def decode_newline_frame_no_filters(f_buf, start, end, out_buf, out_cursor, f_cf
 
 
 @app_njit()
-def decode_cobs_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
+def nb_decode_cobs_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
     """Type 1: Decodes COBS pointers with fused inline filtering."""
     cursor = out_cursor
     buf_cap = out_buf.shape[0]
@@ -164,7 +164,7 @@ def decode_cobs_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
                 break
 
             val = f_buf[read_idx]
-            should_write, ansi_state = process_byte_filters(val, ansi_state, filter_ansi, filter_printable)
+            should_write, ansi_state = nb_process_byte_filters(val, ansi_state, filter_ansi, filter_printable)
 
             if should_write and cursor < buf_cap:
                 out_buf[cursor] = val
@@ -173,7 +173,7 @@ def decode_cobs_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
 
         if code < 0xFF and read_idx < end:
             val = 0x00
-            should_write, ansi_state = process_byte_filters(val, ansi_state, filter_ansi, filter_printable)
+            should_write, ansi_state = nb_process_byte_filters(val, ansi_state, filter_ansi, filter_printable)
 
             if should_write and cursor < buf_cap:
                 out_buf[cursor] = val
@@ -183,7 +183,7 @@ def decode_cobs_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
 
 
 @app_njit()
-def decode_slip_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
+def nb_decode_slip_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
     """Type 2: Unescapes SLIP byte sequences with fused inline filtering."""
     cursor = out_cursor
     buf_cap = out_buf.shape[0]
@@ -206,7 +206,7 @@ def decode_slip_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
                 else:
                     val = esc
 
-        should_write, ansi_state = process_byte_filters(val, ansi_state, filter_ansi, filter_printable)
+        should_write, ansi_state = nb_process_byte_filters(val, ansi_state, filter_ansi, filter_printable)
         if should_write and cursor < buf_cap:
             out_buf[cursor] = val
             cursor += 1
@@ -216,7 +216,7 @@ def decode_slip_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
 
 
 @app_njit()
-def parser_noop(buffer, start_cursor, end_cursor, out_b, out_idx, config):
+def nb_parser_noop(buffer, start_cursor, end_cursor, out_b, out_idx, config):
     """
     Used as a placeholder in the NamedTuple if a specific parser isn't needed.
     """
@@ -224,7 +224,7 @@ def parser_noop(buffer, start_cursor, end_cursor, out_b, out_idx, config):
 
 
 @app_njit()
-def shift_frame_buffer(f_buf, read_ptr, write_ptr):
+def nb_shift_frame_buffer(f_buf, read_ptr, write_ptr):
     residue_len = write_ptr - read_ptr
     if residue_len > 0 and read_ptr > 0:
         for n in range(residue_len):

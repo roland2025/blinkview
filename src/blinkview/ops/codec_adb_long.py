@@ -25,14 +25,14 @@ from blinkview.ops.constants import (
     CHAR_UPPER_A,
     CHAR_ZERO,
 )
-from blinkview.ops.discovery import resolve_module_id
-from blinkview.ops.modules import normalize_name_inplace
+from blinkview.ops.discovery import nb_resolve_module_id
+from blinkview.ops.modules import nb_normalize_name_inplace
 from blinkview.ops.strings import nb_skip_whitespace
-from blinkview.ops.timestamps import nb_project_synced_ns, parse_iso8601_to_ns
+from blinkview.ops.timestamps import nb_project_synced_ns, nb_parse_iso8601_to_ns
 
 
 @app_njit(inline="always")
-def is_adb_long_header_iso(buffer, cursor, limit):
+def nb_is_adb_long_header_iso(buffer, cursor, limit):
     """
     Validates if the sequence starting at `cursor` is a valid ADB Long Header.
     Matches the rigid punctuation skeleton of: [ YYYY-MM-DD HH:MM:SS.
@@ -62,7 +62,7 @@ def is_adb_long_header_iso(buffer, cursor, limit):
 
 
 @app_njit(inline="always")
-def is_adb_long_header_monotonic(buffer, cursor, limit):
+def nb_is_adb_long_header_monotonic(buffer, cursor, limit):
     """
     Validates monotonic ADB Long Header: '[ 1726228.928'
     Matches a '[' followed by a space and at least one digit.
@@ -85,28 +85,28 @@ def is_adb_long_header_monotonic(buffer, cursor, limit):
 
 
 @app_njit(inline="always")
-def decode_adb_long_frame(f_buf, start, end, out_buf, out_cursor, f_cfg, f_state):
+def nb_decode_adb_long_frame(f_buf, start, end, out_buf, out_cursor, f_cfg, f_state):
 
     # print(f"Raw Frame Slice: {f_buf[start:end].tobytes()}")
     # --- 1. ORACLE BOUNDARY CHECK ---
-    search_start = start + 2 if is_adb_long_header_monotonic(f_buf, start, end) else start
+    search_start = start + 2 if nb_is_adb_long_header_monotonic(f_buf, start, end) else start
 
     second_header_idx = -1
 
     for i in range(search_start, end):
         if f_buf[i] == CHAR_LF:
-            if is_adb_long_header_monotonic(f_buf, i + 1, end):
+            if nb_is_adb_long_header_monotonic(f_buf, i + 1, end):
                 second_header_idx = i + 1  # Point exactly to the '[' of the next header
                 break
 
     # search_start = start
-    # if is_adb_long_header_iso(f_buf, start, end):
+    # if nb_is_adb_long_header_iso(f_buf, start, end):
     #     search_start = start + 22
     #
     # second_header_idx = -1
     # for i in range(search_start, end):
     #     if f_buf[i] == CHAR_LF:
-    #         if is_adb_long_header_iso(f_buf, i + 1, end):
+    #         if nb_is_adb_long_header_iso(f_buf, i + 1, end):
     #             second_header_idx = i + 1  # Point exactly to the '[' of the next header
     #             break
 
@@ -211,7 +211,7 @@ def decode_adb_long_frame(f_buf, start, end, out_buf, out_cursor, f_cfg, f_state
 
 
 @app_njit(inline="always")
-def parse_adb_pid_tid(
+def nb_parse_adb_pid_tid(
     buffer,
     start_cursor,
     end_cursor,
@@ -267,7 +267,7 @@ def parse_adb_pid_tid(
 
 
 @app_njit(inline="always")
-def parse_adb_level(buffer, start_cursor, end_cursor, out_b, out_idx, state, unified_config):
+def nb_parse_adb_level(buffer, start_cursor, end_cursor, out_b, out_idx, state, unified_config):
     if start_cursor + 1 >= end_cursor:
         return -1
 
@@ -290,7 +290,7 @@ def parse_adb_level(buffer, start_cursor, end_cursor, out_b, out_idx, state, uni
 
 
 @app_njit(inline="always")
-def parse_adb_tag(
+def nb_parse_adb_tag(
     buffer,
     start_cursor,
     end_cursor,
@@ -344,11 +344,11 @@ def parse_adb_tag(
         if write_pos + tag_len > len(t_bytes):
             return -1
         t_bytes[write_pos : write_pos + tag_len] = buffer[start_cursor:tag_limit]
-        squashed_len = int(normalize_name_inplace(t_bytes, write_pos, tag_len))
+        squashed_len = int(nb_normalize_name_inplace(t_bytes, write_pos, tag_len))
 
         if squashed_len > 0:
             t_bytes[write_pos + squashed_len] = 0
-            mod_id = resolve_module_id(t_bytes, write_pos, squashed_len, s_table, tracker)
+            mod_id = nb_resolve_module_id(t_bytes, write_pos, squashed_len, s_table, tracker)
             if mod_id == -1:
                 return -1
             out_b.modules[out_idx] = mod_id
@@ -389,7 +389,7 @@ def parse_adb_tag(
 
 
 @app_njit(inline="always")
-def parse_monotonic_to_ns(buffer, start, end):
+def nb_parse_monotonic_to_ns(buffer, start, end):
     """
     Parses 'seconds.nanoseconds' (e.g., 733314.258789939) into total nanoseconds.
     Compatible with -v nsec (9 digits) and standard logcat (3 digits).
@@ -431,7 +431,7 @@ def parse_monotonic_to_ns(buffer, start, end):
 
 
 @app_njit(inline="always")
-def parse_adb_timestamp_iso(
+def nb_parse_adb_timestamp_iso(
     buffer,
     start_cursor,
     end_cursor,
@@ -448,7 +448,7 @@ def parse_adb_timestamp_iso(
     # Call the generic ISO parser
     # We pass 'start_cursor + 2' to skip the '[ '
     out_b.timestamps[out_idx] = nb_project_synced_ns(
-        parse_iso8601_to_ns(buffer, start_cursor + 2, state.timestamp.utc_offset[0]), state.timestamp.sync
+        nb_parse_iso8601_to_ns(buffer, start_cursor + 2, state.timestamp.utc_offset[0]), state.timestamp.sync
     )
 
     # Move cursor past timestamp (index 25) and skip whitespace to find PID
@@ -464,7 +464,7 @@ def parse_adb_timestamp_iso(
 
 
 @app_njit(inline="always")
-def parse_adb_timestamp_monotonic(
+def nb_parse_adb_timestamp_monotonic(
     buffer,
     start_cursor,
     end_cursor,
@@ -488,7 +488,7 @@ def parse_adb_timestamp_monotonic(
         return -1
 
     # Parse and Project
-    raw_ns = parse_monotonic_to_ns(buffer, start_cursor + 2, ts_end)
+    raw_ns = nb_parse_monotonic_to_ns(buffer, start_cursor + 2, ts_end)
 
     # This is the 'now' timestamp the AdbReader captured when it read the chunk.
     rx_ns = out_b.rx_timestamps[out_idx]

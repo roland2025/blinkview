@@ -45,7 +45,7 @@ class MergeChunk(NamedTuple):
 
 
 @app_njit()
-def _hybrid_merge_and_copy(chunks, ts_scr, b_idx_scr, r_idx_scr, sort_order, out_bundle):
+def nb_hybrid_merge_and_copy(chunks, ts_scr, b_idx_scr, r_idx_scr, sort_order, out_bundle):
     """
     1. Flattens data to bypass Numba object refcount overhead.
     2. Performs an O(N * K) k-way merge directly on the flat arrays.
@@ -136,7 +136,7 @@ def _hybrid_merge_and_copy(chunks, ts_scr, b_idx_scr, r_idx_scr, sort_order, out
 
 
 @app_njit()
-def _find_split_idx(timestamps, cursor, size, safe_ts):
+def nb_find_split_idx(timestamps, cursor, size, safe_ts):
     """Zero-allocation binary search replacing np.searchsorted."""
     left = cursor
     right = size
@@ -150,7 +150,7 @@ def _find_split_idx(timestamps, cursor, size, safe_ts):
 
 
 @app_njit()
-def _sum_lengths(lengths, start, end):
+def nb_sum_lengths(lengths, start, end):
     """Zero-allocation sum replacing np.sum(slice)."""
     total = 0
     for i in range(start, end):
@@ -278,7 +278,7 @@ class Reorder(BaseReorder):
                                 batches_to_release.append(queue.popleft().batch)
                                 continue
                             batch_bundle = batch.bundle
-                            idx = int(_find_split_idx(batch_bundle.timestamps, cursor, batch.size, safe_ts))
+                            idx = int(nb_find_split_idx(batch_bundle.timestamps, cursor, batch.size, safe_ts))
 
                             if idx > 0:
                                 s = cursor
@@ -286,7 +286,7 @@ class Reorder(BaseReorder):
 
                                 ready_chunks.append(MergeChunk(batch_bundle, s, e))
                                 total_ready_rows += idx
-                                total_ready_bytes += int(_sum_lengths(batch_bundle.lengths, s, e))
+                                total_ready_bytes += int(nb_sum_lengths(batch_bundle.lengths, s, e))
 
                                 qb.cursor[0] = e
                                 if qb.cursor[0] == batch.size:
@@ -325,7 +325,7 @@ class Reorder(BaseReorder):
                             r_idx_scr = h_r_idx.array[:total_ready_rows]
                             sort_order = h_sort.array[:total_ready_rows]
 
-                            _hybrid_merge_and_copy(
+                            nb_hybrid_merge_and_copy(
                                 ready_chunks, ts_scr, b_idx_scr, r_idx_scr, sort_order, batch_out.bundle
                             )
 
@@ -367,7 +367,7 @@ class Reorder(BaseReorder):
     @register_warmup
     def warmup(helper: "NumbaWarmupHelper"):
         """Triggers compilation for the Reorder kernel (Hybrid Merge & Copy, plus the
-        _find_split_idx/_sum_lengths helpers) against small dummy scratchpads."""
+        nb_find_split_idx/nb_sum_lengths helpers) against small dummy scratchpads."""
         print("[Warmup] Reorder ...")
 
         pool_create = helper.array_pool.create
@@ -392,10 +392,10 @@ class Reorder(BaseReorder):
             w_sort_scr = np.zeros(1, dtype=np.uint32)
 
             # --- Explicitly warm up the helper functions ---
-            _find_split_idx(dummy_in_b.timestamps, 0, dummy_in.size, time_ns())
-            _sum_lengths(dummy_in_b.lengths, 0, 1)
+            nb_find_split_idx(dummy_in_b.timestamps, 0, dummy_in.size, time_ns())
+            nb_sum_lengths(dummy_in_b.lengths, 0, 1)
 
             # Warm up the Hybrid Merge & Copy kernel
-            _hybrid_merge_and_copy(warmup_chunks, w_ts_scr, w_b_idx_scr, w_r_idx_scr, w_sort_scr, dummy_out.bundle)
+            nb_hybrid_merge_and_copy(warmup_chunks, w_ts_scr, w_b_idx_scr, w_r_idx_scr, w_sort_scr, dummy_out.bundle)
 
         print("[Warmup] Reorder ... done")

@@ -1,6 +1,12 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
+# Copyright (c) 2026 Roland Uuesoo
+
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 from dataclasses import dataclass
 from time import perf_counter, perf_counter_ns
@@ -44,7 +50,7 @@ if TYPE_CHECKING:
 
 
 @app_njit()
-def _initialize_new_modules(
+def nb_initialize_new_modules(
     n_mods: int,
     sequences: np.ndarray,
     painted_seqs: np.ndarray,
@@ -86,7 +92,7 @@ def _initialize_new_modules(
 
 
 @app_njit()
-def _update_visible_state(
+def nb_update_visible_state(
     visible_mod_ids: np.ndarray,
     current_seqs: np.ndarray,
     painted_seqs: np.ndarray,
@@ -227,7 +233,7 @@ class TelemetryTableModel(QAbstractTableModel):
     @staticmethod
     @register_warmup
     def warmup(helper: "NumbaWarmupHelper"):
-        """Exercises _initialize_new_modules/_update_visible_state - the two Numba kernels
+        """Exercises nb_initialize_new_modules/nb_update_visible_state - the two Numba kernels
         driving apply_updates() - against a private LatestModuleValueTracker built from the
         helper's dummy pool/registry, using scratch arrays sized to it instead of a real
         TelemetryTableModel. Kept private rather than reusing helper.tracker so this warmup
@@ -260,7 +266,7 @@ class TelemetryTableModel(QAbstractTableModel):
             painted_lengths = np.zeros(n_mods, dtype=np.uint16)
             newly_active_ids = np.zeros(n_mods, dtype=np.int32)
 
-            new_count = _initialize_new_modules(
+            new_count = nb_initialize_new_modules(
                 n_mods,
                 sequences,
                 painted_seqs,
@@ -279,7 +285,7 @@ class TelemetryTableModel(QAbstractTableModel):
 
             visible_mod_ids = newly_active_ids[:new_count] if new_count > 0 else np.arange(n_mods, dtype=np.int32)
 
-            _update_visible_state(
+            nb_update_visible_state(
                 visible_mod_ids,
                 sequences,
                 painted_seqs,
@@ -411,7 +417,7 @@ class TelemetryTableModel(QAbstractTableModel):
         if self.is_visible[mod_id]:
             return  # Already has a row — prevents duplicates when both
             # _sync_registry (on registration) and
-            # _initialize_new_modules (on first data) add the same mod_id.
+            # nb_initialize_new_modules (on first data) add the same mod_id.
 
         filter_passed = self._passes_filters(mod_id)
         if not filter_passed:
@@ -617,7 +623,7 @@ class TelemetryTableModel(QAbstractTableModel):
             b_buffer = b.buffer
 
             # --- REPLACE THE OLD PYTHON LOOP WITH THIS ---
-            new_count = _initialize_new_modules(
+            new_count = nb_initialize_new_modules(
                 len(self.modules),
                 sequences,
                 self.painted_seqs,
@@ -642,7 +648,7 @@ class TelemetryTableModel(QAbstractTableModel):
                 return
 
             # Execute Numba kernel computation and perform state updates in-place
-            needs_update = _update_visible_state(
+            needs_update = nb_update_visible_state(
                 self.visible_mod_ids,
                 sequences,
                 self.painted_seqs,

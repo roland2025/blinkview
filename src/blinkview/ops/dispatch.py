@@ -10,13 +10,13 @@ from blinkview.core.types.log_batch import LogBundle
 from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import STATE_COMPLETE, STATE_ERROR, STATE_INCOMPLETE, ParserPipelineBundle
 from blinkview.ops.buffers import nb_copy_buf, nb_move_buf, nb_report_error, nb_sync_push, nb_sync_shift_leftovers
-from blinkview.ops.frame_dispatch import dispatch_frame_decoder
-from blinkview.ops.pipeline import execute_parser_pipeline
-from blinkview.ops.strings import squash_spaces_inplace, trim_spaces
+from blinkview.ops.frame_dispatch import nb_dispatch_frame_decoder
+from blinkview.ops.pipeline import nb_execute_parser_pipeline
+from blinkview.ops.strings import nb_squash_spaces_inplace, nb_trim_spaces
 
 
 @app_njit()
-def process_batch_kernel(
+def nb_process_batch_kernel(
     f_cfg,
     f_state: FrameStateParams,
     in_b,
@@ -133,7 +133,7 @@ def process_batch_kernel(
                         decoder_state = STATE_COMPLETE
                     else:
                         # Standard decoder dispatch
-                        decoder_state, final_cursor, bytes_consumed = dispatch_frame_decoder(
+                        decoder_state, final_cursor, bytes_consumed = nb_dispatch_frame_decoder(
                             target_buf, target_start, target_end, out_b.buffer, curr_out_cursor, f_cfg, f_state
                         )
 
@@ -186,7 +186,7 @@ def process_batch_kernel(
                                 if report_frame_error:
                                     error_code = 1
                             else:
-                                msg_start = execute_parser_pipeline(
+                                msg_start = nb_execute_parser_pipeline(
                                     out_b.buffer, curr_out_cursor, final_cursor, out_b, curr_out_idx, parser.pipeline
                                 )
 
@@ -195,11 +195,11 @@ def process_batch_kernel(
                                         error_code = 2
                                 else:
                                     if filter_squash_spaces:
-                                        msg_start, final_cursor = squash_spaces_inplace(
+                                        msg_start, final_cursor = nb_squash_spaces_inplace(
                                             out_b.buffer, msg_start, final_cursor
                                         )
                                     else:
-                                        msg_start, final_cursor = trim_spaces(out_b.buffer, msg_start, final_cursor)
+                                        msg_start, final_cursor = nb_trim_spaces(out_b.buffer, msg_start, final_cursor)
 
                                     payload_length = final_cursor - msg_start
 

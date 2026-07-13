@@ -6,8 +6,8 @@
 
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.parsing import STATE_COMPLETE, CodecID
-from blinkview.ops.codec_adb_long import decode_adb_long_frame
-from blinkview.ops.codecs import decode_cobs_frame, decode_newline_frame, decode_slip_frame
+from blinkview.ops.codec_adb_long import nb_decode_adb_long_frame
+from blinkview.ops.codecs import nb_decode_cobs_frame, nb_decode_newline_frame, nb_decode_slip_frame
 
 _ID_NONE = CodecID.NONE
 _ID_NEWLINE = CodecID.NEWLINE
@@ -20,21 +20,21 @@ _ID_PLUGIN = CodecID.PLUGIN
 
 
 @app_njit(inline="always")
-def dispatch_frame_decoder(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg, f_state):
+def nb_dispatch_frame_decoder(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg, f_state):
     d_id = f_cfg.decode_id
 
     # Use the extracted local constants instead of CodecID.NEWLINE
     if d_id == _ID_NEWLINE:
-        return decode_newline_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg, f_state)
+        return nb_decode_newline_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg, f_state)
 
     # elif d_id == _ID_COBS:
-    #     return decode_cobs_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
+    #     return nb_decode_cobs_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
     #
     # elif d_id == _ID_SLIP:
-    #     return decode_slip_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
+    #     return nb_decode_slip_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
 
     elif d_id == _ID_ADB_LONG:
-        return decode_adb_long_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg, f_state)
+        return nb_decode_adb_long_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg, f_state)
 
     #
     # elif d_id == _ID_PLUGIN:

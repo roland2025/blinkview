@@ -17,11 +17,11 @@ from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.log_batch import TelemetryBatch
 from blinkview.core.warmup_registry import register_warmup
-from blinkview.ops.segments import copy_batch_to_segment
+from blinkview.ops.segments import nb_copy_batch_to_segment
 from blinkview.ops.telemetry import (
-    count_module_occurrences_backwards,
-    extract_telemetry_segment_to_end,
-    peek_segment_channels_backwards,
+    nb_count_module_occurrences_backwards,
+    nb_extract_telemetry_segment_to_end,
+    nb_peek_segment_channels_backwards,
 )
 from blinkview.utils.log_level import LogLevel
 
@@ -166,7 +166,7 @@ class CircularLogPool:
 
             while rows_written < size:
                 # Fast Path: Symmetrical Copy (Bundle to Bundle)
-                copied = copy_batch_to_segment(self.active_segment.bundle, b_src, rows_written, self.sequence)
+                copied = nb_copy_batch_to_segment(self.active_segment.bundle, b_src, rows_written, self.sequence)
 
                 rows_written += copied
                 self.sequence += copied
@@ -355,7 +355,7 @@ def fetch_telemetry_arrays(
                 if new_watermark == start_seq:
                     new_watermark = segment_last_sequence_id
 
-                curr_write_idx = extract_telemetry_segment_to_end(
+                curr_write_idx = nb_extract_telemetry_segment_to_end(
                     segment.bundle,
                     target_module_int,
                     dtypes.SEQ_TYPE(start_seq),
@@ -399,12 +399,12 @@ def get_telemetry_anchor(
             bundle = segment.bundle
             # --- PHASE 1: DISCOVERY ---
             if detected_channels == 0:
-                head_seq, channels = peek_segment_channels_backwards(bundle, target_module_int, lks, temp_floats)
+                head_seq, channels = nb_peek_segment_channels_backwards(bundle, target_module_int, lks, temp_floats)
 
                 if head_seq != SEQ_NONE:
                     detected_channels = channels
                     # Start counting backwards from the head_seq we just found
-                    found_in_seg, earliest = count_module_occurrences_backwards(
+                    found_in_seg, earliest = nb_count_module_occurrences_backwards(
                         bundle, target_module_int, head_seq, remaining
                     )
                     remaining -= found_in_seg
@@ -415,7 +415,7 @@ def get_telemetry_anchor(
 
             # --- PHASE 2: ANCHORING ---
             else:
-                found_in_seg, earliest = count_module_occurrences_backwards(
+                found_in_seg, earliest = nb_count_module_occurrences_backwards(
                     bundle, target_module_int, segment.last_sequence_id, remaining
                 )
 

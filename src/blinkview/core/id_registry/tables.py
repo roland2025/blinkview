@@ -12,13 +12,13 @@ from blinkview.core import dtypes
 from blinkview.core.id_registry.types import StringTableParams
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.empty import EMPTY_ID, EMPTY_INDEX
-from blinkview.utils.fnv1a_64 import fnv1a_64_fast
+from blinkview.utils.fnv1a_64 import nb_fnv1a_64_fast
 
 
 @app_njit()
 def nb_insert_item(name_array, identity_id, buffer, offsets, lens, hashes, hash_index, cursor, count):
     n_len = len(name_array)
-    name_hash = fnv1a_64_fast(name_array, 0, n_len)
+    name_hash = nb_fnv1a_64_fast(name_array, 0, n_len)
 
     start = cursor
 
@@ -52,7 +52,7 @@ def nb_insert_item(name_array, identity_id, buffer, offsets, lens, hashes, hash_
 @app_njit()
 def nb_insert_item_no_index(name_array, identity_id, buffer, offsets, lens, hashes, cursor, count):
     n_len = len(name_array)
-    name_hash = fnv1a_64_fast(name_array, 0, n_len)
+    name_hash = nb_fnv1a_64_fast(name_array, 0, n_len)
 
     start = cursor
 

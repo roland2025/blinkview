@@ -34,8 +34,10 @@ from blinkview.core.dtypes import SEQ_NONE, SEQ_START
 from blinkview.core.module_snapshot import MAX_MSG_BYTES
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.warmup_registry import register_warmup
-from blinkview.ops.segments import filter_segment, nb_segment_extract_fields, nb_segment_filter_reversed
+from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
+from blinkview.ops.segments import nb_filter_segment, nb_segment_extract_fields, nb_segment_filter_reversed
 from blinkview.ui.gui_context import GUIContext
+from blinkview.ui.widgets.kv_filter_line_edit import KvFilterLineEdit
 from blinkview.ui.widgets.module_filter_sidebar import ModuleFilterSidebar
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
@@ -134,18 +136,23 @@ class LogTableModel(QAbstractTableModel):
     @staticmethod
     @register_warmup
     def warmup(helper: "NumbaWarmupHelper"):
-        """Exercises nb_segment_extract_fields, nb_segment_filter_reversed and filter_segment -
+        """Exercises nb_segment_extract_fields, nb_segment_filter_reversed and nb_filter_segment -
         the kernels this widget uses that aren't already warmed by NumbaWarmupHelper's other
         exercise_* methods - using the helper's dummy log_pool/registry instead of standing up
         a real LogTableModel. Numba compiles a distinct specialization per call-site signature
         (e.g. end_seq/start_seq passed vs. left at its default), so every call shape actually
         used by _fetch_live/_fetch_history is exercised here too - matching only one shape
-        leaves the others to JIT-compile (a stall) on their first real call instead."""
+        leaves the others to JIT-compile (a stall) on their first real call instead. The kv_*
+        arguments are always passed explicitly here (never omitted), matching how the real
+        fetch methods always pass log_filter.bake_kv_arrays()'s output - a numpy array's Numba
+        type only depends on its dtype/ndim, not length, so warming with the empty-conditions
+        arrays also covers the "real conditions present" case at call time."""
         print("[Warmup] LogTableModel ...")
 
         capacity = 8
         max_msg_bytes = 64
         effective_mask = np.zeros(max(10, helper.registry.module_count()), dtype=dtypes.LEVEL_TYPE)
+        kv = EMPTY_KV_CONDITIONS
 
         with (
             helper.array_pool.create(
@@ -170,6 +177,13 @@ class LogTableModel(QAbstractTableModel):
                     effective_mask=effective_mask,
                     out_indices=indices.array,
                     max_matches=capacity,
+                    kv_cond_keys_buf=kv.cond_keys_buf,
+                    kv_cond_keys_off=kv.cond_keys_off,
+                    kv_cond_keys_len=kv.cond_keys_len,
+                    kv_cond_vals_buf=kv.cond_vals_buf,
+                    kv_cond_vals_off=kv.cond_vals_off,
+                    kv_cond_vals_len=kv.cond_vals_len,
+                    kv_num_conditions=kv.num_conditions,
                 )
 
                 # _fetch_history's "before" shape: end_seq passed explicitly.
@@ -179,15 +193,29 @@ class LogTableModel(QAbstractTableModel):
                     out_indices=indices.array,
                     max_matches=capacity,
                     end_seq=dtypes.SEQ_TYPE(SEQ_START),
+                    kv_cond_keys_buf=kv.cond_keys_buf,
+                    kv_cond_keys_off=kv.cond_keys_off,
+                    kv_cond_keys_len=kv.cond_keys_len,
+                    kv_cond_vals_buf=kv.cond_vals_buf,
+                    kv_cond_vals_off=kv.cond_vals_off,
+                    kv_cond_vals_len=kv.cond_vals_len,
+                    kv_num_conditions=kv.num_conditions,
                 )
 
-                # _fetch_history's "after" shape: filter_segment with start_seq passed explicitly.
-                filter_segment(
+                # _fetch_history's "after" shape: nb_filter_segment with start_seq passed explicitly.
+                nb_filter_segment(
                     segment.bundle,
                     effective_mask=effective_mask,
                     out_indices=indices.array,
                     max_matches=capacity,
                     start_seq=SEQ_NONE,
+                    kv_cond_keys_buf=kv.cond_keys_buf,
+                    kv_cond_keys_off=kv.cond_keys_off,
+                    kv_cond_keys_len=kv.cond_keys_len,
+                    kv_cond_vals_buf=kv.cond_vals_buf,
+                    kv_cond_vals_off=kv.cond_vals_off,
+                    kv_cond_vals_len=kv.cond_vals_len,
+                    kv_num_conditions=kv.num_conditions,
                 )
 
                 if match_count > 0:
@@ -460,6 +488,7 @@ class LogTableModel(QAbstractTableModel):
 
         self.filter_sidebar.sync_modules()
         self._bake_effective_mask()
+        kv = self.log_filter.bake_kv_arrays()
 
         limit = self.viewport_rows
         write_cursor = self.capacity
@@ -484,6 +513,13 @@ class LogTableModel(QAbstractTableModel):
                     effective_mask=self._effective_mask,
                     out_indices=indices.array,
                     max_matches=allowed,
+                    kv_cond_keys_buf=kv.cond_keys_buf,
+                    kv_cond_keys_off=kv.cond_keys_off,
+                    kv_cond_keys_len=kv.cond_keys_len,
+                    kv_cond_vals_buf=kv.cond_vals_buf,
+                    kv_cond_vals_off=kv.cond_vals_off,
+                    kv_cond_vals_len=kv.cond_vals_len,
+                    kv_num_conditions=kv.num_conditions,
                 )
 
                 if match_count > 0:
@@ -513,6 +549,7 @@ class LogTableModel(QAbstractTableModel):
     def _fetch_history(self, anchor_seq: int):
         pool = self.gui_context.registry.central.log_pool
         boundary = self.HISTORY_BEFORE  # fixed split point between the "before" and "after" regions
+        kv = self.log_filter.bake_kv_arrays()
 
         before_count = 0
         after_count = 0
@@ -539,6 +576,13 @@ class LogTableModel(QAbstractTableModel):
                         out_indices=indices.array,
                         max_matches=allowed,
                         end_seq=dtypes.SEQ_TYPE(anchor_seq - 1),
+                        kv_cond_keys_buf=kv.cond_keys_buf,
+                        kv_cond_keys_off=kv.cond_keys_off,
+                        kv_cond_keys_len=kv.cond_keys_len,
+                        kv_cond_vals_buf=kv.cond_vals_buf,
+                        kv_cond_vals_off=kv.cond_vals_off,
+                        kv_cond_vals_len=kv.cond_vals_len,
+                        kv_num_conditions=kv.num_conditions,
                     )
 
                     if match_count > 0:
@@ -568,12 +612,19 @@ class LogTableModel(QAbstractTableModel):
                 if allowed <= 0:
                     break
 
-                match_count = filter_segment(
+                match_count = nb_filter_segment(
                     segment.bundle,
                     effective_mask=self._effective_mask,
                     out_indices=indices.array,
                     max_matches=allowed,
                     start_seq=start_seq_lower_bound,
+                    kv_cond_keys_buf=kv.cond_keys_buf,
+                    kv_cond_keys_off=kv.cond_keys_off,
+                    kv_cond_keys_len=kv.cond_keys_len,
+                    kv_cond_vals_buf=kv.cond_vals_buf,
+                    kv_cond_vals_off=kv.cond_vals_off,
+                    kv_cond_vals_len=kv.cond_vals_len,
+                    kv_num_conditions=kv.num_conditions,
                 )
 
                 if match_count > 0:
@@ -682,6 +733,7 @@ class LogTableViewerWidget(QWidget):
         self.show_hidden = False
         self.show_rx_ts = False
         self.ts_precision = 3
+        self.kv_filter_text = ""
 
         self._set_defaults()
 
@@ -751,6 +803,13 @@ class LogTableViewerWidget(QWidget):
 
         self.toolbar.addSeparator()
 
+        self.kv_filter_box = KvFilterLineEdit()
+        self.kv_filter_box.setMaximumWidth(240)
+        self.kv_filter_box.setText(self.kv_filter_text)
+        self.toolbar.addWidget(self.kv_filter_box)
+
+        self.toolbar.addSeparator()
+
         self.action_clear = QAction("Clear", self)
         self.action_clear.triggered.connect(self.clear_logs)
         self.toolbar.addAction(self.action_clear)
@@ -771,6 +830,8 @@ class LogTableViewerWidget(QWidget):
             log_level=self.log_level,
             filtered_module_children=self.filtered_module_children,
         )
+        self.log_filter.set_kv_filter(self.kv_filter_text)
+        self.kv_filter_box.filterTextCommitted.connect(self._apply_kv_filter_text)
 
         self.filter_sidebar = ModuleFilterSidebar(
             gui_context=self.gui_context, target_filter=self.log_filter, parent=self, show_hidden=self.show_hidden
@@ -856,6 +917,7 @@ class LogTableViewerWidget(QWidget):
         self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
         self.show_rx_ts = view_state.get("show_rx_ts", self.show_rx_ts)
         self.ts_precision = view_state.get("ts_precision", self.ts_precision)
+        self.kv_filter_text = view_state.get("kv_filter_text", self.kv_filter_text)
         self.filter_sidebar_state = state.get("filter_sidebar", self.filter_sidebar_state)
 
     def get_state(self):
@@ -868,6 +930,7 @@ class LogTableViewerWidget(QWidget):
                 "show_module_filter": self.show_module_filter,
                 "show_rx_ts": self.show_rx_ts,
                 "ts_precision": self.ts_precision,
+                "kv_filter_text": self.log_filter.kv_filter_text,
             },
             "log_level": self.log_filter.log_level.name_conf,
             "filter_sidebar": self.filter_sidebar.get_state(),
@@ -884,6 +947,10 @@ class LogTableViewerWidget(QWidget):
 
     def _reload_and_redraw(self):
         self.model.reload_and_redraw()
+
+    def _apply_kv_filter_text(self, text):
+        self.log_filter.set_kv_filter(text)
+        self._reload_and_redraw()
 
     def _on_search_changed(self, text):
         self.proxy.set_filter_text(text)

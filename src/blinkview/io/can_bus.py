@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 
 @app_njit()
-def _nb_can_push(
+def nb_can_push(
     bundle,
     raw_timestamp: float,
     offset_ns: int,
@@ -102,7 +102,7 @@ class CanLogBatch(PooledLogBatch):
 
         # 2. Extract hardware attributes safely
         # We use getattr for FD flags to support non-FD drivers/interfaces
-        return _nb_can_push(
+        return nb_can_push(
             b,
             msg.timestamp,
             offset_ns,

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "blinkview"
 dynamic = ["version"]
-description = "High-performance embedded telemetry, log viewer, and plotting tool."
+description = "High-performance log viewer and telemetry tool for multi-source, high-throughput systems."
 readme = "README.md"
 
 
@@ -24,7 +24,8 @@ keywords = [
     "embedded", "telemetry", "logging", "plotting", "real-time",
     "can-bus", "serial", "uart", "jlink", "rtt", "segger",
     "mcu", "arduino", "esp32", "stm32", "sam",
-    "diagnostics", "visualization", "data-analysis"
+    "diagnostics", "visualization", "data-analysis",
+    "distributed-systems", "observability", "structured-logging", "log-viewer"
 ]
 
 # --- Core Dependencies (Safe for all runtimes, including 3.14t) ---

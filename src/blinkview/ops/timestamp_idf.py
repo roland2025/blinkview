@@ -1,3 +1,9 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
+# Copyright (c) 2026 Roland Uuesoo
+
 from blinkview.core.numba_config import app_njit
 from blinkview.ops.constants import CHAR_LPAREN, CHAR_RPAREN, CHAR_SPACE
 from blinkview.ops.strings import nb_skip_whitespace

@@ -25,7 +25,7 @@ from blinkview.ops.constants import (
 
 
 @app_njit()
-def is_whitespace(char):
+def nb_is_whitespace(char):
     # Covers Space, Tab, LF, CR
     if char > 32:
         return False  # Early exit for non-whitespace
@@ -35,12 +35,12 @@ def is_whitespace(char):
 
 
 @app_njit()
-def is_digit(char):
+def nb_is_digit(char):
     return np.uint8(char - 48) < 10
 
 
 @app_njit()
-def is_alpha(char):
+def nb_is_alpha(char):
     # Check A-Z and a-z using the same subtraction trick
     is_upper = np.uint8(char - 65) < 26
     is_lower = np.uint8(char - 97) < 26
@@ -48,7 +48,7 @@ def is_alpha(char):
 
 
 @app_njit()
-def to_lower(char):
+def nb_to_lower(char):
     """Converts uppercase ASCII to lowercase using the bitwise trick."""
     # 1 if char is UPPER, else 0
     is_upper = np.uint8(char - 65) < 26
@@ -57,7 +57,7 @@ def to_lower(char):
 
 
 @app_njit()
-def to_upper(char):
+def nb_to_upper(char):
     """Converts lowercase ASCII to uppercase using the bitwise trick."""
     if CHAR_LOWER_A <= char <= CHAR_LOWER_Z:
         return char & ~32  # Clear the 6th bit
@@ -65,7 +65,7 @@ def to_upper(char):
 
 
 @app_njit()
-def filter_printable_inplace(out_buf, start_cursor, end_cursor):
+def nb_filter_printable_inplace(out_buf, start_cursor, end_cursor):
     """
     Sweeps through the decoded payload and drops non-printable characters.
     Because it writes to the same buffer it reads from, it operates
@@ -95,7 +95,7 @@ def filter_printable_inplace(out_buf, start_cursor, end_cursor):
 
 
 @app_njit()
-def filter_ansi_inplace(out_buf, start_cursor, end_cursor):
+def nb_filter_ansi_inplace(out_buf, start_cursor, end_cursor):
     """
     Optimized Fast-Path ANSI filter.
     Allows LLVM to auto-vectorize the normal text path while
@@ -140,7 +140,7 @@ def nb_skip_whitespace(buffer, cursor, end_cursor):
     """
     Advances the cursor past any space (32) or tab (9) characters.
     """
-    while cursor < end_cursor and is_whitespace(buffer[cursor]):
+    while cursor < end_cursor and nb_is_whitespace(buffer[cursor]):
         cursor += 1
     return cursor
 
@@ -151,7 +151,7 @@ def nb_skip_whitespace_reverse(buffer, start_cursor, end_cursor):
     Moves the end_cursor backward past any trailing space (32) or tab (9) characters.
     Stops if it hits the start_cursor boundary.
     """
-    while end_cursor > start_cursor and is_whitespace(buffer[end_cursor - 1]):
+    while end_cursor > start_cursor and nb_is_whitespace(buffer[end_cursor - 1]):
         end_cursor -= 1
     return end_cursor
 
@@ -162,13 +162,13 @@ def nb_skip_non_whitespace(buffer, cursor, end_cursor):
     Advances the cursor past any non-whitespace characters.
     Stops when it hits an inline space (32), tab (9), or the end of the buffer.
     """
-    while cursor < end_cursor and not is_whitespace(buffer[cursor]):
+    while cursor < end_cursor and not nb_is_whitespace(buffer[cursor]):
         cursor += 1
     return cursor
 
 
 @app_njit()
-def squash_spaces_inplace(buffer, start_cursor, end_cursor):
+def nb_squash_spaces_inplace(buffer, start_cursor, end_cursor):
     """
     Branchless space squashing and stripping.
     Uses the 'unconditional write, conditional increment' pattern.
@@ -208,7 +208,7 @@ def squash_spaces_inplace(buffer, start_cursor, end_cursor):
 
 
 @app_njit()
-def trim_spaces(buffer, start_cursor, end_cursor):
+def nb_trim_spaces(buffer, start_cursor, end_cursor):
     """
     Slices off leading and trailing spaces without copying.
     Returns (new_start, new_end).
@@ -223,7 +223,7 @@ def trim_spaces(buffer, start_cursor, end_cursor):
 
 
 @app_njit()
-def skip_n_words(buffer, cursor, end_cursor, n):
+def nb_skip_n_words(buffer, cursor, end_cursor, n):
     """Core logic to advance cursor past N words and prepare for the next field."""
     words_skipped = 0
     while cursor < end_cursor and words_skipped < n:

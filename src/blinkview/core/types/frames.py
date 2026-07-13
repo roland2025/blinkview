@@ -19,7 +19,7 @@ class FrameStateParams(NamedTuple):
 
 
 class FrameConfig(NamedTuple):
-    decode_id: int  # ID of the decode function to use (e.g., decode_newline_frame)
+    decode_id: int  # ID of the decode function to use (e.g., nb_decode_newline_frame)
     # decode_func: Any  # The JIT function (for plugins)
     delimiter: int  # e.g., ord('\n')
     length_fixed: bool  # If True, only frames of exactly 'length' bytes are valid. If False, frames between length_min and length_max are valid.

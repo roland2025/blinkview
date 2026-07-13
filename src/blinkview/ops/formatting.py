@@ -26,7 +26,7 @@ from blinkview.ops.constants import (
 
 
 @app_njit()
-def update_iso8601_timestamp_cache(total_sec: int, ts_cache: np.ndarray):
+def nb_update_iso8601_timestamp_cache(total_sec: int, ts_cache: np.ndarray):
     """
     Computes the ISO8601 date and time (YYYY-MM-DDTHH:MM:SS) from Unix epoch seconds
     and updates the provided 19-byte numpy array in-place.
@@ -161,7 +161,7 @@ def nb_segment_estimate_out_size(
 
 
 @app_njit(inline="always")
-def copy_bytes(out: np.ndarray, curr: int, src: np.ndarray, off: int, ln: int) -> int:
+def nb_copy_bytes(out: np.ndarray, curr: int, src: np.ndarray, off: int, ln: int) -> int:
     """Explicit loop copy for short strings."""
     for i in range(ln):
         out[curr + i] = src[off + i]
@@ -169,7 +169,7 @@ def copy_bytes(out: np.ndarray, curr: int, src: np.ndarray, off: int, ln: int) -
 
 
 @app_njit(inline="always")
-def write_bytes_direct(out: np.ndarray, curr: int, data: tuple) -> int:
+def nb_write_bytes_direct(out: np.ndarray, curr: int, data: tuple) -> int:
     """Writes a fixed tuple of bytes (like fallbacks)."""
     for i in range(len(data)):
         out[curr + i] = data[i]
@@ -180,8 +180,8 @@ def write_bytes_direct(out: np.ndarray, curr: int, data: tuple) -> int:
 def nb_table_copy_entry(out: np.ndarray, curr: int, table: StringTableParams, idx: int, fallback: tuple) -> int:
     """Helper for Device/Module where the ID is the index."""
     if idx < table.count:
-        return copy_bytes(out, curr, table.buffer, table.offsets[idx], table.lens[idx])
-    return write_bytes_direct(out, curr, fallback)
+        return nb_copy_bytes(out, curr, table.buffer, table.offsets[idx], table.lens[idx])
+    return nb_write_bytes_direct(out, curr, fallback)
 
 
 @app_njit(inline="always")
@@ -189,14 +189,14 @@ def nb_table_lookup_copy_entry(
     out: np.ndarray, curr: int, table: StringTableParams, raw_id: int, fallback: tuple
 ) -> int:
     """Helper for Levels where we must find the index first."""
-    tbl_idx = find_id_index(table.values, table.count, raw_id)
+    tbl_idx = nb_find_id_index(table.values, table.count, raw_id)
     if tbl_idx != -1:
-        return copy_bytes(out, curr, table.buffer, table.offsets[tbl_idx], table.lens[tbl_idx])
-    return write_bytes_direct(out, curr, fallback)
+        return nb_copy_bytes(out, curr, table.buffer, table.offsets[tbl_idx], table.lens[tbl_idx])
+    return nb_write_bytes_direct(out, curr, fallback)
 
 
 @app_njit(inline="always")
-def find_id_index(val_arr: np.ndarray, count: int, target_id: int) -> int:
+def nb_find_id_index(val_arr: np.ndarray, count: int, target_id: int) -> int:
     """Returns the internal index for a given identity ID, or -1 if not found."""
     for i in range(count):
         if val_arr[i] == target_id:
@@ -377,7 +377,7 @@ def nb_segment_format(
             total_rx_sec = rx_ns // 1_000_000_000
 
             if total_rx_sec != last_rx_sec:
-                update_iso8601_timestamp_cache(total_rx_sec, rx_ts_cache)
+                nb_update_iso8601_timestamp_cache(total_rx_sec, rx_ts_cache)
                 last_rx_sec = total_rx_sec
 
             # Write RX Date (YYYY-MM-DD)
@@ -402,7 +402,7 @@ def nb_segment_format(
             total_sec = ts_ns // 1_000_000_000
 
             if total_sec != last_sec:
-                update_iso8601_timestamp_cache(total_sec, ts_cache)
+                nb_update_iso8601_timestamp_cache(total_sec, ts_cache)
                 last_sec = total_sec
 
             # Write Log Date (YYYY-MM-DD)
@@ -448,7 +448,7 @@ def nb_segment_format(
             out[curr] = CHAR_SPACE
             curr += 1
 
-        curr = copy_bytes(out, curr, s_buf, s_offs[idx], s_lens[idx])
+        curr = nb_copy_bytes(out, curr, s_buf, s_offs[idx], s_lens[idx])
 
         out[curr] = CHAR_LF
         curr += 1
@@ -457,7 +457,7 @@ def nb_segment_format(
 
 
 @app_njit()
-def estimate_batch_capacity(bundle: LogBundle, overhead_per_row: int) -> int:
+def nb_estimate_batch_capacity(bundle: LogBundle, overhead_per_row: int) -> int:
     """
     O(1) capacity estimation.
     Uses the pre-calculated msg_cursor (total u8 bytes) and
@@ -468,7 +468,7 @@ def estimate_batch_capacity(bundle: LogBundle, overhead_per_row: int) -> int:
 
 
 @app_njit()
-def format_log_row_batch(
+def nb_format_log_row_batch(
     out: np.ndarray,
     bundle: LogBundle,
     tables: RegistryParams,
@@ -500,7 +500,7 @@ def format_log_row_batch(
 
         # Update cache using localized state
         if total_sec != last_sec:
-            update_iso8601_timestamp_cache(total_sec, ts_cache)
+            nb_update_iso8601_timestamp_cache(total_sec, ts_cache)
             last_sec = total_sec
 
         # Copy 19 bytes: YYYY-MM-DDTHH:MM:SS
@@ -538,7 +538,7 @@ def format_log_row_batch(
         curr += 2
 
         # --- 5. Message ---
-        curr = copy_bytes(out, curr, s_buf, s_offs[idx], s_lens[idx])
+        curr = nb_copy_bytes(out, curr, s_buf, s_offs[idx], s_lens[idx])
         out[curr] = CHAR_LF
         curr += 1
 
@@ -548,7 +548,7 @@ def format_log_row_batch(
 
 
 @app_njit(inline="always")
-def set_u32_le(arr: np.ndarray, offset: int, value: int):
+def nb_set_u32_le(arr: np.ndarray, offset: int, value: int):
     """Writes a 32-bit unsigned integer in Little Endian."""
     arr[offset] = value & 0xFF
     arr[offset + 1] = (value >> 8) & 0xFF
@@ -557,7 +557,7 @@ def set_u32_le(arr: np.ndarray, offset: int, value: int):
 
 
 @app_njit(inline="always")
-def set_u64_le(arr: np.ndarray, offset: int, value: int):
+def nb_set_u64_le(arr: np.ndarray, offset: int, value: int):
     """Writes a 64-bit unsigned integer in Little Endian."""
     arr[offset] = value & 0xFF
     arr[offset + 1] = (value >> 8) & 0xFF
@@ -577,7 +577,7 @@ BIN_HEADER_SIZE = 16
 
 
 @app_njit()
-def format_binary_batch(out: np.ndarray, bundle: LogBundle) -> int:
+def nb_format_binary_batch(out: np.ndarray, bundle: LogBundle) -> int:
     """
     Serializes a LogBundle of binary logs into the `out` array using helpers.
     Header: Sync(1), Type(1), Ver(1), Res(1), Len(4), TS(8) = 16 bytes.
@@ -601,8 +601,8 @@ def format_binary_batch(out: np.ndarray, bundle: LogBundle) -> int:
         out[curr + 3] = CHAR_NULL  # 0x00
 
         # --- 2. Header (Variable Fields via Helpers) ---
-        set_u32_le(out, curr + 4, length)
-        set_u64_le(out, curr + 8, ts)
+        nb_set_u32_le(out, curr + 4, length)
+        nb_set_u64_le(out, curr + 8, ts)
 
         curr += BIN_HEADER_SIZE
 

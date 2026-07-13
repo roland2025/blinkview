@@ -2,9 +2,9 @@
 
 [🖥️ GitHub Repository](https://github.com/roland2025/blinkview) | [🐛 Report a Bug](https://github.com/roland2025/blinkview/issues)
 
-**BlinkView** is a cross-device debugging tool for embedded systems. 
+**BlinkView** is a high-performance log and telemetry viewer for multi-source, high-throughput systems—embedded devices, distributed services, or anything in between.
 
-It aligns and analyzes logs from multiple sources—such as firmware (UART/RTT), CAN bus, and Android—in a single, time-synchronized timeline. Trace events across devices to understand real system behavior.
+It aligns and analyzes logs from multiple sources—such as firmware (UART/RTT), CAN bus, Android, or plain TCP/UDP sockets—in a single, time-synchronized timeline. Trace events across processes and devices to understand real system behavior.
 
 ### LogViewer and filter with telemetry table
 
@@ -29,7 +29,7 @@ In complex hardware/software systems, bugs rarely stay in one layer. Investigati
 
 BlinkView replaces ad-hoc 'log-merger' scripts with a **unified environment** that handles ingestion, time alignment, and visualization in one place.
 
-BlinkView evolved from an internal tool used for debugging real multi-device embedded systems.
+BlinkView started as an internal tool for debugging real multi-device embedded systems, and has since grown into a general-purpose tool for any high-throughput, multi-source logging problem—hardware or software.
 
 ---
 ## Example Use Case
@@ -51,6 +51,22 @@ This makes it possible to:
 - trace behavior across components
 - measure delays between steps
 - identify where failures occur
+
+The same approach applies just as well without any hardware in the loop. Debugging a distributed client/server app:
+
+- Client sends a request over a TCP socket
+- Backend service logs the request, does some work, and responds
+- Multiple backend workers log concurrently under load
+
+BlinkView lets you see all of this in one timeline:
+- Client-side log events
+- Backend request/response logs, correlated across workers
+- Structured `key=value` fields extracted from each log line for filtering
+
+This makes it possible to:
+- trace a single request across processes
+- spot which worker or service introduced a delay
+- correlate client-observed failures with backend-side causes
 ---
 
 ### 🚀 Live Integration Demo
@@ -59,7 +75,7 @@ Want to see BlinkView coordinate a live system right now? Explore this fully con
 
 👉 **[BlinkView Python Client-Backend Demo Repository](https://github.com/roland2025/blinkview-python-demo)**
 
-This demo includes a multi-threaded Qt Client and a headless Backend service. It lets you click buttons, adjust sliders, and generate synthetic log streams so you can watch BlinkView extract, plot, and align the network telemetry in real time.
+This demo includes a multi-threaded Qt Client and a headless Backend service—no embedded hardware involved, just plain TCP sockets. It lets you click buttons, adjust sliders, and generate synthetic log streams so you can watch BlinkView extract, plot, and align the network telemetry in real time.
 
 ---
 
@@ -95,7 +111,7 @@ uv tool install ".[all]"
 
 ```bash
 # Go to your project directory
-cd your/mcu/project
+cd your/project
 
 # Initialize the profile
 blink init
@@ -112,7 +128,7 @@ blink
 
 ## Features
 
-* **Multi-Source Ingestion:**
+* **Multi-Source Ingestion:** Supported source types include:
   * Serial / UART
   * CAN-bus (with DBC decoding)
   * SEGGER RTT
@@ -121,7 +137,9 @@ blink
 * **Text Log Viewer:** 
   * Advanced filtering by device, module, and log level.
   * High-speed text search and highlighting.
+  * Structured `key=value` (logfmt) filtering—combine free-text search with exact-match conditions like `status=ok user_id=42`, evaluated directly on parsed log rows via a Numba-JIT kernel.
   * Auto-pause on high-velocity bursts to maintain UI responsiveness.
+* **Table-Based Log Viewer:** A structured, columnar alternative to the text viewer—Time, Device, Level, Module, and Message as resizable columns. Shares the same live-tail / bounded-history fetch model and `key=value` filtering as the text viewer.
 * **Parsing & Extraction:**
   * Key-Value parser *(Highly optimized pure Python; Numba JIT backend planned)* for extracting structured data from raw text streams.
 * **Session Persistence:** Automatically remembers window positions and active log filter settings. Pick up exactly where you left off without re-configuring your workspace.

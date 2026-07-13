@@ -17,7 +17,7 @@ PLOT_INTERPOLATION_MODE_DISCRETE = 1
 
 
 @app_njit(inline="always")
-def extract_floats_from_bytes(buffer, offset, length, out_array):
+def nb_extract_floats_from_bytes(buffer, offset, length, out_array):
     """
     Scans a uint8 buffer directly for floats.
     Returns the number of floats successfully extracted.
@@ -35,12 +35,12 @@ def extract_floats_from_bytes(buffer, offset, length, out_array):
     for i in range(offset, offset + length):
         c = buffer[i]
 
-        is_digit = 48 <= c <= 57
+        nb_is_digit = 48 <= c <= 57
         is_dot = c == 46
         is_minus = c == 45
         is_plus = c == 43
 
-        if is_digit:
+        if nb_is_digit:
             if not in_number:
                 in_number = True
                 is_negative = False
@@ -114,7 +114,7 @@ def extract_floats_from_bytes(buffer, offset, length, out_array):
 
 
 @app_njit()
-def extract_telemetry_segment_to_end(
+def nb_extract_telemetry_segment_to_end(
     segment: LogBundle,
     target_module: int,
     start_seq: dtypes.SEQ_TYPE,
@@ -155,7 +155,7 @@ def extract_telemetry_segment_to_end(
         # Extract telemetry
         offset = msg_offsets[i]
         length = msg_lens[i]
-        extracted_count = extract_floats_from_bytes(msg_buffer, offset, length, temp_floats)
+        extracted_count = nb_extract_floats_from_bytes(msg_buffer, offset, length, temp_floats)
 
         if extracted_count >= num_channels:
             # Move pointer left and write
@@ -172,7 +172,7 @@ def extract_telemetry_segment_to_end(
 
 
 @app_njit()
-def peek_segment_channels_backwards(
+def nb_peek_segment_channels_backwards(
     seg: LogBundle, target_module: int, start_seq: dtypes.SEQ_TYPE, temp_floats: np.ndarray
 ):
     """
@@ -193,7 +193,7 @@ def peek_segment_channels_backwards(
             offset = offsets[i]
             length = lengths[i]
 
-            extracted_count = extract_floats_from_bytes(seg.buffer, offset, length, temp_floats)
+            extracted_count = nb_extract_floats_from_bytes(seg.buffer, offset, length, temp_floats)
 
             if extracted_count > 0:
                 # We found the latest valid telemetry entry
@@ -203,7 +203,7 @@ def peek_segment_channels_backwards(
 
 
 @app_njit()
-def count_module_occurrences_backwards(
+def nb_count_module_occurrences_backwards(
     seg: LogBundle, target_module: int, start_seq: dtypes.SEQ_TYPE, limit: int
 ) -> tuple[int, dtypes.SEQ_TYPE]:
     """
@@ -238,7 +238,7 @@ def nb_discrete_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count
     """
     Extracts discrete state changes for the overview plot.
     Iterates in reverse to prioritize the newest data.
-    Maintains signature compatibility with minmax_downsample_inplace.
+    Maintains signature compatibility with nb_minmax_downsample_inplace.
     """
     if count == 0:
         return 0, 0.0, 0.0
@@ -310,7 +310,7 @@ def nb_discrete_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count
 
 
 @app_njit()
-def minmax_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count, out_x, out_y, num_bins):
+def nb_minmax_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count, out_x, out_y, num_bins):
     if count == 0:
         return 0, 0.0, 0.0
 
@@ -399,7 +399,7 @@ def minmax_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count, out
 
 
 @app_njit()
-def slice_and_downsample_linear(
+def nb_slice_and_downsample_linear(
     buf: TelemetryBufferBundle,
     col_idx: int,
     out_x: np.ndarray,
@@ -448,7 +448,7 @@ def slice_and_downsample_linear(
         v_end += 1
 
     n_vis = v_end - v_start
-    return minmax_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx + v_start, n_vis, out_x, out_y, num_bins)
+    return nb_minmax_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx + v_start, n_vis, out_x, out_y, num_bins)
 
 
 @app_njit()
@@ -566,7 +566,7 @@ def nb_slice_and_downsample_discrete(
 
 
 @app_njit()
-def fast_insert_mirrored_buffer(
+def nb_fast_insert_mirrored_buffer(
     x_buf: np.ndarray,
     x_i64_buf: np.ndarray,
     y_buf: np.ndarray,
@@ -653,7 +653,7 @@ def nb_slice_and_downsample(
     if mode == PLOT_INTERPOLATION_MODE_DISCRETE:
         return nb_slice_and_downsample_discrete(buf, col_idx, out_x, out_y, t_min_s, t_max_s, num_bins)
 
-    return slice_and_downsample_linear(buf, col_idx, out_x, out_y, t_min_s, t_max_s, num_bins)
+    return nb_slice_and_downsample_linear(buf, col_idx, out_x, out_y, t_min_s, t_max_s, num_bins)
 
 
 @app_njit()
@@ -661,4 +661,4 @@ def nb_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count, out_x, 
     if mode == PLOT_INTERPOLATION_MODE_DISCRETE:
         return nb_discrete_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count, out_x, out_y, num_bins)
 
-    return minmax_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count, out_x, out_y, num_bins)
+    return nb_minmax_downsample_inplace(x_plot, x_ts, y_2d, col_idx, start_idx, count, out_x, out_y, num_bins)

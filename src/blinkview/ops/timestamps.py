@@ -14,7 +14,7 @@ from blinkview.ops.strings import nb_skip_whitespace
 
 
 @app_njit(inline="always")
-def parse_iso8601_to_ns(buffer, start, offset_sec):
+def nb_parse_iso8601_to_ns(buffer, start, offset_sec):
     """
     Parses 'YYYY-MM-DD HH:MM:SS.mmm' starting at 'start'.
     Returns UTC nanoseconds as int64.

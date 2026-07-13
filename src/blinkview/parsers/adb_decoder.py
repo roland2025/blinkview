@@ -17,7 +17,7 @@ from blinkview.core.types.parsing import (
     ParserID,
     UnifiedParserConfig,
 )
-from blinkview.ops.codec_adb_long import decode_adb_long_frame
+from blinkview.ops.codec_adb_long import nb_decode_adb_long_frame
 from blinkview.ops.constants import CHAR_LBRACKET, CHAR_LF, CHAR_ZERO
 from blinkview.parsers.frame_decoders import FrameDecoder, FrameDecoderFactory
 from blinkview.parsers.frame_parsers import (
@@ -29,7 +29,7 @@ from blinkview.parsers.frame_parsers import (
 from blinkview.utils.log_level import LogLevel
 
 
-@FrameDecoderFactory.register("decode_adb_long_frame")
+@FrameDecoderFactory.register("nb_decode_adb_long_frame")
 @override_property("frame_delimiter", default=CHAR_LF)
 @override_property("frame_length_maximum", default=32 * 1024)
 class AdbDecoder(FrameDecoder):
@@ -38,7 +38,7 @@ class AdbDecoder(FrameDecoder):
     def __init__(self):
         super().__init__()
         self.codec_id = CodecID.ADB_LONG
-        self.decode = decode_adb_long_frame
+        self.decode = nb_decode_adb_long_frame
 
 
 @FrameSectionParserFactory.register("module_name_adb_long_frame")

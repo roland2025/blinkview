@@ -17,9 +17,9 @@ from ..core.factory import BaseFactory
 from ..core.numpy_batch_manager import PooledLogBatch
 from ..core.system_context import SystemContext
 from ..ops.formatting import (
-    estimate_batch_capacity,
-    format_binary_batch,
-    format_log_row_batch,
+    nb_estimate_batch_capacity,
+    nb_format_binary_batch,
+    nb_format_log_row_batch,
 )
 from ..subscribers.subscriber import BaseSubscriber
 
@@ -251,11 +251,11 @@ class BinaryBatchProcessor(BaseBatchProcessor):
         bundle = batch.bundle
 
         # 1. Binary Overhead (Strict 16 bytes for the protocol header)
-        required = estimate_batch_capacity(bundle, 16)
+        required = nb_estimate_batch_capacity(bundle, 16)
         self._ensure_capacity(required)
 
         # 2. Binary Serialization Kernel
-        self._written_bytes = format_binary_batch(self._out_buffer, bundle)
+        self._written_bytes = nb_format_binary_batch(self._out_buffer, bundle)
 
 
 @BatchProcessorFactory.register("log_row")
@@ -277,11 +277,13 @@ class LogRowBatchProcessor(BaseBatchProcessor):
         bundle = batch.bundle
 
         # 1. Text Overhead (approx 120 bytes for TS, IDs, and delimiters)
-        required = estimate_batch_capacity(bundle, 120)
+        required = nb_estimate_batch_capacity(bundle, 120)
         self._ensure_capacity(required)
 
         # 2. Registry state (SoA bundle)
         registry = self.shared.id_registry.bundle()
 
         # 3. Text Serialization Kernel
-        self._written_bytes = format_log_row_batch(self._out_buffer, bundle, registry, self._sec_state, self._ts_cache)
+        self._written_bytes = nb_format_log_row_batch(
+            self._out_buffer, bundle, registry, self._sec_state, self._ts_cache
+        )

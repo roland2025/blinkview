@@ -15,9 +15,11 @@ from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.types.formatting import FormattingConfig
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.formatting import nb_segment_estimate_out_size, nb_segment_format
-from blinkview.ops.segments import filter_segment, nb_segment_filter_reversed
+from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
+from blinkview.ops.segments import nb_filter_segment, nb_segment_filter_reversed
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
+from blinkview.ui.widgets.kv_filter_line_edit import KvFilterLineEdit
 from blinkview.ui.widgets.log_highlighter import LogHighlighter
 from blinkview.ui.widgets.module_filter_sidebar import ModuleFilterSidebar
 from blinkview.ui.widgets.searchable_log_area import SearchableLogArea
@@ -76,6 +78,7 @@ QToolButton[filterEnabled="true"] {
         self.show_hidden = False
 
         self.ts_precision = 3
+        self.kv_filter_text = ""
 
         self._set_defaults()
 
@@ -195,6 +198,13 @@ QToolButton[filterEnabled="true"] {
 
         self.toolbar.addSeparator()
 
+        self.kv_filter_box = KvFilterLineEdit()
+        self.kv_filter_box.setMaximumWidth(240)
+        self.kv_filter_box.setText(self.kv_filter_text)
+        self.toolbar.addWidget(self.kv_filter_box)
+
+        self.toolbar.addSeparator()
+
         self.action_clear = QAction("Clear", self)
         self.action_clear.triggered.connect(self.clear_logs)
         self.toolbar.addAction(self.action_clear)
@@ -243,6 +253,8 @@ QToolButton[filterEnabled="true"] {
             log_level=self.log_level,
             filtered_module_children=self.filtered_module_children,
         )
+        self.log_filter.set_kv_filter(self.kv_filter_text)
+        self.kv_filter_box.filterTextCommitted.connect(self._apply_kv_filter_text)
 
         self.filter_sidebar = ModuleFilterSidebar(
             gui_context=self.gui_context, target_filter=self.log_filter, parent=self, show_hidden=self.show_hidden
@@ -358,6 +370,7 @@ QToolButton[filterEnabled="true"] {
 
         self.show_telemetry = view_state.get("show_telemetry", self.show_telemetry)
         self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
+        self.kv_filter_text = view_state.get("kv_filter_text", self.kv_filter_text)
         self.filter_sidebar_state = state.get("filter_sidebar", self.filter_sidebar_state)
 
         self.saved_sizes = view_state.get("splitter_sizes")
@@ -377,6 +390,7 @@ QToolButton[filterEnabled="true"] {
                 "ts_precision": self.ts_precision,
                 "show_module_filter": self.show_module_filter,
                 "show_telemetry": self.show_telemetry,
+                "kv_filter_text": self.log_filter.kv_filter_text,
                 "splitter_sizes": self.splitter.sizes(),
             },
             "log_level": self.log_filter.log_level.name_conf,
@@ -391,6 +405,10 @@ QToolButton[filterEnabled="true"] {
 
         self._effective_mask = None  # Invalidate cache
 
+        self._redraw_history()
+
+    def _apply_kv_filter_text(self, text):
+        self.log_filter.set_kv_filter(text)
         self._redraw_history()
 
     def set_log_index(self):
@@ -615,6 +633,8 @@ QToolButton[filterEnabled="true"] {
         highest_seq_seen_this_tick = self.latest_seq_seen
         first_segment = True
 
+        kv = f.bake_kv_arrays()
+
         # 4. Profile Segment Filtering & Formatting (REVERSED)
         t_segments_start = time.time_ns()
         with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
@@ -639,6 +659,13 @@ QToolButton[filterEnabled="true"] {
                     out_indices=indices.array,
                     max_matches=allowed_matches,
                     start_seq=self.latest_seq_seen,
+                    kv_cond_keys_buf=kv.cond_keys_buf,
+                    kv_cond_keys_off=kv.cond_keys_off,
+                    kv_cond_keys_len=kv.cond_keys_len,
+                    kv_cond_vals_buf=kv.cond_vals_buf,
+                    kv_cond_vals_off=kv.cond_vals_off,
+                    kv_cond_vals_len=kv.cond_vals_len,
+                    kv_num_conditions=kv.num_conditions,
                 )
 
                 if match_count > 0:
@@ -783,7 +810,7 @@ QToolButton[filterEnabled="true"] {
     @staticmethod
     @register_warmup
     def warmup(helper: "NumbaWarmupHelper"):
-        """Triggers compilation for log filtering/formatting kernels (filter_segment,
+        """Triggers compilation for log filtering/formatting kernels (nb_filter_segment,
         nb_segment_filter_reversed, nb_segment_estimate_out_size, nb_segment_format). Requires
         data in the pool, provided by NumbaWarmupHelper.exercise_logging_kernels()."""
 
@@ -804,7 +831,7 @@ QToolButton[filterEnabled="true"] {
 
         with helper.log_pool.get_snapshot() as segments, helper.log_pool.acquire_indices_buffer() as indices:
             for segment in segments:
-                match_count = filter_segment(
+                match_count = nb_filter_segment(
                     segment.bundle,
                     effective_mask=effective_mask,
                     out_indices=indices.array,
@@ -812,12 +839,20 @@ QToolButton[filterEnabled="true"] {
                     start_seq=s_seq,
                 )
 
+                kv = EMPTY_KV_CONDITIONS
                 _ = nb_segment_filter_reversed(
                     segment.bundle,
                     effective_mask=effective_mask,
                     out_indices=indices.array,
                     max_matches=1000,
                     start_seq=s_seq,
+                    kv_cond_keys_buf=kv.cond_keys_buf,
+                    kv_cond_keys_off=kv.cond_keys_off,
+                    kv_cond_keys_len=kv.cond_keys_len,
+                    kv_cond_vals_buf=kv.cond_vals_buf,
+                    kv_cond_vals_off=kv.cond_vals_off,
+                    kv_cond_vals_len=kv.cond_vals_len,
+                    kv_num_conditions=kv.num_conditions,
                 )
 
                 if match_count > 0:

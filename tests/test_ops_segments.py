@@ -2,7 +2,7 @@ import numpy as np
 
 from blinkview.core import dtypes
 from blinkview.core.types.log_batch import LogBundle
-from blinkview.ops.segments import filter_segment, nb_segment_extract_fields, nb_segment_filter_reversed
+from blinkview.ops.segments import nb_filter_segment, nb_segment_extract_fields, nb_segment_filter_reversed
 
 
 def make_bundle(timestamps, rx_timestamps, devices, levels, modules, sequences, messages):
@@ -281,7 +281,7 @@ def test_nb_segment_filter_reversed_end_seq_default_is_unbounded():
 
 
 def test_filter_segment_forward_ascending_matches_from_start_seq():
-    """filter_segment is the forward (ascending) counterpart used for 'history after an anchor'."""
+    """nb_filter_segment is the forward (ascending) counterpart used for 'history after an anchor'."""
     bundle = make_bundle(
         timestamps=[1, 2, 3, 4, 5],
         rx_timestamps=[1, 2, 3, 4, 5],
@@ -296,7 +296,9 @@ def test_filter_segment_forward_ascending_matches_from_start_seq():
     indices = np.zeros(5, dtype=np.int64)
 
     # start_seq=2 -> matches seq > 2, i.e. rows c, d, e (indices 2, 3, 4), ascending.
-    match_count = filter_segment(bundle, effective_mask=effective_mask, out_indices=indices, max_matches=5, start_seq=2)
+    match_count = nb_filter_segment(
+        bundle, effective_mask=effective_mask, out_indices=indices, max_matches=5, start_seq=2
+    )
 
     assert match_count == 3
     assert list(indices[:match_count]) == [2, 3, 4]

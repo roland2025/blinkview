@@ -103,9 +103,9 @@ class FrameDecoder(FrameDecoderBase):
     frame_errors_hidden: bool
 
     def __init__(self):
-        from blinkview.ops.codecs import parser_noop
+        from blinkview.ops.codecs import nb_parser_noop
 
-        self.decode = parser_noop
+        self.decode = nb_parser_noop
         self.codec_id = CodecID.NONE
         self._bundle = None
 
@@ -161,7 +161,7 @@ class CobsDecoder(FrameDecoder):
         self.codec_id = CodecID.COBS
 
 
-@FrameDecoderFactory.register("decode_slip_frame")
+@FrameDecoderFactory.register("nb_decode_slip_frame")
 class SlipDecoder(FrameDecoder):
     """Frame processor for SLIP-encoded frames"""
 

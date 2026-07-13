@@ -41,8 +41,8 @@ from blinkview.core.types.parsing import (
     pipeline_bundle_type,
 )
 from blinkview.ops.constants import EMPTY_STATE
-from blinkview.ops.generic import SkipWordsConfig, skip_words_parser
-from blinkview.ops.modules import parse_fixed_width_name, parse_module_tags_statemachine
+from blinkview.ops.generic import SkipWordsConfig, nb_skip_words_parser
+from blinkview.ops.modules import nb_parse_fixed_width_name, nb_parse_module_tags_statemachine
 from blinkview.utils.log_level import LogLevel
 from blinkview.utils.utc_offset import get_local_utc_offset_seconds
 

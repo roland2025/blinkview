@@ -11,7 +11,7 @@ from blinkview.ops.strings import nb_skip_whitespace
 
 
 @app_njit(inline="always")
-def parse_log_level(buffer, start_cursor, end_cursor, out_b, out_idx, state, unified_config: UnifiedParserConfig):
+def nb_parse_log_level(buffer, start_cursor, end_cursor, out_b, out_idx, state, unified_config: UnifiedParserConfig):
     """
     Optimized parser leveraging null-terminated reference buffer and first-byte short-circuiting.
     """

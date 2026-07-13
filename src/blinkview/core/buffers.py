@@ -60,9 +60,9 @@ class ModuleBuffer:
         if batch.times.size == 0:
             return False
 
-        from blinkview.ops.telemetry import fast_insert_mirrored_buffer
+        from blinkview.ops.telemetry import nb_fast_insert_mirrored_buffer
 
-        new_head, new_size = fast_insert_mirrored_buffer(
+        new_head, new_size = nb_fast_insert_mirrored_buffer(
             self.x_data,
             self.x_data_int64,
             self.y_data,

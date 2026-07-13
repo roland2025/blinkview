@@ -31,6 +31,7 @@ def test_initial_import_baseline():
 
 import time
 
+
 def test_module_registration_density(pool):
     """
     Verify that registering 10,000 modules doesn't exceed a specific memory budget,
@@ -47,9 +48,9 @@ def test_module_registration_density(pool):
     device.get_module("test_warmup")
 
     modules = [f"mod_{i}" for i in range(total_modules)]
-    
+
     # Timing variables
-    min_time_ns = float('inf')
+    min_time_ns = float("inf")
     max_time_ns = 0
     total_time_ns = 0
 
@@ -57,10 +58,10 @@ def test_module_registration_density(pool):
         t0 = time.perf_counter_ns()
         device.get_module(m_name)
         t1 = time.perf_counter_ns()
-        
+
         delta_ns = t1 - t0
         total_time_ns += delta_ns
-        
+
         if delta_ns < min_time_ns:
             min_time_ns = delta_ns
         if delta_ns > max_time_ns:
@@ -70,7 +71,7 @@ def test_module_registration_density(pool):
     final = get_uss_mb()
     delta_mb = final - baseline
     avg_cost_kb = (delta_mb * 1024) / total_modules
-    
+
     # Convert nanoseconds to milliseconds (1 ms = 1,000,000 ns)
     avg_time_ms = (total_time_ns / total_modules) / 1_000_000
     min_time_ms = min_time_ns / 1_000_000
@@ -79,7 +80,7 @@ def test_module_registration_density(pool):
     print(f"\n[Memory Report] Total Modules: {total_modules}")
     print(f"Total Delta: {delta_mb:.2f} MB")
     print(f"Avg Cost per Module: {avg_cost_kb:.2f} KB")
-    
+
     print(f"\n[Performance Report]")
     print(f"Min Add Time: {min_time_ms:.4f} ms")
     print(f"Max Add Time: {max_time_ms:.4f} ms")
@@ -87,7 +88,7 @@ def test_module_registration_density(pool):
 
     # 4. Assertions
     assert avg_cost_kb < 0.69, f"Module memory cost is too high: {avg_cost_kb:.2f} KB/obj"
-    
+
     # Timing assertions based on your targets
     assert avg_time_ms < 0.03, f"Average insertion time too slow: {avg_time_ms:.4f} ms"
 

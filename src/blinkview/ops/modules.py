@@ -16,18 +16,18 @@ from blinkview.ops.constants import (
     CHAR_TAB,
     CHAR_UNDERSCORE,
 )
-from blinkview.ops.discovery import resolve_module_id
+from blinkview.ops.discovery import nb_resolve_module_id
 from blinkview.ops.strings import (
-    is_alpha,
-    is_digit,
-    is_whitespace,
+    nb_is_alpha,
+    nb_is_digit,
+    nb_is_whitespace,
     nb_skip_whitespace,
-    to_lower,
+    nb_to_lower,
 )
 
 
 @app_njit()
-def normalize_name_inplace(buffer, start_idx, length):
+def nb_normalize_name_inplace(buffer, start_idx, length):
     """
     Converts A-Z to lowercase.
     Allows a-z, 0-9, and '.' (dot).
@@ -41,9 +41,9 @@ def normalize_name_inplace(buffer, start_idx, length):
     for i in range(length):
         val = buffer[start_idx + i]
 
-        val = to_lower(val)
+        val = nb_to_lower(val)
 
-        is_alphanum = is_alpha(val) or is_digit(val)
+        is_alphanum = nb_is_alpha(val) or nb_is_digit(val)
         is_dot = val == CHAR_DOT
 
         if is_alphanum:
@@ -76,7 +76,7 @@ def normalize_name_inplace(buffer, start_idx, length):
 
 
 @app_njit(inline="always")
-def parse_fixed_width_name(
+def nb_parse_fixed_width_name(
     buffer,
     start_cursor,
     end_cursor,  # Inputs
@@ -128,12 +128,12 @@ def parse_fixed_width_name(
             start_cursor : start_cursor + logical_len
         ]
 
-        squashed_len = int(normalize_name_inplace(tracker.name_bytes, current_byte_write, logical_len))
+        squashed_len = int(nb_normalize_name_inplace(tracker.name_bytes, current_byte_write, logical_len))
 
         if squashed_len > 0:
             tracker.name_bytes[current_byte_write + squashed_len] = 0
             # Config provides the map, Tracker provides the state
-            mod_id = resolve_module_id(
+            mod_id = nb_resolve_module_id(
                 tracker.name_bytes, current_byte_write, squashed_len, config.string_table, tracker
             )
             if mod_id == MODULE_ID_FULL:
@@ -146,7 +146,7 @@ def parse_fixed_width_name(
 
 
 @app_njit(inline="always")
-def parse_module_tags_statemachine(
+def nb_parse_module_tags_statemachine(
     buffer,
     cursor,
     end_cursor,  # Inputs
@@ -170,7 +170,7 @@ def parse_module_tags_statemachine(
         temp_curr = cursor
 
         # 1. Skip any leading whitespace leading up to the tag
-        while temp_curr < end_cursor and is_whitespace(buffer[temp_curr]):
+        while temp_curr < end_cursor and nb_is_whitespace(buffer[temp_curr]):
             temp_curr += 1
 
         # 2. Check if the remaining buffer is even long enough to hold the prefix
@@ -203,7 +203,7 @@ def parse_module_tags_statemachine(
 
     while curr < end_cursor:
         # 1. Skip whitespace using utility
-        while curr < end_cursor and is_whitespace(buffer[curr]):
+        while curr < end_cursor and nb_is_whitespace(buffer[curr]):
             curr += 1
 
         if curr >= end_cursor:
@@ -217,7 +217,7 @@ def parse_module_tags_statemachine(
                 saw_dot = True
 
                 # Consume any trailing whitespace after the dots
-                while curr < end_cursor and is_whitespace(buffer[curr]):
+                while curr < end_cursor and nb_is_whitespace(buffer[curr]):
                     curr += 1
 
                 if curr >= end_cursor:
@@ -268,13 +268,13 @@ def parse_module_tags_statemachine(
                 char = buffer[scan_ptr]
 
                 # Break on whitespace boundaries
-                if is_whitespace(char):
+                if nb_is_whitespace(char):
                     break
 
                 if char == CHAR_COLON:
                     # LOOKAHEAD: A colon only terminates a tag if it's the last character.
                     # If the next character is not whitespace (or EOF), the colon is INSIDE the word.
-                    if scan_ptr + 1 < end_cursor and not is_whitespace(buffer[scan_ptr + 1]):
+                    if scan_ptr + 1 < end_cursor and not nb_is_whitespace(buffer[scan_ptr + 1]):
                         valid_word_tag = False
                     break
 
@@ -328,12 +328,12 @@ def parse_module_tags_statemachine(
         return -1
 
     logical_len = write_ptr - write_start
-    final_len = int(normalize_name_inplace(tracker.name_bytes, write_start, logical_len))
+    final_len = int(nb_normalize_name_inplace(tracker.name_bytes, write_start, logical_len))
 
     if final_len <= 0:
         return -1
 
-    mod_id = resolve_module_id(tracker.name_bytes, write_start, final_len, unified_config.string_table, tracker)
+    mod_id = nb_resolve_module_id(tracker.name_bytes, write_start, final_len, unified_config.string_table, tracker)
     if mod_id == MODULE_ID_FULL:
         return -1
 

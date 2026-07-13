@@ -318,6 +318,29 @@ class TestLiveMode:
         assert model.data(model.index(0, LogTableCol.MESSAGE)) == "first"
         assert model.data(model.index(2, LogTableCol.MESSAGE)) == "third"
 
+    def test_fetch_live_honors_kv_filter(self, model, gui_context):
+        device = gui_context.id_registry.get_device("esp32")
+        module = device.get_module("wifi")
+
+        bundle = make_bundle(
+            timestamps=[1, 2, 3],
+            rx_timestamps=[1, 2, 3],
+            devices=[device.id] * 3,
+            levels=[0, 0, 0],
+            modules=[module.id] * 3,
+            sequences=[1, 2, 3],
+            messages=["status=ok id=1", "status=fail id=2", "status=ok id=3"],
+        )
+        gui_context.registry.central.log_pool = FakeLogPool(latest_seq=3, segments=[FakeSegment(bundle)])
+
+        model.log_filter.set_kv_filter("status=ok")
+        model.prev_apply = 0
+        model.apply_updates()
+
+        assert model.row_count == 2
+        assert model.data(model.index(0, LogTableCol.MESSAGE)) == "status=ok id=1"
+        assert model.data(model.index(1, LogTableCol.MESSAGE)) == "status=ok id=3"
+
 
 class TestHistoryMode:
     def _make_pool(self, gui_context, device, module, count=20):
@@ -359,6 +382,30 @@ class TestHistoryMode:
         assert model.mode == "history"
         # Nothing exists before sequence 1, so the window should start exactly at the anchor.
         assert model.seq_for_row(0) == 1
+
+    def test_history_mode_honors_kv_filter_in_both_before_and_after_scans(self, model, gui_context):
+        device = gui_context.id_registry.get_device("esp32")
+        module = device.get_module("wifi")
+
+        messages = [f"status={'ok' if i % 2 == 0 else 'fail'} id={i}" for i in range(20)]
+        bundle = make_bundle(
+            timestamps=list(range(20)),
+            rx_timestamps=list(range(20)),
+            devices=[device.id] * 20,
+            levels=[0] * 20,
+            modules=[module.id] * 20,
+            sequences=list(range(1, 21)),
+            messages=messages,
+        )
+        gui_context.registry.central.log_pool = FakeLogPool(latest_seq=20, segments=[FakeSegment(bundle)])
+
+        model.log_filter.set_kv_filter("status=ok")
+        model.enter_history_mode(anchor_seq=10)
+
+        assert model.mode == "history"
+        assert model.row_count == 10  # only the even-indexed (status=ok) rows survive
+        for row in range(model.row_count):
+            assert "status=ok" in model.data(model.index(row, LogTableCol.MESSAGE))
 
     def test_enter_live_mode_resets_anchor_and_refetches(self, model, gui_context):
         device = gui_context.id_registry.get_device("esp32")

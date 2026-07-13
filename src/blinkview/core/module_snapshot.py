@@ -38,7 +38,7 @@ class ModuleSnapshotParams(NamedTuple):
 
 
 @app_njit()
-def _copy_snapshot_state(
+def nb_copy_snapshot_state(
     old_b: ModuleSnapshotParams,
     new_b: ModuleSnapshotParams,
 ):
@@ -62,7 +62,7 @@ def _copy_snapshot_state(
 
 
 @app_njit()
-def _update_master_arrays_reverse(
+def nb_update_master_arrays_reverse(
     seg_b: LogBundle,
     snap_b: ModuleSnapshotParams,
     module_count: int,
@@ -292,7 +292,7 @@ class LatestModuleValueTracker:
     @register_warmup
     def warmup(helper: "NumbaWarmupHelper"):
         """Builds the helper's dummy tracker and triggers compilation for Module Snapshot
-        tracking and state copying (_copy_snapshot_state and _update_master_arrays_reverse).
+        tracking and state copying (nb_copy_snapshot_state and nb_update_master_arrays_reverse).
         Requires data in the pool, provided by NumbaWarmupHelper.exercise_logging_kernels().
         Assigns the tracker onto helper.tracker so other warmup callbacks (e.g.
         TelemetryTableModel.warmup) can reuse it."""
@@ -345,7 +345,7 @@ class LatestModuleValueTracker:
             new_b = new_snap.bundle()
 
             # 3. Copy state from the old snapshot via Numba
-            _copy_snapshot_state(old_b, new_b)
+            nb_copy_snapshot_state(old_b, new_b)
 
             # Use local 'lks' as the baseline for the new burst
             new_high_water = lks
@@ -367,7 +367,7 @@ class LatestModuleValueTracker:
                     seg_b = segment.bundle
 
                     # Kernel uses the localized baseline
-                    hit_boundary = _update_master_arrays_reverse(
+                    hit_boundary = nb_update_master_arrays_reverse(
                         seg_b,
                         new_b,
                         current_count,

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from blinkview.core import dtypes
-from blinkview.ops.formatting import update_iso8601_timestamp_cache
+from blinkview.ops.formatting import nb_update_iso8601_timestamp_cache
 
 # Ensure character constants are defined if they aren't globally available
 # CHAR_ZERO = 48  # ord('0')
@@ -55,7 +55,7 @@ def test_update_iso8601_timestamp_cache_known_values(total_sec, expected_iso):
     ts_cache = np.zeros(19, dtype=dtypes.BYTE)
 
     # Act
-    update_iso8601_timestamp_cache(total_sec, ts_cache)
+    nb_update_iso8601_timestamp_cache(total_sec, ts_cache)
     result_str = decode_cache(ts_cache)
 
     # Assert
@@ -77,7 +77,7 @@ def test_update_iso8601_timestamp_cache_fuzzing():
         expected_iso = datetime.fromtimestamp(total_sec, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
         # Run custom algorithm
-        update_iso8601_timestamp_cache(total_sec, ts_cache)
+        nb_update_iso8601_timestamp_cache(total_sec, ts_cache)
         result_str = decode_cache(ts_cache)
 
         assert result_str == expected_iso, f"Failed at epoch second: {total_sec}"
