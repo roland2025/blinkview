@@ -66,7 +66,7 @@ class PluginManager:
             self.logger.info(f"Successfully loaded plugin: '{module_path}'")
 
         except ImportError as e:
-            self.logger.error(f"Plugin Load Error.", e)
+            self.logger.error("Plugin Load Error.", e)
 
         except Exception as e:
             self.logger.error(f"Unexpected error while loading plugin '{module_path}'.", e)

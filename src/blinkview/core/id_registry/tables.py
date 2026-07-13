@@ -12,7 +12,6 @@ from blinkview.core import dtypes
 from blinkview.core.id_registry.types import StringTableParams
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.empty import EMPTY_ID, EMPTY_INDEX
-from blinkview.core.types.parsing import UnifiedParserConfig
 from blinkview.utils.fnv1a_64 import fnv1a_64_fast
 
 

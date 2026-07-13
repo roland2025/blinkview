@@ -78,7 +78,7 @@ class GitHubUpdate:
 
             return cls._is_newer(latest_v), latest_v
 
-        except Exception as e:
+        except Exception:
             return False, check_data.get("latest_version")
 
     @staticmethod

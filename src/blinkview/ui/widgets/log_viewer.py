@@ -13,8 +13,9 @@ from qtpy.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLay
 from blinkview.core import dtypes
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.types.formatting import FormattingConfig
+from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.formatting import nb_segment_estimate_out_size, nb_segment_format
-from blinkview.ops.segments import nb_segment_filter_reversed
+from blinkview.ops.segments import filter_segment, nb_segment_filter_reversed
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
 from blinkview.ui.widgets.log_highlighter import LogHighlighter
@@ -778,3 +779,60 @@ QToolButton[filterEnabled="true"] {
         if self.ts_precision != precision:
             self.ts_precision = precision
             self._redraw_history()
+
+    @staticmethod
+    @register_warmup
+    def warmup(helper: "NumbaWarmupHelper"):
+        """Triggers compilation for log filtering/formatting kernels (filter_segment,
+        nb_segment_filter_reversed, nb_segment_estimate_out_size, nb_segment_format). Requires
+        data in the pool, provided by NumbaWarmupHelper.exercise_logging_kernels()."""
+
+        print("[Warmup] LogViewerWidget ...")
+
+        s_seq = dtypes.SEQ_TYPE(0)  # uint64
+
+        # Build the Unified Effective Mask for Warmup
+        mod_count = helper.registry.module_count()
+        safe_capacity = max(10, mod_count)  # Ensure it's large enough for dummy IDs
+
+        effective_mask = np.full(safe_capacity, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
+
+        effective_mask[helper.floats_mod.id] = LogLevel.ALL.value
+        effective_mask[helper.warmup_mod.id] = LogLevel.ALL.value
+
+        format_cfg = FormattingConfig(True, True, True, True)
+
+        with helper.log_pool.get_snapshot() as segments, helper.log_pool.acquire_indices_buffer() as indices:
+            for segment in segments:
+                match_count = filter_segment(
+                    segment.bundle,
+                    effective_mask=effective_mask,
+                    out_indices=indices.array,
+                    max_matches=1000,
+                    start_seq=s_seq,
+                )
+
+                _ = nb_segment_filter_reversed(
+                    segment.bundle,
+                    effective_mask=effective_mask,
+                    out_indices=indices.array,
+                    max_matches=1000,
+                    start_seq=s_seq,
+                )
+
+                if match_count > 0:
+                    req_bytes = nb_segment_estimate_out_size(
+                        indices.array, match_count, segment.bundle, helper.registry.bundle(), format_cfg
+                    )
+                    with helper.array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
+                        nb_segment_format(
+                            handle.array,
+                            indices.array,
+                            match_count,
+                            segment.bundle,
+                            helper.registry.bundle(),
+                            format_cfg,
+                            0,
+                        )
+
+        print("[Warmup] LogViewerWidget ... done")

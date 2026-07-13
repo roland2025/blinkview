@@ -153,7 +153,7 @@ def handle_profile_args(args):
         except:
             active = "default"
 
-        print(f"--- Available Profiles ---")
+        print("--- Available Profiles ---")
         for p in sorted(profiles):
             indicator = "*" if p == active else " "
             print(f"{indicator} {p}")

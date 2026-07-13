@@ -4,29 +4,15 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+
 def setup_config_parser(parser):
     parser.add_argument(
-        "--global",
-        dest="global_scope",
-        action="store_true",
-        help="Target global (~/.blinkview) settings"
+        "--global", dest="global_scope", action="store_true", help="Target global (~/.blinkview) settings"
     )
-    parser.add_argument(
-        "--list",
-        action="store_true",
-        help="List all variables set in config file"
-    )
+    parser.add_argument("--list", action="store_true", help="List all variables set in config file")
 
-    parser.add_argument(
-        "--keys",
-        action="store_true",
-        help="List all valid config keys for the current scope"
-    )
-    parser.add_argument(
-        "--unset",
-        action="store_true",
-        help="Remove the key from the config"
-    )
+    parser.add_argument("--keys", action="store_true", help="List all valid config keys for the current scope")
+    parser.add_argument("--unset", action="store_true", help="Remove the key from the config")
     # Changed to optional so --list works without a key
     parser.add_argument("key", nargs="?", help="The setting key (e.g., 'logs', 'name')")
     parser.add_argument("value", nargs="?", help="The value to set (leave empty to GET)")
@@ -40,16 +26,19 @@ def handle_config(args):
     # Determine Scope
     if args.global_scope:
         from blinkview.utils.global_settings import GlobalSettings
+
         settings = GlobalSettings()
         scope_name = "global"
     else:
         from blinkview.utils.project_settings import ProjectSettings
+
         settings = ProjectSettings()
         if not settings._path:
             # If we aren't in a project and didn't specify --global,
             # we check if they just wanted the global list anyway
             if args.list:
                 from blinkview.utils.global_settings import GlobalSettings
+
                 settings = GlobalSettings()
                 scope_name = "global (fallback)"
             else:

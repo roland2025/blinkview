@@ -8,10 +8,7 @@ from time import perf_counter
 
 
 class LogVelocityTracker:
-    def __init__(self,
-                 limit_per_sec=1000,
-                 burst_limit_seconds=3,
-                 instant_cap=5000):
+    def __init__(self, limit_per_sec=1000, burst_limit_seconds=3, instant_cap=5000):
         """
         :param limit_per_sec: The sustained "safe" velocity.
         :param burst_limit_seconds: How many seconds we allow velocity > limit_per_sec.

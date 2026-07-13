@@ -111,6 +111,7 @@ def nb_segment_filter_reversed(
     out_indices,
     max_matches,
     start_seq=SEQ_NONE,
+    end_seq=SEQ_NONE,
     start_ts=TS_UNSPECIFIED,
     end_ts=TS_UNSPECIFIED,
 ):
@@ -128,6 +129,13 @@ def nb_segment_filter_reversed(
         idx = fast_find_first_gt(seqs, count, start_seq)
         if idx > loop_start:
             loop_start = idx
+
+    # end_seq is an INCLUSIVE upper bound (only rows with seq <= end_seq are eligible) - used to
+    # anchor a "history before X" backward scan that must not include rows at/after the anchor.
+    if end_seq != SEQ_NONE:
+        idx = fast_find_first_gt(seqs, count, end_seq)
+        if idx < loop_end:
+            loop_end = idx
 
     if start_ts != TS_UNSPECIFIED:
         idx = fast_find_first_ge(timestamps, count, start_ts)
@@ -165,6 +173,64 @@ def nb_segment_filter_reversed(
         right -= 1
 
     return match_count
+
+
+@app_njit()
+def nb_segment_extract_fields(
+    segment,  # LogBundle
+    indices: np.ndarray,
+    count,
+    out_bundle,  # LogBundle - written fixed-stride, row * max_msg_bytes, not via msg_cursor
+    out_row_offset: int,
+    max_msg_bytes: int,
+) -> int:
+    """
+    Copies `count` rows referenced by `indices` (as produced by nb_segment_filter_reversed)
+    out of `segment` into `out_bundle`'s flat structured columns, starting at `out_row_offset`.
+    Messages longer than `max_msg_bytes` are truncated. Returns the number of rows written.
+    """
+    s_ts = segment.timestamps
+    s_rx_ts = segment.rx_timestamps
+    s_devs = segment.devices
+    s_lvls = segment.levels
+    s_mods = segment.modules
+    s_seqs = segment.sequences
+    s_offs = segment.offsets
+    s_lens = segment.lengths
+    s_buf = segment.buffer
+
+    out_ts = out_bundle.timestamps
+    out_rx_ts = out_bundle.rx_timestamps
+    out_dev = out_bundle.devices
+    out_lvl = out_bundle.levels
+    out_mod = out_bundle.modules
+    out_seq = out_bundle.sequences
+    out_offs = out_bundle.offsets
+    out_lens = out_bundle.lengths
+    out_buf = out_bundle.buffer
+
+    for i in range(count):
+        src_idx = indices[i]
+        row = out_row_offset + i
+
+        out_ts[row] = s_ts[src_idx]
+        out_rx_ts[row] = s_rx_ts[src_idx]
+        out_dev[row] = s_devs[src_idx]
+        out_lvl[row] = s_lvls[src_idx]
+        out_mod[row] = s_mods[src_idx]
+        out_seq[row] = s_seqs[src_idx]
+
+        msg_len = s_lens[src_idx]
+        copy_len = msg_len if msg_len < max_msg_bytes else max_msg_bytes
+
+        src_off = s_offs[src_idx]
+        dst_off = row * max_msg_bytes
+        out_offs[row] = dst_off
+        out_lens[row] = copy_len
+        for b in range(copy_len):
+            out_buf[dst_off + b] = s_buf[src_off + b]
+
+    return count
 
 
 @app_njit()

@@ -23,7 +23,7 @@ def check_for_updates_silently(gui_context, parent=None):
 
     def _bg_worker():
         try:
-            print(f"checking for updates...")
+            print("checking for updates...")
             updater.fetch(force=False)
             latest = updater.get_latest_version()
 

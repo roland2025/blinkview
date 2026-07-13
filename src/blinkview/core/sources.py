@@ -22,7 +22,7 @@ class SourcesManager:
 
         self.needs_delayed_init = True  # Flag to indicate if delayed initialization is needed
 
-        print(f"[SourcesManager] __init__ done")
+        print("[SourcesManager] __init__ done")
 
     def apply_config(self, config: dict) -> bool:
         print(f"[SourcesManager] Applying config: {config}")

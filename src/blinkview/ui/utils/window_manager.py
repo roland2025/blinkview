@@ -51,10 +51,7 @@ def restore_window_geometry_safe(window, geo_dict: dict):
     if not geo_dict:
         return
 
-    from base64 import b64decode
-
-    from qtpy.QtCore import QByteArray, QRect
-    from qtpy.QtGui import QGuiApplication
+    from qtpy.QtCore import QRect
 
     window._last_saved_geo = geo_dict
 
@@ -83,7 +80,7 @@ def restore_window_geometry_safe(window, geo_dict: dict):
         reattach_func = getattr(window, "reattach_to_main", None)
 
         if reattach_func and callable(reattach_func):
-            print(f"🪟 Off-screen window detected. Re-attaching...")
+            print("🪟 Off-screen window detected. Re-attaching...")
             # Use a timer to ensure we don't conflict with the current geometry event
             QTimer.singleShot(0, reattach_func)
             return

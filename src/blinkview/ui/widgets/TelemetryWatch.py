@@ -1672,6 +1672,7 @@ class TelemetryWatch(QWidget):
 
             actions = [
                 (f"View Logs{suffix}", "view_logs"),
+                (f"View Logs (Table){suffix}", "view_logs_table"),
                 (f"View Graph{suffix}", "view_graph"),
                 (None, None),
                 ("Copy Module Name(s)", "copy_names"),
@@ -1699,7 +1700,7 @@ class TelemetryWatch(QWidget):
             return
 
         match action_id:
-            case "view_logs":
+            case "view_logs" | "view_logs_table":
                 title = f"Logs: {entry.label}"
 
                 # Build an explicit filter dictionary for the sidebar
@@ -1716,9 +1717,11 @@ class TelemetryWatch(QWidget):
                 for mod in entry.modules:
                     module_filters[mod.name_with_device()] = {"enabled": True, "level": "ALL"}
 
-                # Open the LogViewerWidget with surgical filtering enabled
+                widget_cls = "LogTableViewerWidget" if action_id == "view_logs_table" else "LogViewerWidget"
+
+                # Open the log viewer (text or table) with surgical filtering enabled
                 self.gui_context.create_widget(
-                    "LogViewerWidget",
+                    widget_cls,
                     title,
                     as_window=True,
                     params={

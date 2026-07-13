@@ -17,7 +17,7 @@ def generate_id(prefix: str = "", prev: Optional[List[str]] = None) -> str:
         random_hex = token_hex(4)
 
         if prefix:
-            clean_prefix = prefix if prefix.endswith('_') else f"{prefix}_"
+            clean_prefix = prefix if prefix.endswith("_") else f"{prefix}_"
             new_id = f"{clean_prefix}{random_hex}"
         else:
             new_id = random_hex

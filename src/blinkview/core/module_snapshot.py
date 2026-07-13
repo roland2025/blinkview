@@ -13,10 +13,12 @@ from blinkview.core import dtypes
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.log_batch import LogBundle
+from blinkview.core.warmup_registry import register_warmup
 
 if TYPE_CHECKING:
     from blinkview.core.id_registry.tables import IndexedStringTable
     from blinkview.core.numpy_log import CircularLogPool
+    from blinkview.core.warmup import NumbaWarmupHelper
 
 # Constant defining the maximum payload allocation per module in bytes
 MAX_MSG_BYTES = 512
@@ -285,6 +287,29 @@ class LatestModuleValueTracker:
 
         self._current_snapshot = self._allocate_snapshot(initial_capacity, m_bundle.count, 0)
         self._current_snapshot.bundle().sequence_ids[:] = 0
+
+    @staticmethod
+    @register_warmup
+    def warmup(helper: "NumbaWarmupHelper"):
+        """Builds the helper's dummy tracker and triggers compilation for Module Snapshot
+        tracking and state copying (_copy_snapshot_state and _update_master_arrays_reverse).
+        Requires data in the pool, provided by NumbaWarmupHelper.exercise_logging_kernels().
+        Assigns the tracker onto helper.tracker so other warmup callbacks (e.g.
+        TelemetryTableModel.warmup) can reuse it."""
+
+        print("[Warmup] LatestModuleValueTracker ...")
+
+        tracker = LatestModuleValueTracker(
+            helper.log_pool, helper.registry.modules_table, helper.array_pool, helper.time_ns
+        )
+        tracker.update()
+
+        # Optionally exercise the string decoding/iterator logic
+        with tracker.get_snapshot() as snap:
+            for _ in snap:
+                break
+
+        print("[Warmup] LatestModuleValueTracker ... done")
 
     def _allocate_snapshot(self, capacity: int, count: int, last_known_seq: int) -> ModuleSnapshot:
         """Acquires pool arrays and constructs a snapshot."""

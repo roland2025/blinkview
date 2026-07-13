@@ -36,10 +36,18 @@ class PipelineListItemWidget(BaseListItemWidget):
         self.gui_context.create_widget("LogViewerWidget", f"Logs: {name}", params={"allowed_device": name})
 
     def _show_log_context_menu(self, pos):
+        name = self.config_node.get("name")
+        if not name:
+            return
+
         context_menu = QMenu(self)
-        action_new_window = QAction("Open in new window", self)
-        action_new_window.triggered.connect(lambda: print("New window logic here"))
-        context_menu.addAction(action_new_window)
+        action_table_view = QAction("Open as Table", self)
+        action_table_view.triggered.connect(
+            lambda: self.gui_context.create_widget(
+                "LogTableViewerWidget", f"Logs: {name}", params={"allowed_device": name}
+            )
+        )
+        context_menu.addAction(action_table_view)
         context_menu.exec(self.btn_log.mapToGlobal(pos))
 
 

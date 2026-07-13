@@ -88,7 +88,7 @@ class ModuleGenParser(BaseParser):
 
                 # Generate the dynamic log line appending the counter
                 # dynamic_log_line = f"status=ok emulation=true counter={module_counter}".encode()
-                dynamic_log_line = f"status=ok emulation=true".encode()
+                dynamic_log_line = "status=ok emulation=true".encode()
                 log_line_len = _len(dynamic_log_line)
 
                 # Capacity management before writing (using the dynamic length)

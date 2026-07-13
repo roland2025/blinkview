@@ -15,9 +15,11 @@ from blinkview.core.buffers import ModuleBuffer
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.numpy_log import (
     allocate_discovery_workspace,
+    allocate_telemetry_workspace,
     fetch_telemetry_arrays,
     get_telemetry_anchor,
 )
+from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.telemetry import (
     PLOT_INTERPOLATION_MODE_DISCRETE,
     PLOT_INTERPOLATION_MODE_LINEAR,
@@ -27,6 +29,8 @@ from blinkview.ops.telemetry import (
 
 if TYPE_CHECKING:
     import pyqtgraph as pg
+
+    from blinkview.core.warmup import NumbaWarmupHelper
 
 from qtpy.QtGui import QAction, QColor
 from qtpy.QtWidgets import QComboBox, QLabel, QMenu, QSizePolicy, QToolBar, QVBoxLayout, QWidget
@@ -1183,3 +1187,74 @@ class TelemetryPlotter(QWidget):
     def has_name_collisions(self):
         all_names = [s.name for s in self.series_list]
         return len(all_names) != len(set(all_names))
+
+    @staticmethod
+    @register_warmup
+    def warmup(helper: "NumbaWarmupHelper"):
+        """Triggers compilation for telemetry discovery and extraction (nb_slice_and_downsample,
+        nb_downsample_inplace). Requires data in the pool, provided by
+        NumbaWarmupHelper.exercise_logging_kernels()."""
+
+        print("[Warmup] TelemetryPlotter ...")
+
+        discovery_ws = allocate_discovery_workspace()
+        warmup_max_points = 50000
+
+        # Trigger: Anchor discovery
+        start_seq, num_channels = get_telemetry_anchor(helper.log_pool, helper.floats_mod.id, SEQ_NONE, discovery_ws)
+        warmup_channels_total = num_channels if num_channels > 0 else 1
+        for warmup_channels in range(warmup_channels_total):
+            temp_floats = allocate_telemetry_workspace(warmup_channels)
+            module_buffer = ModuleBuffer(max_points=1024, num_channels=warmup_channels)
+
+            start_seq = dtypes.SEQ_TYPE(start_seq)
+
+            if warmup_channels > 0:
+                with fetch_telemetry_arrays(
+                    helper.array_pool,
+                    helper.log_pool,
+                    helper.floats_mod.id,
+                    start_seq,
+                    warmup_channels,
+                    temp_floats,
+                    warmup_max_points,
+                ) as batch:
+                    module_buffer.update(batch)
+
+            buf_bundle = module_buffer.bundle()
+
+            t_now = helper.time_ns() / 1e9
+            t_min, t_max = t_now - 60, t_now
+            num_bins = 200  # Small bin count is fine for warmup
+
+            # Pre-allocate scratchpads for output
+            # Note: size is usually num_bins * 2 to account for min-max pairs or extra points
+            out_x = np.zeros(num_bins * 8, dtype=dtypes.PLOT_TS_TYPE)
+            out_y = np.zeros(num_bins * 8, dtype=dtypes.PLOT_VAL_TYPE)
+
+            # Exercise Main Plot Downsampler (Linear)
+            _ = nb_slice_and_downsample(
+                buf_bundle,
+                col_idx=0,
+                out_x=out_x,
+                out_y=out_y,
+                t_min_s=t_min,
+                t_max_s=t_max,
+                num_bins=num_bins,
+                mode=PLOT_INTERPOLATION_MODE_LINEAR,
+            )
+
+            _ = nb_downsample_inplace(
+                x_plot=module_buffer.x_data,
+                x_ts=module_buffer.x_data_int64,
+                y_2d=module_buffer.y_data,
+                col_idx=0,
+                start_idx=0,
+                count=module_buffer.size,
+                out_x=out_x,
+                out_y=out_y,
+                num_bins=num_bins,
+                mode=PLOT_INTERPOLATION_MODE_LINEAR,
+            )
+
+        print("[Warmup] TelemetryPlotter ... done")

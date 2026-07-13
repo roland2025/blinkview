@@ -4,9 +4,10 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+
 def main():
     print("BlinkView Daemon started.")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

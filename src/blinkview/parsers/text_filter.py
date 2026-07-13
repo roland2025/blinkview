@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+
 class TextFilter:
     def __init__(self):
         self._filters = []

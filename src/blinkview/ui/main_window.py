@@ -50,6 +50,7 @@ from blinkview.ui.widgets.config.dynamic_config import DynamicConfigWidget
 from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.config_tool_button_widget import SourcesToolButton
 from blinkview.ui.widgets.device_sidebar import DeviceSidebarWidget
+from blinkview.ui.widgets.log_table_viewer import LogTableViewerWidget
 from blinkview.ui.widgets.log_viewer import LogViewerWidget
 from blinkview.ui.widgets.pipelines_sidebar import PipelinesSidebarWidget
 from blinkview.ui.widgets.plotter import TelemetryPlotter
@@ -148,6 +149,7 @@ class BlinkMainWindow(QMainWindow):
         self.btn_open_logs = QAction("Live Logs", self)
         self.btn_open_logs.triggered.connect(lambda _: self.create_widget("LogViewerWidget", "Live Logs"))
         self.toolbar.addAction(self.btn_open_logs)
+        self._wire_table_view_context_menu(self.btn_open_logs, "Live Logs (Table)")
 
         self.btn_open_system_logs = QAction("System Logs", self)
         self.btn_open_system_logs.triggered.connect(
@@ -156,6 +158,11 @@ class BlinkMainWindow(QMainWindow):
             )
         )
         self.toolbar.addAction(self.btn_open_system_logs)
+        self._wire_table_view_context_menu(
+            self.btn_open_system_logs,
+            "System Logs (Table)",
+            params={"allowed_device": "SYSTEM", "show_hidden": True},
+        )
 
         # --- Telemetry Action ---
         self.btn_open_telemetry = QAction("Telemetry", self)
@@ -300,6 +307,7 @@ class BlinkMainWindow(QMainWindow):
 
         self.widget_factories = {
             "LogViewerWidget": LogViewerWidget,
+            "LogTableViewerWidget": LogTableViewerWidget,
             "TelemetryTable": TelemetryTable,
             "DynamicConfigWidget": DynamicConfigWidget,
             "TelemetryPlotter": TelemetryPlotter,
@@ -349,6 +357,8 @@ class BlinkMainWindow(QMainWindow):
 
             ToastManager.show(message, toast_type, duration, parent=self)
 
+        self.gui_context.gui_state.load_ui_state(self.gui_context.registry.file_manager.get_config_path("gui_state"))
+
         # FAST PATH: Skip 100ms delay if cache is warm
         if IS_CACHE_FRESH:
             QTimer.singleShot(100, start_fast_timer)
@@ -370,12 +380,15 @@ class BlinkMainWindow(QMainWindow):
         # FAST PATH: Skip the warning toast and the 333ms delay
         if IS_CACHE_FRESH:
             ToastManager.show("Compiling Shaders", ToastType.WARNING, duration=1.0, parent=self)
-        QTimer.singleShot(333, self._start_stage_2)
+            QTimer.singleShot(333, self._start_stage_2)
+        else:
+            self._start_stage_2()
 
     def load_ui_state(self):
-        self.gui_context.gui_state.load_ui_state(
-            self.gui_context.registry.file_manager.get_config_path("gui_state"), self._start_stage_1
-        )
+        self._start_stage_1()
+        # self.gui_context.gui_state.load_ui_state(
+        #     self.gui_context.registry.file_manager.get_config_path("gui_state"), self._start_stage_1
+        # )
 
         # QTimer.singleShot(0, lambda: ToastManager.show("Something happened...", ToastType.INFO))
         # QTimer.singleShot(333, lambda: ToastManager.show("WAARNING...", ToastType.WARNING))
@@ -412,7 +425,7 @@ class BlinkMainWindow(QMainWindow):
 
         def fetch():
             try:
-                print(f"[Fetching] system schema")
+                print("[Fetching] system schema")
                 schema = self.gui_context.registry.config.get_by_path()
                 print(f"[Fetching] system schema: {schema}")
                 callback(schema)
@@ -420,6 +433,25 @@ class BlinkMainWindow(QMainWindow):
                 print(f"[Fetching] error fetching system schema: {e}")
 
         system_ctx.tasks.run_task(fetch)
+
+    def _wire_table_view_context_menu(self, action, tab_name, params=None):
+        """Adds a right-click context menu to a toolbar action's button that opens the
+        table-based log viewer as an alternative to the action's normal (text viewer) behavior."""
+        button = self.toolbar.widgetForAction(action)
+        if button is None:
+            return
+
+        button.setContextMenuPolicy(Qt.CustomContextMenu)
+
+        def show_menu(pos):
+            menu = QMenu(self)
+            table_action = menu.addAction("Open as Table")
+            table_action.triggered.connect(
+                lambda: self.create_widget("LogTableViewerWidget", tab_name, params=params or {})
+            )
+            menu.exec_(button.mapToGlobal(pos))
+
+        button.customContextMenuRequested.connect(show_menu)
 
     # --- Core Tab Management Helpers ---
 

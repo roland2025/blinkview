@@ -72,6 +72,9 @@ def run(args):
         install_version = ver
 
     try:
+        if sys.platform == "linux":
+            os.environ["QT_QPA_PLATFORM"] = "xcb"
+
         # Force Windows to show the custom icon in the taskbar
         if sys.platform == "win32":
             import ctypes
@@ -101,7 +104,7 @@ def run(args):
         app = QApplication(sys.argv)
 
         app.setApplicationName(__app_name__)
-        app.setDesktopFileName(__app_id__)
+        app.setDesktopFileName(f"{__app_id__}.desktop")
 
         app.setStyle("Fusion")
         use_qdarktheme = True

@@ -3,10 +3,15 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 #
 # Copyright (c) 2026 Roland Uuesoo
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from blinkview.core.types.parsing import SyncState
+from blinkview.core import dtypes
+from blinkview.core.dtypes import SEQ_NONE
+from blinkview.core.types.parsing import SyncState, create_default_sync
+from blinkview.core.warmup_registry import register_warmup
+from blinkview.ops.segments import nb_find_next_module_index, nb_find_next_module_match
 from blinkview.ops.timesync import (
     IDX_ARRAY_LENGTH,
     IDX_ASYM_RATIO,
@@ -20,6 +25,9 @@ from blinkview.ops.timesync import (
     EngineState,
     nb_sync_kernel,
 )
+
+if TYPE_CHECKING:
+    from blinkview.core.warmup import NumbaWarmupHelper
 
 
 class TimeSyncEngine:
@@ -87,3 +95,41 @@ class TimeSyncEngine:
 
         if log := self.logger:
             log.info("Network RTT history cleared for warm-start. Clock anchors retained.")
+
+    @staticmethod
+    @register_warmup
+    def warmup(helper: "NumbaWarmupHelper"):
+        """Triggers compilation for the TimeSyncEngine (nb_sync_kernel via feed/soft_reset) and
+        the module-lookup kernels used alongside timesync projection. Requires data in the pool,
+        provided by NumbaWarmupHelper.exercise_logging_kernels()."""
+        print("[Warmup] TimeSyncEngine ...")
+
+        now_ns = helper.time_ns()
+        sync_state = create_default_sync(now_ns, start_enabled=True)
+        engine = TimeSyncEngine(sync_state)
+
+        mock_pc_tx = now_ns
+        mock_phone_mono = 1_000_000_000  # 1 second uptime
+        mock_pc_rx = now_ns + 30_000_000  # 30ms RTT
+
+        # Ping 1: Initial anchor
+        engine.feed(mock_pc_tx, mock_phone_mono, mock_phone_mono, mock_pc_rx)
+
+        # Ping 2: Jitter check and drift accumulation
+        engine.feed(
+            mock_pc_tx + 1_000_000_000,
+            mock_phone_mono + 1_000_000_000,
+            mock_phone_mono + 1_000_000_000,
+            mock_pc_rx + 1_000_000_000,
+        )
+
+        engine.soft_reset()
+
+        with helper.log_pool.get_snapshot() as segments:
+            for segment in segments:
+                b = segment.bundle
+                nb_find_next_module_match(b, dtypes.ID_TYPE(helper.warmup_mod.id), SEQ_NONE)
+                nb_find_next_module_index(b, dtypes.ID_TYPE(helper.warmup_mod.id), dtypes.SEQ_TYPE(SEQ_NONE))
+                break
+
+        print("[Warmup] TimeSyncEngine ... done")

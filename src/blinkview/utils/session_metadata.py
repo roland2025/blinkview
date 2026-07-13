@@ -5,18 +5,18 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import json
-from pathlib import Path
-from datetime import datetime, timezone
 import os
 import platform
+from datetime import datetime, timezone
+from pathlib import Path
 
 
 def get_git_revision_hash() -> str:
     try:
-
         import subprocess
+
         # Returns the short hash (e.g., 8a2f3c1)
-        return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
+        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).decode("ascii").strip()
     except Exception:
         return "unknown"
 

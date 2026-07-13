@@ -4,9 +4,9 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import os
 import subprocess
 import sys
-import os
 
 
 def run(cmd, capture=False):
@@ -23,20 +23,9 @@ def run(cmd, capture=False):
 
     if not capture:
         print(f"Executing: {cmd_str}")
-        return subprocess.run(
-            cmd_str,
-            check=True,
-            shell=(sys.platform == "win32"),
-            env=env
-        )
+        return subprocess.run(cmd_str, check=True, shell=(sys.platform == "win32"), env=env)
     else:
-        return subprocess.run(
-            cmd_str,
-            capture_output=True,
-            text=True,
-            shell=(sys.platform == "win32"),
-            env=env
-        )
+        return subprocess.run(cmd_str, capture_output=True, text=True, shell=(sys.platform == "win32"), env=env)
 
 
 def main():
@@ -66,8 +55,8 @@ def main():
     try:
         # We use standard run (no env cleaning needed for git, but safe to use)
         run(["git", "add", "src/blinkview/__init__.py"])
-        run(["git", "commit", "-m", f'\"Release: v{ver}\"'])
-        run(["git", "tag", "-a", f"v{ver}", "-m", f'\"Release: v{ver}\"'])
+        run(["git", "commit", "-m", f'"Release: v{ver}"'])
+        run(["git", "tag", "-a", f"v{ver}", "-m", f'"Release: v{ver}"'])
         run(["git", "push", "origin", "main"])
         run(["git", "push", "origin", "--tags"])
         print(f"\nSuccessfully released v{ver}")

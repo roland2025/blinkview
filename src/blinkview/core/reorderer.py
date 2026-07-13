@@ -16,6 +16,7 @@ from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.numba_config import app_njit
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.log_batch import LogBundle
+from blinkview.core.warmup_registry import register_warmup
 from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 # =========================================================================
@@ -163,7 +164,6 @@ class Reorder(BaseReorder):
         super().__init__()
         self.input_queue = BatchQueue()
         self.put = self.input_queue.put
-        self.numba_needs_compile = True
 
     def run(self):
         pool = self.shared.array_pool
@@ -210,52 +210,6 @@ class Reorder(BaseReorder):
         ready_chunks = NumbaList()
 
         try:
-            # =================================================================
-            # --- [START] WARM UP THE REORDER NUMBA KERNEL ---
-            # =================================================================
-            if self.numba_needs_compile:
-                try:
-                    self.logger.info("Warming up Reorder kernel (Hybrid Merge)...")
-                    with (
-                        pool_create(
-                            PooledLogBatch, 10, 1024, has_levels=True, has_modules=True, has_devices=True
-                        ) as dummy_in,
-                        pool_create(
-                            PooledLogBatch, 10, 1024, has_levels=True, has_modules=True, has_devices=True
-                        ) as dummy_out,
-                    ):
-                        ts = time_ns()
-                        dummy_in.insert(ts, ts, b"warmup", level=0, module=0, device=0)
-
-                        dummy_in_b = dummy_in.bundle
-
-                        warmup_chunks = NumbaList()
-                        warmup_chunks.append(MergeChunk(dummy_in_b, 0, 1))
-
-                        # Create small dummy scratchpads for the hybrid kernel warmup
-                        w_ts_scr = np.zeros(1, dtype=dtypes.TS_TYPE)
-                        w_b_idx_scr = np.zeros(1, dtype=np.uint32)
-                        w_r_idx_scr = np.zeros(1, dtype=np.uint32)
-                        w_sort_scr = np.zeros(1, dtype=np.uint32)
-
-                        # --- Explicitly warm up the helper functions ---
-                        _find_split_idx(dummy_in_b.timestamps, 0, dummy_in.size, time_ns())
-                        _sum_lengths(dummy_in_b.lengths, 0, 1)
-
-                        # Warm up the Hybrid Merge & Copy kernel
-                        _hybrid_merge_and_copy(
-                            warmup_chunks, w_ts_scr, w_b_idx_scr, w_r_idx_scr, w_sort_scr, dummy_out.bundle
-                        )
-
-                    self.logger.info("Reorder kernel warmed up and cached.")
-                except Exception as e:
-                    self.logger.exception("Failed to warm up Reorder kernel", e)
-
-                self.numba_needs_compile = False
-            # =================================================================
-            # --- [END] WARM UP ---
-            # =================================================================
-
             while not stop_is_set():
                 # 1. Drain input queue
                 now_pre_get = time_ns()
@@ -398,8 +352,6 @@ class Reorder(BaseReorder):
         except Exception as e:
             self.logger.exception("run failure", e)
         finally:
-            self.numba_needs_compile = False
-
             # Prevent active batch_out from leaking on shutdown/thread crash
             if batch_out is not None:
                 try:
@@ -410,3 +362,40 @@ class Reorder(BaseReorder):
             for queue in device_queues.values():
                 while queue:
                     queue.popleft().batch.release()
+
+    @staticmethod
+    @register_warmup
+    def warmup(helper: "NumbaWarmupHelper"):
+        """Triggers compilation for the Reorder kernel (Hybrid Merge & Copy, plus the
+        _find_split_idx/_sum_lengths helpers) against small dummy scratchpads."""
+        print("[Warmup] Reorder ...")
+
+        pool_create = helper.array_pool.create
+        time_ns = helper.time_ns
+
+        with (
+            pool_create(PooledLogBatch, 10, 1024, has_levels=True, has_modules=True, has_devices=True) as dummy_in,
+            pool_create(PooledLogBatch, 10, 1024, has_levels=True, has_modules=True, has_devices=True) as dummy_out,
+        ):
+            ts = time_ns()
+            dummy_in.insert(ts, ts, b"warmup", level=0, module=0, device=0)
+
+            dummy_in_b = dummy_in.bundle
+
+            warmup_chunks = NumbaList()
+            warmup_chunks.append(MergeChunk(dummy_in_b, 0, 1))
+
+            # Create small dummy scratchpads for the hybrid kernel warmup
+            w_ts_scr = np.zeros(1, dtype=dtypes.TS_TYPE)
+            w_b_idx_scr = np.zeros(1, dtype=np.uint32)
+            w_r_idx_scr = np.zeros(1, dtype=np.uint32)
+            w_sort_scr = np.zeros(1, dtype=np.uint32)
+
+            # --- Explicitly warm up the helper functions ---
+            _find_split_idx(dummy_in_b.timestamps, 0, dummy_in.size, time_ns())
+            _sum_lengths(dummy_in_b.lengths, 0, 1)
+
+            # Warm up the Hybrid Merge & Copy kernel
+            _hybrid_merge_and_copy(warmup_chunks, w_ts_scr, w_b_idx_scr, w_r_idx_scr, w_sort_scr, dummy_out.bundle)
+
+        print("[Warmup] Reorder ... done")

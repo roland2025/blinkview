@@ -308,7 +308,7 @@ class Registry:
 
             # print()
             self.plugins.apply_config(self.config.get_by_path("/plugins"))
-            print(f"[Registry] Applied plugin configuration.")
+            print("[Registry] Applied plugin configuration.")
 
             system_ctx = self.system_ctx
             factories = system_ctx.factories
@@ -329,7 +329,7 @@ class Registry:
                     self.reorder.reference_id = "reorder"
             except Exception as e:
                 print(f"[Registry] Error configuring reorder buffer: {e}")
-                self.logger.error(f"Error configuring reorder buffer:", e)
+                self.logger.error("Error configuring reorder buffer:", e)
 
             try:
                 central_storage_config = self.config.get_by_path("/central")
@@ -361,19 +361,19 @@ class Registry:
             self.logger.info(f"[System] System initialized with session name: {self.session_name}")
 
             self.reinit_logger(self)
-            self.logger.info(f"[System] Registry logger initialized.")
+            self.logger.info("[System] Registry logger initialized.")
 
             self.reinit_logger(self.id_registry)
             self.reinit_logger(self.reorder)
             self.reinit_logger(self.central)
 
             try:
-                print(f"[Registry] Configuring sources")
+                print("[Registry] Configuring sources")
                 self.sources = self._create_and_bind(SourcesManager, "sources", self.config.get_by_path("/sources"))
                 self.config.subscribe("/sources", self.sources)
             except Exception as e:
                 print(f"[Registry] Error during sources configuration: {e}")
-                self.logger.error(f"Error during sources configuration", e)
+                self.logger.error("Error during sources configuration", e)
             try:
                 from blinkview.core.pipeline_manager import PipelineManager
 
@@ -385,18 +385,18 @@ class Registry:
                 self.pipelines.apply_targets()
             except Exception as e:
                 print(f"[Registry] Error during pipelines configuration: {e}")
-                self.logger.error(f"Error during pipelines configuration", e)
+                self.logger.error("Error during pipelines configuration", e)
 
             try:
                 if self.sources is not None:
                     self.sources.apply_targets()
             except Exception as e:
                 print(f"[Registry] Error during applying source targets: {e}")
-                self.logger.error(f"Error during applying source targets", e)
+                self.logger.error("Error during applying source targets", e)
 
         except Exception as e:
             print(f"[Registry] Error during system configuration: {e}")
-            self.logger.error(f"Error during system configuration", e)
+            self.logger.error("Error during system configuration", e)
 
     def _dump_temp_logs(self):
         get_module = self.system_device.get_module
@@ -673,7 +673,7 @@ class Registry:
                 # Store for next delta
                 self._prev_buffer_stats[name] = curr
 
-            print(f"\n[BUFFER_STATS]\n" + "\n".join(lines) + "\n")
+            print("\n[BUFFER_STATS]\n" + "\n".join(lines) + "\n")
 
         except Exception as e:
             self.logger.exception(f"buffer_stats failed: {e}")

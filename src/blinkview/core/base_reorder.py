@@ -6,14 +6,16 @@
 
 from typing import List
 
-from .configurable import configuration_property, configuration_factory, override_property
 from .base_daemon import BaseDaemon
+from .configurable import configuration_factory, configuration_property, override_property
 from .constants import SysCat
 from .factory import BaseFactory
 
 
 @configuration_factory("reorder")
-@configuration_property("delay", type="integer", default=100, description="Delay window in milliseconds for reordering logs")
+@configuration_property(
+    "delay", type="integer", default=100, description="Delay window in milliseconds for reordering logs"
+)
 @override_property("enabled", default=True, hidden=True)
 class BaseReorder(BaseDaemon):
     delay: int

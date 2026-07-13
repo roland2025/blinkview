@@ -14,8 +14,7 @@ from blinkview.core.configurable import (
     override_property,
 )
 from blinkview.core.id_registry.tables import IndexedStringTable
-from blinkview.core.types.parsing import EmptyUnifiedParserState, ParserID, UnifiedParserConfig, UnifiedParserState
-from blinkview.ops.constants import EMPTY_STATE
+from blinkview.core.types.parsing import EmptyUnifiedParserState, ParserID, UnifiedParserConfig
 from blinkview.parsers.frame_parsers import FrameSectionParser, FrameSectionParserFactory
 from blinkview.utils.log_level import LogLevel
 

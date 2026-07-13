@@ -338,5 +338,5 @@ def parse_module_tags_statemachine(
         return -1
 
     out_b.modules[out_idx] = mod_id
-    
+
     return nb_skip_whitespace(buffer, curr, end_cursor)

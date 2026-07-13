@@ -16,6 +16,7 @@ from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.log_batch import TelemetryBatch
+from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.segments import copy_batch_to_segment
 from blinkview.ops.telemetry import (
     count_module_occurrences_backwards,
@@ -246,6 +247,51 @@ class CircularLogPool:
             # Reset optimization flag so the next _rotate_segment recalculates
             # the optimal row capacity (`segment_capacity`) using the new byte budget.
             self._optimized = False
+
+    @staticmethod
+    @register_warmup
+    def warmup(helper: "NumbaWarmupHelper"):
+        """Triggers compilation for Batch Append and Log Filtering/Formatting. Runs first among
+        the registered warmup callbacks (CircularLogPool is core infrastructure imported well
+        before any UI widget module, so its callback registers - and therefore runs - ahead of
+        theirs in _WARMUP_CALLBACKS) since every other callback's log/telemetry kernels need rows
+        already present in helper.log_pool."""
+
+        print("[Warmup] CircularLogPool ...")
+
+        log_level = LogLevel.INFO.value
+
+        with helper.array_pool.create(
+            PooledLogBatch,
+            1024,
+            1024 * 64,
+            has_levels=True,
+            has_modules=True,
+            has_devices=True,
+        ) as batch:
+            # Trigger string/float parsing kernels
+            for i in range(1000):
+                time_now = helper.time_ns()
+                batch.insert(
+                    time_now + i,
+                    time_now + i,
+                    b"ADC: -1.234, 5.678 ; 100 -0.001",
+                    log_level,
+                    helper.floats_mod.id,
+                    helper.floats_mod.device.id,
+                )
+            batch.insert(
+                helper.time_ns(),
+                helper.time_ns(),
+                b"System Hot",
+                log_level,
+                helper.warmup_mod.id,
+                helper.warmup_mod.device.id,
+            )
+            # Trigger: Batch Append Logic
+            helper.log_pool.batch_append(batch)
+
+        print("[Warmup] CircularLogPool ... done")
 
 
 def allocate_telemetry_workspace(num_channels: int) -> np.ndarray:

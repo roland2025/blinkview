@@ -5,4 +5,3 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from . import file_logger
-

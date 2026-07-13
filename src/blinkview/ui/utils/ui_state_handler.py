@@ -50,7 +50,7 @@ class UIStateHandler:
 
         return state_data
 
-    def load_ui_state(self, file_path, ui_state_restored_cb):
+    def load_ui_state(self, file_path, ui_state_restored_cb=None):
         """Restores geometry and dock states from JSON."""
         if not file_path.exists():
             return
@@ -137,8 +137,8 @@ class UIStateHandler:
                     # Give the OS 100ms
                     QTimer.singleShot(100, restore_this_window)
 
-        except Exception as e:
-            print(f"Could not restore UI state")
+        except Exception:
+            print("Could not restore UI state")
 
             import traceback
 

@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .factory import BaseFactory
@@ -15,9 +15,9 @@ class FactoryRegistry:
 
     def __init__(self):
         # Maps a string category (e.g., "subscriber") to its corresponding Factory class
-        self._factories: dict[str, 'BaseFactory'] = {}
+        self._factories: dict[str, "BaseFactory"] = {}
 
-    def register(self, category: str, factory_class: type['BaseFactory']):
+    def register(self, category: str, factory_class: type["BaseFactory"]):
         """Registers a factory class under a specific category."""
         category = category.lower()  # Normalize category names to lowercase
         if category in self._factories:
@@ -30,14 +30,12 @@ class FactoryRegistry:
         """Routes the build request to the correct underlying factory."""
         factory = self._factories.get(category)
         if not factory:
-            raise KeyError(
-                f"Cannot build '{category}'. Known categories are: {list(self._factories.keys())}"
-            )
+            raise KeyError(f"Cannot build '{category}'. Known categories are: {list(self._factories.keys())}")
 
         # Delegates the exact signature you provided to the specific factory
         return factory.build(config, system_ctx, local_ctx, **kwargs)
 
-    def get_factory(self, category: str) -> 'BaseFactory':
+    def get_factory(self, category: str) -> "BaseFactory":
         """Returns the factory class itself if you need direct access."""
         return self._factories.get(category.lower())
 
@@ -46,9 +44,7 @@ class FactoryRegistry:
         category = category.lower()  # Normalize category names to lowercase
         factory = self.get_factory(category)
         if not factory:
-            raise KeyError(
-                f"Cannot get types for '{category}'. Known categories are: {list(self._factories.keys())}"
-            )
+            raise KeyError(f"Cannot get types for '{category}'. Known categories are: {list(self._factories.keys())}")
         return factory.get_available_types()
 
     def get_produced_type(self, category: str) -> type:
@@ -64,9 +60,7 @@ class FactoryRegistry:
         """Returns the configuration schema for a specific type within a category."""
         factory = self.get_factory(category)
         if not factory:
-            raise KeyError(
-                f"Cannot get schema for '{category}'. Known categories are: {list(self._factories.keys())}"
-            )
+            raise KeyError(f"Cannot get schema for '{category}'. Known categories are: {list(self._factories.keys())}")
         return factory.get_schema(type_name)
 
     def get_base_schema(self, category: str) -> dict:

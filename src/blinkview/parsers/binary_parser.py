@@ -6,17 +6,22 @@
 
 from types import SimpleNamespace
 
+import numpy as np
+
+from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property, on_config_change, override_property
 from blinkview.core.device_identity import DeviceIdentity
 from blinkview.core.numpy_batch_manager import PooledLogBatch, log_batch
 from blinkview.core.time_sync_engine import TimeSyncEngine
 from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import SyncState, create_default_sync
+from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.dispatch import process_batch_kernel
 from blinkview.parsers.frame_decoders import FrameDecoder
 from blinkview.parsers.frame_parsers import GenericFrameParser
 from blinkview.parsers.parser import BaseParser, ParserFactory
 from blinkview.parsers.state import FrameState
+from blinkview.storage.file_logger import BinaryBatchProcessor, LogRowBatchProcessor
 from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 
@@ -63,8 +68,6 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
         self.sync_state: SyncState = None
 
-        self.numba_needs_compile = False
-
         self.logger_batch = None
         self.logger_post = None
 
@@ -104,8 +107,6 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             self._frame_parser = factory_build(
                 "frame_parser", frame_parser, system_ctx=self.shared, local_ctx=parser_ctx
             )
-
-        self.numba_needs_compile = False
         self.thread_needs_restart = True
 
         return changed
@@ -167,46 +168,6 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                     has_modules=True,
                     has_devices=True,
                 )
-
-            # --- [START] WARM UP THE NUMBA KERNEL ---
-            if self.numba_needs_compile:
-                try:
-                    self.logger.info("Pre-compiling Numba kernels (this may take a few seconds)...")
-
-                    def batch_acquire_input():
-                        return pool_create(PooledLogBatch, 128, 4)  # 128 items, 4 kB buffer for the dummy batch
-
-                    # 1. Create a dummy input batch
-                    # We need a small buffer and at least one 'row' entry
-                    with (
-                        batch_acquire_input() as dummy_in,
-                        batch_acquire() as dummy_out,
-                    ):
-                        dummy_in.insert(time_ns(), time_ns(), b"       0.00 V     -0.010 mA \n")
-                        dummy_in.insert(time_ns(), time_ns(), b"N1 main reg input          0.00 V     -0.010 mA \n")
-                        dummy_in.insert(time_ns(), time_ns(), b"N2 ASI switch")
-                        dummy_in.insert(time_ns(), time_ns(), b"              0.00 V")
-                        dummy_in.insert(time_ns(), time_ns(), b"     -0.014 mA \n")
-                        dummy_in.insert(time_ns(), time_ns(), b"N3 charger input        ")
-                        # 3. Trigger the kernel
-                        # This will block the thread while LLVM does its work
-                        _ = process_batch_kernel(
-                            f_config,
-                            f_state,
-                            dummy_in.bundle,
-                            parser_bundle,
-                            o_config,
-                            dummy_out.bundle,
-                        )
-                        # print(f"SIGNATURE: {process_batch_kernel.signatures}")
-                        self.logger.info("Kernels warmed up and cached.")
-                except Exception as e:
-                    self.logger.exception("Exception during kernel compilation", e)
-
-                frame_state.reset_batch_trackers()
-                frame_state.clear_stitch_state()
-                self.numba_needs_compile = False
-            # --- [END] WARM UP ---
 
             def flush():
                 nonlocal batch_out, batch_out_time
@@ -298,8 +259,165 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         except Exception as e:
             self.logger.exception("run failure", e)
         # Flush any remaining batch on exit
+
+    @staticmethod
+    def _warmup_config(helper: "NumbaWarmupHelper", frame_config, parser_config):
+        """Builds one frame_decoder/frame_parser pair from the given configs and drives a dummy
+        batch through process_batch_kernel + the batch processors, to trigger compilation for
+        that particular combination of decoder/parser steps."""
+        frame_codec = None
+        frame_parser = None
+        try:
+            factory_build = helper.shared.factories.build
+
+            device_id = helper.warmup_mod.device
+
+            time_ns = helper.shared.time_ns
+
+            pool = helper.shared.array_pool
+            pool_create = pool.create
+
+            frame_ctx = SimpleNamespace(
+                get_logger=helper.logger.child_creator("decoder"),
+                device_id=device_id,
+            )
+            frame_codec = factory_build("frame_decoder", frame_config, system_ctx=helper.shared, local_ctx=frame_ctx)
+
+            parser_ctx = SimpleNamespace(
+                get_logger=helper.logger.child_creator("parser"),
+                device_id=device_id,
+                sync_state=create_default_sync(helper.shared.time_ns()),
+            )
+            frame_parser = factory_build("frame_parser", parser_config, system_ctx=helper.shared, local_ctx=parser_ctx)
+
+            codec = frame_codec
+
+            f_config = codec.bundle()
+            frame_state = FrameState(pool, codec.frame_length_maximum)
+            f_state = frame_state.bundle
+
+            o_config = OutputConfig(compact_buffer=True)
+
+            parser = frame_parser
+            parser_bundle = parser.bundle()
+
+            def batch_acquire():
+                return pool_create(
+                    PooledLogBatch,
+                    4096,
+                    codec.frame_length_maximum,
+                    has_levels=True,
+                    has_modules=True,
+                    has_devices=True,
+                )
+
+            def batch_acquire_input():
+                return pool_create(PooledLogBatch, 128, 4)  # 128 items, 4 kB buffer for the dummy batch
+
+            # 1. Create a dummy input batch
+            # We need a small buffer and at least one 'row' entry
+            with (
+                batch_acquire_input() as dummy_in,
+                batch_acquire() as dummy_out,
+            ):
+                dummy_in: PooledLogBatch
+
+                msg_1 = b"       0.00 V     -0.010 mA \n"
+                msg_1_mv = memoryview(msg_1)
+
+                dummy_in.insert(time_ns(), time_ns(), msg_1_mv)
+
+                msg_1_data_view = np.frombuffer(msg_1, dtype=dtypes.BYTE)
+
+                dummy_in.insert_view(time_ns(), time_ns(), msg_1_data_view, len(msg_1))
+
+                msg_1_bytearray = bytearray(msg_1)
+
+                msg_1_data_view_2 = np.frombuffer(msg_1_bytearray, dtype=dtypes.BYTE)
+
+                dummy_in.insert_view(time_ns(), time_ns(), msg_1_data_view_2, len(msg_1))
+
+                dummy_in.insert(time_ns(), time_ns(), b"N1 main reg input          0.00 V     -0.010 mA \n")
+                dummy_in.insert(time_ns(), time_ns(), b"N2 ASI switch")
+                dummy_in.insert(time_ns(), time_ns(), b"              0.00 V")
+                dummy_in.insert(time_ns(), time_ns(), b"     -0.014 mA \n")
+                dummy_in.insert(time_ns(), time_ns(), b"N3 charger input        ")
+                dummy_in.append(b" ")
+
+                dummy_in.append_any(b" ")
+
+                # 1. Create a mutable uint8 NumPy array from raw bytes
+                msg_2_arr = np.array(list(b"N2 unique reg input        5.00 V      -0.020 mA \n"), dtype=np.uint8)
+
+                # 2. Extract the memoryview from the NumPy array
+                msg_2_mv = memoryview(msg_2_arr)
+
+                # 3. Pass it into your structured logging pipeline
+                dummy_in.insert(time_ns(), time_ns(), msg_2_mv)
+
+                # 3. Trigger the kernel
+                # This will block the thread while LLVM does its work
+                _ = process_batch_kernel(
+                    f_config,
+                    f_state,
+                    dummy_in.bundle,
+                    parser_bundle,
+                    o_config,
+                    dummy_out.bundle,
+                )
+
+                bin_processor = BinaryBatchProcessor()
+                bin_processor.shared = helper.shared
+                bin_processor.process(dummy_in)
+
+                txt_processor = LogRowBatchProcessor()
+                txt_processor.shared = helper.shared
+                txt_processor.process(dummy_out)
         finally:
-            self.numba_needs_compile = False
+            del frame_codec
+            del frame_parser
+
+    @staticmethod
+    @register_warmup
+    def warmup(helper: "NumbaWarmupHelper"):
+        """Triggers compilation for the default (BinaryParser) decode/parse pipeline across a
+        progressively growing set of parser steps, matching how real device configs commonly
+        stack steps (skip_words, log_level_default, module_name_normalizer, ...)."""
+        print("[Warmup] BinaryParser ...")
+
+        steps = []
+        all_steps = [
+            {"type": "skip_words", "count": 1},
+            {"type": "log_level_default"},
+            {"type": "module_name_normalizer", "max_depth": 8, "max_length": 64},
+            {"type": "skip_words", "count": 1},
+            {"type": "skip_words", "count": 1},
+        ]
+
+        for step in all_steps:
+            decoder_config = {
+                "type": "line_decoder",
+                "frame_errors_hidden": False,
+                "filter_trim_r": True,
+                "filter_printable": True,
+                "filter_ansi": True,
+                "frame_length_dynamic": True,
+                "frame_length": 0,
+                "frame_length_minimum": 8,
+                "frame_length_maximum": 1024,
+            }
+
+            parser_config = {
+                "type": "default",
+                "parser_errors_hidden": False,
+                "steps": steps,
+                "filter_squash_spaces": False,
+            }
+
+            BinaryParser._warmup_config(helper, decoder_config, parser_config)
+            steps.append(step)
+
+        print("[Warmup] BinaryParser ... done")
 
 
 @ParserFactory.register("serial_default")

@@ -19,7 +19,7 @@ from .subscriber import BaseSubscriber, SubscriberFactory
 @SubscriberFactory.register("console")
 class ConsoleSubscriber(BaseSubscriber):
     def __init__(self, console):
-        print(f"[Console] init")
+        print("[Console] init")
         super().__init__()
 
         self.sources = [SysCat.STORAGE, SysCat.REORDER]

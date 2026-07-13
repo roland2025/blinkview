@@ -208,7 +208,7 @@ class ConfigManager:
                         hydrated = new_val
                         try:
                             hydrated = cb.hydrate_config(new_val)
-                        except Exception as e:
+                        except Exception:
                             pass
 
                         # Bonus: You might want to pass the global_patch to the callback

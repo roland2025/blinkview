@@ -4,8 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import os
 import json
+import os
 from pathlib import Path
 
 
@@ -20,7 +20,7 @@ def atomic_json_dump(data: dict, target_path: str | Path, indent: int = 4):
     temp_file = target.parent / f".{target.name}.tmp"
 
     try:
-        with open(temp_file, 'w', encoding='utf-8') as f:
+        with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=indent)
             f.flush()
             # Ensure data is physically on the disk before renaming

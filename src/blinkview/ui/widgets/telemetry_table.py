@@ -4,7 +4,7 @@
 
 from dataclasses import dataclass
 from time import perf_counter, perf_counter_ns
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 from PySide6.QtWidgets import QToolButton
@@ -32,11 +32,15 @@ from qtpy.QtWidgets import (
 
 from blinkview.core import dtypes
 from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
-from blinkview.core.module_snapshot import MAX_MSG_BYTES
+from blinkview.core.module_snapshot import MAX_MSG_BYTES, LatestModuleValueTracker
 from blinkview.core.numba_config import app_njit
+from blinkview.core.warmup_registry import register_warmup
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.in_development import set_as_in_development
 from blinkview.ui.widgets.action_button_delegate import TelemetryCol, TelemetryDelegate
+
+if TYPE_CHECKING:
+    from blinkview.core.warmup import NumbaWarmupHelper
 
 
 @app_njit()
@@ -219,6 +223,82 @@ class TelemetryTableModel(QAbstractTableModel):
         self.sort_order = Qt.AscendingOrder
 
         self.prev_apply = perf_counter()
+
+    @staticmethod
+    @register_warmup
+    def warmup(helper: "NumbaWarmupHelper"):
+        """Exercises _initialize_new_modules/_update_visible_state - the two Numba kernels
+        driving apply_updates() - against a private LatestModuleValueTracker built from the
+        helper's dummy pool/registry, using scratch arrays sized to it instead of a real
+        TelemetryTableModel. Kept private rather than reusing helper.tracker so this warmup
+        doesn't depend on callback registration order."""
+        print("[Warmup] TelemetryTableModel ...")
+
+        tracker = LatestModuleValueTracker(
+            helper.log_pool, helper.registry.modules_table, helper.array_pool, helper.time_ns
+        )
+        tracker.update()
+        now = perf_counter()
+
+        with tracker.get_snapshot() as snap:
+            b = snap.bundle()
+            sequences = b.sequence_ids
+            levels = b.levels
+            b_lengths = b.lengths
+            b_buffer = b.buffer
+
+            n_mods = len(sequences)
+            if n_mods == 0:
+                print("[Warmup] TelemetryTableModel ... done")
+                return
+
+            painted_seqs = np.zeros(n_mods, dtype=dtypes.SEQ_TYPE)
+            painted_levels = np.zeros(n_mods, dtype=dtypes.LEVEL_TYPE)
+            arrival_times = np.zeros(n_mods, dtype=np.float64)
+            change_times = np.zeros(n_mods, dtype=np.float64)
+            painted_buffers = np.zeros(n_mods * MAX_MSG_BYTES, dtype=dtypes.BYTE)
+            painted_lengths = np.zeros(n_mods, dtype=np.uint16)
+            newly_active_ids = np.zeros(n_mods, dtype=np.int32)
+
+            new_count = _initialize_new_modules(
+                n_mods,
+                sequences,
+                painted_seqs,
+                arrival_times,
+                change_times,
+                levels,
+                painted_levels,
+                b_lengths,
+                painted_lengths,
+                b_buffer,
+                painted_buffers,
+                now,
+                MAX_MSG_BYTES,
+                newly_active_ids,
+            )
+
+            visible_mod_ids = newly_active_ids[:new_count] if new_count > 0 else np.arange(n_mods, dtype=np.int32)
+
+            _update_visible_state(
+                visible_mod_ids,
+                sequences,
+                painted_seqs,
+                levels,
+                painted_levels,
+                arrival_times,
+                change_times,
+                now,
+                0.5,  # fade_dur
+                5.0,  # stale_limit
+                0.02,  # buffer_time
+                b_buffer,
+                b_lengths,
+                painted_buffers,
+                painted_lengths,
+                MAX_MSG_BYTES,
+            )
+
+        print("[Warmup] TelemetryTableModel ... done")
 
     def _init_memoryviews(self):
         """Wraps numpy arrays to avoid scalar boxing overhead during pure-Python UI lookups."""
@@ -1011,8 +1091,10 @@ class TelemetryTable(QWidget):
         self._set_hovered_row(-1)
 
         match action_id:
-            case "view_logs" | "view_logs_children":
-                with_children = action_id == "view_logs_children"
+            case "view_logs" | "view_logs_children" | "view_logs_table" | "view_logs_children_table":
+                with_children = action_id in ("view_logs_children", "view_logs_children_table")
+                as_table = action_id in ("view_logs_table", "view_logs_children_table")
+
                 title = f"Logs: {module.name_with_device()}"
                 if with_children:
                     title += " (+Children)"
@@ -1020,7 +1102,7 @@ class TelemetryTable(QWidget):
                 show_hidden = module.device == self.gui_context.registry.system_device
 
                 self.gui_context.create_widget(
-                    "LogViewerWidget",
+                    "LogTableViewerWidget" if as_table else "LogViewerWidget",
                     title,
                     as_window=True,
                     params={
@@ -1071,6 +1153,8 @@ class TelemetryTable(QWidget):
         actions = [
             ("View Logs", "view_logs", False, None),
             ("View Logs with Children", "view_logs_children", False, None),
+            ("View Logs (Table)", "view_logs_table", False, None),
+            ("View Logs with Children (Table)", "view_logs_children_table", False, None),
             (None, None, False, None),
             ("View Graph", "view_graph", False, None),
             ("View Graph with Children", "view_graph_with_children", False, None),

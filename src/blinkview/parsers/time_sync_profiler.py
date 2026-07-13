@@ -112,7 +112,7 @@ class TimeSyncProfiler(BaseParser):
                 with _pipe._subscribers_lock:
                     if _pipe._subscriptions:
                         return _pipe._subscriptions[0]
-            except Exception as e:
+            except Exception:
                 pass
             return None
 

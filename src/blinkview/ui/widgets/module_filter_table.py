@@ -17,6 +17,7 @@ from qtpy.QtWidgets import QComboBox, QHeaderView, QMenu, QStyledItemDelegate, Q
 from blinkview.core import dtypes
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.core.numba_config import app_njit
+from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.id_registry import NO_PARENT
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.module_filter_model import FastModuleFilterModel
@@ -451,6 +452,68 @@ class TempLogFilter(QObject):
 
         if not np.array_equal(old_mask, self.filter_mask):
             self.filter_changed.emit()
+
+    @staticmethod
+    @register_warmup
+    def warmup(helper: "NumbaWarmupHelper"):
+        """Triggers compilation for nb_inherit_states, nb_update_subtree, and
+        nb_rebuild_from_explicit against a small dummy mask set, mirroring how a real
+        TempLogFilter builds/updates its enabled/level/filter arrays."""
+        print("[Warmup] TempLogFilter ...")
+
+        registry = helper.registry
+        count = max(registry._parent_capacity, registry.module_count())
+
+        enabled_mask = np.ones(count, dtype=np.bool_)
+        level_mask = np.full(count, LogLevel.ALL.value, dtype=dtypes.LEVEL_TYPE)
+        filter_mask = np.full(count, LogLevel.ALL.value, dtype=dtypes.LEVEL_TYPE)
+        essential_mask = np.zeros(count, dtype=np.bool_)
+        essential_mask[: len(registry._essential_array)] = registry._essential_array
+
+        nb_inherit_states(
+            enabled_mask,
+            level_mask,
+            filter_mask,
+            registry._parent_array,
+            essential_mask,
+            False,
+            0,
+            count,
+            LogLevel.OFF.value,
+        )
+
+        nb_update_subtree(
+            enabled_mask,
+            level_mask,
+            filter_mask,
+            registry._parent_array,
+            essential_mask,
+            False,
+            0,
+            count,
+            update_enabled=True,
+            new_enabled=True,
+            update_level=True,
+            new_level=LogLevel.ALL.value,
+            off_value=LogLevel.OFF.value,
+        )
+
+        explicit_mask = np.zeros(count, dtype=np.bool_)
+        nb_rebuild_from_explicit(
+            enabled_mask,
+            level_mask,
+            filter_mask,
+            registry._parent_array,
+            explicit_mask,
+            essential_mask,
+            False,
+            count,
+            True,
+            LogLevel.ALL.value,
+            LogLevel.OFF.value,
+        )
+
+        print("[Warmup] TempLogFilter ... done")
 
 
 class LevelDelegate(QStyledItemDelegate):
