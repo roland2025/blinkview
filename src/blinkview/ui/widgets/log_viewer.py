@@ -5,6 +5,8 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 
+from collections import deque
+from enum import Enum
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -35,7 +37,21 @@ if TYPE_CHECKING:
     from blinkview.core.warmup import NumbaWarmupHelper
 
 
+class LogViewMode(Enum):
+    LIVE = "live"
+    HISTORY = "history"
+
+
 class LogViewerWidget(QWidget):
+    # Live mode keeps only a small tail of blocks for cheap paint/scroll cost; history mode
+    # (entered when the user scrolls away from the tail) fetches a bounded window of rows before
+    # and after an anchor sequence, mirroring LogTableStore's live/history split (see
+    # qt-log-table-viewer skill Sec 1/14) but producing pre-formatted text lines instead of
+    # columnar rows, since SearchableLogArea is a QPlainTextEdit rather than a direct-paint grid.
+    LIVE_MAX_BLOCKS = 200
+    HISTORY_BEFORE = 500
+    HISTORY_AFTER = 500
+
     def __init__(self, gui_context, state=None, parent=None):
         super().__init__(parent)
 
@@ -99,7 +115,21 @@ QToolButton[filterEnabled="true"] {
 
         self.prev_apply = 0  # Timestamp of the last apply_updates call for throttling
 
-        self.max_rows = 100_000  # Max rows to keep in the text area for performance
+        self.max_rows = self.LIVE_MAX_BLOCKS  # Per-tick fetch cap + live tail size
+
+        # Live/history mode state (see class docstring comment above LIVE_MAX_BLOCKS).
+        self.view_mode = LogViewMode.LIVE
+        self.history_anchor_seq = None
+        self.history_oldest_seq = None
+        self.history_newest_seq = None
+        self.history_reached_start = False
+        self._programmatic_scroll = False
+
+        # Sequence id for each currently-retained live-mode block, in the same order/length as
+        # the text area's blocks (both bounded to LIVE_MAX_BLOCKS) - lets history mode anchor on
+        # the exact row the user was looking at without the text widget itself tracking per-line
+        # metadata.
+        self._live_seqs = deque(maxlen=self.LIVE_MAX_BLOCKS)
 
         # Main layout
         self.layout = QVBoxLayout(self)
@@ -233,10 +263,6 @@ QToolButton[filterEnabled="true"] {
         self.action_clear.triggered.connect(self.clear_logs)
         self.toolbar.addAction(self.action_clear)
 
-        self.action_end = QAction("GoTo End", self)
-        self.action_end.setToolTip("Scroll to the latest logs")
-        self.toolbar.addAction(self.action_end)
-
         self.is_paused = False
         self.auto_paused = False
         self._is_catching_up = True
@@ -304,7 +330,7 @@ QToolButton[filterEnabled="true"] {
 
         self.text_area.setMinimumWidth(300)
 
-        self.action_end.triggered.connect(self.text_area.scroll_to_end)
+        self.text_area.verticalScrollBar().valueChanged.connect(self._on_scroll_value_changed)
 
         self.splitter.addWidget(self.text_area)
 
@@ -434,15 +460,15 @@ QToolButton[filterEnabled="true"] {
 
         self._effective_mask = None  # Invalidate cache
 
-        self._redraw_history()
+        self._refresh_view()
 
     def _apply_kv_filter_text(self, text):
         self.log_filter.set_kv_filter(text)
-        self._redraw_history()
+        self._refresh_view()
 
     def _apply_search_text(self):
         self.log_filter.set_text_filter(self.search_box.text())
-        self._redraw_history()
+        self._refresh_view()
 
     def set_log_index(self):
         """Updates the syntax highlighter's index based on which columns are active."""
@@ -504,8 +530,8 @@ QToolButton[filterEnabled="true"] {
 
         self.set_log_index()
 
-        # Now trigger a single redraw for the whole batch
-        self._redraw_history()
+        # Now trigger a single refresh for the whole batch
+        self._refresh_view()
 
     def _filter_enable_toggled(self, checked):
         button = self.toolbar.widgetForAction(self.action_toggle_filter)
@@ -547,48 +573,21 @@ QToolButton[filterEnabled="true"] {
 
         self.set_log_index()
 
-        self._redraw_history()
+        self._refresh_view()
 
     def reload_and_redraw(self):
         """Public method to clear current logs and reload from the source with current filters."""
         self._effective_mask = None  # Invalidate cache
 
-        self._redraw_history()
+        self._refresh_view()
 
-    def apply_updates(self):
-        if self.is_paused or self.auto_paused:
-            return
-
-        import time  # Ensure this is imported at the top of your file ideally
-
-        time_ns = time.time_ns
-
-        t_start_total = time_ns()
-
-        # Existing throttling logic uses registry.now_ns, keeping it intact
-        now_ns = self.gui_context.registry.now_ns
-        t_start = now_ns()
-
-        if t_start - self.prev_apply < 100_000_000:
-            return
-
-        # 1. Profile Sidebar Sync
-        t_sidebar_start = time_ns()
-        self.filter_sidebar.sync_modules()
-        t_sidebar_end = time_ns()
-        # self.logger.debug(f"[Profile] sync_modules: {(t_sidebar_end - t_sidebar_start) / 1_000_000:.3f} ms")
-
-        self.prev_apply = t_start
-
-        array_pool = self.gui_context.registry.system_ctx.array_pool
-        f = self.log_filter
+    def _ensure_effective_mask(self):
+        """Bakes self._effective_mask/self._filter_cache from the current module registry and
+        filter sidebar state. Shared by apply_updates' per-tick live fetch and
+        _fetch_history_window's static window fetch so both see identical filtering."""
         reg = self.gui_context.id_registry
-        pool = self.gui_context.registry.central.log_pool
+        f = self.log_filter
 
-        tz_offset_sec = get_local_utc_offset_seconds()
-
-        # 2. Profile Initial Setup & Cache Validation
-        t_setup_start = time.time_ns()
         if self._prev_total_module_count != (mod_count := reg.module_count()) or self._filter_cache is None:
             self._prev_total_module_count = mod_count
             self._effective_mask = None  # Registry grew, invalidate the mask
@@ -607,10 +606,7 @@ QToolButton[filterEnabled="true"] {
                 t_list = None
 
             self._filter_cache = t_list
-        t_setup_end = time.time_ns()
 
-        # 3. Profile Effective Mask Baking
-        t_mask_start = time.time_ns()
         # --- Bake Effective Mask (ONLY IF INVALID) ---
         if self._effective_mask is None or len(self._effective_mask) < mod_count:
             filter_enabled, sidebar_mask = self.filter_sidebar.get_filter()
@@ -645,13 +641,53 @@ QToolButton[filterEnabled="true"] {
                     mask[self._filter_cache] = self._effective_mask[self._filter_cache]
                     self._effective_mask = mask
 
-        t_mask_end = time_ns()
+        return mod_count
 
-        # if (t_mask_end - t_mask_start) > 1_000_000:  # Only log if mask baking took more than 1ms
-        #     self.logger.debug(f"[Profile] Bake Effective Mask: {(t_mask_end - t_mask_start) / 1_000_000:.3f} ms")
+    def apply_updates(self):
+        # Pause (manual or clog-triggered) always routes through view_mode == "history" (see
+        # _set_pause_ui/_enter_history_mode) - this is the single freeze gate. is_paused is kept
+        # as a belt-and-suspenders fallback for the rare case a pause is requested with no live
+        # data yet to build a browsable history window from (_toggle_pause's fallback branch).
+        if self.is_paused or self.view_mode != LogViewMode.LIVE:
+            return
+
+        import time  # Ensure this is imported at the top of your file ideally
+
+        time_ns = time.time_ns
+
+        t_start_total = time_ns()
+
+        # Existing throttling logic uses registry.now_ns, keeping it intact
+        now_ns = self.gui_context.registry.now_ns
+        t_start = now_ns()
+
+        if t_start - self.prev_apply < 100_000_000:
+            return
+
+        # 1. Profile Sidebar Sync
+        t_sidebar_start = time_ns()
+        self.filter_sidebar.sync_modules()
+        t_sidebar_end = time_ns()
+        # self.logger.debug(f"[Profile] sync_modules: {(t_sidebar_end - t_sidebar_start) / 1_000_000:.3f} ms")
+
+        self.prev_apply = t_start
+
+        array_pool = self.gui_context.registry.system_ctx.array_pool
+        f = self.log_filter
+        reg = self.gui_context.id_registry
+        pool = self.gui_context.registry.central.log_pool
+
+        tz_offset_sec = get_local_utc_offset_seconds()
+
+        self._ensure_effective_mask()
 
         total_new_rows = 0
         string_batches = []
+        # Sequence ids for each matched row, in the same per-segment chunking as string_batches,
+        # so self._live_seqs can be kept aligned 1:1 with the text area's blocks (see class
+        # docstring above LIVE_MAX_BLOCKS) - lets history mode anchor on the exact row the user
+        # was looking at without SearchableLogArea needing to track any per-line metadata itself.
+        seq_batches = []
         format_cfg = FormattingConfig(
             self.show_ts,
             self.show_dev,
@@ -732,6 +768,10 @@ QToolButton[filterEnabled="true"] {
                         decoded_str = handle.array[:bytes_written].tobytes().decode("utf-8", errors="replace")
                         string_batches.append(decoded_str)
 
+                    # indices.array is a pooled buffer reused next iteration, so copy the matched
+                    # rows' sequence ids out now rather than keeping a view into it.
+                    seq_batches.append(segment.bundle.sequences[indices.array[:match_count]].copy())
+
                     total_new_rows += match_count
 
                 if total_new_rows >= self.max_rows:
@@ -757,44 +797,97 @@ QToolButton[filterEnabled="true"] {
                 is_clogged = self.velocity_tracker.update_and_check(total_new_rows)
 
             # t_ui_start = time_ns()
-            if is_clogged and not self.is_paused:
-                self.auto_paused = True
-                self.action_pause.setChecked(True)
-            elif not (self.is_paused or self.auto_paused):
+            if is_clogged:
+                # Freeze into a browsable history window instead of just dropping this batch
+                # silently - the guards above already guarantee we were live/unpaused, so this
+                # is the only place a clog can be discovered.
+                self._enter_history_mode(auto=True)
+            else:
                 # We processed the newest segments first, so they are at the front of the list.
                 # Reversing makes the older segments render first, yielding perfect chronological order.
                 string_batches.reverse()
                 full_string_batch = "".join(string_batches)
 
                 self.text_area.append_log(full_string_batch)
+
+                seq_batches.reverse()
+                if seq_batches:
+                    self._live_seqs.extend(np.concatenate(seq_batches).tolist())
             # t_ui_end = time_ns()
 
             # self.logger.debug(f"[Profile] UI Text Append: {(t_ui_end - t_ui_start) / 1_000_000:.3f} ms")
         # t_func_end = time_ns()
         # self.logger.child("total").debug(f"{t_func_end - t_start_total} rows={total_new_rows}")
 
+    def _refresh_view(self):
+        """Reapplies the current filter/level/kv/search/column-visibility settings to whatever's
+        currently on screen, without forcing a return to live mode. If paused/browsing history,
+        re-fetches the same anchor's window under the new settings and stays put; if live,
+        refills from the tail as before. Every settings-change handler should call this instead
+        of _redraw_history() directly, so adjusting a filter never silently un-pauses you."""
+        if self.view_mode == LogViewMode.HISTORY:
+            self._reanchor_history(self.history_anchor_seq)
+        else:
+            self._redraw_history()
+
     def _redraw_history(self):
         """
         Clears the screen and triggers a full re-fetch from the central memory pool
-        using the updated column visibility toggles.
+        using the updated column visibility toggles. Also the mechanism used to explicitly
+        return to live mode (unpausing, or catching up while paging history forward) - it always
+        refills from the live tail, so any caller effectively resumes tailing. Settings-change
+        handlers should call _refresh_view() instead, which only falls back to this when already
+        live.
+
+        Wrapped in the _programmatic_scroll guard like _reanchor_history: clear() and
+        append_log()'s auto-scroll-to-bottom both move the scrollbar and fire valueChanged just
+        like a user scroll would, so without the guard a rapid pause/resume cycle can recurse
+        back into _on_scroll_value_changed and overflow the stack (qt-log-table-viewer skill
+        Sec 8) - this isn't a catchable Python exception, it crashes the process outright.
         """
-        # Detach highlighter to prevent synchronous freezing during bulk insert
-        self.highlighter.setDocument(None)
-        self.text_area.clear()
+        self._programmatic_scroll = True
+        try:
+            # Detach highlighter to prevent synchronous freezing during bulk insert
+            self.highlighter.setDocument(None)
+            self.text_area.clear()
 
-        # Reset trackers so apply_updates fetches everything again
-        self.latest_seq_seen = self.latest_seq_manual
-        self.velocity_tracker.reset()
-        self._is_catching_up = True
+            self.view_mode = LogViewMode.LIVE
+            self.history_anchor_seq = None
+            self.history_oldest_seq = None
+            self.history_newest_seq = None
+            self._live_seqs.clear()
+            self.text_area.set_max_block_count(self.LIVE_MAX_BLOCKS)
+            self._set_pause_ui(False)
 
-        # Force an immediate UI update rather than waiting for the next timer tick
-        self.apply_updates()
+            # Reset trackers so apply_updates fetches everything again
+            self.latest_seq_seen = self.latest_seq_manual
+            self.velocity_tracker.reset()
+            self._is_catching_up = True
 
-        # Reattach highlighter (Qt will now highlight lazily)
-        self.highlighter.setDocument(self.text_area.document())
+            # Force an immediate UI update rather than waiting for the next timer tick
+            self.apply_updates()
+
+            # Reattach highlighter (Qt will now highlight lazily)
+            self.highlighter.setDocument(self.text_area.document())
+        finally:
+            self._programmatic_scroll = False
 
     def clear_logs(self):
-        self.text_area.clear()
+        # clear() moves the scrollbar and fires valueChanged just like a user scroll would -
+        # guard it the same way _redraw_history/_reanchor_history do, so a Clear click while
+        # browsing history can't reenter _on_scroll_value_changed mid-reset.
+        self._programmatic_scroll = True
+        try:
+            self.text_area.clear()
+
+            self.view_mode = LogViewMode.LIVE
+            self.history_anchor_seq = None
+            self.history_oldest_seq = None
+            self.history_newest_seq = None
+            self._live_seqs.clear()
+            self.text_area.set_max_block_count(self.LIVE_MAX_BLOCKS)
+        finally:
+            self._programmatic_scroll = False
 
         log_pool = self.gui_context.registry.central.log_pool
 
@@ -803,6 +896,204 @@ QToolButton[filterEnabled="true"] {
         self.velocity_tracker.reset()
         self._is_catching_up = True
 
+    # --- Live/history mode transitions -----------------------------------------------------
+
+    def _fetch_history_window(self, anchor_seq):
+        """Fetches a bounded window of formatted lines before/after anchor_seq, mirroring
+        LogTableStore._fetch_history (qt-log-table-viewer skill Sec 1/14) but producing
+        already-formatted text instead of columnar rows, since SearchableLogArea is a
+        QPlainTextEdit rather than a direct-paint grid.
+
+        Returns (before_count, after_count, oldest_seq, newest_seq, reached_start, text).
+        """
+        self._ensure_effective_mask()
+
+        reg = self.gui_context.id_registry
+        array_pool = self.gui_context.registry.system_ctx.array_pool
+        pool = self.gui_context.registry.central.log_pool
+        f = self.log_filter
+        tz_offset_sec = get_local_utc_offset_seconds()
+        format_cfg = FormattingConfig(
+            self.show_ts,
+            self.show_dev,
+            self.show_lvl,
+            self.show_mod,
+            self.ts_precision,
+            show_date=self.show_date,
+            show_rx_ts=self.show_rx_ts,
+        )
+        kv = f.bake_kv_arrays()
+        text = f.bake_text_search()
+        reg_bundle = reg.bundle()
+
+        def _format_matches(segment, indices_array, match_count):
+            req_bytes = nb_segment_estimate_out_size(
+                indices_array, match_count, segment.bundle, reg_bundle, format_cfg
+            )
+            with array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
+                bytes_written = nb_segment_format(
+                    handle.array, indices_array, match_count, segment.bundle, reg_bundle, format_cfg, tz_offset_sec
+                )
+                return handle.array[:bytes_written].tobytes().decode("utf-8", errors="replace")
+
+        # --- "Before" set: matches with seq <= anchor_seq - 1, scanning newest-to-oldest ---
+        before_count = 0
+        oldest_seq = anchor_seq
+        before_batches = []
+
+        if anchor_seq is not None and anchor_seq > dtypes.SEQ_START:
+            with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
+                for segment in segments:
+                    if segment.size == 0:
+                        continue
+
+                    allowed = self.HISTORY_BEFORE - before_count
+                    if allowed <= 0:
+                        break
+
+                    match_count = segment_filter_reversed(
+                        segment.bundle,
+                        effective_mask=self._effective_mask,
+                        out_indices=indices.array,
+                        max_matches=allowed,
+                        end_seq=anchor_seq - 1,
+                        kv=kv,
+                        text=text,
+                    )
+
+                    if match_count > 0:
+                        before_batches.append(_format_matches(segment, indices.array, match_count))
+                        oldest_seq = int(segment.bundle.sequences[indices.array[0]])
+                        before_count += match_count
+
+        # A single segment holding more than HISTORY_BEFORE matching rows would previously read
+        # as "reached the start" just because the deque happened to run out right there - it hit
+        # the cap within that segment via max_matches, not because there's genuinely nothing
+        # older. Only treat this as the true start when the fetch came back under quota; hitting
+        # quota exactly always defers to the next backward page, which self-corrects (an empty
+        # follow-up fetch then legitimately reports reached_start).
+        reached_start = before_count < self.HISTORY_BEFORE
+
+        # Segments were scanned newest-to-oldest, so the collected batches need reversing to
+        # read oldest-first, same technique apply_updates uses for its reversed live scan.
+        before_batches.reverse()
+
+        # --- "After" set: matches with seq >= anchor_seq, scanning oldest-to-newest ---
+        after_count = 0
+        newest_seq = anchor_seq
+        after_batches = []
+        start_seq_lower_bound = SEQ_NONE if anchor_seq is None else anchor_seq - 1
+
+        with pool.get_snapshot() as segments, pool.acquire_indices_buffer() as indices:
+            for segment in segments:
+                if segment.size == 0:
+                    continue
+
+                allowed = self.HISTORY_AFTER - after_count
+                if allowed <= 0:
+                    break
+
+                match_count = segment_filter(
+                    segment.bundle,
+                    effective_mask=self._effective_mask,
+                    out_indices=indices.array,
+                    max_matches=allowed,
+                    start_seq=start_seq_lower_bound,
+                    kv=kv,
+                    text=text,
+                )
+
+                if match_count > 0:
+                    after_batches.append(_format_matches(segment, indices.array, match_count))
+                    newest_seq = int(segment.bundle.sequences[indices.array[match_count - 1]])
+                    after_count += match_count
+
+        text_result = "".join(before_batches) + "".join(after_batches)
+
+        return before_count, after_count, oldest_seq, newest_seq, reached_start, text_result
+
+    def _enter_history_mode(self, auto: bool = False):
+        """Called the moment the user scrolls away from the live tail, or when clog protection
+        (auto=True) or the manual Pause button needs to freeze the view. Anchors the new history
+        window on whichever live line is currently at the top of the viewport, so the view
+        doesn't visually jump."""
+        if not self._live_seqs:
+            return
+        idx = max(0, min(self.text_area.first_visible_block(), len(self._live_seqs) - 1))
+        self._reanchor_history(self._live_seqs[idx], auto=auto)
+
+    def _reanchor_history(self, anchor_seq, auto: bool = False):
+        """Rebuilds the history window around anchor_seq and repositions the view on it. Both
+        callers below change the scrollbar's value programmatically, which would otherwise
+        re-fire valueChanged and recurse straight back into _on_scroll_value_changed - the guard
+        flag suppresses that re-entrancy (qt-log-table-viewer skill Sec 8)."""
+        was_live = self.view_mode != LogViewMode.HISTORY
+        self._programmatic_scroll = True
+        try:
+            before_count, after_count, oldest_seq, newest_seq, reached_start, text_result = (
+                self._fetch_history_window(anchor_seq)
+            )
+
+            if before_count == 0 and after_count == 0:
+                return
+
+            self.view_mode = LogViewMode.HISTORY
+            self.history_anchor_seq = anchor_seq
+            self.history_oldest_seq = oldest_seq
+            self.history_newest_seq = newest_seq
+            self.history_reached_start = reached_start
+            if was_live:
+                # Pause and history mode are the same state (see _set_pause_ui) - only sync the
+                # button on the live->history transition edge, not on every page-through reanchor
+                # while already browsing history.
+                self._set_pause_ui(True, auto=auto)
+
+            self.highlighter.setDocument(None)
+            self.text_area.set_max_block_count(before_count + after_count)
+            self.text_area.setPlainText(text_result)
+            self.highlighter.setDocument(self.text_area.document())
+
+            self.text_area.scroll_to_block(before_count)
+
+            # If this fetch's "after" set already reaches the backend's latest row, there may be
+            # too little remaining content to fill the viewport - the scrollbar's range can
+            # collapse to "nothing to scroll", meaning valueChanged will never fire again to
+            # tell us we've caught up. Check eagerly here instead of only reacting to future
+            # scrolls (qt-log-table-viewer skill Sec 9).
+            #
+            # Only applies when paging forward within an already-open history window
+            # (was_live is False) - on the initial live->history transition (Pause click or
+            # scrolling away from the tail), the anchor is deliberately right at/near the tail,
+            # so this would otherwise immediately bounce straight back to live and undo the
+            # pause the user just asked for.
+            if not was_live:
+                pool = self.gui_context.registry.central.log_pool
+                if newest_seq is not None and newest_seq >= pool.latest_sequence():
+                    self._redraw_history()
+        finally:
+            self._programmatic_scroll = False
+
+    def _on_scroll_value_changed(self, value):
+        if self._programmatic_scroll:
+            return
+
+        scrollbar = self.text_area.verticalScrollBar()
+
+        if self.view_mode == LogViewMode.LIVE:
+            # Any scroll away from the tail - not just reaching the very top of the small live
+            # buffer - should drop out of live-follow mode, matching a user's expectation that
+            # scrolling up stops the view out from under them.
+            if value < scrollbar.maximum() - 1:
+                self._enter_history_mode()
+            return
+
+        if value <= scrollbar.minimum() + 1:
+            if not self.history_reached_start and self.history_oldest_seq is not None:
+                self._reanchor_history(self.history_oldest_seq)
+        elif value >= scrollbar.maximum() - 1:
+            if self.history_newest_seq is not None and self.history_newest_seq != self.history_anchor_seq:
+                self._reanchor_history(self.history_newest_seq)
+
     def _toggle_telemetry_sidebar(self, checked):
         """Toggles the visibility of the Telemetry sidebar."""
         self.show_telemetry = checked
@@ -810,17 +1101,36 @@ QToolButton[filterEnabled="true"] {
         # Update tab_params so the state is saved
 
     def _toggle_pause(self, checked):
-        self.is_paused = checked
-
-        # Update the Text
+        """Pause and history mode are the same state from the user's perspective: pausing means
+        freezing on a browsable window, and scrolling away from the tail already does that.
+        Fires from the user clicking the Pause button (checked=Qt's new state)."""
         if checked:
-            text = "▶ Resume (AUTO)" if self.auto_paused else "▶ Resume"
+            if self.view_mode == LogViewMode.LIVE:
+                self._enter_history_mode(auto=False)
+                if self.view_mode != LogViewMode.HISTORY:
+                    # No live data yet to build a window from - still honor the pause request.
+                    self._set_pause_ui(True)
+            # else: already in history (e.g. from a prior scroll-away) - the button just
+            # catches up to that; _set_pause_ui was already applied on that transition.
         else:
-            text = "⏸ Pause"
-            self.auto_paused = False  # Reset auto-flag on manual resume
-            self.velocity_tracker.reset()
+            self._redraw_history()
 
-        self.action_pause.setText(text)
+    def _set_pause_ui(self, paused: bool, auto: bool = False):
+        """Syncs self.is_paused/self.auto_paused and the Pause button's text/checked/style to
+        match. Every path that freezes (manual click, clog protection, scrolling away from the
+        tail) or thaws (unpausing, scroll back to the live edge, filter changes) routes through
+        here or through _redraw_history() so the button never drifts out of sync with view_mode."""
+        self.is_paused = paused
+        self.auto_paused = paused and auto
+
+        self.action_pause.blockSignals(True)
+        self.action_pause.setChecked(paused)
+        self.action_pause.blockSignals(False)
+
+        self.action_pause.setText(("▶ Resume (AUTO)" if self.auto_paused else "▶ Resume") if paused else "⏸ Pause")
+
+        if not paused:
+            self.velocity_tracker.reset()
 
         # Update the Stylesheet Property
         # We need to find the widget associated with the action in the toolbar
@@ -828,16 +1138,12 @@ QToolButton[filterEnabled="true"] {
         if button:
             # Set the properties defined in our CSS
             button.setProperty("autoPaused", self.auto_paused)
-            button.setProperty("manualPaused", checked and not self.auto_paused)
+            button.setProperty("manualPaused", paused and not self.auto_paused)
 
             # Force Qt to re-evaluate the stylesheet (required for dynamic properties)
             button.style().unpolish(button)
             button.style().polish(button)
             button.update()
-
-        # Handle data catch-up
-        if not checked:
-            self._redraw_history()
 
     def closeEvent(self, event):
         """Clean up by unregistering from the GUI context."""
@@ -850,7 +1156,7 @@ QToolButton[filterEnabled="true"] {
     def _set_ts_precision(self, precision: int):
         if self.ts_precision != precision:
             self.ts_precision = precision
-            self._redraw_history()
+            self._refresh_view()
 
     @staticmethod
     @register_warmup

@@ -185,6 +185,21 @@ class SearchableLogArea(QWidget):
     def setPlainText(self, text):
         self.editor.setPlainText(text)
 
+    def set_max_block_count(self, maxlen):
+        """Adjusts how many blocks the editor retains before trimming from the top - used to
+        switch between live mode's small tail window and history mode's larger static window."""
+        self.editor.setMaximumBlockCount(maxlen)
+
+    def scroll_to_block(self, block_number):
+        """Scrolls so `block_number` becomes the first visible line. Valid because the editor
+        uses NoWrap line wrapping, so each block is exactly one visual line and the vertical
+        scrollbar's value directly addresses block indices."""
+        self.editor.verticalScrollBar().setValue(block_number)
+
+    def first_visible_block(self):
+        """Index of the topmost currently-visible block/line."""
+        return self.editor.firstVisibleBlock().blockNumber()
+
     # --- Logic ---
     def show_find_bar(self):
         """Opens find bar and pre-fills with current selection."""
@@ -325,9 +340,3 @@ class SearchableLogArea(QWidget):
             find_visible_matches(self._manual_text, self._fmt_manual)
 
         self.editor.setExtraSelections(combined_selections)
-
-    def scroll_to_end(self):
-        """Forces the editor to scroll to the very bottom."""
-        scrollbar = self.editor.verticalScrollBar()
-        if scrollbar.value() != scrollbar.maximum():
-            scrollbar.setValue(scrollbar.maximum())
