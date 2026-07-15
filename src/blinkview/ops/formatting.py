@@ -277,6 +277,49 @@ def nb_format_timestamp(out, curr, ts_ns, precision):
 
 
 @app_njit(inline="always")
+def nb_format_local_timestamp(out: np.ndarray, ts_ns: int, tz_offset_ns: int, precision: int) -> int:
+    """Formats a UTC nanosecond timestamp, shifted by tz_offset_ns, as HH:MM:SS[.fraction] into
+    `out` starting at index 0 (`out` must be at least 18 bytes). precision: 0=seconds only, 3=ms,
+    6=us, 9=ns - any value >0 and <6 still yields ms, matching LogTableStore's ts_precision
+    semantics. Returns the number of bytes written."""
+    ts_ns += tz_offset_ns
+    total_sec = ts_ns // 1_000_000_000
+    sec = total_sec % 60
+    minute = (total_sec // 60) % 60
+    hour = (total_sec // 3600) % 24
+
+    out[0] = CHAR_ZERO + (hour // 10)
+    out[1] = CHAR_ZERO + (hour % 10)
+    out[2] = CHAR_COLON
+    out[3] = CHAR_ZERO + (minute // 10)
+    out[4] = CHAR_ZERO + (minute % 10)
+    out[5] = CHAR_COLON
+    out[6] = CHAR_ZERO + (sec // 10)
+    out[7] = CHAR_ZERO + (sec % 10)
+
+    if precision <= 0:
+        return 8
+
+    if precision >= 9:
+        frac = ts_ns % 1_000_000_000
+        digits = 9
+    elif precision >= 6:
+        frac = (ts_ns % 1_000_000_000) // 1_000
+        digits = 6
+    else:
+        frac = (ts_ns % 1_000_000_000) // 1_000_000
+        digits = 3
+
+    out[8] = CHAR_DOT
+    curr = 8 + digits
+    for i in range(digits):
+        out[curr - i] = CHAR_ZERO + (frac % 10)
+        frac //= 10
+
+    return curr + 1
+
+
+@app_njit(inline="always")
 def nb_write_time_from_cache(out: np.ndarray, curr: int, ts_cache: np.ndarray, ts_ns: int, ts_precision: int) -> int:
     """
     Appends HH:MM:SS from the ISO8601 cache, calculates fractional seconds

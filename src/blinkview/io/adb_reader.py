@@ -94,6 +94,10 @@ ensuring high throughput without pipeline stalls."""
 
         self._last_error_log_ns = 0
 
+        self._process_ids: dict[str, int] = {}
+        self._last_polled_pids: set[int] = set()
+        self._pid_poll_task_id = None
+
     def run(self):
         # 1. Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
@@ -277,6 +281,7 @@ ensuring high throughput without pipeline stalls."""
 
             # 7. Finalize Environment
             self._refresh_process_ids()
+            self._pid_poll_task_id = self.shared.tasks.run_periodic(15.0, self._refresh_process_ids)
 
             self.logger.info("ADB Connected")
             self._last_error_log_ns = 0  # Reset so the next failure is 'Red' immediately
@@ -325,6 +330,10 @@ ensuring high throughput without pipeline stalls."""
 
         # if self._syncer_task_id is not None:
         #     self.shared.tasks.stop_periodic(self._syncer_task_id)
+
+        if self._pid_poll_task_id is not None:
+            self.shared.tasks.stop_periodic(self._pid_poll_task_id)
+            self._pid_poll_task_id = None
 
     def _finalize_subprocess(self, proc: subprocess.Popen):
         """Helper to terminate, wait, and eventually kill a process."""
@@ -391,7 +400,10 @@ ensuring high throughput without pipeline stalls."""
             return [line.strip() for line in decoded_output.splitlines() if line.strip()]
 
     def _refresh_process_ids(self):
-        """Uses the persistent shell to map all process names to PIDs."""
+        """Uses the persistent shell to map all process names to PIDs. Also feeds the shared,
+        Numba-backed IdHistory (self.shared.pid_history) so that a PID's process name can later
+        be resolved as of any past timestamp, not just "whatever currently holds it" - Android
+        recycles PIDs, so the two are not the same thing over the life of a session."""
         # Use ps -A -o NAME,PID for modern Android compatibility
         lines = self.query("ps -A -o NAME,PID")
 
@@ -414,6 +426,63 @@ ensuring high throughput without pipeline stalls."""
 
         self._process_ids = pids
         logger.info(f"Captured {len(self._process_ids)} application PIDs via shell.")
+
+        now_ns = self.shared.time_ns()
+        history = self.shared.pid_history
+        current_pids = set(pids.values())
+        device_ids = self._owning_pipeline_device_ids()
+
+        for device_id in device_ids:
+            for name, pid in pids.items():
+                history.update(self._pid_history_key(device_id, pid), name, now_ns)
+
+            # Any PID we saw last poll but not this one is gone (process died) - close its
+            # interval rather than leaving it open forever.
+            for pid in self._last_polled_pids - current_pids:
+                history.close(self._pid_history_key(device_id, pid), now_ns)
+
+        self._last_polled_pids = current_pids
+
+    def _owning_pipeline_device_ids(self) -> list[int]:
+        """Finds every pipeline (parser) configured to consume from this source and returns each
+        one's registry device id. This raw io source has no device identity of its own - device
+        ids are resolved at the pipeline/parser layer (core/pipeline_manager.py: `device_id =
+        self.shared.id_registry.get_device(name)`), and a source's own config name is a separate,
+        unrelated string that's never registered as a DeviceIdentity. PID history has to be keyed
+        by the SAME device id LogBundle rows end up tagged with, so this reader must look it up
+        rather than guess at its own. A single source can legitimately feed more than one
+        differently-named pipeline (e.g. two frame_parser configs decoding the same raw bytes
+        two different ways), so this returns a list, not a single id."""
+        pipelines = getattr(self.shared.registry.pipelines, "pipelines", None)
+        if not pipelines:
+            return []
+
+        device_ids = []
+        for pipeline in pipelines.values():
+            sources = getattr(pipeline, "sources_", None)
+            if isinstance(sources, str):
+                sources = [sources]
+            if sources and self.reference_id in sources:
+                device_ids.append(pipeline.local.device_id.id)
+        return device_ids
+
+    @staticmethod
+    def _pid_history_key(device_id: int, pid: int) -> int:
+        """Bit-packs a pipeline's registry device id with a locally-scoped PID into the single
+        opaque uint64 key IdHistory expects, so PIDs from different simultaneously-connected ADB
+        devices never collide (both halves comfortably fit 32 bits)."""
+        return (device_id << 32) | pid
+
+    def resolve_process_name(self, pid: int, ts_ns: int) -> str | None:
+        """Convenience wrapper so callers (UI, future logfmt filtering) don't need to know the
+        key-packing convention above. Checks every pipeline fed by this source, since PID history
+        is recorded per-pipeline-device-id (see _owning_pipeline_device_ids)."""
+        history = self.shared.pid_history
+        for device_id in self._owning_pipeline_device_ids():
+            name = history.resolve(self._pid_history_key(device_id, pid), ts_ns)
+            if name:
+                return name
+        return None
 
     def get_name_from_pid(self, pid: int) -> str | None:
         """

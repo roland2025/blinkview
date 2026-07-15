@@ -42,7 +42,7 @@ PID_TID_ADB_LONG = ParserID.PID_TID_ADB_LONG
 LEVEL_MAP_ADB_LONG = ParserID.LEVEL_MAP_ADB_LONG
 
 
-@app_njit(inline="always")  # Force inline just to be absolutely certain, though Numba usually does this automatically
+@app_njit()
 def nb_process_bundle(buffer, cursor, end_cursor, out_b, out_idx, bundle):
     p_id = bundle[0]
     state = bundle[1]  # ALWAYS UnifiedParserState

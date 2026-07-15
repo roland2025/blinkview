@@ -29,7 +29,7 @@ from blinkview.parsers.frame_parsers import (
 from blinkview.utils.log_level import LogLevel
 
 
-@FrameDecoderFactory.register("nb_decode_adb_long_frame")
+@FrameDecoderFactory.register("decode_adb_long_frame")
 @override_property("frame_delimiter", default=CHAR_LF)
 @override_property("frame_length_maximum", default=32 * 1024)
 class AdbDecoder(FrameDecoder):

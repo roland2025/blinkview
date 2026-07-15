@@ -128,6 +128,15 @@ def nb_hybrid_merge_and_copy(chunks, ts_scr, b_idx_scr, r_idx_scr, sort_order, o
         if out_bundle.has_sequences and src_bundle.has_sequences:
             out_bundle.sequences[out_idx] = src_bundle.sequences[r_id]
 
+        # Rows from a source without pids/tids (e.g. system-generated logs, CAN) must get an
+        # explicit 0, not whatever stale value the array-pool-recycled output slot happened to
+        # hold - array_pool.acquire() does not zero-fill, and out_bundle rows are reused across
+        # many merge calls.
+        if out_bundle.has_pids:
+            out_bundle.pids[out_idx] = src_bundle.pids[r_id] if src_bundle.has_pids else 0
+        if out_bundle.has_tids:
+            out_bundle.tids[out_idx] = src_bundle.tids[r_id] if src_bundle.has_tids else 0
+
         out_idx += 1
 
     # Write back the new sizes to the 1D arrays
@@ -305,7 +314,14 @@ class Reorder(BaseReorder):
                             cap = max(tuner_out.estimated_capacity, total_ready_rows)
                             buf_bytes = max(tuner_out.estimated_buffer_bytes, total_ready_bytes)
                             batch_out = pool_create(
-                                PooledLogBatch, cap, buf_bytes, has_levels=True, has_modules=True, has_devices=True
+                                PooledLogBatch,
+                                cap,
+                                buf_bytes,
+                                has_levels=True,
+                                has_modules=True,
+                                has_devices=True,
+                                has_pids=True,
+                                has_tids=True,
                             )
 
                         h_ts = None
@@ -374,8 +390,26 @@ class Reorder(BaseReorder):
         time_ns = helper.time_ns
 
         with (
-            pool_create(PooledLogBatch, 10, 1024, has_levels=True, has_modules=True, has_devices=True) as dummy_in,
-            pool_create(PooledLogBatch, 10, 1024, has_levels=True, has_modules=True, has_devices=True) as dummy_out,
+            pool_create(
+                PooledLogBatch,
+                10,
+                1024,
+                has_levels=True,
+                has_modules=True,
+                has_devices=True,
+                has_pids=True,
+                has_tids=True,
+            ) as dummy_in,
+            pool_create(
+                PooledLogBatch,
+                10,
+                1024,
+                has_levels=True,
+                has_modules=True,
+                has_devices=True,
+                has_pids=True,
+                has_tids=True,
+            ) as dummy_out,
         ):
             ts = time_ns()
             dummy_in.insert(ts, ts, b"warmup", level=0, module=0, device=0)

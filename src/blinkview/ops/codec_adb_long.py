@@ -255,9 +255,9 @@ def nb_parse_adb_pid_tid(
         else:
             break
 
-    # --- 4. Assignment (Commented out as requested) ---
-    # out_b.pids[out_idx] = pid
-    # out_b.tids[out_idx] = tid
+    # --- 4. Assignment ---
+    out_b.pids[out_idx] = pid
+    out_b.tids[out_idx] = tid
 
     # --- 5. Final Scan to Log Level ---
     # Move the cursor past any trailing whitespace so it sits

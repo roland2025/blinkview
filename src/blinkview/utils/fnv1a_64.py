@@ -8,12 +8,17 @@ import numpy as np
 
 from blinkview.core.numba_config import app_njit
 
+np.seterr(over="ignore")
+
 
 def fnv1a_64_python(buffer, start, length) -> int:
-    from fnvhash import fnv1a_64
-
-    data_slice = buffer[start : start + length]
-    return fnv1a_64(bytes(data_slice))
+    data = memoryview(buffer)[start : start + length]
+    hval = 0xCBF29CE484222325
+    prime = 0x100000001B3
+    mask = 0xFFFFFFFFFFFFFFFF
+    for b in data:
+        hval = ((hval ^ b) * prime) & mask
+    return hval
 
 
 @app_njit(fallback=fnv1a_64_python)

@@ -37,8 +37,7 @@ dependencies = [
     "msgpack",
     "cobs",
     "requests",
-    "packaging",
-    "fnvhash"
+    "packaging"
 ]
 
 [project.optional-dependencies]

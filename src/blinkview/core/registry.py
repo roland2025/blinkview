@@ -15,6 +15,7 @@ from blinkview.core.base_reorder import ReorderFactory
 from blinkview.core.central_storage import CentralFactory
 from blinkview.core.config_manager import ConfigManager
 from blinkview.core.factory_registry import FactoryRegistry
+from blinkview.core.id_history import IdHistory
 from blinkview.core.id_registry import IDRegistry
 from blinkview.core.logger import PrintLogger, SystemLogger
 from blinkview.core.module_snapshot import LatestModuleValueTracker
@@ -145,6 +146,7 @@ class Registry:
         # self.file_manager.save_snapshot(["src/", "configs/"])
 
         self.id_registry = IDRegistry(np_pool)
+        self.pid_history = IdHistory()
 
         self.system_ctx = SystemContext(
             time_ns=self.now_ns,
@@ -154,6 +156,7 @@ class Registry:
             tasks=TaskManager(),
             settings=settings or SettingsManager(),
             array_pool=np_pool,
+            pid_history=self.pid_history,
         )
         self.file_manager.set_context(self.system_ctx)
 

@@ -19,7 +19,7 @@ _ID_ADB_LONG = CodecID.ADB_LONG
 _ID_PLUGIN = CodecID.PLUGIN
 
 
-@app_njit(inline="always")
+@app_njit()
 def nb_dispatch_frame_decoder(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg, f_state):
     d_id = f_cfg.decode_id
 

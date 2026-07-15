@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
@@ -12,7 +12,11 @@ from blinkview.core import dtypes
 from blinkview.core.id_registry.types import StringTableParams
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.empty import EMPTY_ID, EMPTY_INDEX
+from blinkview.core.warmup_registry import register_warmup
 from blinkview.utils.fnv1a_64 import nb_fnv1a_64_fast
+
+if TYPE_CHECKING:
+    from blinkview.core.warmup import NumbaWarmupHelper
 
 
 @app_njit()
@@ -272,3 +276,31 @@ class IndexedStringTable:
     def get_active_ids(self) -> np.ndarray:
         """Returns an array of all IDs currently marked as in use."""
         return np.where(self._in_use[: self.count])[0]
+
+    @staticmethod
+    @register_warmup
+    def warmup(helper: "NumbaWarmupHelper"):
+        """Triggers compilation for nb_insert_item, nb_insert_item_no_index, and
+        nb_rebuild_index. register_name() dispatches to one of the first two kernels depending
+        on use_hashes (both real shapes are in use: core/id_registry/registry.py's
+        modules_table/devices_table/levels_table all use use_hashes=False, while
+        DeviceIdentity's per-device modules_table uses use_hashes=True) - both are exercised
+        here. A second insert past initial_capacity=1 forces growth, triggering
+        _rebuild_index() -> nb_rebuild_index (a no-op for the use_hashes=False table, which
+        skips it by design - exercised on the use_hashes=True table only)."""
+        print("[Warmup] IndexedStringTable ...")
+
+        with_hashes = IndexedStringTable(initial_capacity=1, buffer_size_bytes=64, use_hashes=True)
+        without_hashes = IndexedStringTable(initial_capacity=1, buffer_size_bytes=64, use_hashes=False)
+
+        with_hashes.register_name(0, "a")
+        without_hashes.register_name(0, "a")
+
+        # identity_id=1 >= initial_capacity=1 -> forces growth -> _rebuild_index()
+        with_hashes.register_name(1, "b")
+        without_hashes.register_name(1, "b")
+
+        with_hashes.release()
+        without_hashes.release()
+
+        print("[Warmup] IndexedStringTable ... done")

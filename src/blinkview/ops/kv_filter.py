@@ -18,7 +18,7 @@ MAX_KV_CONDITIONS = 8
 _OFFSET_TYPE = np.uint32
 _LEN_TYPE = np.uint32
 
-EMPTY_KV_BYTES = np.empty(0, dtype=BYTE)
+EMPTY_KV_BYTES = np.frombuffer(b"", dtype=BYTE)  # read-only, matching build_kv_condition_arrays' real cond_*_buf
 EMPTY_KV_OFFSETS = np.empty(0, dtype=_OFFSET_TYPE)
 EMPTY_KV_LENGTHS = np.empty(0, dtype=_LEN_TYPE)
 

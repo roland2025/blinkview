@@ -161,7 +161,7 @@ class CobsDecoder(FrameDecoder):
         self.codec_id = CodecID.COBS
 
 
-@FrameDecoderFactory.register("nb_decode_slip_frame")
+@FrameDecoderFactory.register("decode_slip_frame")
 class SlipDecoder(FrameDecoder):
     """Frame processor for SLIP-encoded frames"""
 

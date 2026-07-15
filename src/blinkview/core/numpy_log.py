@@ -105,6 +105,8 @@ class CircularLogPool:
             has_modules=True,
             has_devices=True,
             has_sequences=True,
+            has_pids=True,
+            has_tids=True,
         )
 
         self.segments.append(new_segment)
@@ -249,13 +251,12 @@ class CircularLogPool:
             self._optimized = False
 
     @staticmethod
-    @register_warmup
+    @register_warmup(priority=100)
     def warmup(helper: "NumbaWarmupHelper"):
         """Triggers compilation for Batch Append and Log Filtering/Formatting. Runs first among
-        the registered warmup callbacks (CircularLogPool is core infrastructure imported well
-        before any UI widget module, so its callback registers - and therefore runs - ahead of
-        theirs in _WARMUP_CALLBACKS) since every other callback's log/telemetry kernels need rows
-        already present in helper.log_pool."""
+        the registered warmup callbacks (explicit high priority, not import-order luck) since
+        every other callback's log/telemetry kernels need rows already present in
+        helper.log_pool."""
 
         print("[Warmup] CircularLogPool ...")
 

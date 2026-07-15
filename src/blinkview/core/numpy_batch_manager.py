@@ -39,6 +39,8 @@ class PooledLogBatch:
         "_mod_h",
         "_dev_h",
         "_seq_h",
+        "_pid_h",
+        "_tid_h",
         # Heterogeneous Extension Handles
         "_ext_u32_1_h",
         "_ext_u32_2_h",
@@ -54,6 +56,8 @@ class PooledLogBatch:
         has_modules: bool = False,
         has_devices: bool = False,
         has_sequences: bool = False,
+        has_pids: bool = False,
+        has_tids: bool = False,
         has_ext_u32_1: bool = False,
         has_ext_u32_2: bool = False,
         has_ext_u64_1: bool = False,
@@ -67,6 +71,7 @@ class PooledLogBatch:
 
         self._ts_h = self._rx_ts_h = self._off_h = self._len_h = self._buf_h = None
         self._lvl_h = self._mod_h = self._dev_h = self._seq_h = None
+        self._pid_h = self._tid_h = None
         self._ext_u32_1_h = self._ext_u32_2_h = self._ext_u64_1_h = None
         self.bundle: Optional[LogBundle] = None
 
@@ -77,6 +82,8 @@ class PooledLogBatch:
             has_modules,
             has_devices,
             has_sequences,
+            has_pids,
+            has_tids,
             has_ext_u32_1,
             has_ext_u32_2,
             has_ext_u64_1,
@@ -90,6 +97,8 @@ class PooledLogBatch:
         has_modules,
         has_devices,
         has_sequences,
+        has_pids,
+        has_tids,
         has_ext_u32_1,
         has_ext_u32_2,
         has_ext_u64_1,
@@ -132,6 +141,18 @@ class PooledLogBatch:
         else:
             seq_arr = EMPTY_SEQ
 
+        if has_pids:
+            self._pid_h = acquire(true_cap, dtype=dtypes.ID_TYPE)
+            pid_arr = self._pid_h.array
+        else:
+            pid_arr = EMPTY_ID
+
+        if has_tids:
+            self._tid_h = acquire(true_cap, dtype=dtypes.ID_TYPE)
+            tid_arr = self._tid_h.array
+        else:
+            tid_arr = EMPTY_ID
+
         # 3. Independent Heterogeneous Extension Columns
         if has_ext_u32_1:
             self._ext_u32_1_h = acquire(true_cap, dtype=dtypes.UINT32)
@@ -159,6 +180,8 @@ class PooledLogBatch:
             modules=mod_arr,
             devices=dev_arr,
             sequences=seq_arr,
+            pids=pid_arr,
+            tids=tid_arr,
             offsets=self._off_h.array,
             lengths=self._len_h.array,
             buffer=self._buf_h.array,
@@ -174,6 +197,8 @@ class PooledLogBatch:
             has_modules=has_modules,
             has_devices=has_devices,
             has_sequences=has_sequences,
+            has_pids=has_pids,
+            has_tids=has_tids,
             has_ext_u32_1=has_ext_u32_1,
             has_ext_u32_2=has_ext_u32_2,
             has_ext_u64_1=has_ext_u64_1,
@@ -211,6 +236,8 @@ class PooledLogBatch:
         ext_u32_1: int = 0,
         ext_u32_2: int = 0,
         ext_u64_1: int = 0,
+        pid: int = 0,
+        tid: int = 0,
     ) -> bool:
         """
         Inserts data from any buffer-compatible object (bytes, bytearray, memoryview, ndarray).
@@ -222,7 +249,7 @@ class PooledLogBatch:
         data_view = np.frombuffer(msg_data, dtype=dtypes.BYTE)
 
         return nb_bundle_push(
-            b, ts_ns, rx_ts_ns, data_view, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
+            b, ts_ns, rx_ts_ns, data_view, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1, pid, tid
         )
 
     def insert_view(
@@ -238,6 +265,8 @@ class PooledLogBatch:
         ext_u32_1: int = 0,
         ext_u32_2: int = 0,
         ext_u64_1: int = 0,
+        pid: int = 0,
+        tid: int = 0,
     ) -> bool:
         """
         Directly passes a pre-allocated zero-copy NumPy view to the Numba kernel.
@@ -247,7 +276,20 @@ class PooledLogBatch:
             return False
 
         return nb_bundle_push_len(
-            b, ts_ns, rx_ts_ns, data_view, msg_length, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
+            b,
+            ts_ns,
+            rx_ts_ns,
+            data_view,
+            msg_length,
+            level,
+            module,
+            device,
+            seq,
+            ext_u32_1,
+            ext_u32_2,
+            ext_u64_1,
+            pid,
+            tid,
         )
 
     def insert(
@@ -262,6 +304,8 @@ class PooledLogBatch:
         ext_u32_1: int = 0,
         ext_u32_2: int = 0,
         ext_u64_1: int = 0,
+        pid: int = 0,
+        tid: int = 0,
     ) -> bool:
         """
         Inserts a new log record into the bundle via optimized Numba kernel.
@@ -285,7 +329,7 @@ class PooledLogBatch:
         # )
 
         return nb_bundle_push(
-            b, ts_ns, rx_ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
+            b, ts_ns, rx_ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1, pid, tid
         )
 
     def append(self, msg_bytes: bytes) -> bool:
@@ -334,6 +378,10 @@ class PooledLogBatch:
                 self._dev_h.release()
             if self._seq_h:
                 self._seq_h.release()
+            if self._pid_h:
+                self._pid_h.release()
+            if self._tid_h:
+                self._tid_h.release()
 
             # Extension release
             if self._ext_u32_1_h:
@@ -345,6 +393,7 @@ class PooledLogBatch:
 
             self._ts_h = self._rx_ts_h = self._off_h = self._len_h = self._buf_h = None
             self._lvl_h = self._mod_h = self._dev_h = self._seq_h = None
+            self._pid_h = self._tid_h = None
             self._ext_u32_1_h = self._ext_u32_2_h = self._ext_u64_1_h = None
 
     def __len__(self):
@@ -398,6 +447,9 @@ class PooledLogBatch:
         has_ext_u32_2 = b.has_ext_u32_2
         has_ext_u64_1 = b.has_ext_u64_1
 
+        has_pids = b.has_pids
+        has_tids = b.has_tids
+
         # Conditional memoryview allocation (Only touch active metadata arrays)
         levels = memoryview(b.levels) if has_levels else None
         modules = memoryview(b.modules) if has_modules else None
@@ -407,6 +459,9 @@ class PooledLogBatch:
         ext_u32_1 = memoryview(b.ext_u32_1) if has_ext_u32_1 else None
         ext_u32_2 = memoryview(b.ext_u32_2) if has_ext_u32_2 else None
         ext_u64_1 = memoryview(b.ext_u64_1) if has_ext_u64_1 else None
+
+        pids = memoryview(b.pids) if has_pids else None
+        tids = memoryview(b.tids) if has_tids else None
 
         for i in range(count):
             off = offsets[i]
@@ -422,6 +477,8 @@ class PooledLogBatch:
                 ext_u32_1[i] if has_ext_u32_1 else None,
                 ext_u32_2[i] if has_ext_u32_2 else None,
                 ext_u64_1[i] if has_ext_u64_1 else None,
+                pids[i] if has_pids else None,
+                tids[i] if has_tids else None,
             )
 
     @property
@@ -522,5 +579,5 @@ def log_batch(instance, batch_data, direction="OUT"):
 
         # Dynamic detail lines
         for item in batch_data:
-            _ts, _msg, _rx_ts = item[0], item[1], item[2]
-            print(f"[{cls_name}_{direction}] ts={_ts}: msg={_msg} hex={_msg.hex()}")
+            _ts, _msg, _rx_ts, pid, tid = item[0], item[1], item[2], item[10], item[11]
+            print(f"[{cls_name}_{direction}] ts={_ts} rx_ts={_rx_ts} pid={pid} tid={tid} msg={_msg} hex={_msg.hex()}")

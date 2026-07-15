@@ -46,6 +46,7 @@ CHAR_DASH = 45  # -
 CHAR_SLASH = 47  # /
 CHAR_BACKSLASH = 92  # \
 CHAR_ESC = 27  # ANSI Escape
+CHAR_EQUALS = 61
 
 CHAR_RS = 30  # 0x1E (Record Separator) used for internal newlines
 

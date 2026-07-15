@@ -9,6 +9,7 @@ import pytest
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.id_registry.registry import IDRegistry
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
+from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
 
@@ -70,6 +71,57 @@ def test_bake_kv_arrays_flattens_conditions(log_filter):
     assert arrays.num_conditions == 2
     k0 = arrays.cond_keys_buf[arrays.cond_keys_off[0] : arrays.cond_keys_off[0] + arrays.cond_keys_len[0]]
     assert k0.tobytes() == b"status"
+
+
+def test_starts_with_no_text_filter(log_filter):
+    assert log_filter.text_filter_text == ""
+    assert log_filter.bake_text_search() is EMPTY_TEXT_SEARCH
+
+
+def test_set_text_filter_stores_text(log_filter):
+    log_filter.set_text_filter("connection lost")
+    assert log_filter.text_filter_text == "connection lost"
+
+
+def test_set_text_filter_empty_reverts_to_empty_search(log_filter):
+    log_filter.set_text_filter("something")
+    assert log_filter.bake_text_search() is not EMPTY_TEXT_SEARCH
+
+    log_filter.set_text_filter("")
+    assert log_filter.bake_text_search() is EMPTY_TEXT_SEARCH
+
+
+def test_bake_text_search_is_cached_until_text_changes(log_filter):
+    log_filter.set_text_filter("lost")
+    baked_first = log_filter.bake_text_search()
+    baked_second = log_filter.bake_text_search()
+    assert baked_first is baked_second
+
+    log_filter.set_text_filter("found")
+    baked_third = log_filter.bake_text_search()
+    assert baked_third is not baked_first
+
+
+def test_bake_text_search_invalidates_when_registry_grows(log_filter):
+    log_filter.set_text_filter("esp32")
+    baked_first = log_filter.bake_text_search()
+
+    log_filter.registry.get_device("esp32")  # registry grows -> a new device could now match
+    baked_second = log_filter.bake_text_search()
+
+    assert baked_second is not baked_first
+    assert baked_second.dev_mask[0]
+
+
+def test_bake_text_search_matches_device_and_module_names(log_filter):
+    device = log_filter.registry.get_device("esp32")
+    module = device.get_module("wifi")
+
+    log_filter.set_text_filter("wifi")
+    arrays = log_filter.bake_text_search()
+
+    assert not arrays.dev_mask[device.id]
+    assert arrays.mod_mask[module.id]
 
 
 @pytest.mark.parametrize(

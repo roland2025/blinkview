@@ -6,23 +6,19 @@
 
 from enum import IntEnum
 from time import time_ns
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
-from qtpy.QtCore import QAbstractTableModel, QEvent, QModelIndex, QSize, QSortFilterProxyModel, Qt
-from qtpy.QtGui import QAction, QColor, QFont
+from qtpy.QtCore import QRect, Qt, QTimer
+from qtpy.QtGui import QAction, QColor, QFontMetrics, QPainter
 from qtpy.QtWidgets import (
+    QAbstractScrollArea,
     QActionGroup,
     QApplication,
     QComboBox,
-    QHeaderView,
     QLineEdit,
     QMenu,
     QSplitter,
-    QStyle,
-    QStyledItemDelegate,
-    QStyleOptionViewItem,
-    QTableView,
     QToolBar,
     QToolButton,
     QVBoxLayout,
@@ -30,12 +26,13 @@ from qtpy.QtWidgets import (
 )
 
 from blinkview.core import dtypes
-from blinkview.core.dtypes import SEQ_NONE, SEQ_START
 from blinkview.core.module_snapshot import MAX_MSG_BYTES
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.warmup_registry import register_warmup
+from blinkview.ops.formatting import nb_format_local_timestamp
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
-from blinkview.ops.segments import nb_filter_segment, nb_segment_extract_fields, nb_segment_filter_reversed
+from blinkview.ops.segments import nb_segment_extract_fields, segment_filter, segment_filter_reversed
+from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.kv_filter_line_edit import KvFilterLineEdit
 from blinkview.ui.widgets.module_filter_sidebar import ModuleFilterSidebar
@@ -47,6 +44,17 @@ if TYPE_CHECKING:
     from blinkview.core.warmup import NumbaWarmupHelper
 
 ROW_HEIGHT = 16
+HEADER_HEIGHT = 22
+
+# Column auto-sizing throttle for columns whose content can keep changing width (MODULE/PROCESS
+# names) - re-measuring on every single paint (live mode ticks at ~10Hz) would be wasteful.
+COLUMN_AUTOSIZE_THROTTLE_NS = 2_000_000_000
+
+# LogLevel.LIST is a small fixed set - precompute QColor/name lookups once at import time instead
+# of allocating a new QColor (and re-resolving LogLevel.from_value) on every single cell paint.
+# Keyed by the raw int value (dtypes.LEVEL_TYPE), same as LogLevel.DICT.
+_LEVEL_COLORS = {level.value: QColor(level.color) for level in LogLevel.LIST}
+_LEVEL_NAMES = {level.value: level.name_conf for level in LogLevel.LIST}
 
 
 class LogTableCol(IntEnum):
@@ -54,11 +62,25 @@ class LogTableCol(IntEnum):
     RX_TIMESTAMP = 1
     DEVICE = 2
     LEVEL = 3
-    MODULE = 4
-    MESSAGE = 5
+    PROCESS = 4
+    THREAD = 5
+    MODULE = 6
+    MESSAGE = 7
 
 
-class LogTableModel(QAbstractTableModel):
+_COLUMN_LABELS = {
+    LogTableCol.TIMESTAMP: "Time",
+    LogTableCol.RX_TIMESTAMP: "Rx Time",
+    LogTableCol.DEVICE: "Device",
+    LogTableCol.LEVEL: "Level",
+    LogTableCol.MODULE: "Module",
+    LogTableCol.MESSAGE: "Message",
+    LogTableCol.PROCESS: "Process",
+    LogTableCol.THREAD: "Thread",
+}
+
+
+class LogTableStore:
     """Two-tier structured (columnar) log row store, filtered by a shared LogFilter the same
     way LogViewerWidget filters its text stream:
 
@@ -70,13 +92,19 @@ class LogTableModel(QAbstractTableModel):
       when history mode was entered), so the user can scroll through a couple hundred rows of
       context in either direction without the model holding unbounded scrollback. This window
       is static (not refreshed on new data) until the widget returns to live mode.
+
+    Plain Python object (not a QAbstractTableModel/QObject) - LogTableCanvas paints directly
+    from this store's arrays instead of going through Qt's model/view/delegate machinery, which
+    was found to force a full-viewport repaint on every single content change regardless of how
+    cheap data() itself was made (see qt-log-table-viewer skill). Callers are responsible for
+    triggering a repaint themselves (LogTableCanvas.request_repaint()) after any call here that
+    changes row_count/content - there are no Qt signals to do it automatically anymore.
     """
 
     HISTORY_BEFORE = 300
     HISTORY_AFTER = 300
 
-    def __init__(self, gui_context, log_filter: LogFilter, filter_sidebar, parent=None):
-        super().__init__(parent)
+    def __init__(self, gui_context, log_filter: LogFilter, filter_sidebar):
         self.gui_context: GUIContext = gui_context
         self.log_filter = log_filter
         self.filter_sidebar = filter_sidebar
@@ -93,45 +121,139 @@ class LogTableModel(QAbstractTableModel):
         self.row_count = 0
         self._valid_start = self.capacity
 
-        # Preallocated once (never inside apply_updates) from the shared array pool, mirroring
-        # how PooledLogBatch is used elsewhere for segment storage. nb_segment_extract_fields
-        # writes directly into .bundle's columns; offsets/lengths are written fixed-stride
-        # (row * MAX_MSG_BYTES) rather than via the running msg_cursor used by ingestion.
-        array_pool = self.gui_context.registry.system_ctx.array_pool
-        self.batch = array_pool.create(
-            PooledLogBatch,
-            self.capacity,
-            self.capacity * MAX_MSG_BYTES,
-            has_levels=True,
-            has_modules=True,
-            has_devices=True,
-            has_sequences=True,
-        )
-        bundle = self.batch.bundle
-        self.ts = bundle.timestamps
-        self.rx_ts = bundle.rx_timestamps
-        self.dev = bundle.devices
-        self.lvl = bundle.levels
-        self.mod = bundle.modules
-        self.seq = bundle.sequences
-        self.msg_offsets = bundle.offsets
-        self.msg_buffer = bundle.buffer
-        self.msg_lengths = bundle.lengths
+        # Set to True whenever apply_updates() actually ran a fetch that changed row content -
+        # False when throttled, the backend sequence didn't move, or no row matched the filter.
+        # LogTableViewerWidget checks this after every apply_updates() call to decide whether a
+        # repaint is even worth scheduling, so a quiet live tail doesn't repaint at the full
+        # heartbeat rate for no reason.
+        self.last_fetch_changed = False
+
+        # Two PooledLogBatch buffers, ping-ponged by _bind_active()/self._active. LIVE mode's
+        # incremental fetch (_fetch_live_incremental) writes the next tick's rows into the
+        # currently-INACTIVE buffer (carrying forward matches already sitting in the active one)
+        # so the buffer the view is currently reading from is never mutated out from under it;
+        # HISTORY mode isn't per-tick so it just writes in place into whichever is active.
+        self._batches = []
+        self._buf_valid_start = []
+        self._buf_row_count = []
+        self._array_pool = self.gui_context.registry.system_ctx.array_pool
+        for _ in range(2):
+            self._batches.append(self._alloc_batch(self.capacity))
+            self._buf_valid_start.append(self.capacity)
+            self._buf_row_count.append(0)
+        self._active = 0
+
+        # identity_indices[i] == i by construction, so any contiguous slice is exactly the
+        # "indices" array nb_segment_extract_fields needs to copy those same-numbered rows out of
+        # a source buffer - lets the incremental fetch's carry-over step reuse that kernel with
+        # zero per-tick allocation.
+        self._identity_indices = np.arange(self.capacity, dtype=np.int64)
+
         self._message_cache = [None] * self.capacity
+        self._bind_active()
+
+        # Scratch buffer for nb_format_local_timestamp - reused across every _format_ts call
+        # instead of allocating a fresh array per cell paint (this runs once per visible
+        # TIMESTAMP/RX_TIMESTAMP cell on every repaint). _ts_scratch_mv is a cached memoryview
+        # over the same buffer - slicing/decoding through it avoids re-wrapping a numpy array
+        # (with its dtype/shape checks) on every single cell.
+        self._ts_scratch = np.empty(18, dtype=np.uint8)
+        self._ts_scratch_mv = memoryview(self._ts_scratch)
 
         self._tz_offset_ns = get_local_utc_offset_seconds() * 1_000_000_000
         self.ts_precision = 3  # 0=seconds, 3=milliseconds, 6=microseconds, 9=nanoseconds
 
+        # Flat id -> name caches for the DEVICE/MODULE columns, used instead of a dict .get() +
+        # attribute lookup through gui_context.id_registry on every single cell paint. Relies on
+        # IDRegistry assigning ids sequentially from 0 (see registry.py's _device_id_counter/
+        # _module_id_counter) so a plain list indexed by id is valid and append-only growable -
+        # same assumption IDRegistry._essential_array already relies on. Names are immutable once
+        # registered (registry.py only ever adds new devices/modules, never renames), so entries
+        # never need invalidating, only appending to.
+        self._device_name_cache = []
+        self._module_name_cache = []
+
         self._prev_total_module_count = None
         self._filter_cache = None
+        self._filter_cache_computed = False
         self._effective_mask = None
 
         # Sentinel forces a rebuild on the very first live tick regardless of the backend's sequence.
         self._last_backend_seq = None
         self.prev_apply = 0
 
+        # Identity of the effective_mask/kv/text used by the *previous* successful fetch - used to
+        # decide whether the next fetch may take the cheap incremental path (forward-scan only
+        # rows added since last time, carrying forward previously-matched rows) or must fall back
+        # to a full rescan (the filter itself changed, so previously-matched rows are no longer
+        # valid). bake_kv_arrays()/bake_text_search()/_bake_effective_mask() all return the same
+        # object instance until something in them actually changes, so `is` comparisons are enough.
+        self._prev_fetch_mask = None
+        self._prev_fetch_kv = None
+        self._prev_fetch_text = None
+
         self.logger = self.gui_context.logger.child("log_table", enabled=True)
         self.logger_fetch = self.logger.child("fetch")
+
+    def _alloc_batch(self, capacity: int) -> PooledLogBatch:
+        return self._array_pool.create(
+            PooledLogBatch,
+            capacity,
+            capacity * MAX_MSG_BYTES,
+            has_levels=True,
+            has_modules=True,
+            has_devices=True,
+            has_sequences=True,
+            has_pids=True,
+            has_tids=True,
+        )
+
+    def _bind_active(self):
+        """Re-points the cached column attrs at whichever buffer is currently active. Called on
+        construction and every time a fetch flips self._active. Plain rebound instance attributes
+        (not properties) since callers - including the test harness - expect self.ts/self.dev/etc.
+        to be plain writable numpy array views, and nothing needs read/write interception.
+
+        Also rebinds a *_mv memoryview twin of each scalar-column array, used only by the paint
+        path's per-cell hot loop: indexing a memoryview of a fixed-width dtype yields a plain
+        Python int/float directly, skipping both the np.int64/uint32 scalar-object wrapper numpy
+        array indexing allocates and a subsequent int(...) unwrap. Code that needs real numpy
+        semantics (slicing, ==, kernels) keeps using the plain array attrs above - memoryviews
+        don't support that.
+
+        Deliberately does NOT touch self._message_cache - unlike the array attrs above (which are
+        always safe to blindly rebind, since a stale numpy view is just replaced), a slot's cached
+        decoded string is only valid for the specific bytes currently occupying that slot in
+        whichever buffer is now active, so blindly nulling the whole cache here would throw away
+        still-valid decodes for carried-forward rows every single live tick. Every caller is
+        responsible for setting self._message_cache itself, appropriately for what it just wrote
+        (_fetch_live_incremental carries forward the entries for rows it carried forward; every
+        other caller here rewrites the whole buffer and must reset the whole cache)."""
+        bundle = self._batches[self._active].bundle
+        self.ts = bundle.timestamps
+        self.rx_ts = bundle.rx_timestamps
+        self.dev = bundle.devices
+        self.lvl = bundle.levels
+        self.mod = bundle.modules
+        self.seq = bundle.sequences
+        self.pid = bundle.pids
+        self.tid = bundle.tids
+        self.msg_offsets = bundle.offsets
+        self.msg_buffer = bundle.buffer
+        self.msg_lengths = bundle.lengths
+
+        self.ts_mv = memoryview(self.ts)
+        self.rx_ts_mv = memoryview(self.rx_ts)
+        self.dev_mv = memoryview(self.dev)
+        self.lvl_mv = memoryview(self.lvl)
+        self.mod_mv = memoryview(self.mod)
+        self.pid_mv = memoryview(self.pid)
+        self.tid_mv = memoryview(self.tid)
+        self.msg_offsets_mv = memoryview(self.msg_offsets)
+        self.msg_lengths_mv = memoryview(self.msg_lengths)
+
+        self._valid_start = self._buf_valid_start[self._active]
+        self.row_count = self._buf_row_count[self._active]
 
     @staticmethod
     @register_warmup
@@ -139,20 +261,29 @@ class LogTableModel(QAbstractTableModel):
         """Exercises nb_segment_extract_fields, nb_segment_filter_reversed and nb_filter_segment -
         the kernels this widget uses that aren't already warmed by NumbaWarmupHelper's other
         exercise_* methods - using the helper's dummy log_pool/registry instead of standing up
-        a real LogTableModel. Numba compiles a distinct specialization per call-site signature
-        (e.g. end_seq/start_seq passed vs. left at its default), so every call shape actually
-        used by _fetch_live/_fetch_history is exercised here too - matching only one shape
-        leaves the others to JIT-compile (a stall) on their first real call instead. The kv_*
-        arguments are always passed explicitly here (never omitted), matching how the real
-        fetch methods always pass log_filter.bake_kv_arrays()'s output - a numpy array's Numba
-        type only depends on its dtype/ndim, not length, so warming with the empty-conditions
-        arrays also covers the "real conditions present" case at call time."""
-        print("[Warmup] LogTableModel ...")
+        a real LogTableStore.
+
+        kv/text are NamedTuples of numpy arrays, and Numba types an array's read-only-ness as
+        part of its signature (see numba-njit skill §3/§9). EMPTY_KV_CONDITIONS/EMPTY_TEXT_SEARCH
+        (ops/kv_filter.py, ops/text_filter.py) are deliberately built from
+        np.frombuffer(b"", ...) rather than np.empty(...) so their buffer fields are already
+        read-only - the same type Numba sees for a real, non-empty query built via
+        build_kv_condition_arrays/build_text_search_arrays. That means the single EMPTY_* combo
+        exercised below covers the "real kv/text present" case too; no need to separately warm
+        every real/empty combination (see numba-njit skill §15). What *does* still need covering
+        per shape below is start_seq/end_seq, crossed with every call shape
+        _fetch_live/_fetch_history actually use."""
+        print("[Warmup] LogTableStore ...")
+
+        # _format_ts's per-cell-paint kernel - precision=9 alone compiles every branch (branches
+        # aren't literal-specialized on a runtime bool/int, see numba-njit skill §3).
+        nb_format_local_timestamp(np.empty(18, dtype=np.uint8), 0, 0, 9)
 
         capacity = 8
         max_msg_bytes = 64
         effective_mask = np.zeros(max(10, helper.registry.module_count()), dtype=dtypes.LEVEL_TYPE)
         kv = EMPTY_KV_CONDITIONS
+        text = EMPTY_TEXT_SEARCH
 
         with (
             helper.array_pool.create(
@@ -163,6 +294,8 @@ class LogTableModel(QAbstractTableModel):
                 has_modules=True,
                 has_devices=True,
                 has_sequences=True,
+                has_pids=True,
+                has_tids=True,
             ) as out_batch,
             helper.log_pool.get_reversed_snapshot() as segments,
             helper.log_pool.acquire_indices_buffer() as indices,
@@ -171,51 +304,45 @@ class LogTableModel(QAbstractTableModel):
                 if segment.size == 0:
                     continue
 
-                # _fetch_live's shape: no end_seq.
-                match_count = nb_segment_filter_reversed(
+                # _fetch_live_full's shape: no start_seq/end_seq.
+                match_count = segment_filter_reversed(
                     segment.bundle,
                     effective_mask=effective_mask,
                     out_indices=indices.array,
                     max_matches=capacity,
-                    kv_cond_keys_buf=kv.cond_keys_buf,
-                    kv_cond_keys_off=kv.cond_keys_off,
-                    kv_cond_keys_len=kv.cond_keys_len,
-                    kv_cond_vals_buf=kv.cond_vals_buf,
-                    kv_cond_vals_off=kv.cond_vals_off,
-                    kv_cond_vals_len=kv.cond_vals_len,
-                    kv_num_conditions=kv.num_conditions,
+                    kv=kv,
+                    text=text,
                 )
 
                 # _fetch_history's "before" shape: end_seq passed explicitly.
-                nb_segment_filter_reversed(
+                segment_filter_reversed(
                     segment.bundle,
                     effective_mask=effective_mask,
                     out_indices=indices.array,
                     max_matches=capacity,
-                    end_seq=dtypes.SEQ_TYPE(SEQ_START),
-                    kv_cond_keys_buf=kv.cond_keys_buf,
-                    kv_cond_keys_off=kv.cond_keys_off,
-                    kv_cond_keys_len=kv.cond_keys_len,
-                    kv_cond_vals_buf=kv.cond_vals_buf,
-                    kv_cond_vals_off=kv.cond_vals_off,
-                    kv_cond_vals_len=kv.cond_vals_len,
-                    kv_num_conditions=kv.num_conditions,
+                    end_seq=dtypes.SEQ_START,
+                    kv=kv,
+                    text=text,
+                )
+
+                # _fetch_live_incremental's shape: start_seq passed explicitly (no end_seq).
+                segment_filter_reversed(
+                    segment.bundle,
+                    effective_mask=effective_mask,
+                    out_indices=indices.array,
+                    max_matches=capacity,
+                    kv=kv,
+                    text=text,
                 )
 
                 # _fetch_history's "after" shape: nb_filter_segment with start_seq passed explicitly.
-                nb_filter_segment(
+                segment_filter(
                     segment.bundle,
                     effective_mask=effective_mask,
                     out_indices=indices.array,
                     max_matches=capacity,
-                    start_seq=SEQ_NONE,
-                    kv_cond_keys_buf=kv.cond_keys_buf,
-                    kv_cond_keys_off=kv.cond_keys_off,
-                    kv_cond_keys_len=kv.cond_keys_len,
-                    kv_cond_vals_buf=kv.cond_vals_buf,
-                    kv_cond_vals_off=kv.cond_vals_off,
-                    kv_cond_vals_len=kv.cond_vals_len,
-                    kv_num_conditions=kv.num_conditions,
+                    kv=kv,
+                    text=text,
                 )
 
                 if match_count > 0:
@@ -229,109 +356,57 @@ class LogTableModel(QAbstractTableModel):
                     )
                 break
 
-        print("[Warmup] LogTableModel ... done")
+        print("[Warmup] LogTableStore ... done")
 
-    # --- Qt model plumbing ---------------------------------------------------------------
-
-    def rowCount(self, parent=QModelIndex()):
-        if parent.isValid():
-            return 0
-        return self.row_count
-
-    def columnCount(self, parent=QModelIndex()):
-        if parent.isValid():
-            return 0
-        return len(LogTableCol)
-
-    def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
-            names = {
-                LogTableCol.TIMESTAMP: "Time",
-                LogTableCol.RX_TIMESTAMP: "Rx Time",
-                LogTableCol.DEVICE: "Device",
-                LogTableCol.LEVEL: "Level",
-                LogTableCol.MODULE: "Module",
-                LogTableCol.MESSAGE: "Message",
-            }
-            return names.get(LogTableCol(section))
-        return super().headerData(section, orientation, role)
-
-    def set_ts_precision(self, precision: int):
-        if self.ts_precision == precision:
-            return
-        self.ts_precision = precision
-        if self.row_count > 0:
-            top_left = self.index(0, LogTableCol.TIMESTAMP)
-            bottom_right = self.index(self.row_count - 1, LogTableCol.RX_TIMESTAMP)
-            self.dataChanged.emit(top_left, bottom_right)
+    # --- Row access ------------------------------------------------------------------------
 
     def _row_to_slot(self, row: int) -> int:
         """Maps a model row (0 = oldest currently shown) to its slot in the fixed-size arrays."""
         return self._valid_start + row
 
     def _format_ts(self, ts_ns: int) -> str:
-        ns = ts_ns + self._tz_offset_ns
-        total_sec = ns // 1_000_000_000
-        sec = total_sec % 60
-        minute = (total_sec // 60) % 60
-        hour = (total_sec // 3600) % 24
-        base = f"{hour:02d}:{minute:02d}:{sec:02d}"
+        length = nb_format_local_timestamp(self._ts_scratch, ts_ns, self._tz_offset_ns, self.ts_precision)
+        return self._ts_scratch_mv[:length].tobytes().decode("ascii")
 
-        precision = self.ts_precision
-        if precision <= 0:
-            return base
+    def set_ts_precision(self, precision: int):
+        if self.ts_precision == precision:
+            return
+        self.ts_precision = precision
 
-        sub_ns = ns % 1_000_000_000
-        if precision >= 9:
-            frac = f"{sub_ns:09d}"
-        elif precision >= 6:
-            frac = f"{sub_ns // 1_000:06d}"
-        else:
-            frac = f"{sub_ns // 1_000_000:03d}"
-
-        return f"{base}.{frac}"
-
-    def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid():
+    def get_color(self, row: int) -> Optional[QColor]:
+        if row < 0 or row >= self.row_count:
             return None
+        slot = self._row_to_slot(row)
+        return _LEVEL_COLORS.get(self.lvl_mv[slot])
 
-        row = index.row()
-        if row >= self.row_count:
+    def get_cell(self, row: int, col: LogTableCol) -> Optional[str]:
+        if row < 0 or row >= self.row_count:
             return None
 
         slot = self._row_to_slot(row)
 
-        if role == Qt.ForegroundRole:
-            level = LogLevel.from_value(int(self.lvl[slot]))
-            return QColor(level.color) if level else None
-
-        if role == Qt.FontRole:
-            level = LogLevel.from_value(int(self.lvl[slot]))
-            if level and level >= LogLevel.WARN:
-                font = QFont()
-                font.setBold(True)
-                return font
-            return None
-
-        if role != Qt.DisplayRole:
-            return None
-
-        col = index.column()
         if col == LogTableCol.TIMESTAMP:
-            return self._format_ts(int(self.ts[slot]))
+            return self._format_ts(self.ts_mv[slot])
         if col == LogTableCol.RX_TIMESTAMP:
-            return self._format_ts(int(self.rx_ts[slot]))
+            return self._format_ts(self.rx_ts_mv[slot])
         if col == LogTableCol.DEVICE:
-            device = self.gui_context.id_registry.devices.get(int(self.dev[slot]))
-            return device.name if device else "?"
+            return self._device_name(self.dev_mv[slot])
         if col == LogTableCol.LEVEL:
-            level = LogLevel.from_value(int(self.lvl[slot]))
-            return level.name_conf if level else "?"
+            return _LEVEL_NAMES.get(self.lvl_mv[slot], "?")
         if col == LogTableCol.MODULE:
-            module = self.gui_context.id_registry.modules.get(int(self.mod[slot]))
-            return module.name if module else "?"
+            return self._module_name(self.mod_mv[slot])
         if col == LogTableCol.MESSAGE:
             return self._decode_message(slot)
+        if col == LogTableCol.PROCESS:
+            pid = self.pid_mv[slot]
+            if pid == 0:
+                return "-"
+            key = (self.dev_mv[slot] << 32) | pid
+            name = self.gui_context.registry.pid_history.resolve(key, self.ts_mv[slot])
+            return name if name else "-"
+        if col == LogTableCol.THREAD:
+            tid = self.tid_mv[slot]
+            return str(tid) if tid else "-"
 
         return None
 
@@ -355,11 +430,29 @@ class LogTableModel(QAbstractTableModel):
         if cached is not None:
             return cached
 
-        msg_len = int(self.msg_lengths[slot])
-        off = int(self.msg_offsets[slot])
+        msg_len = self.msg_lengths_mv[slot]
+        off = self.msg_offsets_mv[slot]
         text = self.msg_buffer[off : off + msg_len].tobytes().decode("utf-8", errors="replace")
         self._message_cache[slot] = text
         return text
+
+    def _device_name(self, dev_id: int) -> str:
+        cache = self._device_name_cache
+        if dev_id >= len(cache):
+            devices = self.gui_context.id_registry.devices
+            for i in range(len(cache), len(devices)):
+                identity = devices.get(i)
+                cache.append(identity.name if identity else "?")
+        return cache[dev_id] if dev_id < len(cache) else "?"
+
+    def _module_name(self, mod_id: int) -> str:
+        cache = self._module_name_cache
+        if mod_id >= len(cache):
+            modules = self.gui_context.id_registry.modules
+            for i in range(len(cache), len(modules)):
+                identity = modules.get(i)
+                cache.append(identity.name if identity else "?")
+        return cache[mod_id] if mod_id < len(cache) else "?"
 
     # --- Mode management ------------------------------------------------------------------
 
@@ -371,9 +464,27 @@ class LogTableModel(QAbstractTableModel):
         if n == self.viewport_rows:
             return
         self.viewport_rows = n
+        if n > self.capacity:
+            self._grow_capacity(n)
         if self.mode == "live":
             self._last_backend_seq = None  # force a refetch at the new size
             self._fetch_live(force=True)
+
+    def _grow_capacity(self, min_capacity: int):
+        """Reallocates both buffers (and the identity-index scratch array) large enough to hold
+        min_capacity rows. viewport_rows growing past the original capacity (e.g. resizing to a
+        very tall view) would otherwise make the fetch write past the end of the fixed-size
+        arrays - a silent negative-index wraparound, not a crash. Old buffer contents don't map
+        cleanly onto a larger backing array, so both buffers' bookkeeping resets to empty; the
+        caller always forces a full refetch immediately after (set_viewport_rows always does)."""
+        self.capacity = max(min_capacity, self.HISTORY_BEFORE + self.HISTORY_AFTER)
+        self._batches = [self._alloc_batch(self.capacity) for _ in range(2)]
+        self._buf_valid_start = [self.capacity, self.capacity]
+        self._buf_row_count = [0, 0]
+        self._identity_indices = np.arange(self.capacity, dtype=np.int64)
+        self._active = 0
+        self._bind_active()
+        self._message_cache = [None] * self.capacity
 
     def enter_live_mode(self):
         self.mode = "live"
@@ -390,15 +501,14 @@ class LogTableModel(QAbstractTableModel):
         self._fetch_history(anchor_seq)
 
     def clear_logs(self):
-        self.beginResetModel()
-        self.row_count = 0
-        self._valid_start = self.capacity
+        self._buf_valid_start = [self.capacity, self.capacity]
+        self._buf_row_count = [0, 0]
+        self._bind_active()
         self._message_cache = [None] * self.capacity
         log_pool = self.gui_context.registry.central.log_pool
         self._last_backend_seq = log_pool.latest_sequence()
         self.mode = "live"
         self.anchor_seq = None
-        self.endResetModel()
 
     def reload_and_redraw(self):
         """Forces a re-fetch under the current mode (used when filter settings change - same
@@ -417,8 +527,16 @@ class LogTableModel(QAbstractTableModel):
         reg = self.gui_context.id_registry
         f = self.log_filter
 
-        if self._prev_total_module_count != (mod_count := reg.module_count()) or self._filter_cache is None:
+        # _filter_cache legitimately holds None as its steady-state value (no module/device
+        # filter active) - a bare "is None" check can't tell "not yet computed" apart from
+        # "computed, and the answer is None", so it would otherwise re-derive filter_cache (and
+        # discard/rebuild effective_mask below) on every single call whenever no module/device
+        # filter is set, defeating both this cache and the `is`-identity comparisons callers rely
+        # on (e.g. LogTableStore._fetch_live's filter-changed detection) to tell "truly unchanged"
+        # apart from "recomputed to the same value".
+        if self._prev_total_module_count != (mod_count := reg.module_count()) or not self._filter_cache_computed:
             self._prev_total_module_count = mod_count
+            self._filter_cache_computed = True
             self._effective_mask = None
 
             if m := f.filtered_module:
@@ -465,30 +583,81 @@ class LogTableModel(QAbstractTableModel):
     # --- LIVE mode fetch --------------------------------------------------------------------
 
     def apply_updates(self):
-        """Driven by the GUIContext heartbeat (~10Hz). Only does anything in LIVE mode -
-        HISTORY mode is a static snapshot until the widget calls enter_live_mode()/
-        enter_history_mode() again in response to scrolling."""
+        """Driven by the GUIContext heartbeat (~10Hz, or slower for a large viewport - see
+        _live_throttle_ns). Only does anything in LIVE mode - HISTORY mode is a static snapshot
+        until the widget calls enter_live_mode()/enter_history_mode() again in response to
+        scrolling."""
+        self.last_fetch_changed = False
+
         if self.mode != "live":
             return
 
         now = time_ns()
-        if now - self.prev_apply < 100_000_000:  # Throttle to ~10Hz
+        if now - self.prev_apply < self._live_throttle_ns():
             return
         self.prev_apply = now
 
         self._fetch_live()
 
+    def _live_throttle_ns(self) -> int:
+        """LIVE mode's per-tick cost used to be dominated by Qt's own repaint (QAbstractItemView
+        always repaints the entire viewport on any content change, confirmed empirically - see
+        qt-log-table-viewer skill), which is why this scales with viewport_rows. Now that painting
+        goes through LogTableCanvas's own direct paintEvent instead of QTableView, the per-cell
+        cost is much lower, but the scaling throttle is kept anyway - repainting more of the
+        viewport is still strictly more work than repainting less of it, regardless of how cheap
+        each cell became, and there's no reason to burn cycles redrawing a few hundred rows at the
+        same ~10Hz rate a two-dozen-row window uses."""
+        baseline_rows = 50
+        base_interval_ns = 100_000_000
+        return base_interval_ns * max(1, self.viewport_rows // baseline_rows)
+
     def _fetch_live(self, force: bool = False):
+        """Dispatches to a full backward rescan (_fetch_live_full) or a cheap incremental
+        forward-scan-and-carry (_fetch_live_incremental), depending on whether a full rescan is
+        actually required this tick. Both write into the currently-INACTIVE buffer and flip
+        self._active on success, so the buffer the view is reading from is never mutated
+        mid-read."""
         pool = self.gui_context.registry.central.log_pool
         current_backend_seq = pool.latest_sequence()
 
         if not force and current_backend_seq == self._last_backend_seq:
             return  # Nothing new in the backend since the last fetch - skip entirely.
-        self._last_backend_seq = current_backend_seq
 
         self.filter_sidebar.sync_modules()
         self._bake_effective_mask()
         kv = self.log_filter.bake_kv_arrays()
+        text = self.log_filter.bake_text_search()
+
+        # A full rescan is unavoidable on the very first fetch, whenever the caller explicitly
+        # forces one (viewport resize, mode transitions, clear), or when the filter itself
+        # changed since the last successful fetch - in that last case, whatever rows are
+        # currently sitting in the active buffer no longer reflect the filter that would produce
+        # them, so they can't be carried forward. Otherwise, the incremental path is strictly
+        # cheaper and correct: it only has to look at rows added since self._last_backend_seq.
+        filter_changed = (
+            self._prev_fetch_mask is not self._effective_mask
+            or self._prev_fetch_kv is not kv
+            or self._prev_fetch_text is not text
+        )
+
+        if force or self._last_backend_seq is None or filter_changed:
+            self.last_fetch_changed = True
+            self._fetch_live_full(pool, kv, text)
+        else:
+            self._fetch_live_incremental(pool, kv, text)
+
+        self._last_backend_seq = current_backend_seq
+        self._prev_fetch_mask = self._effective_mask
+        self._prev_fetch_kv = kv
+        self._prev_fetch_text = text
+
+    def _fetch_live_full(self, pool, kv, text):
+        """Full backward rescan across the entire backend, capped at viewport_rows matches -
+        the only correct option when there's no valid "previous fetch" to carry forward from
+        (first fetch, forced refetch, or the filter itself changed)."""
+        inactive_idx = 1 - self._active
+        inactive = self._batches[inactive_idx]
 
         limit = self.viewport_rows
         write_cursor = self.capacity
@@ -508,18 +677,13 @@ class LogTableModel(QAbstractTableModel):
 
                 segment_count += 1
 
-                match_count = nb_segment_filter_reversed(
+                match_count = segment_filter_reversed(
                     segment.bundle,
                     effective_mask=self._effective_mask,
                     out_indices=indices.array,
                     max_matches=allowed,
-                    kv_cond_keys_buf=kv.cond_keys_buf,
-                    kv_cond_keys_off=kv.cond_keys_off,
-                    kv_cond_keys_len=kv.cond_keys_len,
-                    kv_cond_vals_buf=kv.cond_vals_buf,
-                    kv_cond_vals_off=kv.cond_vals_off,
-                    kv_cond_vals_len=kv.cond_vals_len,
-                    kv_num_conditions=kv.num_conditions,
+                    kv=kv,
+                    text=text,
                 )
 
                 if match_count > 0:
@@ -528,21 +692,141 @@ class LogTableModel(QAbstractTableModel):
                         segment.bundle,
                         indices.array,
                         match_count,
-                        self.batch.bundle,
+                        inactive.bundle,
                         write_cursor,
                         MAX_MSG_BYTES,
                     )
                     total_new += match_count
 
         self.logger_fetch.debug(
-            f"live {(time_ns() - t_start) / 1_000_000:.3f} ms | segments={segment_count} rows={total_new}"
+            f"live full {(time_ns() - t_start) / 1_000_000:.3f} ms | segments={segment_count} rows={total_new}"
         )
 
-        self.beginResetModel()
-        self._valid_start = write_cursor
-        self.row_count = total_new
+        self._buf_valid_start[inactive_idx] = write_cursor
+        self._buf_row_count[inactive_idx] = total_new
+        self._active = inactive_idx
+        self._bind_active()
         self._message_cache = [None] * self.capacity
-        self.endResetModel()
+
+    def _fetch_live_incremental(self, pool, kv, text):
+        """Backward-scans only rows newer than self._last_backend_seq (bounded via the same
+        start_seq mechanism _fetch_history's "before" scan uses), then carries forward the
+        currently-active buffer's own newest rows to fill out whatever's left of the viewport -
+        bounds scan cost to genuinely new backend activity instead of total backend depth, so a
+        filter that rarely matches (or a device that's gone quiet) costs almost nothing per tick.
+
+        Scanning backward (not forward) is what makes this correct for a burst tick: if more than
+        `limit` new rows match since the last fetch, we need the NEWEST `limit` of them (this is
+        a live tail), and a backward scan capped at max_matches finds exactly those first, whereas
+        a forward/ascending scan capped the same way would find the OLDEST new matches instead -
+        the wrong end for a live view."""
+        active_idx = self._active
+        inactive_idx = 1 - active_idx
+        active = self._batches[active_idx]
+        inactive = self._batches[inactive_idx]
+
+        limit = self.viewport_rows
+        start_seq = self._last_backend_seq
+
+        write_cursor = self.capacity
+        total_new = 0
+        segment_count = 0
+
+        t_start = time_ns()
+        t_total_fetch = 0
+        # Identical to _fetch_live_full's scan/extract loop, just bounded by start_seq so it only
+        # ever looks at rows added since the last fetch - segments whose newest row is <=
+        # start_seq are skipped in O(log segment_size) by the kernel's own binary search.
+        with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
+            for segment in segments:
+                if segment.size == 0:
+                    continue
+
+                allowed = limit - total_new
+                if allowed <= 0:
+                    break
+
+                segment_count += 1
+                fetch_start = time_ns()
+                match_count = segment_filter_reversed(
+                    segment.bundle,
+                    effective_mask=self._effective_mask,
+                    out_indices=indices.array,
+                    max_matches=allowed,
+                    start_seq=start_seq,
+                    kv=kv,
+                    text=text,
+                )
+
+                t_total_fetch += time_ns() - fetch_start
+
+                if match_count > 0:
+                    write_cursor -= match_count
+                    nb_segment_extract_fields(
+                        segment.bundle,
+                        indices.array,
+                        match_count,
+                        inactive.bundle,
+                        write_cursor,
+                        MAX_MSG_BYTES,
+                    )
+                    total_new += match_count
+
+        if total_new == 0:
+            # Nothing actually matched since the last fetch (the backend sequence advanced but
+            # no new row passed the filter) - the active buffer's content is still exactly
+            # correct, so skip the flip entirely rather than doing a no-op buffer swap.
+            # last_fetch_changed stays False - the widget won't bother repainting.
+            self.logger_fetch.debug("live incr 0.000 ms | segments=0 new=0 carried=0 (skipped)")
+            return
+
+        self.last_fetch_changed = True
+
+        # The new rows already sit right-aligned to self.capacity (write_cursor..capacity). Carry
+        # forward as many of the active buffer's own newest rows as fit in what's left of the
+        # viewport, landing immediately to their left - the two regions are disjoint by
+        # construction (carried rows all have seq <= start_seq, new rows all have seq > start_seq)
+        # so this never duplicates or drops a row.
+        active_valid_start = self._buf_valid_start[active_idx]
+        active_row_count = self._buf_row_count[active_idx]
+        carry_count = min(active_row_count, limit - total_new)
+        new_row_count = carry_count + total_new
+        valid_start = self.capacity - new_row_count
+
+        # Reuses nb_segment_extract_fields with the active buffer's own .bundle as the "segment"
+        # source - valid because a PooledLogBatch built by this same fetch code has the exact same
+        # LogBundle shape (fixed-stride offsets, same has_* flags) a raw ingest segment has, and
+        # the kernel never reads segment.size, only per-row offsets/lengths already in the
+        # columns/buffer.
+        # Carry the decoded-message cache forward alongside the row data, instead of nulling the
+        # whole cache every tick: a carried row's bytes are byte-for-byte identical to what
+        # nb_segment_extract_fields just copied above, so its already-decoded string is still
+        # valid - just living at a new slot in the now-active buffer. Without this, every
+        # steady-state row pays a full UTF-8 decode + string allocation again on every tick.
+        new_cache = [None] * self.capacity
+        if carry_count > 0:
+            src_lo = active_valid_start + active_row_count - carry_count
+            nb_segment_extract_fields(
+                active.bundle,
+                self._identity_indices[src_lo : src_lo + carry_count],
+                carry_count,
+                inactive.bundle,
+                valid_start,
+                MAX_MSG_BYTES,
+            )
+            old_cache = self._message_cache
+            new_cache[valid_start : valid_start + carry_count] = old_cache[src_lo : src_lo + carry_count]
+
+        self.logger_fetch.debug(
+            f"live incr {(time_ns() - t_start) / 1_000_000:.3f} ms | segments={segment_count} "
+            f"new={total_new} carried={carry_count} fetch={t_total_fetch / 1000000}"
+        )
+
+        self._active = inactive_idx
+        self._buf_valid_start[inactive_idx] = valid_start
+        self._buf_row_count[inactive_idx] = new_row_count
+        self._bind_active()
+        self._message_cache = new_cache
 
     # --- HISTORY mode fetch -------------------------------------------------------------------
 
@@ -550,6 +834,8 @@ class LogTableModel(QAbstractTableModel):
         pool = self.gui_context.registry.central.log_pool
         boundary = self.HISTORY_BEFORE  # fixed split point between the "before" and "after" regions
         kv = self.log_filter.bake_kv_arrays()
+        text = self.log_filter.bake_text_search()
+        active_bundle = self._batches[self._active].bundle
 
         before_count = 0
         after_count = 0
@@ -559,7 +845,7 @@ class LogTableModel(QAbstractTableModel):
         # "Before" set: matches with seq <= anchor_seq - 1, closest to the anchor first, scanning
         # newest-to-oldest and writing right-aligned into [0:boundary) - same "fill from the right
         # end inward" trick used elsewhere so multi-segment results land in order with no copying.
-        if anchor_seq is not None and anchor_seq > SEQ_START:
+        if anchor_seq is not None and anchor_seq > dtypes.SEQ_START:
             write_cursor = boundary
             with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
                 for segment in segments:
@@ -570,19 +856,14 @@ class LogTableModel(QAbstractTableModel):
                     if allowed <= 0:
                         break
 
-                    match_count = nb_segment_filter_reversed(
+                    match_count = segment_filter_reversed(
                         segment.bundle,
                         effective_mask=self._effective_mask,
                         out_indices=indices.array,
                         max_matches=allowed,
-                        end_seq=dtypes.SEQ_TYPE(anchor_seq - 1),
-                        kv_cond_keys_buf=kv.cond_keys_buf,
-                        kv_cond_keys_off=kv.cond_keys_off,
-                        kv_cond_keys_len=kv.cond_keys_len,
-                        kv_cond_vals_buf=kv.cond_vals_buf,
-                        kv_cond_vals_off=kv.cond_vals_off,
-                        kv_cond_vals_len=kv.cond_vals_len,
-                        kv_num_conditions=kv.num_conditions,
+                        end_seq=anchor_seq - 1,
+                        kv=kv,
+                        text=text,
                     )
 
                     if match_count > 0:
@@ -591,7 +872,7 @@ class LogTableModel(QAbstractTableModel):
                             segment.bundle,
                             indices.array,
                             match_count,
-                            self.batch.bundle,
+                            active_bundle,
                             write_cursor,
                             MAX_MSG_BYTES,
                         )
@@ -599,9 +880,10 @@ class LogTableModel(QAbstractTableModel):
 
         # "After" set: matches with seq >= anchor_seq, ascending, scanning oldest-to-newest and
         # writing left-aligned starting at the fixed boundary.
-        start_seq_lower_bound = dtypes.SEQ_TYPE(
-            SEQ_NONE if anchor_seq is None or anchor_seq <= SEQ_START else anchor_seq - 1
+        start_seq_lower_bound = (
+            dtypes.SEQ_NONE if anchor_seq is None or anchor_seq <= dtypes.SEQ_START else anchor_seq - 1
         )
+
         write_cursor = boundary
         with pool.get_snapshot() as segments, pool.acquire_indices_buffer() as indices:
             for segment in segments:
@@ -612,19 +894,14 @@ class LogTableModel(QAbstractTableModel):
                 if allowed <= 0:
                     break
 
-                match_count = nb_filter_segment(
+                match_count = segment_filter(
                     segment.bundle,
                     effective_mask=self._effective_mask,
                     out_indices=indices.array,
                     max_matches=allowed,
                     start_seq=start_seq_lower_bound,
-                    kv_cond_keys_buf=kv.cond_keys_buf,
-                    kv_cond_keys_off=kv.cond_keys_off,
-                    kv_cond_keys_len=kv.cond_keys_len,
-                    kv_cond_vals_buf=kv.cond_vals_buf,
-                    kv_cond_vals_off=kv.cond_vals_off,
-                    kv_cond_vals_len=kv.cond_vals_len,
-                    kv_num_conditions=kv.num_conditions,
+                    kv=kv,
+                    text=text,
                 )
 
                 if match_count > 0:
@@ -632,7 +909,7 @@ class LogTableModel(QAbstractTableModel):
                         segment.bundle,
                         indices.array,
                         match_count,
-                        self.batch.bundle,
+                        active_bundle,
                         write_cursor,
                         MAX_MSG_BYTES,
                     )
@@ -643,78 +920,278 @@ class LogTableModel(QAbstractTableModel):
             f"history {(time_ns() - t_start) / 1_000_000:.3f} ms | before={before_count} after={after_count}"
         )
 
-        self.beginResetModel()
         self._valid_start = boundary - before_count
         self.row_count = before_count + after_count
         self._message_cache = [None] * self.capacity
-        self.endResetModel()
+        self._buf_valid_start[self._active] = self._valid_start
+        self._buf_row_count[self._active] = self.row_count
 
 
-class LogTablePlainTextDelegate(QStyledItemDelegate):
-    """Draws cell text directly instead of going through QStyledItemDelegate's default paint path,
-    which auto-detects rich text (anything with '<') and lays it out via QTextDocument on every
-    repaint - log messages routinely contain '<'/'>' (comparisons, tags, macros), making that
-    default path a per-cell, per-repaint cost across the whole visible viewport. Mirrors
-    TelemetryDelegate, which exists in this codebase for the exact same reason."""
+class LogTableCanvas(QAbstractScrollArea):
+    """Direct-paint replacement for QTableView + QSortFilterProxyModel + QStyledItemDelegate.
 
-    def paint(self, painter, option, index):
+    QAbstractItemView (QTableView's base class) was found to repaint its *entire* viewport on
+    any content change - insert, remove, or scroll alike, in both ScrollPerItem and ScrollPerPixel
+    modes (confirmed empirically: an instrumented offscreen QTableView logged the full viewport
+    rect as dirty for a single-row change) - so per-cell overhead (QModelIndex construction,
+    delegate virtual dispatch, per-cell role queries, proxy row-mapping) was pure waste on top of
+    a repaint that was always going to cover the whole visible area anyway. This paints the
+    visible rows directly from a LogTableStore's arrays in one paintEvent instead, the same way
+    Wireshark's packet list avoids QAbstractItemView for the same reason.
+
+    QAbstractScrollArea routes viewport paint/mouse/resize/wheel events to the corresponding
+    handler overridden here (paintEvent/mousePressEvent/resizeEvent/wheelEvent/contextMenuEvent),
+    exactly as if they'd happened directly on this widget - this is documented QAbstractScrollArea
+    behavior (see viewportEvent()), not something being worked around."""
+
+    def __init__(self, store: LogTableStore, parent=None):
+        super().__init__(parent)
+        self.store = store
+
+        # Single-row click-to-highlight selection, keyed by backend sequence id (not row index)
+        # so it survives a live tick shifting row indices via eviction - mirrors the persistent-
+        # index behavior QTableView gave for free.
+        self.selected_seq = None
+
+        # Callback the owning widget hooks to react to "scrolled up while live" (enters history
+        # mode) - kept as a plain attribute rather than a Qt signal since there's exactly one
+        # subscriber and it's always set before first use.
+        self.on_wheel_up_while_live = None
+
+        self._col_order = list(LogTableCol)
+        self._col_visible = {col: True for col in LogTableCol}
+        self._col_visible[LogTableCol.RX_TIMESTAMP] = False
+        self._col_visible[LogTableCol.PROCESS] = False
+        self._col_visible[LogTableCol.THREAD] = False
+        self._col_width = {col: 80 for col in LogTableCol}
+
+        self._col_autosized_once: set = set()
+        self._col_autosize_last_ns: dict = {}
+
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # LIVE mode default - no scrollback to reach
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # MESSAGE stretches to fill remaining width
+        self.setFrameShape(QAbstractScrollArea.NoFrame)
+        self.verticalScrollBar().valueChanged.connect(lambda _v: self.viewport().update())
+
+        self._recompute_message_column_width()
+
+    # --- Layout ------------------------------------------------------------------------------
+
+    def visible_row_count(self) -> int:
+        h = self.viewport().height() - HEADER_HEIGHT
+        return max(0, h // ROW_HEIGHT)
+
+    def first_visible_row(self) -> int:
+        if self.store.mode == "live":
+            return 0
+        return self.verticalScrollBar().value()
+
+    def _visible_columns(self):
+        return [c for c in self._col_order if self._col_visible[c]]
+
+    def _column_x_offsets(self) -> dict:
+        offsets = {}
+        x = 0
+        for col in self._visible_columns():
+            offsets[col] = x
+            x += self._col_width[col]
+        return offsets
+
+    def _recompute_message_column_width(self):
+        visible = self._visible_columns()
+        if LogTableCol.MESSAGE not in visible:
+            return
+        others_width = sum(self._col_width[c] for c in visible if c != LogTableCol.MESSAGE)
+        remaining = self.viewport().width() - others_width
+        self._col_width[LogTableCol.MESSAGE] = max(80, remaining)
+
+    def _update_scrollbar_range(self):
+        visible = self.visible_row_count()
+        maximum = max(0, self.store.row_count - visible)
+        bar = self.verticalScrollBar()
+        bar.setRange(0, maximum)
+        bar.setPageStep(max(1, visible))
+        bar.setSingleStep(1)
+
+    def sync_viewport_rows(self):
+        self.store.set_viewport_rows(max(1, self.visible_row_count()))
+
+    def request_repaint(self):
+        """Call after any LogTableStore call that may have changed row_count/content - there are
+        no Qt model signals to do this automatically anymore."""
+        self._update_scrollbar_range()
+        self._recompute_message_column_width()
+        self.viewport().update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.sync_viewport_rows()
+        self.request_repaint()
+
+    # --- Painting ------------------------------------------------------------------------------
+
+    def paintEvent(self, event):
+        painter = QPainter(self.viewport())
+        try:
+            painter.fillRect(self.viewport().rect(), self.palette().base())
+            self._paint_header(painter)
+            self._paint_rows(painter)
+        finally:
+            painter.end()
+
+    def _paint_header(self, painter: QPainter):
         painter.save()
-
-        if option.state & QStyle.State_Selected:
-            painter.fillRect(option.rect, option.palette.highlight())
-            painter.setPen(option.palette.highlightedText().color())
-        else:
-            if option.features & QStyleOptionViewItem.ViewItemFeature.Alternate:
-                painter.fillRect(option.rect, option.palette.alternateBase())
-            fg = index.data(Qt.ForegroundRole)
-            painter.setPen(fg if fg is not None else option.palette.text().color())
-
-        font = index.data(Qt.FontRole)
-        if font is not None:
-            painter.setFont(font)
-
-        text = index.data(Qt.DisplayRole)
-        text_rect = option.rect.adjusted(4, 0, -4, 0)
-        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, "" if text is None else str(text))
-
+        header_rect = QRect(0, 0, self.viewport().width(), HEADER_HEIGHT)
+        painter.fillRect(header_rect, self.palette().button())
+        painter.setPen(self.palette().buttonText().color())
+        offsets = self._column_x_offsets()
+        for col in self._visible_columns():
+            rect = QRect(offsets[col], 0, self._col_width[col], HEADER_HEIGHT).adjusted(4, 0, -4, 0)
+            painter.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, _COLUMN_LABELS[col])
         painter.restore()
 
-    def sizeHint(self, option, index):
-        # Bypass QStyledItemDelegate's font-metric-based size calculation entirely - row height
-        # is fixed by the view's vertical header anyway.
-        return QSize(50, ROW_HEIGHT)
+    def _paint_rows(self, painter: QPainter):
+        store = self.store
+        first = self.first_visible_row()
+        last = min(first + self.visible_row_count(), store.row_count)
+        if last <= first:
+            return
 
+        offsets = self._column_x_offsets()
+        visible_columns = self._visible_columns()
+        viewport_width = self.viewport().width()
+        selected_seq = self.selected_seq
+        default_color = self.palette().text().color()
+        highlight_brush = self.palette().highlight()
+        highlight_text_color = self.palette().highlightedText().color()
 
-class LogTableFilterProxy(QSortFilterProxyModel):
-    """Text-search proxy over LogTableModel, mirroring TelemetryTable's search box behavior."""
+        painter.save()
+        for offset, row in enumerate(range(first, last)):
+            y = HEADER_HEIGHT + offset * ROW_HEIGHT
+            is_selected = selected_seq is not None and store.seq_for_row(row) == selected_seq
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._filter_text = ""
+            if is_selected:
+                painter.fillRect(QRect(0, y, viewport_width, ROW_HEIGHT), highlight_brush)
+                painter.setPen(highlight_text_color)
+            else:
+                color = store.get_color(row)
+                painter.setPen(color if color is not None else default_color)
 
-    def set_filter_text(self, text: str):
-        self._filter_text = text.lower().strip()
-        self.invalidate()
+            for col in visible_columns:
+                text = store.get_cell(row, col)
+                rect = QRect(offsets[col], y, self._col_width[col], ROW_HEIGHT).adjusted(4, 0, -4, 0)
+                painter.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, "" if text is None else text)
+        painter.restore()
 
-    def filterAcceptsRow(self, source_row, source_parent):
-        if not self._filter_text:
-            return True
+    # --- Selection / interaction -----------------------------------------------------------
 
-        model = self.sourceModel()
-        for col in (LogTableCol.DEVICE, LogTableCol.MODULE, LogTableCol.MESSAGE):
-            idx = model.index(source_row, col, source_parent)
-            val = model.data(idx, Qt.DisplayRole)
-            if val and self._filter_text in str(val).lower():
-                return True
+    def _row_at(self, pos) -> Optional[int]:
+        if pos.y() < HEADER_HEIGHT:
+            return None
+        first = self.first_visible_row()
+        row = first + (pos.y() - HEADER_HEIGHT) // ROW_HEIGHT
+        if first <= row < min(first + self.visible_row_count(), self.store.row_count):
+            return row
+        return None
 
-        return False
+    def mousePressEvent(self, event):
+        row = self._row_at(event.pos())
+        self.selected_seq = self.store.seq_for_row(row) if row is not None else None
+        self.viewport().update()
+        super().mousePressEvent(event)
+
+    def contextMenuEvent(self, event):
+        row = self._row_at(event.pos())
+        if row is None:
+            return
+
+        menu = QMenu(self)
+        action_copy = QAction("Copy Message", self)
+        action_copy.triggered.connect(lambda: self._copy_message(row))
+        menu.addAction(action_copy)
+        menu.exec_(event.globalPos())
+
+    def _copy_message(self, row: int):
+        QApplication.clipboard().setText(self.store.get_cell(row, LogTableCol.MESSAGE) or "")
+
+    def wheelEvent(self, event):
+        if self.store.mode == "live" and event.angleDelta().y() > 0:
+            # Scrolling "up" (towards older entries) while live: hand off to the widget to anchor
+            # on whatever's currently on top and switch into a scrollable history window.
+            if self.on_wheel_up_while_live is not None:
+                self.on_wheel_up_while_live()
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    # --- Column visibility / auto-sizing -----------------------------------------------------
+
+    def set_column_visible(self, col: LogTableCol, visible: bool):
+        self._col_visible[col] = visible
+        if visible:
+            self.reset_column_autosize(col)
+        self._recompute_message_column_width()
+        self.viewport().update()
+
+    def reset_column_autosize(self, col: LogTableCol):
+        self._col_autosized_once.discard(col)
+        self._col_autosize_last_ns.pop(col, None)
+
+    def autosize_columns(self):
+        """Sizes columns to fit their content. TIMESTAMP/RX_TIMESTAMP/LEVEL/THREAD are sized
+        once (their content width is effectively fixed for a given ts_precision - see
+        reset_column_autosize for why TIMESTAMP/RX_TIMESTAMP get an extra explicit re-trigger on
+        precision change) and then left alone; MODULE/PROCESS are re-measured periodically
+        (throttled - live mode ticks at ~10Hz) since new, differently-sized module/process names
+        keep appearing as rows stream in. MESSAGE is intentionally excluded - it stretches to
+        fill the remaining space and DEVICE rarely varies enough to matter."""
+        store = self.store
+        if store.row_count == 0:
+            return
+
+        metrics = QFontMetrics(self.font())
+        changed = False
+
+        once_cols = (LogTableCol.TIMESTAMP, LogTableCol.RX_TIMESTAMP, LogTableCol.LEVEL, LogTableCol.THREAD)
+        for col in once_cols:
+            if self._col_visible[col] and col not in self._col_autosized_once:
+                self._measure_column(col, metrics)
+                self._col_autosized_once.add(col)
+                changed = True
+
+        now = time_ns()
+        throttled_cols = (LogTableCol.MODULE, LogTableCol.PROCESS)
+        for col in throttled_cols:
+            if not self._col_visible[col]:
+                continue
+            last = self._col_autosize_last_ns.get(col, 0)
+            if now - last >= COLUMN_AUTOSIZE_THROTTLE_NS:
+                self._measure_column(col, metrics)
+                self._col_autosize_last_ns[col] = now
+                changed = True
+
+        if changed:
+            self._recompute_message_column_width()
+            self.viewport().update()
+
+    def _measure_column(self, col: LogTableCol, metrics: QFontMetrics):
+        store = self.store
+        first = self.first_visible_row()
+        last = min(first + self.visible_row_count(), store.row_count)
+        width = metrics.horizontalAdvance(_COLUMN_LABELS[col])
+        for row in range(first, last):
+            text = store.get_cell(row, col)
+            if text:
+                width = max(width, metrics.horizontalAdvance(text))
+        self._col_width[col] = width + 8
 
 
 class LogTableViewerWidget(QWidget):
     """Table-based alternative to LogViewerWidget, sharing the same LogFilter/ModuleFilterSidebar
-    filtering capability but rendering structured rows in a QTableView instead of formatted text.
+    filtering capability but rendering structured rows directly via LogTableCanvas instead of
+    formatted text.
 
-    Runs in two tiers (see LogTableModel): a scrollbar-less LIVE tail view that only fetches
+    Runs in two tiers (see LogTableStore): a scrollbar-less LIVE tail view that only fetches
     enough rows to fill the visible area, and a bounded HISTORY view (entered on scroll) that
     fetches a couple hundred rows before/after the point the user scrolled away from."""
 
@@ -732,8 +1209,10 @@ class LogTableViewerWidget(QWidget):
         self.show_module_filter = False
         self.show_hidden = False
         self.show_rx_ts = False
+        self.show_process_thread = False
         self.ts_precision = 3
         self.kv_filter_text = ""
+        self.search_text = ""
 
         self._set_defaults()
 
@@ -795,11 +1274,31 @@ class LogTableViewerWidget(QWidget):
 
         self.toolbar.addSeparator()
 
+        self.action_show_process_thread = QAction("Process/Thread", self)
+        self.action_show_process_thread.setCheckable(True)
+        self.action_show_process_thread.setChecked(self.show_process_thread)
+        self.action_show_process_thread.setToolTip(
+            "Show Process/Thread columns (resolved from PID history - populated by ADB sources only)"
+        )
+        self.action_show_process_thread.toggled.connect(self._toggle_process_thread)
+        self.toolbar.addAction(self.action_show_process_thread)
+
+        self.toolbar.addSeparator()
+
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Filter device/module/message...")
         self.search_box.setClearButtonEnabled(True)
-        self.search_box.textChanged.connect(self._on_search_changed)
+        self.search_box.setText(self.search_text)
         self.toolbar.addWidget(self.search_box)
+
+        # Debounced and baked into the same row-level Numba filter kernels as the kv/level
+        # filters (LogFilter.set_text_filter/bake_text_search), rather than a Qt proxy over
+        # whatever rows happened to already be fetched - so a live-mode fetch actually re-scans
+        # the backend and fills the viewport with matches.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)
+        self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
 
         self.toolbar.addSeparator()
 
@@ -833,6 +1332,9 @@ class LogTableViewerWidget(QWidget):
         self.log_filter.set_kv_filter(self.kv_filter_text)
         self.kv_filter_box.filterTextCommitted.connect(self._apply_kv_filter_text)
 
+        self.log_filter.set_text_filter(self.search_text)
+        self._search_timer.timeout.connect(self._apply_search_text)
+
         self.filter_sidebar = ModuleFilterSidebar(
             gui_context=self.gui_context, target_filter=self.log_filter, parent=self, show_hidden=self.show_hidden
         )
@@ -843,38 +1345,16 @@ class LogTableViewerWidget(QWidget):
         self.splitter.addWidget(self.filter_sidebar)
         self.filter_sidebar.setVisible(self.show_module_filter)
 
-        self.model = LogTableModel(self.gui_context, self.log_filter, self.filter_sidebar, self)
+        self.model = LogTableStore(self.gui_context, self.log_filter, self.filter_sidebar)
 
-        self.proxy = LogTableFilterProxy(self)
-        self.proxy.setSourceModel(self.model)
-
-        self.view = QTableView()
-        self.view.setModel(self.proxy)
-        self.view.setSelectionBehavior(QTableView.SelectRows)
-        self.view.horizontalHeader().setStretchLastSection(True)
-        # self.view.setAlternatingRowColors(True)
+        self.view = LogTableCanvas(self.model)
         self.view.setMinimumWidth(300)
-        self.view.setWordWrap(False)
-        self.view.setItemDelegate(LogTablePlainTextDelegate(self.view))
-
-        # Fixed row height avoids Qt recomputing per-row geometry for the whole table on every
-        # change (an O(row_count) relayout cost) - same pattern TelemetryTable uses.
-        v_header = self.view.verticalHeader()
-        v_header.setVisible(False)
-        v_header.setSectionResizeMode(QHeaderView.Fixed)
-        v_header.setDefaultSectionSize(ROW_HEIGHT)
-
-        # LIVE mode has nothing to scroll to (only enough rows are fetched to fill the view).
-        self.view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
-        self.model.ts_precision = self.ts_precision
-        self.view.setColumnHidden(LogTableCol.RX_TIMESTAMP, not self.show_rx_ts)
-
-        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.view.customContextMenuRequested.connect(self._show_context_menu)
+        self.view.on_wheel_up_while_live = self._enter_history_at_top_row
+        self.view.set_column_visible(LogTableCol.RX_TIMESTAMP, self.show_rx_ts)
+        self.view.set_column_visible(LogTableCol.PROCESS, self.show_process_thread)
+        self.view.set_column_visible(LogTableCol.THREAD, self.show_process_thread)
 
         self._programmatic_scroll = False
-        self.view.viewport().installEventFilter(self)
         self.view.verticalScrollBar().valueChanged.connect(self._on_scroll_value_changed)
 
         self.splitter.addWidget(self.view)
@@ -888,7 +1368,8 @@ class LogTableViewerWidget(QWidget):
         if idx != -1:
             self.level_combo.setCurrentIndex(idx)
 
-        self._update_viewport_rows()
+        self.view.sync_viewport_rows()
+        self.view.request_repaint()
 
         self.gui_context.add_updatable(self)
 
@@ -916,8 +1397,10 @@ class LogTableViewerWidget(QWidget):
         view_state = state.get("view_state", {})
         self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
         self.show_rx_ts = view_state.get("show_rx_ts", self.show_rx_ts)
+        self.show_process_thread = view_state.get("show_process_thread", self.show_process_thread)
         self.ts_precision = view_state.get("ts_precision", self.ts_precision)
         self.kv_filter_text = view_state.get("kv_filter_text", self.kv_filter_text)
+        self.search_text = view_state.get("search_text", self.search_text)
         self.filter_sidebar_state = state.get("filter_sidebar", self.filter_sidebar_state)
 
     def get_state(self):
@@ -929,8 +1412,10 @@ class LogTableViewerWidget(QWidget):
             "view_state": {
                 "show_module_filter": self.show_module_filter,
                 "show_rx_ts": self.show_rx_ts,
+                "show_process_thread": self.show_process_thread,
                 "ts_precision": self.ts_precision,
                 "kv_filter_text": self.log_filter.kv_filter_text,
+                "search_text": self.log_filter.text_filter_text,
             },
             "log_level": self.log_filter.log_level.name_conf,
             "filter_sidebar": self.filter_sidebar.get_state(),
@@ -939,6 +1424,9 @@ class LogTableViewerWidget(QWidget):
 
     def apply_updates(self):
         self.model.apply_updates()
+        if self.model.last_fetch_changed:
+            self.view.request_repaint()
+            self.view.autosize_columns()
 
     def _handle_level_change(self, index):
         level_identity = self.level_combo.itemData(index)
@@ -947,13 +1435,16 @@ class LogTableViewerWidget(QWidget):
 
     def _reload_and_redraw(self):
         self.model.reload_and_redraw()
+        self.view.request_repaint()
+        self.view.autosize_columns()
 
     def _apply_kv_filter_text(self, text):
         self.log_filter.set_kv_filter(text)
         self._reload_and_redraw()
 
-    def _on_search_changed(self, text):
-        self.proxy.set_filter_text(text)
+    def _apply_search_text(self):
+        self.log_filter.set_text_filter(self.search_box.text())
+        self._reload_and_redraw()
 
     def _toggle_module_filter(self, checked):
         self.show_module_filter = checked
@@ -961,61 +1452,38 @@ class LogTableViewerWidget(QWidget):
 
     def _toggle_rx_ts(self, checked):
         self.show_rx_ts = checked
-        self.view.setColumnHidden(LogTableCol.RX_TIMESTAMP, not checked)
+        self.view.set_column_visible(LogTableCol.RX_TIMESTAMP, checked)
+        if checked:
+            self.view.autosize_columns()
+
+    def _toggle_process_thread(self, checked):
+        self.show_process_thread = checked
+        self.view.set_column_visible(LogTableCol.PROCESS, checked)
+        self.view.set_column_visible(LogTableCol.THREAD, checked)
+        if checked:
+            self.view.autosize_columns()
 
     def _set_ts_precision(self, precision: int):
         if self.ts_precision != precision:
             self.ts_precision = precision
             self.model.set_ts_precision(precision)
+            # A precision change alone doesn't touch row_count, so request_repaint()'s scrollbar-
+            # range recompute is a no-op here - still needed for the viewport().update() call.
+            self.view.reset_column_autosize(LogTableCol.TIMESTAMP)
+            self.view.reset_column_autosize(LogTableCol.RX_TIMESTAMP)
+            self.view.autosize_columns()
+            self.view.request_repaint()
 
     def clear_logs(self):
         self.model.clear_logs()
+        self.view.selected_seq = None
         self._set_live_ui_state()
+        self.view.request_repaint()
 
     # --- Live/history mode transitions -----------------------------------------------------
 
-    def _update_viewport_rows(self):
-        """Keeps LIVE mode's fetch bound matched to how many rows actually fit on screen, so it
-        never fetches (or holds) more than the visible area needs. LIVE mode has no scrollbar
-        (ScrollBarAlwaysOff), so fetching even one row more than truly fits pushes the newest
-        row(s) below the viewport with no way to reach them - must be an exact floor, not a
-        margin over-fetch.
-
-        Divides by the header's actual effective row height, not the ROW_HEIGHT constant:
-        QHeaderView.setDefaultSectionSize() silently clamps up to minimumSectionSize() if the
-        requested size is smaller than what the header's font metrics need (system
-        font/DPI-dependent) - dividing by the constant in that case would over-count how many
-        rows fit and push the newest ones below the viewport."""
-        row_height = self.view.verticalHeader().defaultSectionSize() or ROW_HEIGHT
-        rows = self.view.viewport().height() // row_height
-        self.model.set_viewport_rows(rows)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_viewport_rows()
-
-    def eventFilter(self, source, event):
-        if source is self.view.viewport():
-            if event.type() == QEvent.Wheel:
-                if self.model.mode == "live" and event.angleDelta().y() > 0:
-                    # Scrolling "up" (towards older entries) while live: anchor on whatever's
-                    # currently on top and switch into a scrollable history window around it.
-                    self._enter_history_at_top_row()
-            elif event.type() == QEvent.Resize:
-                # The widget's own resizeEvent fires once during initial show, often with a
-                # transient intermediate size before the splitter/layout fully settles - the
-                # viewport's final size is reached afterwards without re-firing it. Watching the
-                # viewport's own Resize event directly catches that final size instead of
-                # under-fetching rows based on a stale measurement.
-                self._update_viewport_rows()
-        return super().eventFilter(source, event)
-
     def _topmost_row_seq(self):
-        top_index = self.view.indexAt(self.view.viewport().rect().topLeft())
-        if not top_index.isValid():
-            return self.model.seq_for_row(0)
-        src_index = self.proxy.mapToSource(top_index)
-        return self.model.seq_for_row(src_index.row())
+        return self.model.seq_for_row(self.view.first_visible_row())
 
     def _enter_history_at_top_row(self):
         anchor_seq = self._topmost_row_seq()
@@ -1026,12 +1494,13 @@ class LogTableViewerWidget(QWidget):
 
     def _reanchor_history(self, anchor_seq):
         """Rebuilds the history window around anchor_seq and repositions the view on it. Both
-        enter_history_mode() (via beginResetModel/endResetModel) and scrollTo() below change the
-        scrollbar's value programmatically, which would otherwise re-fire valueChanged and recurse
-        straight back into _on_scroll_value_changed - the guard flag suppresses that re-entrancy."""
+        enter_history_mode() and _scroll_to_seq() below change the scrollbar's value
+        programmatically, which would otherwise re-fire valueChanged and recurse straight back
+        into _on_scroll_value_changed - the guard flag suppresses that re-entrancy."""
         self._programmatic_scroll = True
         try:
             self.model.enter_history_mode(anchor_seq)
+            self.view.request_repaint()  # scrollbar range must reflect the new row_count first
 
             # If this fetch's "after" set already reaches the backend's latest row, there may be
             # too little remaining content to fill the viewport - the scrollbar's range can
@@ -1039,17 +1508,12 @@ class LogTableViewerWidget(QWidget):
             # us we've caught up. Check eagerly here instead of only reacting to future scrolls.
             if self._at_live_edge():
                 self.model.enter_live_mode()
+                self.view.request_repaint()
                 self._set_live_ui_state()
                 return
 
-            # QTableView defers its internal row/geometry layout after a model reset (a 0ms
-            # timer, for performance) rather than recomputing it synchronously inside
-            # endResetModel(). scrollTo() called right after enter_history_mode() would then
-            # run against stale geometry from the *previous* content and silently land on the
-            # wrong row (observed: always row 0) instead of the anchor. Force the layout to
-            # happen now so scrollTo() has correct geometry to work with.
-            self.view.doItemsLayout()
             self._scroll_to_seq(anchor_seq)
+            self.view.autosize_columns()
         finally:
             self._programmatic_scroll = False
 
@@ -1066,9 +1530,7 @@ class LogTableViewerWidget(QWidget):
         row = self.model.row_for_seq(seq)
         if row < 0:
             return
-        proxy_index = self.proxy.mapFromSource(self.model.index(row, 0))
-        if proxy_index.isValid():
-            self.view.scrollTo(proxy_index, QTableView.PositionAtTop)
+        self.view.verticalScrollBar().setValue(row)
 
     def _go_live(self):
         self._programmatic_scroll = True
@@ -1076,6 +1538,8 @@ class LogTableViewerWidget(QWidget):
             self.model.enter_live_mode()
         finally:
             self._programmatic_scroll = False
+        self.view.request_repaint()
+        self.view.autosize_columns()
         self._set_live_ui_state()
 
     def _set_live_ui_state(self):
@@ -1111,28 +1575,10 @@ class LogTableViewerWidget(QWidget):
 
         if value <= scrollbar.minimum() + 1 and self.model.row_count > 0:
             top_seq = self.model.seq_for_row(0)
-            if top_seq is not None and top_seq > SEQ_START and top_seq != self.model.anchor_seq:
+            if top_seq is not None and top_seq > dtypes.SEQ_START and top_seq != self.model.anchor_seq:
                 # Near the top of the fetched window with more history potentially available -
                 # slide the window further back, keeping the same row under the viewport's top.
                 self._reanchor_history(top_seq)
-
-    def _show_context_menu(self, pos):
-        index = self.view.indexAt(pos)
-        if not index.isValid():
-            return
-
-        menu = QMenu(self)
-        action_copy = QAction("Copy Message", self)
-        action_copy.triggered.connect(lambda: self._copy_message(index))
-        menu.addAction(action_copy)
-        menu.exec_(self.view.viewport().mapToGlobal(pos))
-
-    def _copy_message(self, index):
-        src_index = self.proxy.mapToSource(index)
-        row = src_index.row()
-        if 0 <= row < self.model.row_count:
-            slot = self.model._row_to_slot(row)
-            QApplication.clipboard().setText(self.model._decode_message(slot))
 
     def closeEvent(self, event):
         self.gui_context.remove_updatable(self)

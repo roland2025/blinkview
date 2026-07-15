@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
     from .array_pool import NumpyArrayPool
     from .factory_registry import FactoryRegistry  # Adjust import path as needed
+    from .id_history import IdHistory
     from .registry import Registry
     from .settings_manager import SettingsManager
     from .task_manager import TaskManager
@@ -26,3 +27,4 @@ class SystemContext:
     tasks: "TaskManager"
     settings: "SettingsManager"
     array_pool: "NumpyArrayPool"
+    pid_history: "IdHistory"

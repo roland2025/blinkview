@@ -12,6 +12,7 @@ from .batch_queue import BatchQueue
 from .configurable import configuration_factory, configuration_property, override_property
 from .factory import BaseFactory
 from .limits import CENTRAL_STORAGE_BUFFER_SIZE_MB, CENTRAL_STORAGE_MAX_PIECES, CENTRAL_STORAGE_MAXLEN
+from .numpy_batch_manager import log_batch
 from .numpy_log import (
     CircularLogPool,
 )
@@ -102,6 +103,8 @@ class CentralStorage(BaseCentralStorage):
                     # print(f"[CENTRAL] Received batch of {len(entry)} entries.")
                     # print(f"[Central] batch={batch}")
                     # print(f"[central] batch={batch}")
+
+                    # log_batch(self, batch, "IN")
 
                     speedometer.batch(batch)
 

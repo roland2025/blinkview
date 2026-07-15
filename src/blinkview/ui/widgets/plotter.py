@@ -369,6 +369,14 @@ class TelemetryPlotter(QWidget):
         self.buffers[module] = buf
 
         # 2. Setup the UI series list
+        # Restored (persisted-layout) series can reference channel indices that
+        # no longer exist if the discovered channel count for this module has
+        # since shrunk (e.g. variable-arity telemetry lines) - drop those so we
+        # never index past num_channels in the downsample kernels.
+        stale_ids = {id(s) for s in self.series_list if s.module == module and s.index >= num_channels}
+        if stale_ids:
+            self.series_list = [s for s in self.series_list if id(s) not in stale_ids]
+
         if not any(s.module == module for s in self.series_list):
             start_idx = len(self.series_list)
             for i in range(num_channels):

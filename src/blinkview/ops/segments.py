@@ -7,10 +7,20 @@
 import numpy as np
 from numba import types, uint32, uint64
 
-from blinkview.core.dtypes import ID_TYPE, ID_UNSPECIFIED, LEVEL_UNSPECIFIED, SEQ_NONE, SEQ_TYPE, TS_UNSPECIFIED
+from blinkview.core.dtypes import (
+    ID_TYPE,
+    ID_UNSPECIFIED,
+    LEVEL_UNSPECIFIED,
+    SEQ_NONE,
+    SEQ_TYPE,
+    TS_TYPE,
+    TS_UNSPECIFIED,
+)
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.log_batch import LogBundle
-from blinkview.ops.kv_filter import EMPTY_KV_BYTES, EMPTY_KV_LENGTHS, EMPTY_KV_OFFSETS, nb_row_matches_kv_conditions
+from blinkview.ops.constants import CHAR_EQUALS, CHAR_SPACE
+from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS, nb_row_matches_kv_conditions
+from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH, nb_bytes_contains_ci
 
 
 @app_njit()
@@ -60,6 +70,20 @@ def nb_copy_batch_to_segment(segment: LogBundle, batch: LogBundle, batch_start_i
         segment.modules[s_start:s_end] = batch.modules[b_start:b_end]
     if batch.has_devices:
         segment.devices[s_start:s_end] = batch.devices[b_start:b_end]
+    # Rows from a batch without pids/tids (e.g. system-generated logs, CAN) must get an explicit
+    # 0, not whatever stale value the array-pool-recycled segment slot happened to hold -
+    # array_pool.acquire() does not zero-fill, and segment backing arrays get reused across many
+    # segment rotations.
+    if segment.has_pids:
+        if batch.has_pids:
+            segment.pids[s_start:s_end] = batch.pids[b_start:b_end]
+        else:
+            segment.pids[s_start:s_end] = 0
+    if segment.has_tids:
+        if batch.has_tids:
+            segment.tids[s_start:s_end] = batch.tids[b_start:b_end]
+        else:
+            segment.tids[s_start:s_end] = 0
 
     # 5. SHIFT OFFSETS & SEQUENCE IDS
     for i in range(rows_to_copy):
@@ -105,8 +129,7 @@ def nb_fast_find_first_gt(arr, count, val):
     return left
 
 
-@app_njit()
-def nb_segment_filter_reversed(
+def segment_filter_reversed(
     segment,  # LogBundle
     effective_mask,
     out_indices,
@@ -115,20 +138,47 @@ def nb_segment_filter_reversed(
     end_seq=SEQ_NONE,
     start_ts=TS_UNSPECIFIED,
     end_ts=TS_UNSPECIFIED,
-    kv_cond_keys_buf=EMPTY_KV_BYTES,
-    kv_cond_keys_off=EMPTY_KV_OFFSETS,
-    kv_cond_keys_len=EMPTY_KV_LENGTHS,
-    kv_cond_vals_buf=EMPTY_KV_BYTES,
-    kv_cond_vals_off=EMPTY_KV_OFFSETS,
-    kv_cond_vals_len=EMPTY_KV_LENGTHS,
-    kv_num_conditions=0,
-    kv_field_delim=32,
-    kv_kv_delim=61,
+    kv=EMPTY_KV_CONDITIONS,  # KvConditionArrays
+    kv_field_delim=CHAR_SPACE,
+    kv_kv_delim=CHAR_EQUALS,
+    text=EMPTY_TEXT_SEARCH,  # TextSearchArrays
+):
+    return nb_segment_filter_reversed(
+        segment,
+        effective_mask,
+        out_indices,
+        max_matches,
+        SEQ_TYPE(start_seq),
+        SEQ_TYPE(end_seq),
+        TS_TYPE(start_ts),
+        TS_TYPE(end_ts),
+        kv,
+        kv_field_delim,
+        kv_kv_delim,
+        text,
+    )
+
+
+@app_njit()
+def nb_segment_filter_reversed(
+    segment,  # LogBundle
+    effective_mask,
+    out_indices,
+    max_matches,
+    start_seq,
+    end_seq,
+    start_ts,
+    end_ts,
+    kv,
+    kv_field_delim,
+    kv_kv_delim,
+    text,
 ):
     count = segment.size[0]
     timestamps = segment.timestamps
     levels = segment.levels
     modules = segment.modules
+    devices = segment.devices
     seqs = segment.sequences
 
     # 1. Zero-Overhead Logarithmic Boundary Finding
@@ -165,23 +215,28 @@ def nb_segment_filter_reversed(
     # 2. Scan BACKWARDS from the newest valid log
     for i in range(loop_end - 1, loop_start - 1, -1):
         level_ok = levels[i] >= effective_mask[modules[i]]
-        is_match = level_ok and (
-            kv_num_conditions == 0
-            or nb_row_matches_kv_conditions(
-                segment.buffer,
-                segment.offsets[i],
-                segment.lengths[i],
-                kv_cond_keys_buf,
-                kv_cond_keys_off,
-                kv_cond_keys_len,
-                kv_cond_vals_buf,
-                kv_cond_vals_off,
-                kv_cond_vals_len,
-                kv_num_conditions,
-                kv_field_delim,
-                kv_kv_delim,
+        kv_ok = kv.num_conditions == 0 or nb_row_matches_kv_conditions(
+            segment.buffer,
+            segment.offsets[i],
+            segment.lengths[i],
+            kv.cond_keys_buf,
+            kv.cond_keys_off,
+            kv.cond_keys_len,
+            kv.cond_vals_buf,
+            kv.cond_vals_off,
+            kv.cond_vals_len,
+            kv.num_conditions,
+            kv_field_delim,
+            kv_kv_delim,
+        )
+        text_ok = text.needle_len == 0 or (
+            (devices[i] < len(text.dev_mask) and text.dev_mask[devices[i]])
+            or (modules[i] < len(text.mod_mask) and text.mod_mask[modules[i]])
+            or nb_bytes_contains_ci(
+                segment.buffer, segment.offsets[i], segment.lengths[i], text.needle_buf, text.needle_len
             )
         )
+        is_match = level_ok and kv_ok and text_ok
 
         if is_match:
             out_indices[match_count] = i
@@ -236,6 +291,13 @@ def nb_segment_extract_fields(
     out_lens = out_bundle.lengths
     out_buf = out_bundle.buffer
 
+    copy_pids = segment.has_pids and out_bundle.has_pids
+    copy_tids = segment.has_tids and out_bundle.has_tids
+    s_pids = segment.pids
+    s_tids = segment.tids
+    out_pids = out_bundle.pids
+    out_tids = out_bundle.tids
+
     for i in range(count):
         src_idx = indices[i]
         row = out_row_offset + i
@@ -246,6 +308,10 @@ def nb_segment_extract_fields(
         out_lvl[row] = s_lvls[src_idx]
         out_mod[row] = s_mods[src_idx]
         out_seq[row] = s_seqs[src_idx]
+        if copy_pids:
+            out_pids[row] = s_pids[src_idx]
+        if copy_tids:
+            out_tids[row] = s_tids[src_idx]
 
         msg_len = s_lens[src_idx]
         copy_len = msg_len if msg_len < max_msg_bytes else max_msg_bytes
@@ -260,8 +326,7 @@ def nb_segment_extract_fields(
     return count
 
 
-@app_njit()
-def nb_filter_segment(
+def segment_filter(
     segment,  # LogBundle
     effective_mask,
     out_indices,
@@ -269,20 +334,45 @@ def nb_filter_segment(
     start_seq=SEQ_NONE,
     start_ts=TS_UNSPECIFIED,
     end_ts=TS_UNSPECIFIED,
-    kv_cond_keys_buf=EMPTY_KV_BYTES,
-    kv_cond_keys_off=EMPTY_KV_OFFSETS,
-    kv_cond_keys_len=EMPTY_KV_LENGTHS,
-    kv_cond_vals_buf=EMPTY_KV_BYTES,
-    kv_cond_vals_off=EMPTY_KV_OFFSETS,
-    kv_cond_vals_len=EMPTY_KV_LENGTHS,
-    kv_num_conditions=0,
-    kv_field_delim=32,
-    kv_kv_delim=61,
+    kv=EMPTY_KV_CONDITIONS,  # KvConditionArrays
+    kv_field_delim=CHAR_SPACE,
+    kv_kv_delim=CHAR_EQUALS,
+    text=EMPTY_TEXT_SEARCH,  # TextSearchArrays
+):
+    return nb_filter_segment(
+        segment,  # LogBundle
+        effective_mask,
+        out_indices,
+        max_matches,
+        SEQ_TYPE(start_seq),
+        TS_TYPE(start_ts),
+        TS_TYPE(end_ts),
+        kv,
+        kv_field_delim,
+        kv_kv_delim,
+        text,
+    )
+
+
+@app_njit()
+def nb_filter_segment(
+    segment,  # LogBundle
+    effective_mask,
+    out_indices,
+    max_matches,
+    start_seq,
+    start_ts,
+    end_ts,
+    kv,
+    kv_field_delim,
+    kv_kv_delim,
+    text,
 ):
     count = segment.size[0]
     timestamps = segment.timestamps
     levels = segment.levels
     modules = segment.modules
+    devices = segment.devices
     seqs = segment.sequences
 
     # 1. Zero-Overhead Logarithmic Boundary Finding
@@ -312,23 +402,28 @@ def nb_filter_segment(
         # The ultimate O(1) check:
         # Is the log level >= the threshold baked for this module?
         level_ok = levels[i] >= effective_mask[modules[i]]
-        is_match = level_ok and (
-            kv_num_conditions == 0
-            or nb_row_matches_kv_conditions(
-                segment.buffer,
-                segment.offsets[i],
-                segment.lengths[i],
-                kv_cond_keys_buf,
-                kv_cond_keys_off,
-                kv_cond_keys_len,
-                kv_cond_vals_buf,
-                kv_cond_vals_off,
-                kv_cond_vals_len,
-                kv_num_conditions,
-                kv_field_delim,
-                kv_kv_delim,
+        kv_ok = kv.num_conditions == 0 or nb_row_matches_kv_conditions(
+            segment.buffer,
+            segment.offsets[i],
+            segment.lengths[i],
+            kv.cond_keys_buf,
+            kv.cond_keys_off,
+            kv.cond_keys_len,
+            kv.cond_vals_buf,
+            kv.cond_vals_off,
+            kv.cond_vals_len,
+            kv.num_conditions,
+            kv_field_delim,
+            kv_kv_delim,
+        )
+        text_ok = text.needle_len == 0 or (
+            (devices[i] < len(text.dev_mask) and text.dev_mask[devices[i]])
+            or (modules[i] < len(text.mod_mask) and text.mod_mask[modules[i]])
+            or nb_bytes_contains_ci(
+                segment.buffer, segment.offsets[i], segment.lengths[i], text.needle_buf, text.needle_len
             )
         )
+        is_match = level_ok and kv_ok and text_ok
 
         # Branchless Append
         out_indices[match_count] = i
@@ -383,7 +478,19 @@ def nb_find_next_module_index(segment: LogBundle, target_module, start_idx):
 
 @app_njit()
 def nb_bundle_push(
-    bundle: LogBundle, ts_ns, rx_ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
+    bundle: LogBundle,
+    ts_ns,
+    rx_ts_ns,
+    msg_bytes,
+    level,
+    module,
+    device,
+    seq,
+    ext_u32_1,
+    ext_u32_2,
+    ext_u64_1,
+    pid=0,
+    tid=0,
 ):
     """
     Convenience wrapper that infers the length directly from the buffer
@@ -392,13 +499,39 @@ def nb_bundle_push(
     msg_len = len(msg_bytes)
 
     return nb_bundle_push_len(
-        bundle, ts_ns, rx_ts_ns, msg_bytes, msg_len, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
+        bundle,
+        ts_ns,
+        rx_ts_ns,
+        msg_bytes,
+        msg_len,
+        level,
+        module,
+        device,
+        seq,
+        ext_u32_1,
+        ext_u32_2,
+        ext_u64_1,
+        pid,
+        tid,
     )
 
 
 @app_njit(inline="always")
 def nb_bundle_push_len(
-    bundle: LogBundle, ts_ns, rx_ts_ns, msg_bytes, msg_len, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1
+    bundle: LogBundle,
+    ts_ns,
+    rx_ts_ns,
+    msg_bytes,
+    msg_len,
+    level,
+    module,
+    device,
+    seq,
+    ext_u32_1,
+    ext_u32_2,
+    ext_u64_1,
+    pid=0,
+    tid=0,
 ):
     # 1. Early Exit & Pre-flight
     size_ptr = bundle.size
@@ -430,6 +563,10 @@ def nb_bundle_push_len(
         bundle.devices[idx] = device
     if bundle.has_sequences:
         bundle.sequences[idx] = seq
+    if bundle.has_pids:
+        bundle.pids[idx] = pid
+    if bundle.has_tids:
+        bundle.tids[idx] = tid
 
     # Heterogeneous Extension Columns
     if bundle.has_ext_u32_1:

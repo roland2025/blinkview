@@ -9,6 +9,7 @@ from typing import Optional
 
 from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
 from blinkview.ops.kv_filter import KvConditionArrays, build_kv_condition_arrays
+from blinkview.ops.text_filter import TextSearchArrays, build_text_search_arrays
 from blinkview.utils.log_level import LevelIdentity, LogLevel
 
 
@@ -29,6 +30,10 @@ class LogFilter:
         self.kv_conditions: list[tuple[bytes, bytes]] = []
         self._kv_baked_key = None
         self._kv_baked_arrays: Optional[KvConditionArrays] = None
+
+        self.text_filter_text = ""
+        self._text_baked_key = None
+        self._text_baked_arrays: Optional[TextSearchArrays] = None
 
     def set_level(self, log_level):
         self.log_level = LogLevel.from_string(log_level)
@@ -76,9 +81,29 @@ class LogFilter:
     def bake_kv_arrays(self) -> KvConditionArrays:
         """Flattens kv_conditions into the flat arrays the Numba filter kernels expect, caching
         the result until kv_conditions changes - same "bake once, reuse until changed" pattern
-        as the effective_mask caches in LogViewerWidget/LogTableModel."""
+        as the effective_mask caches in LogViewerWidget/LogTableStore."""
         cache_key = tuple(self.kv_conditions)
         if self._kv_baked_key != cache_key or self._kv_baked_arrays is None:
             self._kv_baked_key = cache_key
             self._kv_baked_arrays = build_kv_condition_arrays(self.kv_conditions)
         return self._kv_baked_arrays
+
+    def set_text_filter(self, text: str):
+        """Sets the free-text "device/module/message" search query. Unlike the old Qt-proxy
+        search box, this is baked into the same row-level Numba filter kernels as the kv/level
+        filters, so a live-mode fetch actually re-scans the backend for matches and fills the
+        viewport with them, instead of filtering whatever small window of rows happened to
+        already be fetched."""
+        self.text_filter_text = text or ""
+
+    def bake_text_search(self) -> TextSearchArrays:
+        """Flattens text_filter_text into the flat arrays/masks the Numba filter kernels expect,
+        caching the result until the text changes or the device/module registries grow (a newly
+        registered device/module needs a chance to be re-checked against the current query)."""
+        cache_key = (self.text_filter_text, len(self.registry.devices), len(self.registry.modules))
+        if self._text_baked_key != cache_key or self._text_baked_arrays is None:
+            self._text_baked_key = cache_key
+            self._text_baked_arrays = build_text_search_arrays(
+                self.text_filter_text, self.registry.devices, self.registry.modules
+            )
+        return self._text_baked_arrays

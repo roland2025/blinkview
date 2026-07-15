@@ -5,10 +5,12 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 
+from typing import TYPE_CHECKING
+
 import numpy as np
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QTimer
 from qtpy.QtGui import QAction
-from qtpy.QtWidgets import QComboBox, QSizePolicy, QSplitter, QToolBar, QVBoxLayout, QWidget
+from qtpy.QtWidgets import QComboBox, QLineEdit, QSizePolicy, QSplitter, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.core import dtypes
 from blinkview.core.dtypes import SEQ_NONE
@@ -16,7 +18,8 @@ from blinkview.core.types.formatting import FormattingConfig
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.formatting import nb_segment_estimate_out_size, nb_segment_format
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
-from blinkview.ops.segments import nb_filter_segment, nb_segment_filter_reversed
+from blinkview.ops.segments import segment_filter, segment_filter_reversed
+from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
 from blinkview.ui.widgets.kv_filter_line_edit import KvFilterLineEdit
@@ -27,6 +30,9 @@ from blinkview.ui.widgets.telemetry_table import TelemetryTable
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
 from blinkview.utils.utc_offset import get_local_utc_offset_seconds
+
+if TYPE_CHECKING:
+    from blinkview.core.warmup import NumbaWarmupHelper
 
 
 class LogViewerWidget(QWidget):
@@ -79,13 +85,14 @@ QToolButton[filterEnabled="true"] {
 
         self.ts_precision = 3
         self.kv_filter_text = ""
+        self.search_text = ""
 
         self._set_defaults()
 
         if state:
             self.restore(state)
 
-        # self.logger = gui_context.logger.child(f"log_viewer_{id(self):x}")
+        self.logger = gui_context.logger.child("log_viewer")
 
         self.latest_seq_manual = SEQ_NONE
         self.latest_seq_seen = SEQ_NONE
@@ -198,6 +205,23 @@ QToolButton[filterEnabled="true"] {
 
         self.toolbar.addSeparator()
 
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Filter device/module/message...")
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.setText(self.search_text)
+        self.search_box.setMaximumWidth(240)
+        self.toolbar.addWidget(self.search_box)
+
+        # Debounced and baked into the same row-level Numba filter kernels as the kv filter
+        # (LogFilter.set_text_filter/bake_text_search), rather than filtering the already-
+        # rendered text area - so a redraw actually re-scans the backend for matches.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)
+        self.search_box.textChanged.connect(lambda _text: self._search_timer.start())
+
+        self.toolbar.addSeparator()
+
         self.kv_filter_box = KvFilterLineEdit()
         self.kv_filter_box.setMaximumWidth(240)
         self.kv_filter_box.setText(self.kv_filter_text)
@@ -255,6 +279,9 @@ QToolButton[filterEnabled="true"] {
         )
         self.log_filter.set_kv_filter(self.kv_filter_text)
         self.kv_filter_box.filterTextCommitted.connect(self._apply_kv_filter_text)
+
+        self.log_filter.set_text_filter(self.search_text)
+        self._search_timer.timeout.connect(self._apply_search_text)
 
         self.filter_sidebar = ModuleFilterSidebar(
             gui_context=self.gui_context, target_filter=self.log_filter, parent=self, show_hidden=self.show_hidden
@@ -371,6 +398,7 @@ QToolButton[filterEnabled="true"] {
         self.show_telemetry = view_state.get("show_telemetry", self.show_telemetry)
         self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
         self.kv_filter_text = view_state.get("kv_filter_text", self.kv_filter_text)
+        self.search_text = view_state.get("search_text", self.search_text)
         self.filter_sidebar_state = state.get("filter_sidebar", self.filter_sidebar_state)
 
         self.saved_sizes = view_state.get("splitter_sizes")
@@ -391,6 +419,7 @@ QToolButton[filterEnabled="true"] {
                 "show_module_filter": self.show_module_filter,
                 "show_telemetry": self.show_telemetry,
                 "kv_filter_text": self.log_filter.kv_filter_text,
+                "search_text": self.log_filter.text_filter_text,
                 "splitter_sizes": self.splitter.sizes(),
             },
             "log_level": self.log_filter.log_level.name_conf,
@@ -409,6 +438,10 @@ QToolButton[filterEnabled="true"] {
 
     def _apply_kv_filter_text(self, text):
         self.log_filter.set_kv_filter(text)
+        self._redraw_history()
+
+    def _apply_search_text(self):
+        self.log_filter.set_text_filter(self.search_box.text())
         self._redraw_history()
 
     def set_log_index(self):
@@ -528,7 +561,9 @@ QToolButton[filterEnabled="true"] {
 
         import time  # Ensure this is imported at the top of your file ideally
 
-        t_start_total = time.time_ns()
+        time_ns = time.time_ns
+
+        t_start_total = time_ns()
 
         # Existing throttling logic uses registry.now_ns, keeping it intact
         now_ns = self.gui_context.registry.now_ns
@@ -538,9 +573,9 @@ QToolButton[filterEnabled="true"] {
             return
 
         # 1. Profile Sidebar Sync
-        t_sidebar_start = time.time_ns()
+        t_sidebar_start = time_ns()
         self.filter_sidebar.sync_modules()
-        t_sidebar_end = time.time_ns()
+        t_sidebar_end = time_ns()
         # self.logger.debug(f"[Profile] sync_modules: {(t_sidebar_end - t_sidebar_start) / 1_000_000:.3f} ms")
 
         self.prev_apply = t_start
@@ -610,7 +645,7 @@ QToolButton[filterEnabled="true"] {
                     mask[self._filter_cache] = self._effective_mask[self._filter_cache]
                     self._effective_mask = mask
 
-        t_mask_end = time.time_ns()
+        t_mask_end = time_ns()
 
         # if (t_mask_end - t_mask_start) > 1_000_000:  # Only log if mask baking took more than 1ms
         #     self.logger.debug(f"[Profile] Bake Effective Mask: {(t_mask_end - t_mask_start) / 1_000_000:.3f} ms")
@@ -634,7 +669,13 @@ QToolButton[filterEnabled="true"] {
         first_segment = True
 
         kv = f.bake_kv_arrays()
+        text = f.bake_text_search()
 
+        # filter_debug = self.logger.child("filter").debug
+        # estimate_debug = self.logger.child("estimate").debug
+        # format_debug = self.logger.child("format").debug
+
+        reg_bundle = reg.bundle()
         # 4. Profile Segment Filtering & Formatting (REVERSED)
         t_segments_start = time.time_ns()
         with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
@@ -652,37 +693,42 @@ QToolButton[filterEnabled="true"] {
                     first_segment = False
 
                 allowed_matches = self.max_rows - total_new_rows
-
-                match_count = nb_segment_filter_reversed(
+                # t_filter_start = time_ns()
+                match_count = segment_filter_reversed(
                     segment.bundle,
                     effective_mask=self._effective_mask,
                     out_indices=indices.array,
                     max_matches=allowed_matches,
                     start_seq=self.latest_seq_seen,
-                    kv_cond_keys_buf=kv.cond_keys_buf,
-                    kv_cond_keys_off=kv.cond_keys_off,
-                    kv_cond_keys_len=kv.cond_keys_len,
-                    kv_cond_vals_buf=kv.cond_vals_buf,
-                    kv_cond_vals_off=kv.cond_vals_off,
-                    kv_cond_vals_len=kv.cond_vals_len,
-                    kv_num_conditions=kv.num_conditions,
+                    kv=kv,
+                    text=text,
                 )
+                # t_step = time_ns()
+                #
+                # filter_debug(str(t_step - t_filter_start))
 
                 if match_count > 0:
+                    # t_estimate_start = time_ns()
                     req_bytes = nb_segment_estimate_out_size(
-                        indices.array, match_count, segment.bundle, reg.bundle(), format_cfg
+                        indices.array, match_count, segment.bundle, reg_bundle, format_cfg
                     )
 
+                    # t_step = time_ns()
+                    # estimate_debug(str(t_step - t_estimate_start))
+
                     with array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
+                        # t_format_start = time_ns()
                         bytes_written = nb_segment_format(
                             handle.array,
                             indices.array,
                             match_count,
                             segment.bundle,
-                            reg.bundle(),
+                            reg_bundle,
                             format_cfg,
                             tz_offset_sec,
                         )
+
+                        # format_debug(str(time_ns() - t_format_start))
                         decoded_str = handle.array[:bytes_written].tobytes().decode("utf-8", errors="replace")
                         string_batches.append(decoded_str)
 
@@ -697,9 +743,6 @@ QToolButton[filterEnabled="true"] {
         self.latest_seq_seen = max(self.latest_seq_seen, highest_seq_seen_this_tick)
 
         # if total_new_rows > 0:
-        #     self.logger.debug(
-        #         f"[Profile] Filtering & Formatting {total_new_rows} rows: {(t_segments_end - t_segments_start) / 1_000_000:.3f} ms"
-        #     )
 
         # Catch-up logic ...
         was_catching_up = self._is_catching_up
@@ -713,7 +756,7 @@ QToolButton[filterEnabled="true"] {
             else:
                 is_clogged = self.velocity_tracker.update_and_check(total_new_rows)
 
-            t_ui_start = time.time_ns()
+            # t_ui_start = time_ns()
             if is_clogged and not self.is_paused:
                 self.auto_paused = True
                 self.action_pause.setChecked(True)
@@ -724,9 +767,11 @@ QToolButton[filterEnabled="true"] {
                 full_string_batch = "".join(string_batches)
 
                 self.text_area.append_log(full_string_batch)
-            t_ui_end = time.time_ns()
+            # t_ui_end = time_ns()
 
             # self.logger.debug(f"[Profile] UI Text Append: {(t_ui_end - t_ui_start) / 1_000_000:.3f} ms")
+        # t_func_end = time_ns()
+        # self.logger.child("total").debug(f"{t_func_end - t_start_total} rows={total_new_rows}")
 
     def _redraw_history(self):
         """
@@ -812,11 +857,20 @@ QToolButton[filterEnabled="true"] {
     def warmup(helper: "NumbaWarmupHelper"):
         """Triggers compilation for log filtering/formatting kernels (nb_filter_segment,
         nb_segment_filter_reversed, nb_segment_estimate_out_size, nb_segment_format). Requires
-        data in the pool, provided by NumbaWarmupHelper.exercise_logging_kernels()."""
+        data in the pool, provided by NumbaWarmupHelper.exercise_logging_kernels().
+
+        kv/text are NamedTuples of numpy arrays, and Numba types an array's read-only-ness as
+        part of its signature (see numba-njit skill §3/§9). EMPTY_KV_CONDITIONS/EMPTY_TEXT_SEARCH
+        (ops/kv_filter.py, ops/text_filter.py) are deliberately built from
+        np.frombuffer(b"", ...) rather than np.empty(...) so their buffer fields are already
+        read-only - the same type Numba sees for a real, non-empty query built via
+        build_kv_condition_arrays/build_text_search_arrays. That means this single EMPTY_* call
+        below covers the "real kv/text present" case too; no need to separately warm every
+        real/empty combination (see numba-njit skill §15)."""
 
         print("[Warmup] LogViewerWidget ...")
 
-        s_seq = dtypes.SEQ_TYPE(0)  # uint64
+        s_seq = 0
 
         # Build the Unified Effective Mask for Warmup
         mod_count = helper.registry.module_count()
@@ -831,28 +885,24 @@ QToolButton[filterEnabled="true"] {
 
         with helper.log_pool.get_snapshot() as segments, helper.log_pool.acquire_indices_buffer() as indices:
             for segment in segments:
-                match_count = nb_filter_segment(
+                match_count = segment_filter(
                     segment.bundle,
                     effective_mask=effective_mask,
                     out_indices=indices.array,
                     max_matches=1000,
                     start_seq=s_seq,
+                    kv=EMPTY_KV_CONDITIONS,
+                    text=EMPTY_TEXT_SEARCH,
                 )
 
-                kv = EMPTY_KV_CONDITIONS
-                _ = nb_segment_filter_reversed(
+                _ = segment_filter_reversed(
                     segment.bundle,
                     effective_mask=effective_mask,
                     out_indices=indices.array,
                     max_matches=1000,
                     start_seq=s_seq,
-                    kv_cond_keys_buf=kv.cond_keys_buf,
-                    kv_cond_keys_off=kv.cond_keys_off,
-                    kv_cond_keys_len=kv.cond_keys_len,
-                    kv_cond_vals_buf=kv.cond_vals_buf,
-                    kv_cond_vals_off=kv.cond_vals_off,
-                    kv_cond_vals_len=kv.cond_vals_len,
-                    kv_num_conditions=kv.num_conditions,
+                    kv=EMPTY_KV_CONDITIONS,
+                    text=EMPTY_TEXT_SEARCH,
                 )
 
                 if match_count > 0:

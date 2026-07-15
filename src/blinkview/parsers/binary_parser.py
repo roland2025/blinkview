@@ -167,6 +167,8 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                     has_levels=True,
                     has_modules=True,
                     has_devices=True,
+                    has_pids=True,
+                    has_tids=True,
                 )
 
             def flush():
@@ -309,6 +311,8 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                     has_levels=True,
                     has_modules=True,
                     has_devices=True,
+                    has_pids=True,
+                    has_tids=True,
                 )
 
             def batch_acquire_input():

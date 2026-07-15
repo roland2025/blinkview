@@ -22,6 +22,8 @@ class LogBundle(NamedTuple):
     modules: np.ndarray  # dtypes.ID_TYPE (uint32)
     devices: np.ndarray  # dtypes.ID_TYPE (uint32)
     sequences: np.ndarray  # dtypes.SEQ_TYPE (uint64)
+    pids: np.ndarray  # dtypes.ID_TYPE (uint32) - source-local process id (e.g. Android PID)
+    tids: np.ndarray  # dtypes.ID_TYPE (uint32) - source-local thread id (e.g. Android TID)
 
     # --- New Heterogeneous Extension Columns ---
     ext_u32_1: np.ndarray  # dtypes.UINT32 (uint32)
@@ -37,6 +39,8 @@ class LogBundle(NamedTuple):
     has_modules: bool
     has_devices: bool
     has_sequences: bool
+    has_pids: bool
+    has_tids: bool
     has_ext_u32_1: bool
     has_ext_u32_2: bool
     has_ext_u64_1: bool

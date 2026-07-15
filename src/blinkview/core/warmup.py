@@ -26,12 +26,14 @@ class NumbaWarmupHelper:
 
         self.logger = PrintLogger("warmup")
 
+        from blinkview.core.id_history import IdHistory
         from blinkview.core.id_registry import IDRegistry
         from blinkview.core.numpy_log import CircularLogPool
 
         # 1. Initialize dummy infrastructure
         self.registry = IDRegistry(self.array_pool)
         self.log_pool = CircularLogPool(self.array_pool, 4, 1024 * 16)
+        self.pid_history = IdHistory()
 
         # Constructed by LatestModuleValueTracker.warmup() (a registered warmup callback), not
         # here.
@@ -49,12 +51,14 @@ class NumbaWarmupHelper:
             tasks=shared.tasks,
             settings=shared.settings,
             array_pool=shared.array_pool,
+            pid_history=self.pid_history,
         )
 
     def run_all(self):
-        """Execute the full warmup suite."""
+        """Execute the full warmup suite, highest-priority callbacks first (stable sort - equal
+        priorities keep registration/import order)."""
         try:
-            for callback in _WARMUP_CALLBACKS:
+            for _priority, callback in sorted(_WARMUP_CALLBACKS, key=lambda item: item[0], reverse=True):
                 callback(self)
         finally:
             # Clean up dummy data

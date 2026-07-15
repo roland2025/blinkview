@@ -2,10 +2,18 @@ import numpy as np
 
 from blinkview.core import dtypes
 from blinkview.core.types.log_batch import LogBundle
-from blinkview.ops.segments import nb_filter_segment, nb_segment_extract_fields, nb_segment_filter_reversed
+from blinkview.ops.constants import CHAR_EQUALS, CHAR_SPACE
+from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
+from blinkview.ops.segments import (
+    nb_copy_batch_to_segment,
+    nb_filter_segment,
+    nb_segment_extract_fields,
+    nb_segment_filter_reversed,
+)
+from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
 
 
-def make_bundle(timestamps, rx_timestamps, devices, levels, modules, sequences, messages):
+def make_bundle(timestamps, rx_timestamps, devices, levels, modules, sequences, messages, pids=None, tids=None):
     """Builds a minimal LogBundle backing a fixed set of rows, for kernel-level testing."""
     lengths = np.array([len(m) for m in messages], dtype=dtypes.LEN_TYPE)
     offsets = np.zeros(len(messages), dtype=dtypes.OFFSET_TYPE)
@@ -34,6 +42,8 @@ def make_bundle(timestamps, rx_timestamps, devices, levels, modules, sequences, 
         modules=np.array(modules, dtype=dtypes.ID_TYPE),
         devices=np.array(devices, dtype=dtypes.ID_TYPE),
         sequences=np.array(sequences, dtype=dtypes.SEQ_TYPE),
+        pids=np.array(pids if pids is not None else [0] * size, dtype=dtypes.ID_TYPE),
+        tids=np.array(tids if tids is not None else [0] * size, dtype=dtypes.ID_TYPE),
         ext_u32_1=np.zeros(size, dtype=dtypes.UINT32),
         ext_u32_2=np.zeros(size, dtype=dtypes.UINT32),
         ext_u64_1=np.zeros(size, dtype=dtypes.UINT64),
@@ -44,13 +54,15 @@ def make_bundle(timestamps, rx_timestamps, devices, levels, modules, sequences, 
         has_modules=True,
         has_devices=True,
         has_sequences=True,
+        has_pids=pids is not None,
+        has_tids=tids is not None,
         has_ext_u32_1=False,
         has_ext_u32_2=False,
         has_ext_u64_1=False,
     )
 
 
-def make_out_bundle(capacity, max_msg_bytes):
+def make_out_bundle(capacity, max_msg_bytes, has_pids=False, has_tids=False):
     """Builds a zeroed LogBundle sized to receive nb_segment_extract_fields output."""
     return LogBundle(
         timestamps=np.zeros(capacity, dtype=dtypes.TS_TYPE),
@@ -62,6 +74,8 @@ def make_out_bundle(capacity, max_msg_bytes):
         modules=np.zeros(capacity, dtype=dtypes.ID_TYPE),
         devices=np.zeros(capacity, dtype=dtypes.ID_TYPE),
         sequences=np.zeros(capacity, dtype=dtypes.SEQ_TYPE),
+        pids=np.zeros(capacity, dtype=dtypes.ID_TYPE),
+        tids=np.zeros(capacity, dtype=dtypes.ID_TYPE),
         ext_u32_1=np.zeros(capacity, dtype=dtypes.UINT32),
         ext_u32_2=np.zeros(capacity, dtype=dtypes.UINT32),
         ext_u64_1=np.zeros(capacity, dtype=dtypes.UINT64),
@@ -72,6 +86,8 @@ def make_out_bundle(capacity, max_msg_bytes):
         has_modules=True,
         has_devices=True,
         has_sequences=True,
+        has_pids=has_pids,
+        has_tids=has_tids,
         has_ext_u32_1=False,
         has_ext_u32_2=False,
         has_ext_u64_1=False,
@@ -98,6 +114,14 @@ def test_nb_segment_extract_fields_basic_roundtrip():
         effective_mask=effective_mask,
         out_indices=indices,
         max_matches=3,
+        start_seq=dtypes.SEQ_NONE,
+        end_seq=dtypes.SEQ_NONE,
+        start_ts=dtypes.TS_UNSPECIFIED,
+        end_ts=dtypes.TS_UNSPECIFIED,
+        kv=EMPTY_KV_CONDITIONS,
+        kv_field_delim=CHAR_SPACE,
+        kv_kv_delim=CHAR_EQUALS,
+        text=EMPTY_TEXT_SEARCH,
     )
     assert match_count == 3
 
@@ -151,6 +175,14 @@ def test_nb_segment_extract_fields_respects_mask_filtering():
         effective_mask=effective_mask,
         out_indices=indices,
         max_matches=4,
+        start_seq=dtypes.SEQ_NONE,
+        end_seq=dtypes.SEQ_NONE,
+        start_ts=dtypes.TS_UNSPECIFIED,
+        end_ts=dtypes.TS_UNSPECIFIED,
+        kv=EMPTY_KV_CONDITIONS,
+        kv_field_delim=CHAR_SPACE,
+        kv_kv_delim=CHAR_EQUALS,
+        text=EMPTY_TEXT_SEARCH,
     )
 
     # Only rows with level==5 (indices 1 and 3) should match.
@@ -172,7 +204,20 @@ def test_nb_segment_extract_fields_truncates_long_messages():
 
     effective_mask = np.zeros(1, dtype=dtypes.LEVEL_TYPE)
     indices = np.zeros(1, dtype=np.int64)
-    match_count = nb_segment_filter_reversed(bundle, effective_mask=effective_mask, out_indices=indices, max_matches=1)
+    match_count = nb_segment_filter_reversed(
+        bundle,
+        effective_mask=effective_mask,
+        out_indices=indices,
+        max_matches=1,
+        start_seq=dtypes.SEQ_NONE,
+        end_seq=dtypes.SEQ_NONE,
+        start_ts=dtypes.TS_UNSPECIFIED,
+        end_ts=dtypes.TS_UNSPECIFIED,
+        kv=EMPTY_KV_CONDITIONS,
+        kv_field_delim=CHAR_SPACE,
+        kv_kv_delim=CHAR_EQUALS,
+        text=EMPTY_TEXT_SEARCH,
+    )
     assert match_count == 1
 
     max_msg_bytes = 8
@@ -205,7 +250,20 @@ def test_nb_segment_extract_fields_writes_at_row_offset():
 
     effective_mask = np.zeros(10, dtype=dtypes.LEVEL_TYPE)
     indices = np.zeros(1, dtype=np.int64)
-    match_count = nb_segment_filter_reversed(bundle, effective_mask=effective_mask, out_indices=indices, max_matches=1)
+    match_count = nb_segment_filter_reversed(
+        bundle,
+        effective_mask=effective_mask,
+        out_indices=indices,
+        max_matches=1,
+        start_seq=dtypes.SEQ_NONE,
+        end_seq=dtypes.SEQ_NONE,
+        start_ts=dtypes.TS_UNSPECIFIED,
+        end_ts=dtypes.TS_UNSPECIFIED,
+        kv=EMPTY_KV_CONDITIONS,
+        kv_field_delim=CHAR_SPACE,
+        kv_kv_delim=CHAR_EQUALS,
+        text=EMPTY_TEXT_SEARCH,
+    )
     assert match_count == 1
 
     capacity = 5
@@ -254,7 +312,18 @@ def test_nb_segment_filter_reversed_end_seq_bounds_history_before_fetch():
 
     # anchor_seq = 4 -> "before" fetch should only see seq <= 3 (rows a, b, c).
     match_count = nb_segment_filter_reversed(
-        bundle, effective_mask=effective_mask, out_indices=indices, max_matches=5, end_seq=3
+        bundle,
+        effective_mask=effective_mask,
+        out_indices=indices,
+        max_matches=5,
+        start_seq=dtypes.SEQ_NONE,
+        end_seq=3,
+        start_ts=dtypes.TS_UNSPECIFIED,
+        end_ts=dtypes.TS_UNSPECIFIED,
+        kv=EMPTY_KV_CONDITIONS,
+        kv_field_delim=CHAR_SPACE,
+        kv_kv_delim=CHAR_EQUALS,
+        text=EMPTY_TEXT_SEARCH,
     )
 
     assert match_count == 3
@@ -275,7 +344,20 @@ def test_nb_segment_filter_reversed_end_seq_default_is_unbounded():
     effective_mask = np.zeros(1, dtype=dtypes.LEVEL_TYPE)
     indices = np.zeros(3, dtype=np.int64)
 
-    match_count = nb_segment_filter_reversed(bundle, effective_mask=effective_mask, out_indices=indices, max_matches=3)
+    match_count = nb_segment_filter_reversed(
+        bundle,
+        effective_mask=effective_mask,
+        out_indices=indices,
+        max_matches=3,
+        start_seq=dtypes.SEQ_NONE,
+        end_seq=dtypes.SEQ_NONE,
+        start_ts=dtypes.TS_UNSPECIFIED,
+        end_ts=dtypes.TS_UNSPECIFIED,
+        kv=EMPTY_KV_CONDITIONS,
+        kv_field_delim=CHAR_SPACE,
+        kv_kv_delim=CHAR_EQUALS,
+        text=EMPTY_TEXT_SEARCH,
+    )
 
     assert match_count == 3
 
@@ -297,8 +379,113 @@ def test_filter_segment_forward_ascending_matches_from_start_seq():
 
     # start_seq=2 -> matches seq > 2, i.e. rows c, d, e (indices 2, 3, 4), ascending.
     match_count = nb_filter_segment(
-        bundle, effective_mask=effective_mask, out_indices=indices, max_matches=5, start_seq=2
+        bundle,
+        effective_mask=effective_mask,
+        out_indices=indices,
+        max_matches=5,
+        start_seq=2,
+        start_ts=dtypes.TS_UNSPECIFIED,
+        end_ts=dtypes.TS_UNSPECIFIED,
+        kv=EMPTY_KV_CONDITIONS,
+        kv_field_delim=CHAR_SPACE,
+        kv_kv_delim=CHAR_EQUALS,
+        text=EMPTY_TEXT_SEARCH,
     )
 
     assert match_count == 3
     assert list(indices[:match_count]) == [2, 3, 4]
+
+
+def test_nb_copy_batch_to_segment_copies_pids_and_tids():
+    batch = make_bundle(
+        timestamps=[1, 2, 3],
+        rx_timestamps=[1, 2, 3],
+        devices=[0, 0, 0],
+        levels=[0, 0, 0],
+        modules=[0, 0, 0],
+        sequences=[0, 0, 0],  # source batches don't carry real sequence ids yet
+        messages=["a", "b", "c"],
+        pids=[111, 222, 333],
+        tids=[11, 22, 33],
+    )
+
+    segment = make_out_bundle(capacity=5, max_msg_bytes=8, has_pids=True, has_tids=True)
+
+    copied = nb_copy_batch_to_segment(segment, batch, 0, 0)
+
+    assert copied == 3
+    assert list(segment.pids[:3]) == [111, 222, 333]
+    assert list(segment.tids[:3]) == [11, 22, 33]
+
+
+def test_nb_copy_batch_to_segment_does_not_copy_ext_columns():
+    """ext_u32_1/ext_u32_2/ext_u64_1 are source-to-pipeline-local data (e.g. CAN arbitration id)
+    and are intentionally never copied into the central segment - this is not a bug."""
+    batch = make_bundle(
+        timestamps=[1],
+        rx_timestamps=[1],
+        devices=[0],
+        levels=[0],
+        modules=[0],
+        sequences=[0],
+        messages=["a"],
+    )
+    batch.ext_u32_1[:] = 999
+    batch.ext_u32_2[:] = 888
+    batch.ext_u64_1[:] = 777
+
+    segment = make_out_bundle(capacity=5, max_msg_bytes=8)
+
+    copied = nb_copy_batch_to_segment(segment, batch, 0, 0)
+
+    assert copied == 1
+    assert list(segment.ext_u32_1[:1]) == [0]
+    assert list(segment.ext_u32_2[:1]) == [0]
+    assert list(segment.ext_u64_1[:1]) == [0]
+
+
+def test_nb_copy_batch_to_segment_skips_pids_when_segment_lacks_the_column():
+    """A batch that has pids but a target segment that doesn't (has_pids=False) must not write
+    into (or crash against) the segment's empty pids array."""
+    batch = make_bundle(
+        timestamps=[1],
+        rx_timestamps=[1],
+        devices=[0],
+        levels=[0],
+        modules=[0],
+        sequences=[0],
+        messages=["a"],
+        pids=[42],
+    )
+
+    segment = make_out_bundle(capacity=5, max_msg_bytes=8, has_pids=False, has_tids=False)
+
+    copied = nb_copy_batch_to_segment(segment, batch, 0, 0)
+
+    assert copied == 1
+
+
+def test_nb_copy_batch_to_segment_zeros_pids_when_batch_lacks_them():
+    """A segment with has_pids=True receiving rows from a batch without pids (e.g. system logs,
+    CAN) must write 0, not leak whatever stale value the array-pool-recycled segment slot
+    happened to hold from a previous segment rotation."""
+    batch = make_bundle(
+        timestamps=[1],
+        rx_timestamps=[1],
+        devices=[0],
+        levels=[0],
+        modules=[0],
+        sequences=[0],
+        messages=["a"],
+        # pids/tids not passed -> has_pids=False on this batch
+    )
+
+    segment = make_out_bundle(capacity=5, max_msg_bytes=8, has_pids=True, has_tids=True)
+    segment.pids[:] = 999  # simulate stale leftover data from a prior segment rotation
+    segment.tids[:] = 888
+
+    copied = nb_copy_batch_to_segment(segment, batch, 0, 0)
+
+    assert copied == 1
+    assert int(segment.pids[0]) == 0
+    assert int(segment.tids[0]) == 0
