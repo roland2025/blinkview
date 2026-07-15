@@ -10,6 +10,7 @@ import signal
 import sys
 from pathlib import Path
 from time import perf_counter, time
+from types import SimpleNamespace
 from typing import Optional
 
 from qtpy.QtCore import QCoreApplication, Qt, QTimer, Signal, Slot
@@ -510,10 +511,67 @@ class BlinkMainWindow(QMainWindow):
 
         # set_as_in_development(update_act, self)
 
+        menu.addSeparator()
+        load_menu = menu.addMenu("Load Session...")
+        self._populate_replay_menu(load_menu)
+
         # Global Exit
         menu.addSeparator()
         exit_act = menu.addAction("Quit")
         exit_act.triggered.connect(self.close)
+
+    def _populate_replay_menu(self, load_menu):
+        """Populates 'Load Session...' with one action per past run in this project.
+        If this window is already running in replay_mode, picking one loads it in-place via
+        UnifiedLogReplay. Otherwise replay_mode is fixed at Registry construction time, so
+        picking one relaunches the app as a new process in replay mode targeting that session."""
+        from blinkview.utils.session_lister import list_sessions, resolve_log_root, unified_log_parts
+
+        log_dir, project_name = resolve_log_root()
+        sessions = [s for s in list_sessions(log_dir, project_name) if unified_log_parts(s)]
+
+        if not sessions:
+            empty_act = load_menu.addAction("(no previous sessions found)")
+            empty_act.setEnabled(False)
+            return
+
+        already_replaying = getattr(self.gui_context.registry, "replay_mode", False)
+
+        for session_info in sessions[:25]:
+            label = f"{session_info.display_name} ({session_info.profile}) - {session_info.created_at or '?'}"
+            act = load_menu.addAction(label)
+            if already_replaying:
+                act.triggered.connect(lambda checked=False, s=session_info: self.start_replay(s))
+            else:
+                act.triggered.connect(lambda checked=False, s=session_info: self._relaunch_as_replay(s))
+
+    def start_replay(self, session_info):
+        """Loads a previously-recorded session's unified log into Central Storage.
+        Only meaningful when this window's registry was launched with replay_mode=True."""
+        from blinkview.parsers.unified_log_replay import UnifiedLogReplay
+        from blinkview.utils.session_lister import unified_log_parts
+
+        registry = self.gui_context.registry
+        parts = unified_log_parts(session_info)
+        if not parts:
+            self.logger.warn(f"start_replay: no unified log found in session '{session_info.session_id}'")
+            return
+
+        replay_reader = UnifiedLogReplay(parts)
+        replay_reader.bind_system(registry.system_ctx, SimpleNamespace(get_logger=registry.logger_creator("replay")))
+        replay_reader.subscribe(registry.central)
+        replay_reader.start()
+
+    def _relaunch_as_replay(self, session_info):
+        """Spawns `blink replay <session_id>` as a new process. Called from a normal (non-replay)
+        session, where this window's own registry was already constructed with replay_mode=False
+        - that flag is fixed at Registry construction, so an existing live session can't be
+        flipped into replay mode in-place."""
+        import subprocess
+        import sys
+
+        self.logger.info(f"Relaunching in replay mode for session '{session_info.session_id}'")
+        subprocess.Popen([sys.executable, "-m", "blinkview", "replay", session_info.session_id])
 
     def create_widget(self, cls_name, name, as_window=False, show=True, params=None, reattach_on_close=False):
         """Routes a string class name to the correct factory method."""

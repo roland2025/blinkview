@@ -4,20 +4,35 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from threading import Thread
-from time import sleep
-
+import numpy as np
 from rich.text import Text
 
+from ..core import dtypes
 from ..core.constants import SysCat
-from ..utils.log_filter import LogFilter
+from ..core.dtypes import SEQ_NONE
+from ..core.types.formatting import FormattingConfig
+from ..ops.formatting import nb_segment_estimate_out_size, nb_segment_format
+from ..ops.segments import segment_filter_reversed
 from ..utils.log_level import LogLevel
-from ..utils.time_utils import ConsoleTimestampFormatter
+from ..utils.utc_offset import get_local_utc_offset_seconds
 from .subscriber import BaseSubscriber, SubscriberFactory
 
 
 @SubscriberFactory.register("console")
 class ConsoleSubscriber(BaseSubscriber):
+    """Tails Central Storage's log_pool to a Rich console, using the same pull/snapshot query
+    pattern as ui/widgets/log_viewer.py (get_reversed_snapshot + segment_filter_reversed +
+    nb_segment_format), rather than treating pushed PooledLogBatch rows as row objects - that
+    contract (msg.level/msg.module.device/msg.message) predates the numpy_log rewrite where
+    PooledLogBatch iteration became plain (ts, msg_bytes, ...) tuples of raw ids.
+
+    Still subscribes to STORAGE/REORDER for lifecycle purposes (registry.build_subscriber wires
+    subscribers through the same pub/sub topology as everything else), but the pushed batches
+    are only used as a "there might be new data" wake-up signal and immediately released -
+    the actual rows are pulled straight from central.log_pool on every tick, exactly like the
+    GUI log viewer does.
+    """
+
     def __init__(self, console):
         print("[Console] init")
         super().__init__()
@@ -30,53 +45,79 @@ class ConsoleSubscriber(BaseSubscriber):
 
         self.log_level = LogLevel.ALL
 
-        self.log_filter = None
+        self.latest_seq_seen = SEQ_NONE
 
     def set_level(self, level: LogLevel):
         self.log_level = level
-        if self.log_filter is not None:
-            self.log_filter.set_level(self.log_level)
 
     def run(self):
-        timestamp_formatter = ConsoleTimestampFormatter()
-        format_ts = timestamp_formatter.format  # Localized!
-        queue_get = self.input_queue.get
-        c_print = self.console.print  # Localized!
-        TextCls = Text
+        registry = self.shared.registry
+        pool = registry.central.log_pool
+        reg = self.shared.id_registry
+        array_pool = self.shared.array_pool
 
-        batch_text = None
+        format_cfg = FormattingConfig(
+            show_ts=True, show_dev=True, show_lvl=True, show_mod=True, ts_precision=3, show_date=False
+        )
+        tz_offset_sec = get_local_utc_offset_seconds()
 
-        self.log_filter = LogFilter(self.shared.id_registry, log_level=self.log_level)
-        log_filter = self.log_filter
+        self.latest_seq_seen = pool.latest_sequence()
 
+        drain = self.input_queue.get
+        c_print = self.console.print
         stop_is_set = self._stop_event.is_set
+
         print(f"[Console] started with log level: {self.log_level}")
 
         while not stop_is_set():
-            # msg_batch = log_filter.filter_batch(queue_get())
-            msg_batch = queue_get(0.1)
-            if msg_batch is not None:
-                for msg in msg_batch:
-                    if msg.level < self.log_level:
-                        continue
+            pushed = drain(0.1)
+            if pushed is not None:
+                pushed.release()
 
-                    if self.streaming:
-                        if batch_text is None:
-                            batch_text = TextCls()
+            if not self.streaming:
+                continue
 
-                        # Format line
-                        ts_str = format_ts(msg.timestamp_ns)
-                        line = f"{ts_str} {msg.level} {msg.module.device} {msg.module.name} \t{msg.message}\n"
-                        # print(line)
+            mod_count = reg.module_count()
+            if mod_count == 0:
+                continue
 
-                        # Append to the consolidated Rich Text object
-                        batch_text.append(line, style=msg.level.color)
-                    else:
-                        batch_text = None  # Drop batch if not streaming
-                msg_batch.release()
+            effective_mask = np.full(mod_count, dtypes.LEVEL_TYPE(self.log_level.value), dtype=dtypes.LEVEL_TYPE)
+            reg_bundle = reg.bundle()
 
-            if batch_text is not None:
-                # ONE call to rule them all.
-                # soft_wrap=True prevents Rich from doing expensive line-break calculations
-                c_print(batch_text, soft_wrap=True, end="")
-                batch_text = None
+            string_batches = []
+            with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
+                for segment in segments:
+                    if segment.size == 0 or segment.last_sequence_id <= self.latest_seq_seen:
+                        break
+
+                    match_count = segment_filter_reversed(
+                        segment.bundle,
+                        effective_mask=effective_mask,
+                        out_indices=indices.array,
+                        max_matches=len(indices.array),
+                        start_seq=self.latest_seq_seen,
+                    )
+
+                    if match_count > 0:
+                        req_bytes = nb_segment_estimate_out_size(
+                            indices.array, match_count, segment.bundle, reg_bundle, format_cfg
+                        )
+                        with array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
+                            bytes_written = nb_segment_format(
+                                handle.array,
+                                indices.array,
+                                match_count,
+                                segment.bundle,
+                                reg_bundle,
+                                format_cfg,
+                                tz_offset_sec,
+                            )
+                            string_batches.append(
+                                handle.array[:bytes_written].tobytes().decode("utf-8", errors="replace")
+                            )
+
+            self.latest_seq_seen = pool.latest_sequence()
+
+            if string_batches:
+                string_batches.reverse()
+                c_print(Text("".join(string_batches)), soft_wrap=True, end="")

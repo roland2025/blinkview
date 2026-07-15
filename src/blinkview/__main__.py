@@ -7,7 +7,7 @@
 import sys
 from argparse import ArgumentParser
 
-from blinkview.ui.cli_args import setup_gui_parser
+from blinkview.ui.cli_args import setup_gui_parser, setup_replay_parser
 
 
 def run_init(args):
@@ -30,6 +30,37 @@ def run_cli(args):
 
 def run_daemon(args):
     print(f"🔌 Starting Daemon on port: {args.port}")
+
+
+def run_replay(args):
+    # utils/session_lister.py deliberately avoids importing anything from blinkview.storage/
+    # blinkview.parsers (the numba/id_registry cluster, ~600 modules) so --list stays fast.
+    from blinkview.utils.session_lister import list_sessions, resolve_log_root, resolve_session, unified_log_parts
+
+    log_dir, project_name = resolve_log_root(log_dir=args.logdir)
+
+    if args.list:
+        sessions = [s for s in list_sessions(log_dir, project_name) if unified_log_parts(s)]
+        if not sessions:
+            print(f"No replay sessions found for project '{project_name}' in {log_dir}.")
+            return
+        for s in sessions:
+            print(f"{s.session_id}  [{s.status}]  {s.display_name} (profile={s.profile}, created={s.created_at})")
+        return
+
+    session_info = resolve_session(log_dir, project_name, name=args.name, last=args.last)
+    if session_info is None:
+        print(f"No matching replay session found (name={args.name!r}, last={args.last}).")
+        sys.exit(1)
+
+    parts = unified_log_parts(session_info)
+    if not parts:
+        print(f"Session '{session_info.session_id}' has no unified log to replay.")
+        sys.exit(1)
+
+    from blinkview.ui.run import run as run_gui
+
+    run_gui(args, replay_mode=True, replay_session_info=session_info)
 
 
 # --- Parser Setup ---
@@ -68,6 +99,11 @@ def main():
     daemon_parser = subparsers.add_parser("daemon", help="Background service")
     daemon_parser.add_argument("--port", type=int, default=8000)
     daemon_parser.set_defaults(func=run_daemon)
+
+    # REPLAY Command
+    replay_parser = subparsers.add_parser("replay", help="Load a previously recorded session")
+    setup_replay_parser(replay_parser)
+    replay_parser.set_defaults(func=run_replay)
 
     config_parser = subparsers.add_parser("config", help="Get and set project or global options")
 

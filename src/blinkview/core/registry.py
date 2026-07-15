@@ -51,12 +51,14 @@ class Registry:
         profile_name: str = None,
         log_dir: str | Path = None,
         settings=None,
+        replay_mode: bool = False,
     ):
         # ==========================================
         # LAYER 1: Core Services
         # ==========================================
 
         self.initialized = False
+        self.replay_mode = replay_mode
 
         self._temp_log_queue: Queue = Queue()
 
@@ -454,10 +456,10 @@ class Registry:
         # self.parser_thread.start()
         # Start Hardware Pipelines (Readers + Parsers)
 
-        if self.pipelines is not None:
+        if self.pipelines is not None and not self.replay_mode:
             self.pipelines.start()
 
-        if self.sources is not None:
+        if self.sources is not None and not self.replay_mode:
             self.sources.start()
 
         tasks = self.system_ctx.tasks

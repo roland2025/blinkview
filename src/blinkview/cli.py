@@ -21,11 +21,7 @@ from rich.console import Console
 
 # Internal BlinkView imports
 from .core.registry import Registry
-from .io.uart import UARTReader
-from .parsers.line_parser import LineParser
-from .parsers.text_filter import TextFilter
-from .storage.file_logger import BinaryBatchProcessor, FileLogger, LogRowBatchProcessor
-from .subscribers.console import ConsoleSubscriber
+from .subscribers.console import ConsoleSubscriber  # noqa: F401 - registers "console" with SubscriberFactory
 from .utils.log_level import LogLevel
 
 
@@ -42,7 +38,6 @@ class BlinkViewApp:
         """Lazy-loads and configures the console subscriber."""
         if self.console_sub is None:
             self.console_sub = self.registry.build_subscriber("CLI", "Console", console=self.console)
-            # self.console_sub = ConsoleSubscriber(self.console, self.registry)
             self.console_sub.start()
 
         self.console_sub.set_level(level)

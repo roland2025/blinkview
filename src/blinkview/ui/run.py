@@ -53,7 +53,7 @@ StartupWMClass={__app_id__}
         print(f"DEBUG: Updated desktop entry at {desktop_file}")
 
 
-def run(args):
+def run(args, replay_mode: bool = False, replay_session_info=None):
     from qtpy.QtCore import Qt, QTimer
     from qtpy.QtGui import QIcon
     from qtpy.QtWidgets import (
@@ -154,6 +154,7 @@ def run(args):
             log_dir=args.logdir,
             config_path=args.config,
             settings=settings,
+            replay_mode=replay_mode,
         )
 
         from blinkview.ui.main_window import BlinkMainWindow
@@ -170,6 +171,9 @@ def run(args):
             viewer.activateWindow()
             # Materialize the window in its perfect location
             viewer.setWindowOpacity(1.0)
+
+            if replay_session_info is not None:
+                viewer.start_replay(replay_session_info)
 
         # Schedule the restoration to happen on the very first frame of the Event Loop
         QTimer.singleShot(50, finalize_ui_restore)

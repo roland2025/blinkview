@@ -87,7 +87,8 @@ class BaseDaemon:
 
                 if self.logger:
                     self.logger.info(f"Logging conf: {logging_cfg}")
-                if logging_cfg.get("enabled"):
+                replay_mode = getattr(self.shared.registry, "replay_mode", False)
+                if logging_cfg.get("enabled") and not replay_mode:
                     if self.file_logger is None:
                         ns = SimpleNamespace(
                             get_logger=self.shared.registry.logger_creator("file_logging", self.local.logging_id),
