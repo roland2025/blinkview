@@ -208,6 +208,15 @@ class SearchableLogArea(QWidget):
         """Index of the topmost currently-visible block/line."""
         return self.editor.firstVisibleBlock().blockNumber()
 
+    def visible_row_count(self):
+        """How many lines actually fit in the current viewport height - each block is exactly
+        one visual line (NoWrap), so this is viewport height / line height. Used to size
+        live/follow fetch budgets to what the screen can show rather than a fixed guess."""
+        line_height = self.editor.fontMetrics().lineSpacing()
+        if line_height <= 0:
+            return 0
+        return self.editor.viewport().height() // line_height
+
     # --- Logic ---
     def show_find_bar(self):
         """Opens find bar and pre-fills with current selection."""

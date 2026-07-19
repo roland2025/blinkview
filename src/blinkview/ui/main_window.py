@@ -54,6 +54,7 @@ from blinkview.ui.widgets.device_sidebar import DeviceSidebarWidget
 from blinkview.ui.widgets.log_table_viewer import LogTableViewerWidget
 from blinkview.ui.widgets.log_viewer import LogViewerWidget
 from blinkview.ui.widgets.pipelines_sidebar import PipelinesSidebarWidget
+from blinkview.ui.widgets.playback_control import PlaybackControlWidget
 from blinkview.ui.widgets.plotter import TelemetryPlotter
 from blinkview.ui.widgets.telemetry_table import TelemetryTable
 from blinkview.ui.widgets.TelemetryWatch import TelemetryWatch
@@ -242,6 +243,16 @@ class BlinkMainWindow(QMainWindow):
         # Keep a list so Python's garbage collector doesn't destroy our floating windows
         self.window_manager = WindowManager()
 
+        # One global playback control widget per session (mirrors registry.playback_clock's
+        # one-per-session lifecycle), shared by every log-viewer tab rather than embedded per-tab.
+        self.playback_control = PlaybackControlWidget(self.gui_context)
+
+        self.action_view_playback = QAction("Playback", self)
+        self.action_view_playback.setCheckable(True)
+        self.action_view_playback.setChecked(True)
+        self.action_view_playback.toggled.connect(self.playback_control.setVisible)
+        self.toolbar.addAction(self.action_view_playback)
+
         if use_frameless:
             self.main_container = QWidget()
             self.main_layout = QVBoxLayout(self.main_container)
@@ -261,13 +272,22 @@ class BlinkMainWindow(QMainWindow):
             self.toolbar.setMovable(False)
             self.main_layout.addWidget(self.toolbar)
 
+            self.main_layout.addWidget(self.playback_control)
+
             self.main_layout.addWidget(self.central_tabs)
 
             self.setCentralWidget(self.main_container)
         else:
             self.addToolBar(self.toolbar)
 
-            self.setCentralWidget(self.central_tabs)
+            self.main_container = QWidget()
+            self.main_layout = QVBoxLayout(self.main_container)
+            self.main_layout.setContentsMargins(0, 0, 0, 0)
+            self.main_layout.setSpacing(0)
+            self.main_layout.addWidget(self.playback_control)
+            self.main_layout.addWidget(self.central_tabs)
+
+            self.setCentralWidget(self.main_container)
 
         # Backend Integration
         self.input_queue = BatchQueue()

@@ -16,6 +16,7 @@ from qtpy.QtWidgets import QComboBox, QLineEdit, QSizePolicy, QSplitter, QToolBa
 
 from blinkview.core import dtypes
 from blinkview.core.dtypes import SEQ_NONE
+from blinkview.core.playback_clock import PlaybackMode
 from blinkview.core.types.formatting import FormattingConfig
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.formatting import nb_segment_estimate_out_size, nb_segment_format
@@ -48,7 +49,11 @@ class LogViewerWidget(QWidget):
     # and after an anchor sequence, mirroring LogTableStore's live/history split (see
     # qt-log-table-viewer skill Sec 1/14) but producing pre-formatted text lines instead of
     # columnar rows, since SearchableLogArea is a QPlainTextEdit rather than a direct-paint grid.
-    LIVE_MAX_BLOCKS = 200
+    #
+    # The live/follow row budget (self.max_rows) isn't a fixed constant here - it's derived from
+    # the text area's actual visible row count (see _update_viewport_row_budget), since most of
+    # the time only ~40-50 rows fit on screen and a fixed larger guess just means needlessly
+    # filtering/formatting/rendering rows nobody can see.
     HISTORY_BEFORE = 500
     HISTORY_AFTER = 500
 
@@ -116,9 +121,12 @@ QToolButton[filterEnabled="true"] {
         self.prev_apply = 0  # Timestamp of the last apply_updates call for throttling
         self.prev_history_poll = 0  # Timestamp of the last history-mode tail poll, same throttle window
 
-        self.max_rows = self.LIVE_MAX_BLOCKS  # Per-tick fetch cap + live tail size
+        # Per-tick fetch cap + live tail size. Bootstrap value only - the text area doesn't exist
+        # yet to measure real geometry from, so this is immediately superseded by
+        # _update_viewport_row_budget() later in __init__ and on every resize after that.
+        self.max_rows = 50
 
-        # Live/history mode state (see class docstring comment above LIVE_MAX_BLOCKS).
+        # Live/history mode state (see class docstring comment above).
         self.view_mode = LogViewMode.LIVE
         self.history_anchor_seq = None
         self.history_oldest_seq = None
@@ -126,11 +134,27 @@ QToolButton[filterEnabled="true"] {
         self.history_reached_start = False
         self._programmatic_scroll = False
 
+        # Playback-clock following state. history_anchor_ts_ns mirrors history_anchor_seq but
+        # for a timestamp-anchored window (mutually exclusive with it) - set when this tab's
+        # current history window was anchored on the global registry.playback_clock's virtual
+        # time rather than a manually-scrolled/paused sequence id. follow_playback controls
+        # whether apply_updates() keeps re-anchoring to the clock every tick; a manual scroll
+        # within a playback-anchored window clears it (see _on_scroll_value_changed).
+        # _playback_anchored just tracks "is the window on screen right now clock-anchored",
+        # for the REPLAY->LIVE exit check in apply_updates().
+        self.history_anchor_ts_ns = None
+        self.follow_playback = True
+        self._playback_anchored = False
+        # Last clock.current_ts_ns this tab actually re-fetched under while following - lets
+        # apply_updates() skip a redundant kernel scan every ~100ms when REPLAY is paused and
+        # sitting still (see the follow branch below).
+        self._last_followed_ts_ns = None
+
         # Sequence id for each currently-retained live-mode block, in the same order/length as
-        # the text area's blocks (both bounded to LIVE_MAX_BLOCKS) - lets history mode anchor on
-        # the exact row the user was looking at without the text widget itself tracking per-line
+        # the text area's blocks (both bounded to max_rows) - lets history mode anchor on the
+        # exact row the user was looking at without the text widget itself tracking per-line
         # metadata.
-        self._live_seqs = deque(maxlen=self.LIVE_MAX_BLOCKS)
+        self._live_seqs = deque(maxlen=self.max_rows)
 
         # Main layout
         self.layout = QVBoxLayout(self)
@@ -373,6 +397,11 @@ QToolButton[filterEnabled="true"] {
         idx = self.level_combo.findData(LogLevel.from_string(self.log_level))
         if idx != -1:
             self.level_combo.setCurrentIndex(idx)
+
+        # Best-effort initial sizing in case this tab is constructed with real geometry already
+        # (e.g. a saved layout); usually a no-op here since the widget isn't shown yet, and
+        # resizeEvent corrects it once real geometry is settled.
+        self._update_viewport_row_budget()
 
         self.gui_context.add_updatable(self)
 
@@ -644,13 +673,73 @@ QToolButton[filterEnabled="true"] {
 
         return mod_count
 
+    def _clock(self):
+        """Read-only access to the global registry.playback_clock. Only PlaybackControlWidget
+        ever calls clock.tick() (it's constructed before any tab, so it always ticks first in
+        the same GUIContext heartbeat) - this tab must only read mode/current_ts_ns/is_playing,
+        never advance it itself."""
+        registry = self.gui_context.registry
+        return registry.playback_clock if registry is not None else None
+
     def apply_updates(self):
+        now_ns = self.gui_context.registry.now_ns
+        t_start = now_ns()
+
+        clock = self._clock()
+
+        # REPLAY -> LIVE exit (edge-triggered, one-shot): the clock just returned to live and
+        # this tab was following it - resume the ordinary live tail the same way unpausing does
+        # (_redraw_history is also the un-pause path). is_paused always wins: a manually-paused
+        # tab stays frozen through a clock mode change and only unfreezes on its own Resume
+        # click (see _toggle_pause).
+        if clock is not None and clock.mode is PlaybackMode.LIVE and self._playback_anchored and not self.is_paused:
+            self._playback_anchored = False
+            self._last_followed_ts_ns = None
+            # The clock itself just returned to LIVE - this is the one place a local
+            # scroll-override (_on_scroll_value_changed) gets cleared, so a fresh REPLAY session
+            # always starts this tab following again.
+            self.follow_playback = True
+            self._redraw_history()
+            return
+
+        # Follow (level-triggered, every tick): re-anchor to the clock's virtual time whenever
+        # it's playing back, throttled on the same cadence as the live tail fetch below. This is
+        # level- not edge-triggered so a tab opened after REPLAY already started still picks it
+        # up on its next tick, rather than only reacting to a LIVE->REPLAY transition it missed.
+        following = clock is not None and clock.mode is PlaybackMode.REPLAY and self.follow_playback and not self.is_paused
+        if following:
+            if t_start - self.prev_apply < 100_000_000:
+                return
+            self.prev_apply = t_start
+            # Skip the refetch once REPLAY is paused and the clock hasn't moved since the last
+            # follow - avoids a full kernel scan every ~100ms per open tab for no visual change.
+            # Always refetch while actually playing, even if current_ts_ns happens to be
+            # unchanged this particular tick.
+            if clock.is_playing or clock.current_ts_ns != self._last_followed_ts_ns:
+                # Split the viewport-sized max_rows budget in half for before/after - this
+                # re-fetches on every clock tick while playing, so a full HISTORY_BEFORE/
+                # HISTORY_AFTER-sized window would mean repeatedly filtering/formatting/
+                # re-rendering ~1000 rows for a view nobody's scrolling through yet. Upgraded to
+                # the full window the moment the user actually scrolls
+                # (see _on_scroll_value_changed).
+                follow_cap = self.max_rows // 2
+                self._reanchor_history(anchor_ts=clock.current_ts_ns, before_cap=follow_cap, after_cap=follow_cap)
+                # _reanchor_history no-ops (leaves view_mode untouched) when the fetch found
+                # nothing at this instant - only claim "clock-anchored" once it actually is.
+                self._playback_anchored = self.view_mode == LogViewMode.HISTORY
+                self._last_followed_ts_ns = clock.current_ts_ns
+            return
+
         # Pause (manual or clog-triggered) always routes through view_mode == "history" (see
         # _set_pause_ui/_enter_history_mode) - this is the single freeze gate. is_paused is kept
         # as a belt-and-suspenders fallback for the rare case a pause is requested with no live
         # data yet to build a browsable history window from (_toggle_pause's fallback branch).
         if self.is_paused or self.view_mode != LogViewMode.LIVE:
-            if self.view_mode == LogViewMode.HISTORY:
+            # A ts-anchored (playback-following) window must never fall into the seq-based tail
+            # poll below - history_newest_seq is always a real seq even under ts-anchoring, so
+            # polling it would silently convert a following tab into a seq-anchored one racing
+            # the pool's live edge (see _poll_history_tail).
+            if self.view_mode == LogViewMode.HISTORY and self.history_anchor_ts_ns is None:
                 self._poll_history_tail()
             return
 
@@ -659,10 +748,6 @@ QToolButton[filterEnabled="true"] {
         time_ns = time.time_ns
 
         t_start_total = time_ns()
-
-        # Existing throttling logic uses registry.now_ns, keeping it intact
-        now_ns = self.gui_context.registry.now_ns
-        t_start = now_ns()
 
         if t_start - self.prev_apply < 100_000_000:
             return
@@ -688,8 +773,8 @@ QToolButton[filterEnabled="true"] {
         string_batches = []
         # Sequence ids for each matched row, in the same per-segment chunking as string_batches,
         # so self._live_seqs can be kept aligned 1:1 with the text area's blocks (see class
-        # docstring above LIVE_MAX_BLOCKS) - lets history mode anchor on the exact row the user
-        # was looking at without SearchableLogArea needing to track any per-line metadata itself.
+        # docstring above) - lets history mode anchor on the exact row the user was looking at
+        # without SearchableLogArea needing to track any per-line metadata itself.
         seq_batches = []
         format_cfg = FormattingConfig(
             self.show_ts,
@@ -829,7 +914,7 @@ QToolButton[filterEnabled="true"] {
         refills from the tail as before. Every settings-change handler should call this instead
         of _redraw_history() directly, so adjusting a filter never silently un-pauses you."""
         if self.view_mode == LogViewMode.HISTORY:
-            self._reanchor_history(self.history_anchor_seq)
+            self._reanchor_history(anchor_seq=self.history_anchor_seq, anchor_ts=self.history_anchor_ts_ns)
         else:
             self._redraw_history()
 
@@ -856,11 +941,19 @@ QToolButton[filterEnabled="true"] {
 
             self.view_mode = LogViewMode.LIVE
             self.history_anchor_seq = None
+            self.history_anchor_ts_ns = None
             self.history_oldest_seq = None
             self.history_newest_seq = None
             self._live_seqs.clear()
-            self.text_area.set_max_block_count(self.LIVE_MAX_BLOCKS)
+            self.text_area.set_max_block_count(self.max_rows)
             self._set_pause_ui(False)
+            # This tab's window is no longer clock-anchored (whether or not it ever was) -
+            # follow_playback itself is deliberately left untouched here: a local scroll-override
+            # (_on_scroll_value_changed) should only be un-done by the clock's own next LIVE
+            # transition (apply_updates' REPLAY->LIVE exit branch), not by every path that lands
+            # back in live mode (e.g. scrolling to the pool's true edge while the clock is still
+            # REPLAY, or an unrelated manual pause/resume while the clock is LIVE).
+            self._playback_anchored = False
 
             # Reset trackers so apply_updates fetches everything again
             self.latest_seq_seen = self.latest_seq_manual
@@ -885,10 +978,11 @@ QToolButton[filterEnabled="true"] {
 
             self.view_mode = LogViewMode.LIVE
             self.history_anchor_seq = None
+            self.history_anchor_ts_ns = None
             self.history_oldest_seq = None
             self.history_newest_seq = None
             self._live_seqs.clear()
-            self.text_area.set_max_block_count(self.LIVE_MAX_BLOCKS)
+            self.text_area.set_max_block_count(self.max_rows)
         finally:
             self._programmatic_scroll = False
 
@@ -901,14 +995,28 @@ QToolButton[filterEnabled="true"] {
 
     # --- Live/history mode transitions -----------------------------------------------------
 
-    def _fetch_history_window(self, anchor_seq):
-        """Fetches a bounded window of formatted lines before/after anchor_seq, mirroring
+    def _fetch_history_window(self, anchor_seq=None, anchor_ts=None, before_cap=None, after_cap=None):
+        """Fetches a bounded window of formatted lines before/after an anchor point, mirroring
         LogTableStore._fetch_history (qt-log-table-viewer skill Sec 1/14) but producing
         already-formatted text instead of columnar rows, since SearchableLogArea is a
         QPlainTextEdit rather than a direct-paint grid.
 
+        The anchor is either a sequence id (anchor_seq - manual scroll/pause paging) or a
+        timestamp (anchor_ts - playback-clock following); mutually exclusive. segment_filter/
+        segment_filter_reversed (ops/segments.py) accept both bound types natively via binary
+        search over the segment's timestamps/sequences, so no seq<->ts conversion is needed -
+        only the bound kwargs differ below. end_ts is an inclusive upper bound like end_seq, but
+        start_ts is an inclusive lower bound (unlike start_seq, which is exclusive) - hence the
+        asymmetric `anchor_ts` vs `anchor_ts - 1` between the before/after scans.
+
+        before_cap/after_cap default to HISTORY_BEFORE/HISTORY_AFTER (manual browsing); the
+        playback-follow path in apply_updates() passes half of the viewport-sized max_rows
+        budget instead, since it re-fetches on every clock tick while playing.
+
         Returns (before_count, after_count, oldest_seq, newest_seq, reached_start, text).
         """
+        before_cap = self.HISTORY_BEFORE if before_cap is None else before_cap
+        after_cap = self.HISTORY_AFTER if after_cap is None else after_cap
         self._ensure_effective_mask()
 
         reg = self.gui_context.id_registry
@@ -937,18 +1045,22 @@ QToolButton[filterEnabled="true"] {
                 )
                 return handle.array[:bytes_written].tobytes().decode("utf-8", errors="replace")
 
-        # --- "Before" set: matches with seq <= anchor_seq - 1, scanning newest-to-oldest ---
+        has_seq_anchor = anchor_seq is not None and anchor_seq > dtypes.SEQ_START
+        has_ts_anchor = anchor_ts is not None
+
+        # --- "Before" set: matches strictly before the anchor, scanning newest-to-oldest ---
         before_count = 0
-        oldest_seq = anchor_seq
+        oldest_seq = anchor_seq if has_seq_anchor else None
         before_batches = []
 
-        if anchor_seq is not None and anchor_seq > dtypes.SEQ_START:
+        if has_seq_anchor or has_ts_anchor:
+            before_kwargs = {"end_seq": anchor_seq - 1} if has_seq_anchor else {"end_ts": anchor_ts - 1}
             with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
                 for segment in segments:
                     if segment.size == 0:
                         continue
 
-                    allowed = self.HISTORY_BEFORE - before_count
+                    allowed = before_cap - before_count
                     if allowed <= 0:
                         break
 
@@ -957,9 +1069,9 @@ QToolButton[filterEnabled="true"] {
                         effective_mask=self._effective_mask,
                         out_indices=indices.array,
                         max_matches=allowed,
-                        end_seq=anchor_seq - 1,
                         kv=kv,
                         text=text,
+                        **before_kwargs,
                     )
 
                     if match_count > 0:
@@ -973,24 +1085,30 @@ QToolButton[filterEnabled="true"] {
         # older. Only treat this as the true start when the fetch came back under quota; hitting
         # quota exactly always defers to the next backward page, which self-corrects (an empty
         # follow-up fetch then legitimately reports reached_start).
-        reached_start = before_count < self.HISTORY_BEFORE
+        reached_start = before_count < before_cap
 
         # Segments were scanned newest-to-oldest, so the collected batches need reversing to
         # read oldest-first, same technique apply_updates uses for its reversed live scan.
         before_batches.reverse()
 
-        # --- "After" set: matches with seq >= anchor_seq, scanning oldest-to-newest ---
+        # --- "After" set: matches at/after the anchor, scanning oldest-to-newest ---
         after_count = 0
-        newest_seq = anchor_seq
+        newest_seq = anchor_seq if has_seq_anchor else None
         after_batches = []
-        start_seq_lower_bound = SEQ_NONE if anchor_seq is None else anchor_seq - 1
+
+        if has_seq_anchor:
+            after_kwargs = {"start_seq": anchor_seq - 1}  # start_seq is an exclusive lower bound
+        elif has_ts_anchor:
+            after_kwargs = {"start_ts": anchor_ts}  # start_ts is an inclusive lower bound - no -1
+        else:
+            after_kwargs = {"start_seq": SEQ_NONE}
 
         with pool.get_snapshot() as segments, pool.acquire_indices_buffer() as indices:
             for segment in segments:
                 if segment.size == 0:
                     continue
 
-                allowed = self.HISTORY_AFTER - after_count
+                allowed = after_cap - after_count
                 if allowed <= 0:
                     break
 
@@ -999,9 +1117,9 @@ QToolButton[filterEnabled="true"] {
                     effective_mask=self._effective_mask,
                     out_indices=indices.array,
                     max_matches=allowed,
-                    start_seq=start_seq_lower_bound,
                     kv=kv,
                     text=text,
+                    **after_kwargs,
                 )
 
                 if match_count > 0:
@@ -1023,16 +1141,18 @@ QToolButton[filterEnabled="true"] {
         idx = max(0, min(self.text_area.first_visible_block(), len(self._live_seqs) - 1))
         self._reanchor_history(self._live_seqs[idx], auto=auto)
 
-    def _reanchor_history(self, anchor_seq, auto: bool = False):
-        """Rebuilds the history window around anchor_seq and repositions the view on it. Both
-        callers below change the scrollbar's value programmatically, which would otherwise
-        re-fire valueChanged and recurse straight back into _on_scroll_value_changed - the guard
-        flag suppresses that re-entrancy (qt-log-table-viewer skill Sec 8)."""
+    def _reanchor_history(self, anchor_seq=None, anchor_ts=None, auto: bool = False, before_cap=None, after_cap=None):
+        """Rebuilds the history window around anchor_seq or anchor_ts (mutually exclusive) and
+        repositions the view on it. Both callers below change the scrollbar's value
+        programmatically, which would otherwise re-fire valueChanged and recurse straight back
+        into _on_scroll_value_changed - the guard flag suppresses that re-entrancy
+        (qt-log-table-viewer skill Sec 8). before_cap/after_cap passthrough to
+        _fetch_history_window - see its docstring."""
         was_live = self.view_mode != LogViewMode.HISTORY
         self._programmatic_scroll = True
         try:
             before_count, after_count, oldest_seq, newest_seq, reached_start, text_result = self._fetch_history_window(
-                anchor_seq
+                anchor_seq=anchor_seq, anchor_ts=anchor_ts, before_cap=before_cap, after_cap=after_cap
             )
 
             if before_count == 0 and after_count == 0:
@@ -1040,13 +1160,18 @@ QToolButton[filterEnabled="true"] {
 
             self.view_mode = LogViewMode.HISTORY
             self.history_anchor_seq = anchor_seq
+            self.history_anchor_ts_ns = anchor_ts
             self.history_oldest_seq = oldest_seq
             self.history_newest_seq = newest_seq
             self.history_reached_start = reached_start
-            if was_live:
+            if was_live and anchor_ts is None:
                 # Pause and history mode are the same state (see _set_pause_ui) - only sync the
                 # button on the live->history transition edge, not on every page-through reanchor
-                # while already browsing history.
+                # while already browsing history. Skipped for a ts-anchored (playback-following)
+                # transition: is_paused must stay False there, or the very next apply_updates()
+                # tick's `not self.is_paused` follow-guard would immediately block further
+                # following - freezing the tab after just one reanchor until a manual Resume
+                # click, which defeats the point of following the clock at all.
                 self._set_pause_ui(True, auto=auto)
 
             self.highlighter.setDocument(None)
@@ -1062,12 +1187,14 @@ QToolButton[filterEnabled="true"] {
             # tell us we've caught up. Check eagerly here instead of only reacting to future
             # scrolls (qt-log-table-viewer skill Sec 9).
             #
-            # Only applies when paging forward within an already-open history window
-            # (was_live is False) - on the initial live->history transition (Pause click or
-            # scrolling away from the tail), the anchor is deliberately right at/near the tail,
-            # so this would otherwise immediately bounce straight back to live and undo the
-            # pause the user just asked for.
-            if not was_live:
+            # Only applies when paging forward within an already-open SEQ-anchored history
+            # window (was_live is False, anchor_ts is None) - on the initial live->history
+            # transition the anchor is deliberately right at/near the tail, so this would
+            # otherwise immediately bounce straight back to live and undo the pause the user
+            # just asked for. A ts-anchored (playback-following) window's LIVE/REPLAY
+            # transitions are solely driven by the global clock (see apply_updates), never by
+            # this heuristic, or it would spuriously snap back to live-tail mid-follow.
+            if not was_live and anchor_ts is None:
                 pool = self.gui_context.registry.central.log_pool
                 if newest_seq is not None and newest_seq >= pool.latest_sequence():
                     self._redraw_history()
@@ -1114,6 +1241,41 @@ QToolButton[filterEnabled="true"] {
                 self._enter_history_mode()
             return
 
+        if self._playback_anchored:
+            clock = self._clock()
+            if clock is not None and clock.is_scrubbing:
+                # A drag on the global transport scrubber re-anchors this tab's history window
+                # on every follow tick (see apply_updates), and that reanchor's own
+                # setPlainText/set_max_block_count calls can trigger a scrollbar valueChanged
+                # here that Qt defers past the `_programmatic_scroll` guard window closing
+                # (its geometry/range recompute isn't always fully synchronous). While a scrub
+                # is actively in progress, this can never be a genuine manual scroll of the log
+                # viewer's own text area, so ignore it instead of wrongly detaching/pausing.
+                return
+
+            # A manual scroll within a playback-following window locally overrides it for this
+            # tab only - the global clock and every other tab keep going. follow_playback resets
+            # to True either when the clock itself goes back to LIVE (apply_updates' REPLAY->LIVE
+            # exit branch) or when the user explicitly clicks Resume while the clock is still
+            # REPLAY (_toggle_pause) - not merely by scrolling back to the pool's current edge.
+            self.follow_playback = False
+            self._playback_anchored = False
+
+            # Mark this as a paused/frozen state (same as every other freeze path in this class -
+            # manual pause, clog protection, scrolling away from LIVE) so the Pause button
+            # actually shows "Resume" instead of silently leaving this tab detached from both
+            # live-tail and playback-follow with no visible way back in.
+            self._set_pause_ui(True)
+
+            # The follow window is deliberately small (half of max_rows each side) to keep
+            # scrubbing cheap - upgrade to the full HISTORY_BEFORE/HISTORY_AFTER browsable window
+            # now that the user is actually looking around in it, then let a subsequent scroll
+            # drive the ordinary seq-based paging below (this call's `value`/scrollbar range are
+            # about to change under this rebuild, so don't also evaluate the top/bottom checks
+            # below against them this same invocation).
+            self._reanchor_history(anchor_ts=self.history_anchor_ts_ns)
+            return
+
         if value <= scrollbar.minimum() + 1:
             if not self.history_reached_start and self.history_oldest_seq is not None:
                 self._reanchor_history(self.history_oldest_seq)
@@ -1150,7 +1312,15 @@ QToolButton[filterEnabled="true"] {
         freezing on a browsable window, and scrolling away from the tail already does that.
         Fires from the user clicking the Pause button (checked=Qt's new state)."""
         if checked:
-            if self.view_mode == LogViewMode.LIVE:
+            if self._playback_anchored:
+                # Already showing a clock-anchored window - _enter_history_mode() would anchor
+                # off _live_seqs, which is never populated while following (the LIVE fetch path
+                # that fills it doesn't run in that branch of apply_updates). The window already
+                # shows the right content; just freeze it in place, same as a local
+                # scroll-override (_on_scroll_value_changed).
+                self.follow_playback = False
+                self._set_pause_ui(True)
+            elif self.view_mode == LogViewMode.LIVE:
                 self._enter_history_mode(auto=False)
                 if self.view_mode != LogViewMode.HISTORY:
                     # No live data yet to build a window from - still honor the pause request.
@@ -1158,7 +1328,16 @@ QToolButton[filterEnabled="true"] {
             # else: already in history (e.g. from a prior scroll-away) - the button just
             # catches up to that; _set_pause_ui was already applied on that transition.
         else:
-            self._redraw_history()
+            clock = self._clock()
+            if clock is not None and clock.mode is PlaybackMode.REPLAY:
+                # The clock is still playing back - resuming here means rejoining it, not
+                # jumping to the pool's live tail. Just clear the freeze; the next
+                # apply_updates() tick's follow branch re-anchors to wherever the clock has
+                # moved to since, which may be far from where this tab was paused.
+                self._set_pause_ui(False)
+                self.follow_playback = True
+            else:
+                self._redraw_history()
 
     def _set_pause_ui(self, paused: bool, auto: bool = False):
         """Syncs self.is_paused/self.auto_paused and the Pause button's text/checked/style to
@@ -1197,8 +1376,46 @@ QToolButton[filterEnabled="true"] {
         chase."""
         super().resizeEvent(event)
 
+        self._update_viewport_row_budget()
+
         if self.view_mode == LogViewMode.LIVE:
             self.text_area.scroll_to_end()
+
+    def showEvent(self, event):
+        """The widget's real geometry (splitter allocation, tab visibility) is often not final
+        until it's actually shown - resizeEvent can fire during construction/initial layout with
+        a transient, too-small size that never gets corrected afterward (e.g. a tab that starts
+        as the active one and simply never resizes again once created). showEvent fires once
+        Qt's laid it out for real, so recompute the row budget here too rather than trusting
+        __init__'s best-effort bootstrap pass alone."""
+        super().showEvent(event)
+
+        self._update_viewport_row_budget()
+
+    def _update_viewport_row_budget(self):
+        """Sizes max_rows (live-tail fetch cap/size; halved for the playback-follow window's
+        before/after caps, see apply_updates) to the text area's actual visible row count
+        (typically ~40-50 lines) rather than a fixed guess, so live-tail and playback-follow
+        fetches don't repeatedly filter/format/render several times more rows than the screen
+        can even show. HISTORY_BEFORE/HISTORY_AFTER (manual browsing) deliberately stay fixed
+        and generous - that window is meant to hold real paging headroom beyond the viewport,
+        not just fill it.
+
+        Called on every resize; also called once from __init__, though the widget's real
+        geometry usually isn't settled until it's actually shown, so the __init__ bootstrap
+        value remains in effect as a safe fallback until the first real resizeEvent corrects it.
+        """
+        visible_rows = self.text_area.visible_row_count()
+        if visible_rows <= 0:
+            return  # Not yet laid out/shown - keep the bootstrap fallback for now.
+
+        # A safety margin above the bare visible count avoids refetching on every trivial
+        # resize/scroll-position jitter and covers a partially-visible row at each edge.
+        self.max_rows = max(20, int(visible_rows * 1.5))
+        self.text_area.set_max_block_count(self.max_rows)
+
+        if self._live_seqs.maxlen != self.max_rows:
+            self._live_seqs = deque(self._live_seqs, maxlen=self.max_rows)
 
     def closeEvent(self, event):
         """Clean up by unregistering from the GUI context."""

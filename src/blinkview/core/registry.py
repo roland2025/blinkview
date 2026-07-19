@@ -41,6 +41,7 @@ from blinkview.utils.time_utils import TimeUtils
 if TYPE_CHECKING:
     from .central_storage import CentralStorage
     from .pipeline_manager import PipelineManager
+    from .playback_clock import PlaybackClock
 
 
 class Registry:
@@ -177,6 +178,7 @@ class Registry:
 
         self.central: "CentralStorage" = None
         self.reorder = None
+        self.playback_clock: Optional["PlaybackClock"] = None
 
         self.module_value_tracker: LatestModuleValueTracker = None
 
@@ -356,6 +358,10 @@ class Registry:
                     self.config.subscribe("/central", self.central)
 
                     self.central.reference_id = "central"
+
+                    from blinkview.core.playback_clock import PlaybackClock
+
+                    self.playback_clock = PlaybackClock(self.central.log_pool)
             except Exception as e:
                 # print(f"[Registry] Error configuring central storage: {e}")
                 self.logger.exception("Error configuring central storage", e)

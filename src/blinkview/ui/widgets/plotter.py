@@ -11,14 +11,16 @@ from typing import TYPE_CHECKING, List, Optional, Union
 import numpy as np
 
 from blinkview.core import dtypes
-from blinkview.core.buffers import ModuleBuffer
+from blinkview.core.buffers import ModuleBuffer, ReplayWindowBuffer
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.numpy_log import (
     allocate_discovery_workspace,
     allocate_telemetry_workspace,
     fetch_telemetry_arrays,
+    fetch_telemetry_window,
     get_telemetry_anchor,
 )
+from blinkview.core.playback_clock import PlaybackMode
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.telemetry import (
     PLOT_INTERPOLATION_MODE_DISCRETE,
@@ -79,6 +81,19 @@ class SeriesContainer:
 
 
 class TelemetryPlotter(QWidget):
+    # Per-side sample cap for a REPLAY-follow fetch (ops/telemetry.py's window kernels via
+    # fetch_telemetry_window) - independent of max_points (which bounds the LIVE ring).
+    # Rendering is already downsample-bounded regardless of raw sample count (see
+    # nb_slice_and_downsample), so this exists purely to bound log_pool fetch cost for a
+    # high-sample-rate module over a wide view_duration, not to bound render cost.
+    REPLAY_FETCH_CAP = 5000
+
+    # Fixed 10Hz fetch/redraw cadence while actively following playback - deliberately
+    # independent of the user's configured update-rate combo (_update_interval_ns, which could
+    # be set much slower for steady-state LIVE viewing), since scrubbing needs to feel responsive
+    # regardless of that setting.
+    REPLAY_FOLLOW_UPDATE_INTERVAL_NS = 100_000_000
+
     def __init__(self, gui_context, state=None, parent=None):
         super().__init__(parent)
 
@@ -116,6 +131,27 @@ class TelemetryPlotter(QWidget):
         # Buffers
         self.modules: List[ModuleIdentity] = []
         self.buffers: dict[ModuleIdentity, ModuleBuffer] = {}
+
+        # Playback-clock following state (mirrors log_viewer.py's follow_playback/_clock
+        # pattern). replay_buffers holds one ReplayWindowBuffer per module, populated only
+        # while registry.playback_clock is in REPLAY - kept entirely separate from `buffers`
+        # (the live-tailing ring) so scrubbing the past can never corrupt the live ring's
+        # forward watermark. follow_playback controls whether apply_updates() keeps re-centering
+        # the replay fetch on the clock every tick; a manual pan away from the followed window
+        # clears it (see _on_region_changed/_on_main_plot_range_changed).
+        self.follow_playback = True
+        self.replay_buffers: dict[ModuleIdentity, ReplayWindowBuffer] = {}
+        self._last_followed_ts_ns = None
+        self._replay_prev_fetch_ns = 0
+
+        # Vertical line(s) marking registry.playback_clock's current_ts_ns while in REPLAY -
+        # one per main plot (split mode has one per channel; shared mode has exactly one) plus
+        # the overview strip. Rebuilt in set_split_mode alongside everything else graph_view.
+        # clear()s; repositioned every apply_updates tick regardless of the playhead_active
+        # stationary-skip gate below, since moving a single pg.InfiniteLine is cheap enough not
+        # to need that optimization.
+        self._playhead_lines: List["pg.InfiniteLine"] = []
+        self._overview_playhead_line: Optional["pg.InfiniteLine"] = None
 
         # New Single Source of Truth for Series
         self.series_list: List[SeriesContainer] = []
@@ -175,11 +211,15 @@ class TelemetryPlotter(QWidget):
 
         self.toolbar.addSeparator()
 
-        # Add an Auto-Scroll toggle to the toolbar
+        # Add an Auto-Scroll toggle to the toolbar. Doubles as the REPLAY follow-playback
+        # control while the clock is in REPLAY (see _on_autoscroll_toggled/_sync_autoscroll_button)
+        # - is_auto_scroll is a LIVE-only concept, so without this the button/label would sit
+        # frozen on "Auto-Scroll: ON" after a manual pan silently detached follow_playback during
+        # a REPLAY session, and there'd be no toolbar way to resume following.
         self.autoscroll_action = self.toolbar.addAction("Auto-Scroll: ON")
         self.autoscroll_action.setCheckable(True)
         self.autoscroll_action.setChecked(True)
-        self.autoscroll_action.triggered.connect(self.set_autoscroll)
+        self.autoscroll_action.triggered.connect(self._on_autoscroll_toggled)
 
         # self.toolbar.addWidget(QLabel("Window:"))
         self.duration_combo = QComboBox()
@@ -400,17 +440,90 @@ class TelemetryPlotter(QWidget):
     def total_series_count(self) -> int:
         return len(self.series_list)
 
+    def _clock(self):
+        """Read-only access to the global registry.playback_clock. Only PlaybackControlWidget
+        ever calls clock.tick() (it's constructed before any tab, so it always ticks first in
+        the same GUIContext heartbeat) - this widget must only read mode/current_ts_ns/
+        is_playing, never advance it itself. Mirrors LogViewerWidget._clock() exactly."""
+        registry = self.gui_context.registry
+        return registry.playback_clock if registry is not None else None
+
+    def _active_buffer(self, module: ModuleIdentity):
+        """Whichever buffer the render/downsample path should read for this module: the
+        live-tailing ModuleBuffer ring normally, or this module's ReplayWindowBuffer while the
+        global playback clock is in REPLAY. A pure function of clock.mode each call - unlike
+        LogViewerWidget's `_playback_anchored` bookkeeping, pyqtgraph's .setData() has no
+        equivalent of a text-widget rebuild to guard against re-doing every tick, so there's
+        nothing to cache here."""
+        clock = self._clock()
+        if clock is not None and clock.mode is PlaybackMode.REPLAY:
+            return self.replay_buffers.get(module)
+        return self.buffers.get(module)
+
+    def _make_playhead_line(self) -> "pg.InfiniteLine":
+        """A vertical marker for registry.playback_clock.current_ts_ns, added to a plot at
+        construction time (set_split_mode) and repositioned every tick (_update_playhead_lines).
+        Starts hidden - shown only while the clock is actually in REPLAY."""
+        line = self._pg.InfiniteLine(angle=90, movable=False, pen=self._pg.mkPen((0, 220, 220), width=1))
+        line.setZValue(50)
+        line.hide()
+        return line
+
+    def _update_playhead_lines(self):
+        """Repositions (and shows/hides) every playhead line to match the clock's current
+        virtual time. Deliberately unconditional on playhead_active/force in apply_updates - a
+        single InfiniteLine.setPos() per plot is cheap enough not to need that stationary-skip
+        optimization, and the line must still track a paused, manually-panned REPLAY session
+        (following=False) rather than only while this widget is actively follow-fetching."""
+        clock = self._clock()
+        in_replay = clock is not None and clock.mode is PlaybackMode.REPLAY
+
+        lines = self._playhead_lines
+        if self._overview_playhead_line is not None:
+            lines = (*lines, self._overview_playhead_line)
+
+        if in_replay:
+            playhead_x = clock.current_ts_ns / 1_000_000_000.0
+            for line in lines:
+                line.setPos(playhead_x)
+                if not line.isVisible():
+                    line.show()
+        else:
+            for line in lines:
+                if line.isVisible():
+                    line.hide()
+
     def apply_updates(self, force: bool = False):
         registry = self.gui_context.registry
         now_ns_func = registry.now_ns
         now_ns = now_ns_func()
 
+        clock = self._clock()
+        if clock is not None and clock.mode is PlaybackMode.LIVE:
+            # Always ready to follow the next REPLAY session - the only place follow_playback
+            # resets to True, matching log_viewer.py's REPLAY->LIVE exit branch (a local pan
+            # detach during one REPLAY session must not carry over and silently skip the next).
+            self.follow_playback = True
+        following = clock is not None and clock.mode is PlaybackMode.REPLAY and self.follow_playback
+
+        # Peeked before the throttle gate itself (cheap - a couple of attribute reads on the
+        # clock) so the gate can choose its own cadence: the fast 10Hz follow interval only
+        # while there's actually something moving to track (playing, or the playhead moved
+        # since the last tick that got past this gate), the same slower steady-state cadence as
+        # LIVE viewing otherwise. Without this, a REPLAY session paused on a single frame would
+        # poll - and re-run this whole method's body, including the per-module LIVE-ring-
+        # freshness loop below - at 10Hz forever for nothing to show, which is measurable idle
+        # CPU for a view that's supposed to be sitting still.
+        current_ts_ns = clock.current_ts_ns if clock is not None else 0
+        playhead_active = following and (clock.is_playing or current_ts_ns != self._last_followed_ts_ns)
+
         # --- THROTTLE GATE ---
         # If we are significantly ahead of our target interval, bail early.
         # The 10ms deadzone ensures we don't miss a cycle due to tiny clock jitters.
         deadzone_ns = 10_000_000
+        gate_interval_ns = self.REPLAY_FOLLOW_UPDATE_INTERVAL_NS if playhead_active else self._update_interval_ns
         # BYPASS: Ignore the timer if a manual update was forced
-        if not force and (now_ns - self._last_update_ns) < (self._update_interval_ns - deadzone_ns):
+        if not force and (now_ns - self._last_update_ns) < (gate_interval_ns - deadzone_ns):
             return
 
         self._last_update_ns = now_ns
@@ -474,6 +587,54 @@ class TelemetryPlotter(QWidget):
                 if buf.update(batch):
                     updated = True
 
+        # === REPLAY-FOLLOW FETCH ===
+        # Runs independently of the LIVE loop above (which keeps running regardless of clock
+        # mode - it's the only path that discovers a never-before-seen module's num_channels,
+        # and keeps the live ring warm for a quick return to LIVE). Populates replay_buffers
+        # (never `buffers`, so scrubbing the past can never corrupt the live ring's forward
+        # watermark) with a window centered on the clock's current virtual time. clock/following/
+        # current_ts_ns/playhead_active were already computed above (needed there for the
+        # throttle gate itself) - just latch the watermark used for next tick's comparison here.
+        if following:
+            self._last_followed_ts_ns = current_ts_ns
+
+        self._update_playhead_lines()
+        self._sync_autoscroll_button()
+
+        if playhead_active and (now_ns - self._replay_prev_fetch_ns) >= self.REPLAY_FOLLOW_UPDATE_INTERVAL_NS:
+            self._replay_prev_fetch_ns = now_ns
+            half_span_ns = max(1, int(self.view_duration * 1_000_000_000 / 2))
+
+            for module in self.modules:
+                live_buf = self.buffers.get(module)
+                if live_buf is None:
+                    continue  # not yet discovered on the live edge - nothing to fetch/plot
+                if len(self.series_list) > 0 and not any(s.visible for s in self.series_list if s.module == module):
+                    continue
+
+                replay_buf = self.replay_buffers.get(module)
+                if replay_buf is None:
+                    replay_buf = ReplayWindowBuffer(
+                        capacity=self.REPLAY_FETCH_CAP * 2, num_channels=live_buf.num_channels
+                    )
+                    self.replay_buffers[module] = replay_buf
+
+                with fetch_telemetry_window(
+                    array_pool,
+                    log_pool,
+                    module.id,
+                    num_channels=live_buf.num_channels,
+                    temp_floats=replay_buf.temp_floats,
+                    anchor_ts_ns=current_ts_ns,
+                    before_span_ns=half_span_ns,
+                    after_span_ns=half_span_ns,
+                    before_cap=self.REPLAY_FETCH_CAP,
+                    after_cap=self.REPLAY_FETCH_CAP,
+                ) as batch:
+                    if replay_buf.update(batch):
+                        updated = True
+                    replay_buf.last_fetch_ns = now_ns
+
         # 1. Handle Auto-Scroll (Moves the camera)
 
         # 2. Main Plot Update (Viewport clipped, high frequency)
@@ -481,7 +642,17 @@ class TelemetryPlotter(QWidget):
 
         graph_view = self.graph_view
         try:
-            if self.is_auto_scroll:
+            if following and (force or playhead_active):
+                # Centered on the playhead (per product decision - shows a bit of already-
+                # buffered "future" rather than trailing behind it like LIVE auto-scroll does).
+                graph_view.setUpdatesEnabled(False)
+                center_s = clock.current_ts_ns / 1_000_000_000.0
+                half_duration = self.view_duration / 2.0
+                self._apply_view_range(center_s - half_duration, center_s + half_duration, force=force)
+                updated = True
+            elif clock is not None and clock.mode is PlaybackMode.REPLAY:
+                pass  # Browsing a manually-panned REPLAY window - view range left alone (Phase 4)
+            elif self.is_auto_scroll:
                 graph_view.setUpdatesEnabled(False)
                 latency_offset = self.data_update_interval_ns
                 # latency_offset = 1_000_000_000
@@ -490,14 +661,17 @@ class TelemetryPlotter(QWidget):
                 updated = True
 
             time_since_data = now_ns - self._last_data_update_ns
-            if force or time_since_data >= self.data_update_interval_ns:
-                # if updated:
+            # While following playback, redraw only when the playhead actually moved this tick
+            # (playing, or scrubbed to a new position) - not on a fixed timer. A paused,
+            # stationary REPLAY scrub has nothing new to show, so unlike the LIVE/auto-scroll
+            # path below (which still redraws on a timer even absent a fresh fetch), skip the
+            # full _update_plots() pass entirely rather than repainting the same frame at 10Hz.
+            if following:
+                should_redraw = force or playhead_active
+            else:
+                should_redraw = force or time_since_data >= self.data_update_interval_ns
+            if should_redraw:
                 graph_view.setUpdatesEnabled(False)
-
-                # if self.is_auto_scroll:
-                #     latest_time = self._get_latest_timestamp()
-                #     if latest_time > 0:
-                #         self._apply_view_range(latest_time - self.view_duration, latest_time)
                 self._update_plots()
                 self._last_data_update_ns = now_ns
 
@@ -511,7 +685,9 @@ class TelemetryPlotter(QWidget):
                 main_is_slower = self._update_interval_ns >= self._overview_update_interval_ns
 
                 if force or is_ov_due or main_is_slower:
-                    has_new_data = any(buf.is_dirty_overview for buf in self.buffers.values())
+                    has_new_data = any(
+                        buf.is_dirty_overview for buf in (*self.buffers.values(), *self.replay_buffers.values())
+                    )
                     # Only draw if there's actually something new to show
                     if force or has_new_data or self.is_auto_scroll:
                         graph_view.setUpdatesEnabled(False)
@@ -520,12 +696,16 @@ class TelemetryPlotter(QWidget):
 
                     for buf in self.buffers.values():
                         buf.is_dirty_overview = False
+                    for buf in self.replay_buffers.values():
+                        buf.is_dirty_overview = False
         finally:
             if not graph_view.updatesEnabled():
                 graph_view.setUpdatesEnabled(True)
 
         # 4. Final Cleanup: Clear dirty flags only after both consumers had their turn
         for buf in self.buffers.values():
+            buf.is_dirty = False
+        for buf in self.replay_buffers.values():
             buf.is_dirty = False
 
     def get_state(self):
@@ -565,6 +745,11 @@ class TelemetryPlotter(QWidget):
         # Clear the layout to start fresh
         self.graph_view.clear()
 
+        # graph_view.clear() destroyed the previous lines along with everything else - drop our
+        # Python-side references too, rebuilt below alongside the plots/curves.
+        self._playhead_lines = []
+        self._overview_playhead_line = None
+
         # Track the vertical row index in the GraphicsLayout
         current_row = 0
         LEFT_AXIS_WIDTH = 65
@@ -592,6 +777,9 @@ class TelemetryPlotter(QWidget):
 
             # Connect signals for two-way syncing
             self.region.sigRegionChanged.connect(self._on_region_changed)
+
+            self._overview_playhead_line = self._make_playhead_line()
+            self.overview_plot.addItem(self._overview_playhead_line)
 
             current_row += 1
         else:
@@ -622,6 +810,10 @@ class TelemetryPlotter(QWidget):
             # Connect range changes to the overview slider if it exists
             shared_plot.sigRangeChangedManually.connect(self._on_main_plot_range_changed)
 
+            line = self._make_playhead_line()
+            shared_plot.addItem(line)
+            self._playhead_lines.append(line)
+
         # --- 3. Create Curves and Split Plots ---
         for i, s in enumerate(self.series_list):
             title_text = s.module.name_with_device() if has_name_collisions else s.name
@@ -648,6 +840,10 @@ class TelemetryPlotter(QWidget):
                 s.plot_item = p
 
                 p.setVisible(s.visible)
+
+                line = self._make_playhead_line()
+                p.addItem(line)
+                self._playhead_lines.append(line)
             else:
                 s.plot_item = shared_plot
 
@@ -678,6 +874,7 @@ class TelemetryPlotter(QWidget):
             s._last_t_min = -1.0
             s._last_t_max = -1.0
 
+        self._update_playhead_lines()
         self._update_axis_visibility()
 
         # Finalize UI
@@ -710,7 +907,7 @@ class TelemetryPlotter(QWidget):
         self.graph_view.blockSignals(True)
         try:
             for module in self.modules:
-                buf = self.buffers.get(module)
+                buf = self._active_buffer(module)
                 if not buf or buf.size == 0:
                     continue
 
@@ -780,8 +977,6 @@ class TelemetryPlotter(QWidget):
             return
 
         ov_bins = self._get_target_resolution(self.overview_plot)
-        buffers_get = self.buffers.get
-        max_points = self.max_points
 
         # Aggregator for the overview's Y-axis
         ov_min = float("inf")
@@ -789,13 +984,16 @@ class TelemetryPlotter(QWidget):
         has_data = False
 
         for module in self.modules:
-            buf = buffers_get(module)
+            buf = self._active_buffer(module)
             # We only skip the DRAW if not dirty, but we still need
             # the range if we're going to scale correctly.
             if not buf or buf.size == 0:
                 continue
 
-            data_start = 0 if buf.size < max_points else buf.head
+            # buf.bundle().data_start already encodes each buffer type's own wraparound rule
+            # correctly (ModuleBuffer's ring head vs. ReplayWindowBuffer's always-0) - reusing
+            # it here instead of recomputing inline avoids baking in a ring-specific assumption.
+            data_start = buf.bundle().data_start
 
             for s in series_list:
                 if s.module != module or not s.overview_curve or not s.visible:
@@ -918,6 +1116,15 @@ class TelemetryPlotter(QWidget):
             buf.ptr = 0
             buf.is_dirty = True  # Force a redraw of the empty state
 
+        # 3b. Also reset any REPLAY scrub windows - otherwise, while clock.mode is REPLAY,
+        # _active_buffer() would keep serving the untouched ReplayWindowBuffer and a Clear click
+        # would appear to do nothing.
+        for replay_buf in self.replay_buffers.values():
+            replay_buf.size = 0
+            replay_buf.is_dirty = True  # Force a redraw of the empty state
+            replay_buf.is_dirty_overview = True
+        self._last_followed_ts_ns = None  # force the next follow tick to re-fetch, not skip
+
         # 4. Clear visual curves
         for series in self.series_list:
             if series.curve:
@@ -994,14 +1201,52 @@ class TelemetryPlotter(QWidget):
             return
 
         self.is_auto_scroll = enabled
-        self.autoscroll_action.setChecked(enabled)
-        self.autoscroll_action.setText(f"Auto-Scroll: {'ON' if enabled else 'OFF'}")
+        self._sync_autoscroll_button()
 
         # Dynamically toggle labels based on mode
         self._update_axis_visibility()
 
         if enabled:
             self._update_plots()
+
+    def _on_autoscroll_toggled(self, checked: bool):
+        """Handles a click on the toolbar's Auto-Scroll/Follow button. While the clock is in
+        REPLAY, this button controls follow_playback instead of is_auto_scroll (see class-level
+        comment on autoscroll_action) - is_auto_scroll only means anything for LIVE mode's tail-
+        chasing."""
+        clock = self._clock()
+        if clock is not None and clock.mode is PlaybackMode.REPLAY:
+            self.follow_playback = checked
+            if checked:
+                # Force the very next apply_updates tick to re-fetch/re-center immediately
+                # rather than waiting for current_ts_ns to change - it may not have moved at
+                # all since the user detached, e.g. they panned and released without the clock
+                # advancing. Mirrors LogViewerWidget's Resume click.
+                self._last_followed_ts_ns = None
+            self._sync_autoscroll_button()
+        else:
+            self.set_autoscroll(checked)
+
+    def _sync_autoscroll_button(self):
+        """Keeps the toolbar button's checked state/label matching whichever state it's
+        actually controlling right now - is_auto_scroll while LIVE/no clock, follow_playback
+        while REPLAY. Called every apply_updates tick (cheap - two no-op-if-unchanged Qt calls)
+        so a manual pan that silently detaches follow_playback (_on_main_plot_range_changed/
+        _on_region_changed) can't leave the button showing 'Follow: ON' after the view has
+        actually stopped following; those two call sites also call this immediately for instant
+        feedback instead of waiting up to a tick."""
+        clock = self._clock()
+        if clock is not None and clock.mode is PlaybackMode.REPLAY:
+            checked = self.follow_playback
+            label = f"Follow: {'ON' if checked else 'OFF'}"
+        else:
+            checked = self.is_auto_scroll
+            label = f"Auto-Scroll: {'ON' if checked else 'OFF'}"
+
+        if self.autoscroll_action.isChecked() != checked:
+            self.autoscroll_action.setChecked(checked)
+        if self.autoscroll_action.text() != label:
+            self.autoscroll_action.setText(label)
 
     def _update_axis_visibility(self):
         """Shows labels only when paused (not auto-scrolling) to save CPU."""
@@ -1112,15 +1357,67 @@ class TelemetryPlotter(QWidget):
         # Re-triggering split mode will rebuild the GraphicsLayout without the overview row
         self.set_split_mode(self.is_split)
 
+    def _refetch_replay_window(self, t_min_s: float, t_max_s: float):
+        """Fetches a telemetry window covering [t_min_s, t_max_s] into each visible module's
+        ReplayWindowBuffer - used for the one-shot "browse window" fetch when the user manually
+        pans/zooms during REPLAY (see _on_region_changed/_on_main_plot_range_changed). Reuses
+        REPLAY_FETCH_CAP as a raw-sample safety bound; the span itself is exactly the requested
+        range rather than a separate fixed "browse span" constant, so a manual zoom-out just
+        fetches proportionally more without a hardcoded ceiling on how far the user can look."""
+        registry = self.gui_context.registry
+        log_pool = registry.central.log_pool
+        array_pool = registry.system_ctx.array_pool
+
+        anchor_ts_ns = int(round((t_min_s + t_max_s) / 2.0 * 1_000_000_000))
+        half_span_ns = max(1, int(round((t_max_s - t_min_s) / 2.0 * 1_000_000_000)))
+
+        for module in self.modules:
+            live_buf = self.buffers.get(module)
+            if live_buf is None:
+                continue
+            if len(self.series_list) > 0 and not any(s.visible for s in self.series_list if s.module == module):
+                continue
+
+            replay_buf = self.replay_buffers.get(module)
+            if replay_buf is None:
+                replay_buf = ReplayWindowBuffer(
+                    capacity=self.REPLAY_FETCH_CAP * 2, num_channels=live_buf.num_channels
+                )
+                self.replay_buffers[module] = replay_buf
+
+            with fetch_telemetry_window(
+                array_pool,
+                log_pool,
+                module.id,
+                num_channels=live_buf.num_channels,
+                temp_floats=replay_buf.temp_floats,
+                anchor_ts_ns=anchor_ts_ns,
+                before_span_ns=half_span_ns,
+                after_span_ns=half_span_ns,
+                before_cap=self.REPLAY_FETCH_CAP,
+                after_cap=self.REPLAY_FETCH_CAP,
+            ) as batch:
+                replay_buf.update(batch)
+
     def _on_region_changed(self):
         if self._is_system_updating or not self.region:
             return
-        self.set_autoscroll(False)
+
+        clock = self._clock()
+        if clock is not None and clock.mode is PlaybackMode.REPLAY:
+            self.follow_playback = False
+            self._sync_autoscroll_button()
+        else:
+            self.set_autoscroll(False)
+
         minX, maxX = self.region.getRegion()
 
         # FIX: Same here, only apply to the primary linked plot
         if self.series_list and self.series_list[0].plot_item:
             self.series_list[0].plot_item.setXRange(minX, maxX, padding=0)
+
+        if clock is not None and clock.mode is PlaybackMode.REPLAY:
+            self._refetch_replay_window(minX, maxX)
 
         self._update_plots()  # Fills the new view range
 
@@ -1136,8 +1433,13 @@ class TelemetryPlotter(QWidget):
             if math.isnan(rlow) or math.isnan(rhigh):
                 return
 
-            # 2. Stop auto-scroll because the user is manually interacting
-            if self.is_auto_scroll:
+            # 2. Stop following because the user is manually interacting
+            clock = self._clock()
+            in_replay = clock is not None and clock.mode is PlaybackMode.REPLAY
+            if in_replay:
+                self.follow_playback = False
+                self._sync_autoscroll_button()
+            elif self.is_auto_scroll:
                 self.set_autoscroll(False)
 
             # 3. Sync the Overview Slider (ONLY if it exists)
@@ -1147,6 +1449,11 @@ class TelemetryPlotter(QWidget):
                     self.region.setRegion([rlow, rhigh])
                 finally:
                     self._is_system_updating = False
+
+            # 3b. Fetch whatever the user just navigated to (REPLAY only - LIVE mode's ring
+            # already holds everything fetched so far, no re-fetch needed for a plain pan).
+            if in_replay:
+                self._refetch_replay_window(rlow, rhigh)
 
             # 4. ALWAYS update the plots to fill the new X-range with data
             self._update_plots()
@@ -1228,6 +1535,24 @@ class TelemetryPlotter(QWidget):
                     warmup_max_points,
                 ) as batch:
                     module_buffer.update(batch)
+
+                # Trigger: playback-scrub window extraction (nb_extract_telemetry_segment_window_
+                # backward/forward, via fetch_telemetry_window) - separate code path from the
+                # forward-watermark fetch above, exercised here so REPLAY-mode scrubbing doesn't
+                # hit a live JIT compile on the GUI thread the first time a user scrubs.
+                with fetch_telemetry_window(
+                    helper.array_pool,
+                    helper.log_pool,
+                    helper.floats_mod.id,
+                    num_channels=warmup_channels,
+                    temp_floats=temp_floats,
+                    anchor_ts_ns=helper.time_ns(),
+                    before_span_ns=60_000_000_000,
+                    after_span_ns=60_000_000_000,
+                    before_cap=64,
+                    after_cap=64,
+                ):
+                    pass
 
             buf_bundle = module_buffer.bundle()
 

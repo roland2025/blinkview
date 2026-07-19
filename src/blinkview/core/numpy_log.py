@@ -16,11 +16,14 @@ from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.log_batch import TelemetryBatch
+from blinkview.core.types.telemetry import TsWindowBundle
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.segments import nb_copy_batch_to_segment
 from blinkview.ops.telemetry import (
     nb_count_module_occurrences_backwards,
     nb_extract_telemetry_segment_to_end,
+    nb_extract_telemetry_segment_window_backward,
+    nb_extract_telemetry_segment_window_forward,
     nb_peek_segment_channels_backwards,
 )
 from blinkview.utils.log_level import LogLevel
@@ -149,6 +152,17 @@ class CircularLogPool:
             active_cap = self.active_segment.capacity if self.active_segment else self.segment_capacity
             max_total = self.max_pieces * active_cap
             return current_total, max_total, int(self.sequence)
+
+    def get_time_bounds(self) -> tuple[int, int]:
+        """Returns (earliest_ts_ns, latest_ts_ns) of currently retained rows, or (0, 0) if empty."""
+        with self._lock:
+            if not self.segments:
+                return 0, 0
+            oldest = self.segments[0]
+            newest = self.active_segment
+            earliest = oldest.bundle.timestamps[0] if oldest.size else 0
+            latest = newest.bundle.timestamps[newest.size - 1] if newest and newest.size else 0
+            return int(earliest), int(latest)
 
     def release_all(self):
         with self._lock:
@@ -377,6 +391,114 @@ def fetch_telemetry_arrays(
         )
 
         # When the caller's 'with' block ends, ExitStack finishes and releases all handles.
+
+
+@contextmanager
+def fetch_telemetry_window(
+    array_pool: "NumpyArrayPool",
+    log_pool: "CircularLogPool",
+    target_module_int: int,
+    num_channels: int,
+    temp_floats: np.ndarray,
+    anchor_ts_ns: int,
+    before_span_ns: int,
+    after_span_ns: int,
+    before_cap: int,
+    after_cap: int,
+):
+    """Playback-scrub counterpart to fetch_telemetry_arrays: extracts a bounded time window of
+    telemetry samples for one module around anchor_ts_ns, independent of any forward-fetch
+    sequence watermark. Used to populate a ReplayWindowBuffer (core/buffers.py) while following
+    registry.playback_clock, rather than a ModuleBuffer ring's forward-only accumulation.
+
+    before_span_ns/after_span_ns bound the ts range considered on each side of the anchor;
+    before_cap/after_cap additionally cap the sample count per side - kept small while actively
+    following (see TelemetryPlotter.apply_updates), upgraded to a larger cap once the user pans
+    away from following, mirroring log_viewer.py's FOLLOW-window-vs-HISTORY-window split.
+
+    The returned TelemetryBatch's `watermark` field is meaningless here (no forward-fetch
+    watermark concept applies to an arbitrary-time-anchored window) and is always SEQ_NONE -
+    ReplayWindowBuffer.update() does not read it, unlike ModuleBuffer.update()'s use of
+    fetch_telemetry_arrays' watermark.
+    """
+    with ExitStack() as stack:
+        before_segments = stack.enter_context(log_pool.get_reversed_snapshot())
+        after_segments = stack.enter_context(log_pool.get_snapshot())
+
+        max_points = before_cap + after_cap
+        times_handle = stack.enter_context(array_pool.get(max_points, dtype=dtypes.PLOT_TS_TYPE))
+        times_int64_handle = stack.enter_context(array_pool.get(max_points, dtype=np.int64))
+        values_handle = stack.enter_context(array_pool.get(max_points * num_channels, dtype=dtypes.PLOT_VAL_TYPE))
+
+        out_times = times_handle.array[:max_points]
+        out_times_int64 = times_int64_handle.array[:max_points]
+        out_values = values_handle.array[: max_points * num_channels].reshape((max_points, num_channels))
+
+        # --- Before half: [anchor - before_span, anchor - 1], newest-to-oldest, writing
+        # backward into out_*[:before_cap] - end_ts excludes the anchor row itself so the after
+        # half (which includes it) doesn't double-extract it, mirroring log_viewer.py's
+        # anchor_ts - 1 / anchor_ts split between its before/after log-row scans.
+        before_write_idx = before_cap
+        before_window = TsWindowBundle(
+            start_ts=dtypes.TS_TYPE(anchor_ts_ns - before_span_ns),
+            end_ts=dtypes.TS_TYPE(anchor_ts_ns - 1),
+        )
+        for segment in before_segments:
+            if before_write_idx <= 0:
+                break
+            if segment.size == 0:
+                continue
+            before_write_idx = nb_extract_telemetry_segment_window_backward(
+                segment.bundle,
+                target_module_int,
+                before_window,
+                num_channels,
+                out_times[:before_cap],
+                out_times_int64[:before_cap],
+                out_values[:before_cap],
+                temp_floats,
+                before_write_idx,
+            )
+
+        # --- After half: [anchor, anchor + after_span], oldest-to-newest, writing forward into
+        # out_*[before_cap:before_cap+after_cap] ---
+        after_write_idx = 0
+        after_window = TsWindowBundle(
+            start_ts=dtypes.TS_TYPE(anchor_ts_ns),
+            end_ts=dtypes.TS_TYPE(anchor_ts_ns + after_span_ns),
+        )
+        after_out_times = out_times[before_cap:]
+        after_out_times_int64 = out_times_int64[before_cap:]
+        after_out_values = out_values[before_cap:]
+        for segment in after_segments:
+            if after_write_idx >= after_cap:
+                break
+            if segment.size == 0:
+                continue
+            after_write_idx = nb_extract_telemetry_segment_window_forward(
+                segment.bundle,
+                target_module_int,
+                after_window,
+                num_channels,
+                after_out_times[:after_cap],
+                after_out_times_int64[:after_cap],
+                after_out_values[:after_cap],
+                temp_floats,
+                after_write_idx,
+            )
+
+        # Both halves already land ascending (before scanned newest-to-oldest but written
+        # backward; after scanned oldest-to-newest and written forward) - straight concatenation
+        # needs no merge/sort step.
+        before_slice = slice(before_write_idx, before_cap)
+        after_slice = slice(before_cap, before_cap + after_write_idx)
+
+        yield TelemetryBatch(
+            times=np.concatenate([out_times[before_slice], out_times[after_slice]]),
+            times_int64=np.concatenate([out_times_int64[before_slice], out_times_int64[after_slice]]),
+            values=np.concatenate([out_values[before_slice], out_values[after_slice]]),
+            watermark=SEQ_NONE,
+        )
 
 
 def get_telemetry_anchor(

@@ -35,6 +35,7 @@ from qtpy.QtWidgets import (
 
 from blinkview.core import dtypes
 from blinkview.core.device_identity import ModuleIdentity
+from blinkview.core.playback_clock import PlaybackMode
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.message_box import MessageBox
@@ -1395,9 +1396,13 @@ class TelemetryWatch(QWidget):
         self.entries.append(SectionEntry(label="NEW SECTION"))
         self.save_config()
 
-    def apply_updates(self):
+    def _clock(self):
+        registry = self.gui_context.registry
+        return registry.playback_clock if registry is not None else None
+
+    def apply_updates(self, force: bool = False):
         now = perf_counter()
-        if now - self.prev_apply < 0.1:
+        if not force and now - self.prev_apply < 0.1:
             return
         self.prev_apply = now
 
@@ -1408,7 +1413,17 @@ class TelemetryWatch(QWidget):
         theme = self.gui_context.theme
         fade_duration = theme.fade_duration
 
-        with tracker.get_snapshot() as snap:
+        # While the global playback clock is scrubbing REPLAY, show the latest-per-module
+        # message as of the playhead instead of the tracker's "latest ever" snapshot. Like
+        # TelemetryTable, this widget has no manual browse/detach state of its own - it always
+        # follows the clock while in REPLAY.
+        clock = self._clock()
+        if clock is not None and clock.mode is PlaybackMode.REPLAY:
+            snapshot_ctx = tracker.build_snapshot_as_of(clock.current_ts_ns)
+        else:
+            snapshot_ctx = tracker.get_snapshot()
+
+        with snapshot_ctx as snap:
             sequences = memoryview(snap.bundle().sequence_ids)
             try:
                 for entry in self.entries:
@@ -1416,9 +1431,6 @@ class TelemetryWatch(QWidget):
                         continue
 
                     label = entry.value_label
-                    best_seq = entry.last_painted_seq
-                    new_msg = None
-                    row_updated = False
 
                     if len(entry.sub_seqs) != len(entry.modules):
                         entry.sub_seqs = [dtypes.SEQ_NONE] * len(entry.modules)
@@ -1430,11 +1442,14 @@ class TelemetryWatch(QWidget):
                             current_sub_seq = sequences[m.id]
                             sub_label = entry.sub_labels[idx]
 
-                            if current_sub_seq > entry.sub_seqs[idx]:
+                            # `!=` (not `>`) so a playback-clock scrub backward - which can
+                            # drop current_sub_seq below what was previously painted, including
+                            # back to 0 for "no message yet at this ts" - still repaints instead
+                            # of leaving a stale forward-in-time value on screen.
+                            if current_sub_seq != entry.sub_seqs[idx]:
                                 entry.sub_seqs[idx] = current_sub_seq
                                 mod_msg = snap.get_message(m.id)
-                                if mod_msg:
-                                    sub_label.setText(mod_msg)
+                                sub_label.setText(mod_msg if mod_msg else "---")
                                 entry.sub_change_times[idx] = now
 
                             was_sub_flashing = sub_label.is_flashing
@@ -1442,19 +1457,22 @@ class TelemetryWatch(QWidget):
                             if sub_label.is_flashing or was_sub_flashing != sub_label.is_flashing:
                                 sub_label.update()
 
-                    # 2. Main combined row calculation loop
+                    # 2. Main combined row calculation: recomputed fresh from scratch each tick
+                    # (rather than only ratcheting best_seq upward) so a clock scrub can move the
+                    # winning module - and its displayed value - backward as well as forward.
+                    best_seq = dtypes.SEQ_NONE
+                    winner_id = None
                     for m in entry.modules:
                         current_seq = sequences[m.id]
-
                         if current_seq > best_seq:
                             best_seq = current_seq
-                            new_msg = snap.get_message(m.id)
-                            row_updated = True
+                            winner_id = m.id
 
-                    if row_updated and new_msg is not None:
+                    if best_seq != entry.last_painted_seq:
+                        new_msg = snap.get_message(winner_id) if winner_id is not None else ""
                         entry.last_painted_seq = best_seq
                         entry.last_painted_msg = new_msg
-                        entry.value_label.setText(new_msg)
+                        entry.value_label.setText(new_msg if new_msg else "---")
                         entry.last_change_time = now
 
                     was_flashing = label.is_flashing

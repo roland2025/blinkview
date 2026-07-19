@@ -396,6 +396,80 @@ def test_filter_segment_forward_ascending_matches_from_start_seq():
     assert list(indices[:match_count]) == [2, 3, 4]
 
 
+def test_nb_segment_filter_reversed_end_ts_is_inclusive_upper_bound():
+    """end_ts caps matches to ts <= end_ts, mirroring end_seq - the ts-anchored counterpart of
+    a 'history before an anchor' scan (LogViewerWidget._fetch_history_window's anchor_ts path,
+    which passes end_ts=anchor_ts - 1 to exclude the anchor row itself)."""
+    bundle = make_bundle(
+        timestamps=[10, 20, 30, 40, 50],
+        rx_timestamps=[10, 20, 30, 40, 50],
+        devices=[0] * 5,
+        levels=[0] * 5,
+        modules=[0] * 5,
+        sequences=[1, 2, 3, 4, 5],
+        messages=["a", "b", "c", "d", "e"],
+    )
+
+    effective_mask = np.zeros(1, dtype=dtypes.LEVEL_TYPE)
+    indices = np.zeros(5, dtype=np.int64)
+
+    # end_ts=30 -> rows a, b, c (ts 10/20/30) all included - the boundary row itself matches.
+    match_count = nb_segment_filter_reversed(
+        bundle,
+        effective_mask=effective_mask,
+        out_indices=indices,
+        max_matches=5,
+        start_seq=dtypes.SEQ_NONE,
+        end_seq=dtypes.SEQ_NONE,
+        start_ts=dtypes.TS_UNSPECIFIED,
+        end_ts=30,
+        kv=EMPTY_KV_CONDITIONS,
+        kv_field_delim=CHAR_SPACE,
+        kv_kv_delim=CHAR_EQUALS,
+        text=EMPTY_TEXT_SEARCH,
+    )
+
+    assert match_count == 3
+    assert list(indices[:match_count]) == [0, 1, 2]
+
+
+def test_filter_segment_forward_start_ts_is_inclusive_lower_bound():
+    """start_ts matches ts >= start_ts - unlike start_seq (exclusive, matches seq > start_seq).
+    LogViewerWidget._fetch_history_window relies on this asymmetry: a ts-anchored 'history
+    after an anchor' scan passes start_ts=anchor_ts directly (no -1), while the seq-anchored
+    path passes start_seq=anchor_seq - 1 to include the anchor row."""
+    bundle = make_bundle(
+        timestamps=[10, 20, 30, 40, 50],
+        rx_timestamps=[10, 20, 30, 40, 50],
+        devices=[0] * 5,
+        levels=[0] * 5,
+        modules=[0] * 5,
+        sequences=[1, 2, 3, 4, 5],
+        messages=["a", "b", "c", "d", "e"],
+    )
+
+    effective_mask = np.zeros(1, dtype=dtypes.LEVEL_TYPE)
+    indices = np.zeros(5, dtype=np.int64)
+
+    # start_ts=30 -> rows c, d, e (ts 30/40/50) all included - the boundary row itself matches.
+    match_count = nb_filter_segment(
+        bundle,
+        effective_mask=effective_mask,
+        out_indices=indices,
+        max_matches=5,
+        start_seq=dtypes.SEQ_NONE,
+        start_ts=30,
+        end_ts=dtypes.TS_UNSPECIFIED,
+        kv=EMPTY_KV_CONDITIONS,
+        kv_field_delim=CHAR_SPACE,
+        kv_kv_delim=CHAR_EQUALS,
+        text=EMPTY_TEXT_SEARCH,
+    )
+
+    assert match_count == 3
+    assert list(indices[:match_count]) == [2, 3, 4]
+
+
 def test_nb_copy_batch_to_segment_copies_pids_and_tids():
     batch = make_bundle(
         timestamps=[1, 2, 3],

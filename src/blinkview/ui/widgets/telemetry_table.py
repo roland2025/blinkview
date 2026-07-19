@@ -40,6 +40,7 @@ from blinkview.core import dtypes
 from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
 from blinkview.core.module_snapshot import MAX_MSG_BYTES, LatestModuleValueTracker
 from blinkview.core.numba_config import app_njit
+from blinkview.core.playback_clock import PlaybackMode
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.in_development import set_as_in_development
@@ -65,13 +66,23 @@ def nb_initialize_new_modules(
     now: float,
     max_msg_bytes: int,
     newly_active_ids: np.ndarray,  # NEW: Output buffer for IDs
+    is_visible: np.ndarray,
 ) -> int:
     """
     Initializes modules and returns the count of newly initialized modules.
     Populates `newly_active_ids` with the activated mod_ids.
+
+    Skips modules that are already visible: those are handled by nb_update_visible_state
+    instead, which (unlike this function) also flags them for a Qt dataChanged emit. Without
+    this guard, a module whose painted_seqs got reset to 0 by a playback-clock scrub
+    backward past its first message, then scrubbed forward again, would get silently
+    repainted here with no accompanying signal - leaving the view showing a stale "---".
     """
     count = 0
     for mod_id in range(n_mods):
+        if is_visible[mod_id]:
+            continue
+
         if painted_seqs[mod_id] == 0 and sequences[mod_id] > 0:
             painted_seqs[mod_id] = sequences[mod_id]
             arrival_times[mod_id] = now
@@ -113,6 +124,12 @@ def nb_update_visible_state(
     """
     Evaluates visible rows and updates painted state in-place at C-speed.
     Returns a single boolean mask of rows that need a Qt signal emitted.
+
+    Uses `c_seq != p_seq` (not `c_seq > p_seq`) so that scrubbing the playback clock
+    *backward* - which can make a module's latest-as-of-ts sequence decrease, or drop back
+    to 0 for a module with no message yet at the scrubbed-to time - still repaints instead of
+    silently keeping a stale forward-in-time value. In LIVE mode current_seqs only ever grows,
+    so `!=` and `>` are equivalent there; this is a strict generalization, not a behavior change.
     """
     n_visible = len(visible_mod_ids)
     needs_update = np.zeros(n_visible, dtype=np.bool_)
@@ -120,14 +137,12 @@ def nb_update_visible_state(
     for i in range(n_visible):
         mod_id = visible_mod_ids[i]
         c_seq = current_seqs[mod_id]
-
-        if c_seq == 0:
-            continue
-
         p_seq = painted_seqs[mod_id]
 
-        # Sequence bump check
-        if c_seq > p_seq:
+        if c_seq == 0 and p_seq == 0:
+            continue
+
+        if c_seq != p_seq:
             needs_update[i] = True
 
             # --- MOVED FROM PYTHON: Direct state updates ---
@@ -135,31 +150,37 @@ def nb_update_visible_state(
             painted_seqs[mod_id] = c_seq
             painted_levels[mod_id] = current_levels[mod_id]
 
-            c_len = current_lengths[mod_id]
-            p_len = painted_lengths[mod_id]
-
-            msg_changed = False
-            if c_len != p_len:
-                msg_changed = True
-            else:
-                # Fast byte-by-byte comparison
-                offset = mod_id * max_msg_bytes
-                for b in range(c_len):
-                    idx = offset + b
-                    if current_buffers[idx] != painted_buffers[idx]:
-                        msg_changed = True
-                        break
-
-            # --- MOVED FROM PYTHON: Buffer state updates ---
-            if msg_changed:
+            if c_seq == 0:
+                # Scrubbed back to before this module's first message - clear the painted
+                # buffer so data() falls back to "---" instead of showing a future value.
                 change_times[mod_id] = now
-                painted_lengths[mod_id] = c_len
+                painted_lengths[mod_id] = 0
+            else:
+                c_len = current_lengths[mod_id]
+                p_len = painted_lengths[mod_id]
 
-                # In Numba, a simple for-loop over contiguous memory compiles
-                # down to the equivalent of a C memcpy, avoiding Python slice overhead.
-                offset = mod_id * max_msg_bytes
-                for b in range(c_len):
-                    painted_buffers[offset + b] = current_buffers[offset + b]
+                msg_changed = False
+                if c_len != p_len:
+                    msg_changed = True
+                else:
+                    # Fast byte-by-byte comparison
+                    offset = mod_id * max_msg_bytes
+                    for b in range(c_len):
+                        idx = offset + b
+                        if current_buffers[idx] != painted_buffers[idx]:
+                            msg_changed = True
+                            break
+
+                # --- MOVED FROM PYTHON: Buffer state updates ---
+                if msg_changed:
+                    change_times[mod_id] = now
+                    painted_lengths[mod_id] = c_len
+
+                    # In Numba, a simple for-loop over contiguous memory compiles
+                    # down to the equivalent of a C memcpy, avoiding Python slice overhead.
+                    offset = mod_id * max_msg_bytes
+                    for b in range(c_len):
+                        painted_buffers[offset + b] = current_buffers[offset + b]
 
         else:
             # Animation/Stale timeout checks
@@ -230,6 +251,10 @@ class TelemetryTableModel(QAbstractTableModel):
 
         self.prev_apply = perf_counter()
 
+    def _clock(self):
+        registry = self.context.registry
+        return registry.playback_clock if registry is not None else None
+
     @staticmethod
     @register_warmup
     def warmup(helper: "NumbaWarmupHelper"):
@@ -265,6 +290,7 @@ class TelemetryTableModel(QAbstractTableModel):
             painted_buffers = np.zeros(n_mods * MAX_MSG_BYTES, dtype=dtypes.BYTE)
             painted_lengths = np.zeros(n_mods, dtype=np.uint16)
             newly_active_ids = np.zeros(n_mods, dtype=np.int32)
+            is_visible = np.zeros(n_mods, dtype=np.bool_)
 
             new_count = nb_initialize_new_modules(
                 n_mods,
@@ -281,6 +307,7 @@ class TelemetryTableModel(QAbstractTableModel):
                 now,
                 MAX_MSG_BYTES,
                 newly_active_ids,
+                is_visible,
             )
 
             visible_mod_ids = newly_active_ids[:new_count] if new_count > 0 else np.arange(n_mods, dtype=np.int32)
@@ -593,10 +620,10 @@ class TelemetryTableModel(QAbstractTableModel):
         self.endResetModel()
         self.layout_changed.emit()
 
-    def apply_updates(self):
+    def apply_updates(self, force: bool = False):
         """High-frequency vectorized pull from the module_value_tracker."""
         now = perf_counter()
-        if now - self.prev_apply < 0.1:  # Target ~10Hz limit
+        if not force and now - self.prev_apply < 0.1:  # Target ~10Hz limit
             return
         self.prev_apply = now
 
@@ -615,7 +642,17 @@ class TelemetryTableModel(QAbstractTableModel):
 
         newly_active_ids = np.zeros(len(self.modules), dtype=np.int32)
 
-        with tracker.get_snapshot() as snap:
+        # While the global playback clock is scrubbing REPLAY, show the latest-per-module
+        # message as of the playhead instead of the tracker's "latest ever" snapshot - there's
+        # no manual browse/detach state to track here (unlike LogViewerWidget/TelemetryPlotter),
+        # since this table has no per-widget time navigation of its own; it always follows.
+        clock = self._clock()
+        if clock is not None and clock.mode is PlaybackMode.REPLAY:
+            snapshot_ctx = tracker.build_snapshot_as_of(clock.current_ts_ns)
+        else:
+            snapshot_ctx = tracker.get_snapshot()
+
+        with snapshot_ctx as snap:
             b = snap.bundle()
             sequences = b.sequence_ids
             levels = b.levels
@@ -638,6 +675,7 @@ class TelemetryTableModel(QAbstractTableModel):
                 now,
                 MAX_MSG_BYTES,
                 newly_active_ids,  # Pass the new output buffer
+                self.is_visible,
             )
 
             if new_count > 0:
@@ -907,10 +945,9 @@ class TelemetryTable(QWidget):
         self.gui_context.remove_updatable(self)
         super().closeEvent(event)
 
-    def apply_updates(self):
+    def apply_updates(self, force: bool = False):
         """Pass update execution to our isolated table model."""
-        # pass
-        self.model.apply_updates()
+        self.model.apply_updates(force=force)
 
     def _set_defaults(self):
         self.tab_name = self.__class__.__name__

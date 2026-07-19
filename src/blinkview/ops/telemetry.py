@@ -7,10 +7,11 @@
 import numpy as np
 
 from blinkview.core import dtypes
-from blinkview.core.dtypes import SEQ_NONE
+from blinkview.core.dtypes import SEQ_NONE, TS_UNSPECIFIED
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.log_batch import LogBundle, TelemetryBatch
-from blinkview.core.types.telemetry import TelemetryBufferBundle
+from blinkview.core.types.telemetry import TelemetryBufferBundle, TsWindowBundle
+from blinkview.ops.segments import nb_fast_find_first_ge, nb_fast_find_first_gt
 
 PLOT_INTERPOLATION_MODE_LINEAR = 0
 PLOT_INTERPOLATION_MODE_DISCRETE = 1
@@ -167,6 +168,141 @@ def nb_extract_telemetry_segment_to_end(
             # Write channels
             for c in range(num_channels):
                 out_values[write_idx, c] = temp_floats[c]
+
+    return write_idx
+
+
+@app_njit()
+def nb_extract_telemetry_segment_window_backward(
+    segment: LogBundle,
+    target_module: int,
+    window: TsWindowBundle,
+    num_channels: int,
+    out_times: np.ndarray,
+    out_times_int64: np.ndarray,
+    out_values: np.ndarray,
+    temp_floats: np.ndarray,
+    write_idx: int,  # Starting write position (moves backward)
+) -> int:
+    """
+    Playback-scrub counterpart to nb_extract_telemetry_segment_to_end: instead of stopping at a
+    forward-fetch sequence watermark, this is bounded by an arbitrary [window.start_ts,
+    window.end_ts] range (same binary-search boundary technique as
+    nb_segment_filter_reversed in ops/segments.py) and scans that bounded range newest-to-oldest,
+    writing backward from write_idx - same "moves left" convention as
+    nb_extract_telemetry_segment_to_end, so a caller can chain multiple segments' calls together
+    without a merge/sort step.
+    """
+    count = segment.size[0]
+    timestamps = segment.timestamps
+    modules = segment.modules
+    msg_offsets = segment.offsets
+    msg_lens = segment.lengths
+    msg_buffer = segment.buffer
+
+    loop_start = 0
+    loop_end = count
+
+    if window.start_ts != TS_UNSPECIFIED:
+        idx = nb_fast_find_first_ge(timestamps, count, window.start_ts)
+        if idx > loop_start:
+            loop_start = idx
+
+    if window.end_ts != TS_UNSPECIFIED:
+        idx = nb_fast_find_first_gt(timestamps, count, window.end_ts)
+        if idx < loop_end:
+            loop_end = idx
+
+    if loop_start >= loop_end:
+        return write_idx
+
+    for i in range(loop_end - 1, loop_start - 1, -1):
+        if write_idx <= 0:
+            break
+
+        if modules[i] != target_module:
+            continue
+
+        offset = msg_offsets[i]
+        length = msg_lens[i]
+        extracted_count = nb_extract_floats_from_bytes(msg_buffer, offset, length, temp_floats)
+
+        if extracted_count >= num_channels:
+            write_idx -= 1
+            ts_int = timestamps[i]
+            out_times[write_idx] = ts_int / 1_000_000_000.0
+            out_times_int64[write_idx] = ts_int
+
+            for c in range(num_channels):
+                out_values[write_idx, c] = temp_floats[c]
+
+    return write_idx
+
+
+@app_njit()
+def nb_extract_telemetry_segment_window_forward(
+    segment: LogBundle,
+    target_module: int,
+    window: TsWindowBundle,
+    num_channels: int,
+    out_times: np.ndarray,
+    out_times_int64: np.ndarray,
+    out_values: np.ndarray,
+    temp_floats: np.ndarray,
+    write_idx: int,  # Starting write position (moves forward)
+) -> int:
+    """
+    Forward-direction counterpart to nb_extract_telemetry_segment_window_backward, for the
+    "after the scrub anchor" half of a window. Scans the bounded [window.start_ts,
+    window.end_ts] range oldest-to-newest, writing forward from write_idx so the combined
+    backward+forward output lands pre-sorted ascending with no merge step, mirroring how
+    _fetch_history_window (log_viewer.py) pairs a reversed "before" scan with a forward
+    "after" scan.
+    """
+    count = segment.size[0]
+    timestamps = segment.timestamps
+    modules = segment.modules
+    msg_offsets = segment.offsets
+    msg_lens = segment.lengths
+    msg_buffer = segment.buffer
+    max_write = out_times.shape[0]
+
+    loop_start = 0
+    loop_end = count
+
+    if window.start_ts != TS_UNSPECIFIED:
+        idx = nb_fast_find_first_ge(timestamps, count, window.start_ts)
+        if idx > loop_start:
+            loop_start = idx
+
+    if window.end_ts != TS_UNSPECIFIED:
+        idx = nb_fast_find_first_gt(timestamps, count, window.end_ts)
+        if idx < loop_end:
+            loop_end = idx
+
+    if loop_start >= loop_end:
+        return write_idx
+
+    for i in range(loop_start, loop_end):
+        if write_idx >= max_write:
+            break
+
+        if modules[i] != target_module:
+            continue
+
+        offset = msg_offsets[i]
+        length = msg_lens[i]
+        extracted_count = nb_extract_floats_from_bytes(msg_buffer, offset, length, temp_floats)
+
+        if extracted_count >= num_channels:
+            ts_int = timestamps[i]
+            out_times[write_idx] = ts_int / 1_000_000_000.0
+            out_times_int64[write_idx] = ts_int
+
+            for c in range(num_channels):
+                out_values[write_idx, c] = temp_floats[c]
+
+            write_idx += 1
 
     return write_idx
 

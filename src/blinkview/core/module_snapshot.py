@@ -123,6 +123,75 @@ def nb_update_master_arrays_reverse(
     return False
 
 
+@app_njit()
+def nb_build_snapshot_as_of(
+    seg_b: LogBundle,
+    snap_b: ModuleSnapshotParams,
+    module_count: int,
+    max_ts_ns: int,
+    found_mask: np.ndarray,  # bool_, len module_count, in/out
+    remaining: int,
+) -> Tuple[bool, int]:
+    """Playback-scrub counterpart to nb_update_master_arrays_reverse: instead of resuming
+    from a forward sequence watermark, rebuilds "latest message per module" from scratch as
+    of an arbitrary point in the past (`max_ts_ns`). Scans a segment back-to-front, skipping
+    rows newer than max_ts_ns (they're in the log's future relative to the playhead) and
+    filling in the first (i.e. latest-before-max_ts_ns) row seen per not-yet-found module.
+    `found_mask`/`remaining` carry state across segments so a caller can stop early once
+    every module has been resolved instead of always scanning back to the start of the log.
+    Returns (all_found, remaining).
+    """
+    row_count = seg_b.size[0]
+    seg_b_modules = seg_b.modules
+    seg_b_timestamps = seg_b.timestamps
+    seg_b_levels = seg_b.levels
+    seg_b_lengths = seg_b.lengths
+    seg_b_offsets = seg_b.offsets
+    seg_b_buffer = seg_b.buffer
+    seg_b_sequences = seg_b.sequences
+
+    snap_b_timestamps = snap_b.timestamps
+    snap_b_sequence_ids = snap_b.sequence_ids
+    snap_b_levels = snap_b.levels
+    snap_b_lengths = snap_b.lengths
+    snap_b_buffer = snap_b.buffer
+
+    for i in range(row_count - 1, -1, -1):
+        if remaining <= 0:
+            return True, remaining
+
+        ts = seg_b_timestamps[i]
+        if ts > max_ts_ns:
+            continue
+
+        mod_id = seg_b_modules[i]
+        if mod_id >= module_count:
+            continue
+
+        if found_mask[mod_id]:
+            continue
+
+        snap_b_timestamps[mod_id] = ts
+        snap_b_sequence_ids[mod_id] = seg_b_sequences[i]
+        snap_b_levels[mod_id] = seg_b_levels[i]
+
+        m_len = seg_b_lengths[i]
+        if m_len > MAX_MSG_BYTES - 1:
+            m_len = MAX_MSG_BYTES - 1
+
+        s_off = seg_b_offsets[i]
+        m_off = mod_id * MAX_MSG_BYTES
+
+        snap_b_buffer[m_off : m_off + m_len] = seg_b_buffer[s_off : s_off + m_len]
+        snap_b_lengths[mod_id] = m_len
+        snap_b_buffer[m_off + m_len] = 0
+
+        found_mask[mod_id] = True
+        remaining -= 1
+
+    return remaining <= 0, remaining
+
+
 class ModuleSnapshot:
     """
     A ref-counted, point-in-time view of module statuses backed by pooled arrays.
@@ -292,7 +361,8 @@ class LatestModuleValueTracker:
     @register_warmup
     def warmup(helper: "NumbaWarmupHelper"):
         """Builds the helper's dummy tracker and triggers compilation for Module Snapshot
-        tracking and state copying (nb_copy_snapshot_state and nb_update_master_arrays_reverse).
+        tracking and state copying (nb_copy_snapshot_state, nb_update_master_arrays_reverse,
+        and the playback-scrub nb_build_snapshot_as_of).
         Requires data in the pool, provided by NumbaWarmupHelper.exercise_logging_kernels().
         Assigns the tracker onto helper.tracker so other warmup callbacks (e.g.
         TelemetryTableModel.warmup) can reuse it."""
@@ -307,6 +377,11 @@ class LatestModuleValueTracker:
         # Optionally exercise the string decoding/iterator logic
         with tracker.get_snapshot() as snap:
             for _ in snap:
+                break
+
+        # Compile the playback-scrub "rebuild as of a past ts" path
+        with tracker.build_snapshot_as_of(helper.time_ns()) as replay_snap:
+            for _ in replay_snap:
                 break
 
         print("[Warmup] LatestModuleValueTracker ... done")
@@ -403,6 +478,42 @@ class LatestModuleValueTracker:
                 # The background thread swapped and released this snapshot
                 # a microsecond before we called retain(). Try again.
                 continue
+
+    def build_snapshot_as_of(self, ts_ns: int) -> ModuleSnapshot:
+        """Playback-scrub counterpart to get_snapshot(): rebuilds a one-shot ModuleSnapshot
+        holding the latest-per-module message as of an arbitrary past `ts_ns`, instead of
+        the tracker's incrementally-maintained "latest ever" snapshot. Callers (widgets
+        following registry.playback_clock in REPLAY) are expected to call this once per
+        follow tick and NOT retain it across ticks - unlike the live snapshot, there's no
+        watermark to resume from, so every call does a fresh bounded backward scan.
+        """
+        m_bundle = self._module_table.bundle()
+        count = m_bundle.count
+
+        snap = self._allocate_snapshot(max(1024, count), count, 0)
+        b = snap.bundle()
+        b.sequence_ids[:] = 0
+
+        if count == 0:
+            return snap
+
+        found_mask = np.zeros(count, dtype=np.bool_)
+        remaining = count
+
+        with self._log_pool.get_reversed_snapshot() as segments:
+            for segment in segments:
+                if remaining <= 0:
+                    break
+                if segment.size == 0:
+                    continue
+
+                all_found, remaining = nb_build_snapshot_as_of(
+                    segment.bundle, b, count, ts_ns, found_mask, remaining
+                )
+                if all_found:
+                    break
+
+        return snap
 
     def debug_print(self):
         """Helper to print the current active snapshot."""
