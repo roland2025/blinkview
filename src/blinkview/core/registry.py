@@ -138,6 +138,7 @@ class Registry:
 
         self.warmup_success = False
         self.warmup_error = None
+        self._warmup_done = False
 
         # ==========================================
         # LAYER 2: Storage & Sinks
@@ -417,8 +418,10 @@ class Registry:
 
         self._temp_log_queue = None  # Release the temporary log queue
 
-    def start(self, configure=True):
-        if self._is_running:
+    def warmup(self):
+        """Compiles Numba kernels. Safe to call once, ahead of start(); start() will
+        call it itself if it hasn't run yet."""
+        if self._warmup_done:
             return
 
         try:
@@ -435,6 +438,13 @@ class Registry:
             self.logger.exception("Error during compiling kernels", e)
         finally:
             self.warmup_helper = None
+            self._warmup_done = True
+
+    def start(self, configure=True):
+        if self._is_running:
+            return
+
+        self.warmup()
 
         self.logger.warn(f"--- Starting Session: {self.session_name} ---")
 

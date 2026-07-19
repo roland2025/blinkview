@@ -34,7 +34,9 @@ from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
 from blinkview.ops.segments import nb_segment_extract_fields, segment_filter, segment_filter_reversed
 from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
 from blinkview.ui.gui_context import GUIContext
+from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
 from blinkview.ui.widgets.kv_filter_line_edit import KvFilterLineEdit
+from blinkview.ui.widgets.log_viewer import LogViewMode
 from blinkview.ui.widgets.module_filter_sidebar import ModuleFilterSidebar
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
@@ -113,7 +115,7 @@ class LogTableStore:
 
         self.capacity = max(self.viewport_rows, self.HISTORY_BEFORE + self.HISTORY_AFTER)
 
-        self.mode = "live"
+        self.mode = LogViewMode.LIVE
         self.anchor_seq = None
 
         # row_count rows are valid, starting at self._valid_start within the fixed-size arrays
@@ -127,6 +129,11 @@ class LogTableStore:
         # repaint is even worth scheduling, so a quiet live tail doesn't repaint at the full
         # heartbeat rate for no reason.
         self.last_fetch_changed = False
+
+        # How many new rows the last apply_updates() fetch matched (0 if throttled, no match, or
+        # not in LIVE mode) - LogTableViewerWidget feeds this into its LogVelocityTracker the same
+        # way LogViewerWidget feeds total_new_rows, to decide whether to auto-pause into history.
+        self.last_fetch_new_rows = 0
 
         # Two PooledLogBatch buffers, ping-ponged by _bind_active()/self._active. LIVE mode's
         # incremental fetch (_fetch_live_incremental) writes the next tick's rows into the
@@ -466,7 +473,7 @@ class LogTableStore:
         self.viewport_rows = n
         if n > self.capacity:
             self._grow_capacity(n)
-        if self.mode == "live":
+        if self.mode == LogViewMode.LIVE:
             self._last_backend_seq = None  # force a refetch at the new size
             self._fetch_live(force=True)
 
@@ -487,7 +494,7 @@ class LogTableStore:
         self._message_cache = [None] * self.capacity
 
     def enter_live_mode(self):
-        self.mode = "live"
+        self.mode = LogViewMode.LIVE
         self.anchor_seq = None
         self._last_backend_seq = None
         self._fetch_live(force=True)
@@ -495,7 +502,7 @@ class LogTableStore:
     def enter_history_mode(self, anchor_seq):
         if anchor_seq is None:
             return
-        self.mode = "history"
+        self.mode = LogViewMode.HISTORY
         self.anchor_seq = anchor_seq
         self._bake_effective_mask()
         self._fetch_history(anchor_seq)
@@ -507,14 +514,14 @@ class LogTableStore:
         self._message_cache = [None] * self.capacity
         log_pool = self.gui_context.registry.central.log_pool
         self._last_backend_seq = log_pool.latest_sequence()
-        self.mode = "live"
+        self.mode = LogViewMode.LIVE
         self.anchor_seq = None
 
     def reload_and_redraw(self):
         """Forces a re-fetch under the current mode (used when filter settings change - same
         data, different criteria). Stays anchored to the same position in history mode."""
         self._effective_mask = None
-        if self.mode == "history" and self.anchor_seq is not None:
+        if self.mode == LogViewMode.HISTORY and self.anchor_seq is not None:
             self._bake_effective_mask()
             self._fetch_history(self.anchor_seq)
         else:
@@ -588,8 +595,9 @@ class LogTableStore:
         until the widget calls enter_live_mode()/enter_history_mode() again in response to
         scrolling."""
         self.last_fetch_changed = False
+        self.last_fetch_new_rows = 0
 
-        if self.mode != "live":
+        if self.mode != LogViewMode.LIVE:
             return
 
         now = time_ns()
@@ -707,6 +715,7 @@ class LogTableStore:
         self._active = inactive_idx
         self._bind_active()
         self._message_cache = [None] * self.capacity
+        self.last_fetch_new_rows = total_new
 
     def _fetch_live_incremental(self, pool, kv, text):
         """Backward-scans only rows newer than self._last_backend_seq (bounded via the same
@@ -827,6 +836,7 @@ class LogTableStore:
         self._buf_row_count[inactive_idx] = new_row_count
         self._bind_active()
         self._message_cache = new_cache
+        self.last_fetch_new_rows = total_new
 
     # --- HISTORY mode fetch -------------------------------------------------------------------
 
@@ -982,7 +992,7 @@ class LogTableCanvas(QAbstractScrollArea):
         return max(0, h // ROW_HEIGHT)
 
     def first_visible_row(self) -> int:
-        if self.store.mode == "live":
+        if self.store.mode == LogViewMode.LIVE:
             return 0
         return self.verticalScrollBar().value()
 
@@ -1115,7 +1125,7 @@ class LogTableCanvas(QAbstractScrollArea):
         QApplication.clipboard().setText(self.store.get_cell(row, LogTableCol.MESSAGE) or "")
 
     def wheelEvent(self, event):
-        if self.store.mode == "live" and event.angleDelta().y() > 0:
+        if self.store.mode == LogViewMode.LIVE and event.angleDelta().y() > 0:
             # Scrolling "up" (towards older entries) while live: hand off to the widget to anchor
             # on whatever's currently on top and switch into a scrollable history window.
             if self.on_wheel_up_while_live is not None:
@@ -1199,6 +1209,27 @@ class LogTableViewerWidget(QWidget):
         super().__init__(parent)
 
         self.gui_context: GUIContext = gui_context
+
+        # Same Pause button highlight scheme as LogViewerWidget, so both viewers present
+        # auto vs. manual pausing identically.
+        self.setStyleSheet("""QToolButton {
+    border-radius: 4px;
+    padding: 2px;
+}
+
+/* Auto-Pause Highlight */
+QToolButton[autoPaused="true"] {
+    background-color: #882222; /* Deep Red */
+    color: white;
+    border: 1px solid #ff4444;
+}
+
+/* Optional: Manual Pause Highlight (Amber) */
+QToolButton[manualPaused="true"] {
+    background-color: #886622;
+    color: white;
+}
+""")
 
         self.tab_name = ""
         self.allowed_device = None
@@ -1313,11 +1344,20 @@ class LogTableViewerWidget(QWidget):
         self.action_clear.triggered.connect(self.clear_logs)
         self.toolbar.addAction(self.action_clear)
 
-        self.action_go_live = QAction("⏵ Go Live", self)
-        self.action_go_live.setToolTip("Return to the live tail (jump back to the latest rows)")
-        self.action_go_live.triggered.connect(self._go_live)
-        self.action_go_live.setVisible(False)
-        self.toolbar.addAction(self.action_go_live)
+        self.is_paused = False
+        self.auto_paused = False
+        self._is_catching_up = True
+
+        # Velocity Tracking - same clog-protection mechanism as LogViewerWidget
+        self.velocity_tracker = LogVelocityTracker(limit_per_sec=1000)
+
+        # Pause/Resume toggle - same texts/behavior as LogViewerWidget.action_pause. Pause and
+        # history mode are the same state from the user's perspective (see _set_pause_ui), so
+        # this single button replaces the old non-checkable "Go Live" action.
+        self.action_pause = QAction("⏸ Pause", self)
+        self.action_pause.setCheckable(True)
+        self.action_pause.toggled.connect(self._toggle_pause)
+        self.toolbar.insertAction(self.action_clear, self.action_pause)
 
         self.splitter = QSplitter(Qt.Horizontal, self)
         self.layout.addWidget(self.splitter)
@@ -1355,6 +1395,8 @@ class LogTableViewerWidget(QWidget):
         self.view.set_column_visible(LogTableCol.THREAD, self.show_process_thread)
 
         self._programmatic_scroll = False
+        self.prev_history_poll = 0
+        self._last_polled_backend_seq = None
         self.view.verticalScrollBar().valueChanged.connect(self._on_scroll_value_changed)
 
         self.splitter.addWidget(self.view)
@@ -1424,9 +1466,67 @@ class LogTableViewerWidget(QWidget):
 
     def apply_updates(self):
         self.model.apply_updates()
+
+        if self.model.mode == LogViewMode.LIVE:
+            # Clog protection, mirroring LogViewerWidget.apply_updates: a live tail that's
+            # matching more rows than fit the viewport every tick is silently dropping the
+            # backlog beyond viewport_rows each fetch - freeze into a browsable history window
+            # instead so nothing is lost unnoticed.
+            was_catching_up = self._is_catching_up
+            reached_live_edge = self.model.last_fetch_new_rows < self.model.viewport_rows
+            if self._is_catching_up and reached_live_edge:
+                self._is_catching_up = False
+
+            if self.model.last_fetch_new_rows > 0:
+                if was_catching_up:
+                    # The initial burst of backlog while first catching up to live doesn't count
+                    # as a sustained clog - same carve-out as LogViewerWidget.
+                    self.velocity_tracker.reset()
+                elif self.velocity_tracker.update_and_check(self.model.last_fetch_new_rows):
+                    self._enter_history_at_top_row(auto=True)
+                    return
+
         if self.model.last_fetch_changed:
             self.view.request_repaint()
             self.view.autosize_columns()
+
+        if self.model.mode == LogViewMode.HISTORY:
+            self._poll_history_tail()
+
+    def _poll_history_tail(self):
+        """Mirrors LogViewerWidget._poll_history_tail (qt-log-table-viewer skill Sec 9): a sparse
+        filter's history window can fit entirely inside the viewport, collapsing the scrollbar's
+        range to "nothing to scroll" (min == max) - valueChanged then never fires again, so
+        _on_scroll_value_changed's bottom-edge catch-up check never runs. Piggyback on the
+        heartbeat instead so a stalled-at-the-bottom history view still notices new rows."""
+        now = time_ns()
+        if now - self.prev_history_poll < 100_000_000:
+            return
+        self.prev_history_poll = now
+
+        if self.model.anchor_seq is None:
+            return
+
+        scrollbar = self.view.verticalScrollBar()
+        if scrollbar.value() < scrollbar.maximum() - 1:
+            return  # Not at the bottom - the scroll handler already covers catch-up once they get there
+
+        pool = self.gui_context.registry.central.log_pool
+        latest = pool.latest_sequence()
+        if latest == self._last_polled_backend_seq:
+            return  # Backend hasn't advanced since we last looked - nothing new to find
+        self._last_polled_backend_seq = latest
+
+        if self._at_live_edge():
+            self._go_live()
+            return
+
+        # Deliberately not gated on `last_seq != self.model.anchor_seq` - see the matching
+        # comment in _on_scroll_value_changed's bottom-edge branch. Also not gated on
+        # row_count > 0 - see _history_newest_ref_seq's anchor_seq fallback.
+        last_seq = self._history_newest_ref_seq()
+        if last_seq is not None:
+            self._reanchor_history(last_seq)
 
     def _handle_level_change(self, index):
         level_identity = self.level_combo.itemData(index)
@@ -1485,42 +1585,66 @@ class LogTableViewerWidget(QWidget):
     def _topmost_row_seq(self):
         return self.model.seq_for_row(self.view.first_visible_row())
 
-    def _enter_history_at_top_row(self):
+    def _enter_history_at_top_row(self, auto: bool = False):
+        """Called the moment the user scrolls away from the live tail, or when clog protection
+        (auto=True) needs to freeze the view. Anchors the new history window on whichever live
+        row is currently at the top of the viewport, so the view doesn't visually jump."""
         anchor_seq = self._topmost_row_seq()
         if anchor_seq is None:
             return
-        self._reanchor_history(anchor_seq)
-        self._set_history_ui_state()
+        self._reanchor_history(anchor_seq, auto=auto)
 
-    def _reanchor_history(self, anchor_seq):
+    def _reanchor_history(self, anchor_seq, auto: bool = False):
         """Rebuilds the history window around anchor_seq and repositions the view on it. Both
         enter_history_mode() and _scroll_to_seq() below change the scrollbar's value
         programmatically, which would otherwise re-fire valueChanged and recurse straight back
         into _on_scroll_value_changed - the guard flag suppresses that re-entrancy."""
+        was_live = self.model.mode != LogViewMode.HISTORY
         self._programmatic_scroll = True
         try:
             self.model.enter_history_mode(anchor_seq)
             self.view.request_repaint()  # scrollbar range must reflect the new row_count first
 
-            # If this fetch's "after" set already reaches the backend's latest row, there may be
-            # too little remaining content to fill the viewport - the scrollbar's range can
-            # collapse to "nothing to scroll", meaning valueChanged will never fire again to tell
-            # us we've caught up. Check eagerly here instead of only reacting to future scrolls.
-            if self._at_live_edge():
-                self.model.enter_live_mode()
-                self.view.request_repaint()
-                self._set_live_ui_state()
-                return
+            if was_live:
+                # Pause and history mode are the same state (see _set_pause_ui) - only sync the
+                # button/scrollbar policy on the live->history transition edge, not on every
+                # page-through reanchor while already browsing history.
+                self._set_pause_ui(True, auto=auto)
+                self._set_history_ui_state()
+            else:
+                # If this fetch's "after" set already reaches the backend's latest row, there may
+                # be too little remaining content to fill the viewport - the scrollbar's range can
+                # collapse to "nothing to scroll", meaning valueChanged will never fire again to
+                # tell us we've caught up. Check eagerly here instead of only reacting to future
+                # scrolls (qt-log-table-viewer skill Sec 9).
+                #
+                # Only applies when paging forward within an already-open history window (was_live
+                # is False) - on the initial live->history transition, the anchor is deliberately
+                # right at/near the tail, so this would otherwise immediately bounce straight back
+                # to live and undo the pause the user just asked for.
+                if self._at_live_edge():
+                    self._go_live()
+                    return
 
             self._scroll_to_seq(anchor_seq)
             self.view.autosize_columns()
         finally:
             self._programmatic_scroll = False
 
+    def _history_newest_ref_seq(self):
+        """The reference point for "how far forward has this history window scanned", mirroring
+        LogViewerWidget.history_newest_seq: the last actually-matched row when there is one,
+        otherwise the anchor itself. _fetch_history's "after" scan runs from the anchor forward
+        through every remaining segment regardless of whether anything matches, so anchor_seq is
+        still a valid low-water mark even when a sparse filter leaves row_count at 0 - without
+        this fallback, a window with zero matches could never be recognized as caught up to the
+        live edge and would poll forever without ever resuming live mode."""
+        if self.model.row_count > 0:
+            return self.model.seq_for_row(self.model.row_count - 1)
+        return self.model.anchor_seq
+
     def _at_live_edge(self) -> bool:
-        if self.model.row_count == 0:
-            return False
-        last_seq = self.model.seq_for_row(self.model.row_count - 1)
+        last_seq = self._history_newest_ref_seq()
         if last_seq is None:
             return False
         pool = self.gui_context.registry.central.log_pool
@@ -1533,6 +1657,8 @@ class LogTableViewerWidget(QWidget):
         self.view.verticalScrollBar().setValue(row)
 
     def _go_live(self):
+        """Also the mechanism used to explicitly return to live mode (unpausing, or catching up
+        while paging history forward) - mirrors LogViewerWidget._redraw_history."""
         self._programmatic_scroll = True
         try:
             self.model.enter_live_mode()
@@ -1541,35 +1667,83 @@ class LogTableViewerWidget(QWidget):
         self.view.request_repaint()
         self.view.autosize_columns()
         self._set_live_ui_state()
+        self._set_pause_ui(False)
+        self._is_catching_up = True
 
     def _set_live_ui_state(self):
         self.view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.action_go_live.setVisible(False)
 
     def _set_history_ui_state(self):
         self.view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.action_go_live.setVisible(True)
+
+    def _toggle_pause(self, checked):
+        """Pause and history mode are the same state from the user's perspective: pausing means
+        freezing on a browsable window, and scrolling away from the tail already does that.
+        Fires from the user clicking the Pause button (checked=Qt's new state). Mirrors
+        LogViewerWidget._toggle_pause exactly."""
+        if checked:
+            if self.model.mode == LogViewMode.LIVE:
+                self._enter_history_at_top_row(auto=False)
+                if self.model.mode != LogViewMode.HISTORY:
+                    # No live rows yet to build a window from - still honor the pause request.
+                    self._set_pause_ui(True)
+            # else: already in history (e.g. from a prior scroll-away) - the button just
+            # catches up to that; _set_pause_ui was already applied on that transition.
+        else:
+            self._go_live()
+
+    def _set_pause_ui(self, paused: bool, auto: bool = False):
+        """Syncs self.is_paused/self.auto_paused and the Pause button's text/checked/style to
+        match. Mirrors LogViewerWidget._set_pause_ui exactly (including the button text scheme)
+        so both viewers present pausing identically."""
+        self.is_paused = paused
+        self.auto_paused = paused and auto
+
+        self.action_pause.blockSignals(True)
+        self.action_pause.setChecked(paused)
+        self.action_pause.blockSignals(False)
+
+        self.action_pause.setText(("▶ Resume (AUTO)" if self.auto_paused else "▶ Resume") if paused else "⏸ Pause")
+
+        if not paused:
+            self.velocity_tracker.reset()
+
+        button = self.toolbar.widgetForAction(self.action_pause)
+        if button:
+            button.setProperty("autoPaused", self.auto_paused)
+            button.setProperty("manualPaused", paused and not self.auto_paused)
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.update()
 
     def _on_scroll_value_changed(self, value):
         if self._programmatic_scroll:
             return
 
-        if self.model.mode != "history":
+        if self.model.mode != LogViewMode.HISTORY:
             return
 
         scrollbar = self.view.verticalScrollBar()
 
-        if value >= scrollbar.maximum() - 1 and self.model.row_count > 0:
+        if value >= scrollbar.maximum() - 1:
+            # Deliberately not gated on `self.model.row_count > 0`: a sparse filter can leave the
+            # window with zero matching rows at all, and that must still be able to detect "we've
+            # caught all the way up" via _at_live_edge()'s anchor_seq fallback - otherwise a
+            # zero-match window can never resume live mode (mirrors LogViewerWidget's history
+            # catch-up, which doesn't gate on any matched-row count either).
             if self._at_live_edge():
                 # Caught all the way up to the live edge - resume tailing.
                 self._go_live()
                 return
 
-            last_seq = self.model.seq_for_row(self.model.row_count - 1)
-            if last_seq is not None and last_seq != self.model.anchor_seq:
-                # More rows exist in the backend beyond what this (static) window fetched -
-                # slide the window forward, anchored on the last row so it becomes the top
-                # of the next chunk (continuous scroll instead of dead-ending mid-history).
+            last_seq = self._history_newest_ref_seq()
+            if last_seq is not None:
+                # Deliberately not gated on `last_seq != self.model.anchor_seq`: under a sparse
+                # filter, the "after" fetch can come back empty (last_seq == anchor_seq) even
+                # though the backend has moved on, since none of the new raw rows matched at
+                # fetch time. A `!=` guard here would then never re-scan, since history mode's
+                # own apply_updates() is frozen and this scroll check is the only place that
+                # re-examines the pool (mirrors LogViewerWidget._on_scroll_value_changed).
                 self._reanchor_history(last_seq)
                 return
 

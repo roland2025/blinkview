@@ -167,11 +167,6 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
             # Because this runs AFTER app.exec() starts, Qt's geometry math will be flawless.
             viewer.load_ui_state()
 
-            viewer.raise_()
-            viewer.activateWindow()
-            # Materialize the window in its perfect location
-            viewer.setWindowOpacity(1.0)
-
             if replay_session_info is not None:
                 viewer.start_replay(replay_session_info)
 

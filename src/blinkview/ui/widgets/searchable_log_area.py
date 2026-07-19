@@ -190,6 +190,14 @@ class SearchableLogArea(QWidget):
         switch between live mode's small tail window and history mode's larger static window."""
         self.editor.setMaximumBlockCount(maxlen)
 
+    def scroll_to_end(self):
+        """Scrolls to the last line. Re-widening/heightening the viewport (e.g. a splitter or
+        window resize) changes how many lines fit without moving the scrollbar's value, so a
+        resize while pinned to the tail can otherwise leave the view sitting above the new
+        bottom."""
+        scrollbar = self.editor.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
     def scroll_to_block(self, block_number):
         """Scrolls so `block_number` becomes the first visible line. Valid because the editor
         uses NoWrap line wrapping, so each block is exactly one visual line and the vertical

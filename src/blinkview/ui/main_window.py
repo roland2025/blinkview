@@ -35,7 +35,7 @@ from qtpy.QtWidgets import (
 from blinkview import __version__ as blinkview_version
 from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.config_manager import ConfigManager
-from blinkview.core.numba_setup import IS_CACHE_FRESH
+from blinkview.core.numba_setup import IS_CACHE_WARM
 from blinkview.core.registry import Registry
 from blinkview.core.settings_manager import SettingsManager
 from blinkview.core.task_manager import TaskManager
@@ -185,10 +185,14 @@ class BlinkMainWindow(QMainWindow):
         self.sources_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.sources_dock)
 
+        self.sources_dock.setVisible(False)
+
         self.pipelines_dock = QDockWidget("Pipelines", self)
         self.pipelines_dock.setObjectName("PipelinesDock")
         self.pipelines_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.pipelines_dock)
+
+        self.pipelines_dock.setVisible(False)
 
         self.toolbar.addSeparator()
 
@@ -231,14 +235,9 @@ class BlinkMainWindow(QMainWindow):
         self.central_tabs.tabBar().setContextMenuPolicy(Qt.CustomContextMenu)
         self.central_tabs.tabBar().customContextMenuRequested.connect(self.show_tab_context_menu)
 
-        devices_config_node = self.gui_context.config_manager.create_node("/sources")
-        self.device_sidebar = DeviceSidebarWidget(devices_config_node, gui_context=self.gui_context)
-        self.sources_dock.setWidget(self.device_sidebar)
-
-        pipelines_config_node = self.gui_context.config_manager.create_node("/pipelines")
-        self.pipelines_sidebar = PipelinesSidebarWidget(pipelines_config_node, gui_context=self.gui_context)
-        # self.pipelines_sidebar.device_added.connect(self.on_add_device)
-        self.pipelines_dock.setWidget(self.pipelines_sidebar)
+        # Sidebars are created later, as part of the staged startup sequence in load_ui_state()
+        self.device_sidebar = None
+        self.pipelines_sidebar = None
 
         # Keep a list so Python's garbage collector doesn't destroy our floating windows
         self.window_manager = WindowManager()
@@ -329,75 +328,108 @@ class BlinkMainWindow(QMainWindow):
 
         print("[BlinkMainWindow] Initialization complete.")
 
-        QTimer.singleShot(1000, lambda: check_for_updates_silently(self.gui_context, parent=self))
+    def load_ui_state(self):
+        """Staged startup sequence, run once the window is shown:
+        1. move the window to its final position
+        2. show the "compiling shaders" toast
+        3. numba warmup
+        4. add the sources/pipelines sidebars
+        5. restore other windows and tabs
+        6. registry.start()
+        7. start main-window timers
+        8. show the ready toast
+        9. check for updates
+        """
+        self.gui_context.gui_state.restore_window_geometry(
+            self.gui_context.registry.file_manager.get_config_path("gui_state"),
+            self._on_window_positioned,
+        )
 
-    def _start_stage_3(self):
+    def _on_window_positioned(self):
+        self.raise_()
+        self.activateWindow()
+        # Materialize the window in its perfect location
+        self.setWindowOpacity(1.0)
+
+        self._show_precompile_toast()
+
+    def _show_precompile_toast(self):
+        # FAST PATH: Skip the warning toast and the 333ms delay if cache is warm
+        if IS_CACHE_WARM:
+            self._run_warmup()
+        else:
+            ToastManager.show("Compiling Shaders", ToastType.WARNING, duration=2, parent=self)
+
+            QApplication.processEvents()
+            QTimer.singleShot(1000, self._run_warmup)
+
+    def _run_warmup(self):
+        # registry.warmup() blocks the GUI thread for the duration of the numba compile, so
+        # force any pending paint/animation events (the "Compiling Shaders" toast) to actually
+        # reach the screen first - a QTimer delay alone doesn't guarantee that.
+        QApplication.processEvents()
+
+        self._numba_compile_start = self.gui_context.registry.now_ns()
+        self.gui_context.registry.warmup()
+        self._numba_compile_end = self.gui_context.registry.now_ns()
+        self._add_sidebars()
+
+    def _add_sidebars(self):
+        devices_config_node = self.gui_context.config_manager.create_node("/sources")
+        self.device_sidebar = DeviceSidebarWidget(devices_config_node, gui_context=self.gui_context)
+        self.sources_dock.setWidget(self.device_sidebar)
+
+        self.sources_dock.setVisible(True)
+
+        pipelines_config_node = self.gui_context.config_manager.create_node("/pipelines")
+        self.pipelines_sidebar = PipelinesSidebarWidget(pipelines_config_node, gui_context=self.gui_context)
+        # self.pipelines_sidebar.device_added.connect(self.on_add_device)
+        self.pipelines_dock.setWidget(self.pipelines_sidebar)
+
+        self.pipelines_dock.setVisible(True)
+
+        self._restore_docks_and_tabs()
+
+    def _restore_docks_and_tabs(self):
+        self.gui_context.gui_state.load_ui_state(
+            self.gui_context.registry.file_manager.get_config_path("gui_state"),
+            self._start_registry,
+        )
+
+    def _start_registry(self):
+        self.gui_context.registry.start()
+        self._start_timers()
+
+    def _start_timers(self):
+        registry = self.gui_context.registry
         self.timer_slow.start(self.timeout_slow)
 
+        # Set last_poll_time to the future to avoid false lag detection on the first tick
+        self.last_poll_time = registry.now_ns() + self.timeout_fast * 1_000_000
+        self.timer_fast.start(self.timeout_fast)
+
+        self._show_ready_toast()
+
+    def _show_ready_toast(self):
         registry = self.gui_context.registry
+        compile_time = (self._numba_compile_end - self._numba_compile_start) / 1_000_000_000.0
+        compile_msg = ""
 
-        def start_fast_timer():
-            self.last_poll_time = registry.now_ns() + (self.timeout_fast) * 1_000_000
-            # Set it to the future to avoid false lag detection on the first tick
-            self.timer_fast.start(self.timeout_fast)
-            compile_time = (self._numba_compile_end - self._numba_compile_start) / 1_000_000_000.0
-            # msg = f"Compilation time: {compile_time:.1f} seconds"
-            compile_msg = ""
+        if compile_time > 2:
+            compile_msg = f" | {compile_time:.0f} sec"
 
-            if compile_time > 2:
-                compile_msg = f" | {compile_time:.0f} sec"
-
-            if registry.warmup_success:
-                message = f"System ready{compile_msg}"
-                toast_type = ToastType.SUCCESS
-                duration = 5.0
-            else:
-                message = f"Compilation failed: {registry.warmup_error}"
-                toast_type = ToastType.ERROR
-                duration = 15.0
-
-            ToastManager.show(message, toast_type, duration, parent=self)
-
-        self.gui_context.gui_state.load_ui_state(self.gui_context.registry.file_manager.get_config_path("gui_state"))
-
-        # FAST PATH: Skip 100ms delay if cache is warm
-        if IS_CACHE_FRESH:
-            QTimer.singleShot(100, start_fast_timer)
+        if registry.warmup_success:
+            message = f"System ready{compile_msg}"
+            toast_type = ToastType.SUCCESS
+            duration = 5.0
         else:
-            start_fast_timer()
+            message = f"Compilation failed: {registry.warmup_error}"
+            toast_type = ToastType.ERROR
+            duration = 15.0
 
-    def _start_stage_2(self):
-        self._numba_compile_start = self.gui_context.registry.now_ns()
-        self.gui_context.registry.start()
-        self._numba_compile_end = self.gui_context.registry.now_ns()
+        ToastManager.show(message, toast_type, duration, parent=self)
 
-        # FAST PATH: Skip 100ms delay if cache is warm
-        if IS_CACHE_FRESH:
-            QTimer.singleShot(100, self._start_stage_3)
-        else:
-            self._start_stage_3()
-
-    def _start_stage_1(self):
-        # FAST PATH: Skip the warning toast and the 333ms delay
-        if IS_CACHE_FRESH:
-            ToastManager.show("Compiling Shaders", ToastType.WARNING, duration=1.0, parent=self)
-            QTimer.singleShot(333, self._start_stage_2)
-        else:
-            self._start_stage_2()
-
-    def load_ui_state(self):
-        self._start_stage_1()
-        # self.gui_context.gui_state.load_ui_state(
-        #     self.gui_context.registry.file_manager.get_config_path("gui_state"), self._start_stage_1
-        # )
-
-        # QTimer.singleShot(0, lambda: ToastManager.show("Something happened...", ToastType.INFO))
-        # QTimer.singleShot(333, lambda: ToastManager.show("WAARNING...", ToastType.WARNING))
-        # QTimer.singleShot(666, lambda: ToastManager.show("WHoop success...", ToastType.SUCCESS))
-        # QTimer.singleShot(999, lambda: ToastManager.show("Attention error...", ToastType.ERROR))
-
-        # delay the start of the registry, allows the windows to appear before doing anything heavy
-        # QTimer.singleShot(333, self._start_stage_1)
+        QTimer.singleShot(1000, lambda: check_for_updates_silently(self.gui_context, parent=self))
 
     def register_log_target(self, target):
         """Adds a target that expects a 'process_log_batch(list)' method."""

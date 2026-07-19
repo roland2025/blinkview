@@ -114,6 +114,7 @@ QToolButton[filterEnabled="true"] {
         self.latest_seq_seen = SEQ_NONE
 
         self.prev_apply = 0  # Timestamp of the last apply_updates call for throttling
+        self.prev_history_poll = 0  # Timestamp of the last history-mode tail poll, same throttle window
 
         self.max_rows = self.LIVE_MAX_BLOCKS  # Per-tick fetch cap + live tail size
 
@@ -649,6 +650,8 @@ QToolButton[filterEnabled="true"] {
         # as a belt-and-suspenders fallback for the rare case a pause is requested with no live
         # data yet to build a browsable history window from (_toggle_pause's fallback branch).
         if self.is_paused or self.view_mode != LogViewMode.LIVE:
+            if self.view_mode == LogViewMode.HISTORY:
+                self._poll_history_tail()
             return
 
         import time  # Ensure this is imported at the top of your file ideally
@@ -927,9 +930,7 @@ QToolButton[filterEnabled="true"] {
         reg_bundle = reg.bundle()
 
         def _format_matches(segment, indices_array, match_count):
-            req_bytes = nb_segment_estimate_out_size(
-                indices_array, match_count, segment.bundle, reg_bundle, format_cfg
-            )
+            req_bytes = nb_segment_estimate_out_size(indices_array, match_count, segment.bundle, reg_bundle, format_cfg)
             with array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
                 bytes_written = nb_segment_format(
                     handle.array, indices_array, match_count, segment.bundle, reg_bundle, format_cfg, tz_offset_sec
@@ -1030,8 +1031,8 @@ QToolButton[filterEnabled="true"] {
         was_live = self.view_mode != LogViewMode.HISTORY
         self._programmatic_scroll = True
         try:
-            before_count, after_count, oldest_seq, newest_seq, reached_start, text_result = (
-                self._fetch_history_window(anchor_seq)
+            before_count, after_count, oldest_seq, newest_seq, reached_start, text_result = self._fetch_history_window(
+                anchor_seq
             )
 
             if before_count == 0 and after_count == 0:
@@ -1073,6 +1074,32 @@ QToolButton[filterEnabled="true"] {
         finally:
             self._programmatic_scroll = False
 
+    def _poll_history_tail(self):
+        """When browsing a filtered history window that's already scrolled to the bottom, a
+        sparse filter can mean the fetched window doesn't fill the viewport - the scrollbar's
+        range collapses to "nothing to scroll" (min == max), so _on_scroll_value_changed's
+        catch-up check (Sec 9) never fires since valueChanged never fires. apply_updates keeps
+        ticking even in history mode's early-return branch, so use it to periodically re-check
+        for newly-arrived matching rows past the current window instead."""
+        if self.history_newest_seq is None:
+            return
+
+        now_ns = self.gui_context.registry.now_ns
+        t_start = now_ns()
+        if t_start - self.prev_history_poll < 100_000_000:
+            return
+        self.prev_history_poll = t_start
+
+        scrollbar = self.text_area.verticalScrollBar()
+        if scrollbar.value() < scrollbar.maximum() - 1:
+            return  # Not at the bottom - the scroll handler already covers catch-up once they get there
+
+        pool = self.gui_context.registry.central.log_pool
+        if self.history_newest_seq >= pool.latest_sequence():
+            return  # Nothing new has arrived past our last fetch
+
+        self._reanchor_history(self.history_newest_seq)
+
     def _on_scroll_value_changed(self, value):
         if self._programmatic_scroll:
             return
@@ -1090,9 +1117,27 @@ QToolButton[filterEnabled="true"] {
         if value <= scrollbar.minimum() + 1:
             if not self.history_reached_start and self.history_oldest_seq is not None:
                 self._reanchor_history(self.history_oldest_seq)
-        elif value >= scrollbar.maximum() - 1:
-            if self.history_newest_seq is not None and self.history_newest_seq != self.history_anchor_seq:
-                self._reanchor_history(self.history_newest_seq)
+
+        # Deliberately not `elif`: under a sparse filter the whole fetched window can be small
+        # enough to fit entirely inside the viewport, collapsing the scrollbar so minimum() ==
+        # maximum() - value then satisfies both branches at once, and an elif here would let the
+        # top branch's (no-op, since reached_start) win every time, silently skipping the live
+        # catch-up check below no matter what it would have found.
+        if value >= scrollbar.maximum() - 1:
+            if self.history_newest_seq is not None:
+                pool = self.gui_context.registry.central.log_pool
+                if self.history_newest_seq >= pool.latest_sequence():
+                    # Truly nothing more can exist past here (matching or not) - resume
+                    # live-follow instead of paging forward.
+                    self._redraw_history()
+                else:
+                    # There's newer raw data than our last fetch saw, even if none of it matched
+                    # the filter at the time (leaving history_newest_seq == history_anchor_seq -
+                    # a `!=` guard here would then never refetch, since history mode's own
+                    # apply_updates is frozen and this scroll check is the only place that
+                    # re-examines the pool). Always re-scan so a sparse filter's next match - or
+                    # confirmation that we're now caught up - gets picked up.
+                    self._reanchor_history(self.history_newest_seq)
 
     def _toggle_telemetry_sidebar(self, checked):
         """Toggles the visibility of the Telemetry sidebar."""
@@ -1144,6 +1189,16 @@ QToolButton[filterEnabled="true"] {
             button.style().unpolish(button)
             button.style().polish(button)
             button.update()
+
+    def resizeEvent(self, event):
+        """A resize changes how many lines fit in the viewport without moving the scrollbar's
+        value, so tailing live mode can otherwise end up pinned above the new bottom edge after
+        e.g. a splitter drag or window resize. History mode is left alone - it has no "tail" to
+        chase."""
+        super().resizeEvent(event)
+
+        if self.view_mode == LogViewMode.LIVE:
+            self.text_area.scroll_to_end()
 
     def closeEvent(self, event):
         """Clean up by unregistering from the GUI context."""

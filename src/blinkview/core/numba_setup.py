@@ -9,7 +9,7 @@ from pathlib import Path
 
 from blinkview import __version__
 
-IS_CACHE_FRESH = False
+IS_CACHE_WARM = False
 
 
 def export_numba_cache(settings):
@@ -17,7 +17,7 @@ def export_numba_cache(settings):
     Calculates the versioned cache path and exports it to the environment.
     Sets a global flag indicating if the directory was empty upon initialization.
     """
-    global IS_CACHE_FRESH
+    global IS_CACHE_WARM
 
     # 1. Determine base path
     repo_path = Path(settings.get("update.path", "."))
@@ -26,15 +26,15 @@ def export_numba_cache(settings):
     cache_root = repo_path / ".numba_cache"
     versioned_dir = cache_root / __version__
 
-    # 3. Check if empty BEFORE creating/writing to it
-    # We check if the directory exists and contains any files
+    # 3. Check if populated BEFORE creating/writing to it.
+    # IS_CACHE_WARM means "a warm cache from a previous run is already there", so the UI can
+    # skip the compiling-shaders toast/delays - not "the directory was just freshly created".
     if not versioned_dir.exists():
-        IS_CACHE_FRESH = True
+        IS_CACHE_WARM = False
         versioned_dir.mkdir(parents=True, exist_ok=True)
     else:
         # Check if directory contains any files (excluding hidden system files if necessary)
-        is_empty = not any(versioned_dir.iterdir())
-        IS_CACHE_FRESH = is_empty
+        IS_CACHE_WARM = any(versioned_dir.iterdir())
 
     # Check if the variable is already defined in the environment
     if "NUMBA_CACHE_DIR" not in os.environ:

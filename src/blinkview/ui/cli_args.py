@@ -25,6 +25,4 @@ def setup_replay_parser(parser):
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--list", action="store_true", help="List available replay sessions for this project and exit")
     group.add_argument("--last", action="store_true", help="Replay the most recently recorded session")
-    group.add_argument(
-        "name", type=str, nargs="?", default=None, help="Session id or display name to replay"
-    )
+    group.add_argument("name", type=str, nargs="?", default=None, help="Session id or display name to replay")
