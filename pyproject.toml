@@ -92,7 +92,7 @@ daemon = [
 
 test = [
     "pytest>=8.0.0",
-#    "pytest-cov",      # Optional: for coverage reporting
+    "pytest-cov>=5.0.0",
 ]
 
 # --- HATCH SPECIFIC ---

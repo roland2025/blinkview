@@ -27,7 +27,7 @@ BlinkView is a high-performance telemetry, log viewer, and visualization tool fo
 
 ### Performance & Memory Management
 - **Zero-Allocation Critical Path:** When processing incoming data streams, avoid allocating new Python objects inside the main loop.
-- **Use Memory Pools:** Utilize the pre-allocated buffers provided by `core` (e.g., `array_pool.py`, `numpy_buffer_pool.py`) for temporary data.
+- **Use Memory Pools:** Utilize the pre-allocated buffers provided by `core` (e.g., `array_pool.py`) for temporary data.
 - **Numba Types:** When writing code for the `ops/` directory, ensure strict type signatures using `core.dtypes`.
 - **String Handling:** In JIT-compiled code, strings are treated as raw byte arrays. Conversion to Python strings should only happen at the UI boundary.
 
