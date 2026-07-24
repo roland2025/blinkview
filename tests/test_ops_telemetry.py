@@ -21,8 +21,12 @@ from tests.test_ops_segments import make_bundle
 MODULE_A = 1
 MODULE_B = 2
 
+# Permissive (admit-everything) effective_mask for tests that don't care about level filtering -
+# LogLevel.ALL == 0, the lowest threshold, so `levels[i] < mask[modules[i]]` is never true.
+PERMISSIVE_MASK = np.zeros(10, dtype=dtypes.LEVEL_TYPE)
 
-def make_telemetry_bundle(timestamps, modules, values):
+
+def make_telemetry_bundle(timestamps, modules, values, levels=None):
     """Builds a LogBundle whose message bytes are telemetry-parseable floats (one value per
     row here - nb_extract_floats_from_bytes handles multi-channel too, but one channel is
     enough to exercise the window-bounding logic these kernels add)."""
@@ -31,7 +35,7 @@ def make_telemetry_bundle(timestamps, modules, values):
         timestamps=timestamps,
         rx_timestamps=timestamps,
         devices=[0] * len(timestamps),
-        levels=[0] * len(timestamps),
+        levels=levels if levels is not None else [0] * len(timestamps),
         modules=modules,
         sequences=list(range(1, len(timestamps) + 1)),
         messages=messages,
@@ -52,7 +56,7 @@ def test_backward_kernel_respects_start_and_end_ts_bounds():
     # window [15, 40] -> rows with ts 20/30/40 (values 2,3,4)
     window = TsWindowBundle(start_ts=dtypes.TS_TYPE(15), end_ts=dtypes.TS_TYPE(40))
     write_idx = nb_extract_telemetry_segment_window_backward(
-        bundle, MODULE_A, window, 1, out_times, out_times_int64, out_values, temp_floats, 5
+        bundle, MODULE_A, window, 1, out_times, out_times_int64, out_values, temp_floats, 5, PERMISSIVE_MASK
     )
 
     assert write_idx == 2  # 3 rows written backward from index 5 -> occupy [2, 5)
@@ -74,7 +78,7 @@ def test_forward_kernel_respects_start_and_end_ts_bounds():
     # window [20, 45] -> rows with ts 20/30/40 (values 2,3,4)
     window = TsWindowBundle(start_ts=dtypes.TS_TYPE(20), end_ts=dtypes.TS_TYPE(45))
     write_idx = nb_extract_telemetry_segment_window_forward(
-        bundle, MODULE_A, window, 1, out_times, out_times_int64, out_values, temp_floats, 0
+        bundle, MODULE_A, window, 1, out_times, out_times_int64, out_values, temp_floats, 0, PERMISSIVE_MASK
     )
 
     assert write_idx == 3
@@ -95,7 +99,7 @@ def test_both_kernels_filter_by_target_module():
     window = TsWindowBundle(start_ts=TS_UNSPECIFIED, end_ts=TS_UNSPECIFIED)
 
     write_idx = nb_extract_telemetry_segment_window_forward(
-        bundle, MODULE_B, window, 1, out_times, out_times_int64, out_values, temp_floats, 0
+        bundle, MODULE_B, window, 1, out_times, out_times_int64, out_values, temp_floats, 0, PERMISSIVE_MASK
     )
 
     assert write_idx == 2
@@ -104,9 +108,7 @@ def test_both_kernels_filter_by_target_module():
 
 
 def test_unspecified_bounds_extract_everything():
-    bundle = make_telemetry_bundle(
-        timestamps=[10, 20, 30], modules=[MODULE_A] * 3, values=[1.0, 2.0, 3.0]
-    )
+    bundle = make_telemetry_bundle(timestamps=[10, 20, 30], modules=[MODULE_A] * 3, values=[1.0, 2.0, 3.0])
     temp_floats = np.empty(1, dtype=dtypes.PLOT_VAL_TYPE)
     out_times_int64 = np.zeros(3, dtype=np.int64)
     out_times = np.zeros(3, dtype=dtypes.PLOT_TS_TYPE)
@@ -114,11 +116,98 @@ def test_unspecified_bounds_extract_everything():
     window = TsWindowBundle(start_ts=TS_UNSPECIFIED, end_ts=TS_UNSPECIFIED)
 
     write_idx = nb_extract_telemetry_segment_window_forward(
-        bundle, MODULE_A, window, 1, out_times, out_times_int64, out_values, temp_floats, 0
+        bundle, MODULE_A, window, 1, out_times, out_times_int64, out_values, temp_floats, 0, PERMISSIVE_MASK
     )
 
     assert write_idx == 3
     assert list(out_times_int64) == [10, 20, 30]
+
+
+def test_forward_kernel_excludes_rows_below_effective_mask_threshold():
+    """A row matching target_module but below the mask's level threshold must be excluded, same
+    row-inclusion test ops/segments.py's segment_filter uses (levels[i] >= mask[modules[i]])."""
+    bundle = make_telemetry_bundle(
+        timestamps=[10, 20, 30, 40],
+        modules=[MODULE_A] * 4,
+        values=[1.0, 2.0, 3.0, 4.0],
+        levels=[0, 3, 0, 3],  # rows at ts=20/40 are the only ones at/above a threshold of 3
+    )
+    temp_floats = np.empty(1, dtype=dtypes.PLOT_VAL_TYPE)
+    out_times_int64 = np.zeros(4, dtype=np.int64)
+    out_times = np.zeros(4, dtype=dtypes.PLOT_TS_TYPE)
+    out_values = np.zeros((4, 1), dtype=dtypes.PLOT_VAL_TYPE)
+    window = TsWindowBundle(start_ts=TS_UNSPECIFIED, end_ts=TS_UNSPECIFIED)
+    mask = np.zeros(10, dtype=dtypes.LEVEL_TYPE)
+    mask[MODULE_A] = 3
+
+    write_idx = nb_extract_telemetry_segment_window_forward(
+        bundle, MODULE_A, window, 1, out_times, out_times_int64, out_values, temp_floats, 0, mask
+    )
+
+    assert write_idx == 2
+    assert list(out_times_int64[:2]) == [20, 40]
+    assert list(out_values[:2, 0]) == [2.0, 4.0]
+
+
+def test_backward_kernel_excludes_rows_below_effective_mask_threshold():
+    bundle = make_telemetry_bundle(
+        timestamps=[10, 20, 30, 40],
+        modules=[MODULE_A] * 4,
+        values=[1.0, 2.0, 3.0, 4.0],
+        levels=[0, 3, 0, 3],
+    )
+    temp_floats = np.empty(1, dtype=dtypes.PLOT_VAL_TYPE)
+    out_times_int64 = np.zeros(4, dtype=np.int64)
+    out_times = np.zeros(4, dtype=dtypes.PLOT_TS_TYPE)
+    out_values = np.zeros((4, 1), dtype=dtypes.PLOT_VAL_TYPE)
+    window = TsWindowBundle(start_ts=TS_UNSPECIFIED, end_ts=TS_UNSPECIFIED)
+    mask = np.zeros(10, dtype=dtypes.LEVEL_TYPE)
+    mask[MODULE_A] = 3
+
+    write_idx = nb_extract_telemetry_segment_window_backward(
+        bundle, MODULE_A, window, 1, out_times, out_times_int64, out_values, temp_floats, 4, mask
+    )
+
+    assert write_idx == 2
+    assert list(out_times_int64[2:4]) == [20, 40]
+    assert list(out_values[2:4, 0]) == [2.0, 4.0]
+
+
+def test_fetch_telemetry_window_permissive_default_mask_reproduces_unfiltered_output():
+    """Regression guard for the "zero behavior change until a real filter is wired in" claim:
+    not passing effective_mask at all must reproduce exactly what a caller got before this
+    parameter existed."""
+    array_pool = NumpyArrayPool(max_bytes=4 * 1024 * 1024)
+    log_pool = CircularLogPool(array_pool, max_pieces=4, final_buffer_bytes=64 * 1024)
+
+    src = array_pool.create(PooledLogBatch, 20, 4096, has_levels=True, has_modules=True, has_devices=True)
+    base = 1_000_000_000_000
+    values = [1.0, 2.0, 3.0]
+    timestamps = [base + i * 10 for i in range(len(values))]
+    with src:
+        for ts, val in zip(timestamps, values):
+            # A high level (well above any real threshold) must still pass through, since the
+            # default mask is fully permissive (LogLevel.ALL == 0).
+            src.insert_any(ts, ts, str(val).encode("ascii"), level=7, module=MODULE_A, device=0)
+        log_pool.batch_append(src)
+
+    temp_floats = np.empty(1, dtype=dtypes.PLOT_VAL_TYPE)
+
+    with fetch_telemetry_window(
+        array_pool,
+        log_pool,
+        MODULE_A,
+        num_channels=1,
+        temp_floats=temp_floats,
+        anchor_ts_ns=timestamps[1],
+        before_span_ns=1000,
+        after_span_ns=1000,
+        before_cap=10,
+        after_cap=10,
+    ) as batch:
+        got_values = list(batch.values[:, 0])
+
+    assert got_values == values
 
 
 def test_fetch_telemetry_window_end_to_end_against_a_real_pool():

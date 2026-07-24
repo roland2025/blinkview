@@ -62,7 +62,13 @@ def insert_truncated_error(
 
     # Note: LogLevel.ERROR.value should be imported from your constants
     return batch.insert(
-        ts_ns=ts_ns, level=LogLevel.ERROR.value, module=module, device=device, seq=seq, msg_bytes=msg_bytes
+        ts_ns=ts_ns,
+        rx_ts_ns=ts_ns,
+        level=LogLevel.ERROR.value,
+        module=module,
+        device=device,
+        seq=seq,
+        msg_bytes=msg_bytes,
     )
 
 
@@ -196,7 +202,7 @@ class CircularLogPool:
                         self._rotate_segment()
 
                         # Use the unified insert_truncated_error method
-                        ts, raw_msg, _, mod, dev, _ = batch[rows_written]
+                        ts, raw_msg, _lvl, mod, dev, _seq, _e1, _e2, _e3 = batch[rows_written]
                         insert_truncated_error(self.active_segment, ts, mod, dev, self.sequence, raw_msg)
 
                         rows_written += 1
@@ -338,7 +344,19 @@ def fetch_telemetry_arrays(
     num_channels: int,
     temp_floats: np.ndarray,
     max_points: int = 5000,
+    effective_mask: Optional[np.ndarray] = None,
 ):
+    """effective_mask - per-module level threshold (see ops/segments.py's
+    segment_filter/segment_filter_reversed and ops/telemetry.py's
+    nb_extract_telemetry_segment_to_end) applied on top of the existing exact target_module
+    match, so a caller can make plotted telemetry respect the same level filter a log view
+    would. Defaults to a permissive single-entry mask covering just target_module_int (the only
+    index the kernel ever reads, since rows are already filtered to that module) - equivalent to
+    "no filtering", preserving this function's original module-only behavior for callers that
+    don't pass one. No caller wires a real mask in yet - see TelemetryPlotter's call sites."""
+    if effective_mask is None:
+        effective_mask = np.zeros(target_module_int + 1, dtype=dtypes.LEVEL_TYPE)
+
     # CRITICAL: Ensure this is from contextlib, not typing
     with ExitStack() as stack:
         # 1. Acquire Snapshot
@@ -380,6 +398,7 @@ def fetch_telemetry_arrays(
                     out_values,
                     temp_floats,
                     curr_write_idx,
+                    effective_mask,
                 )
 
         # 4. Yield result (even if empty)
@@ -405,6 +424,7 @@ def fetch_telemetry_window(
     after_span_ns: int,
     before_cap: int,
     after_cap: int,
+    effective_mask: Optional[np.ndarray] = None,
 ):
     """Playback-scrub counterpart to fetch_telemetry_arrays: extracts a bounded time window of
     telemetry samples for one module around anchor_ts_ns, independent of any forward-fetch
@@ -416,11 +436,17 @@ def fetch_telemetry_window(
     following (see TelemetryPlotter.apply_updates), upgraded to a larger cap once the user pans
     away from following, mirroring log_viewer.py's FOLLOW-window-vs-HISTORY-window split.
 
+    effective_mask - see fetch_telemetry_arrays' docstring; same permissive-default-when-None
+    behavior.
+
     The returned TelemetryBatch's `watermark` field is meaningless here (no forward-fetch
     watermark concept applies to an arbitrary-time-anchored window) and is always SEQ_NONE -
     ReplayWindowBuffer.update() does not read it, unlike ModuleBuffer.update()'s use of
     fetch_telemetry_arrays' watermark.
     """
+    if effective_mask is None:
+        effective_mask = np.zeros(target_module_int + 1, dtype=dtypes.LEVEL_TYPE)
+
     with ExitStack() as stack:
         before_segments = stack.enter_context(log_pool.get_reversed_snapshot())
         after_segments = stack.enter_context(log_pool.get_snapshot())
@@ -458,6 +484,7 @@ def fetch_telemetry_window(
                 out_values[:before_cap],
                 temp_floats,
                 before_write_idx,
+                effective_mask,
             )
 
         # --- After half: [anchor, anchor + after_span], oldest-to-newest, writing forward into
@@ -485,6 +512,7 @@ def fetch_telemetry_window(
                 after_out_values[:after_cap],
                 temp_floats,
                 after_write_idx,
+                effective_mask,
             )
 
         # Both halves already land ascending (before scanned newest-to-oldest but written

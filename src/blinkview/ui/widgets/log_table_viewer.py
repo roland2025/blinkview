@@ -26,17 +26,19 @@ from qtpy.QtWidgets import (
 )
 
 from blinkview.core import dtypes
+from blinkview.core.dtypes import SEQ_NONE
+from blinkview.core.log_fetch import LogSegmentScanner
 from blinkview.core.module_snapshot import MAX_MSG_BYTES
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.formatting import nb_format_local_timestamp
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
-from blinkview.ops.segments import nb_segment_extract_fields, segment_filter, segment_filter_reversed
+from blinkview.ops.segments import nb_segment_extract_fields, segment_filter_reversed
 from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
 from blinkview.ui.widgets.kv_filter_line_edit import KvFilterLineEdit
-from blinkview.ui.widgets.log_viewer import LogViewMode
+from blinkview.ui.widgets.log_view_mode import LogViewMode
 from blinkview.ui.widgets.module_filter_sidebar import ModuleFilterSidebar
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
@@ -111,6 +113,14 @@ class LogTableStore:
         self.log_filter = log_filter
         self.filter_sidebar = filter_sidebar
 
+        self._scanner = LogSegmentScanner(
+            self.gui_context.id_registry,
+            lambda: self.gui_context.registry.central.log_pool,
+            self.log_filter,
+            get_sidebar_filter=self.filter_sidebar.get_filter,
+            get_show_hidden=self.filter_sidebar.action_show_non_essential.isChecked,
+        )
+
         self.viewport_rows = 100  # LIVE mode fetch bound; the widget keeps this in sync with the view's height
 
         self.capacity = max(self.viewport_rows, self.HISTORY_BEFORE + self.HISTORY_AFTER)
@@ -180,11 +190,6 @@ class LogTableStore:
         self._device_name_cache = []
         self._module_name_cache = []
 
-        self._prev_total_module_count = None
-        self._filter_cache = None
-        self._filter_cache_computed = False
-        self._effective_mask = None
-
         # Sentinel forces a rebuild on the very first live tick regardless of the backend's sequence.
         self._last_backend_seq = None
         self.prev_apply = 0
@@ -193,8 +198,9 @@ class LogTableStore:
         # decide whether the next fetch may take the cheap incremental path (forward-scan only
         # rows added since last time, carrying forward previously-matched rows) or must fall back
         # to a full rescan (the filter itself changed, so previously-matched rows are no longer
-        # valid). bake_kv_arrays()/bake_text_search()/_bake_effective_mask() all return the same
-        # object instance until something in them actually changes, so `is` comparisons are enough.
+        # valid). bake_kv_arrays()/bake_text_search()/LogSegmentScanner.ensure_effective_mask()
+        # all return the same object instance until something in them actually changes, so `is`
+        # comparisons are enough.
         self._prev_fetch_mask = None
         self._prev_fetch_kv = None
         self._prev_fetch_text = None
@@ -265,21 +271,12 @@ class LogTableStore:
     @staticmethod
     @register_warmup
     def warmup(helper: "NumbaWarmupHelper"):
-        """Exercises nb_segment_extract_fields, nb_segment_filter_reversed and nb_filter_segment -
-        the kernels this widget uses that aren't already warmed by NumbaWarmupHelper's other
-        exercise_* methods - using the helper's dummy log_pool/registry instead of standing up
-        a real LogTableStore.
-
-        kv/text are NamedTuples of numpy arrays, and Numba types an array's read-only-ness as
-        part of its signature (see numba-njit skill §3/§9). EMPTY_KV_CONDITIONS/EMPTY_TEXT_SEARCH
-        (ops/kv_filter.py, ops/text_filter.py) are deliberately built from
-        np.frombuffer(b"", ...) rather than np.empty(...) so their buffer fields are already
-        read-only - the same type Numba sees for a real, non-empty query built via
-        build_kv_condition_arrays/build_text_search_arrays. That means the single EMPTY_* combo
-        exercised below covers the "real kv/text present" case too; no need to separately warm
-        every real/empty combination (see numba-njit skill §15). What *does* still need covering
-        per shape below is start_seq/end_seq, crossed with every call shape
-        _fetch_live/_fetch_history actually use."""
+        """Exercises nb_segment_extract_fields - the columnar-extraction kernel unique to this
+        class. segment_filter_reversed/nb_filter_segment (every start_seq/end_seq shape
+        _fetch_live/_fetch_history use) are now warmed once by LogSegmentScanner.warmup
+        (core/log_fetch.py) instead of duplicated here - both callbacks are registered
+        independently and NumbaWarmupHelper.run_all() runs every registered callback, so no
+        explicit ordering/dependency between them is needed."""
         print("[Warmup] LogTableStore ...")
 
         # _format_ts's per-cell-paint kernel - precision=9 alone compiles every branch (branches
@@ -289,8 +286,6 @@ class LogTableStore:
         capacity = 8
         max_msg_bytes = 64
         effective_mask = np.zeros(max(10, helper.registry.module_count()), dtype=dtypes.LEVEL_TYPE)
-        kv = EMPTY_KV_CONDITIONS
-        text = EMPTY_TEXT_SEARCH
 
         with (
             helper.array_pool.create(
@@ -311,45 +306,13 @@ class LogTableStore:
                 if segment.size == 0:
                     continue
 
-                # _fetch_live_full's shape: no start_seq/end_seq.
                 match_count = segment_filter_reversed(
                     segment.bundle,
                     effective_mask=effective_mask,
                     out_indices=indices.array,
                     max_matches=capacity,
-                    kv=kv,
-                    text=text,
-                )
-
-                # _fetch_history's "before" shape: end_seq passed explicitly.
-                segment_filter_reversed(
-                    segment.bundle,
-                    effective_mask=effective_mask,
-                    out_indices=indices.array,
-                    max_matches=capacity,
-                    end_seq=dtypes.SEQ_START,
-                    kv=kv,
-                    text=text,
-                )
-
-                # _fetch_live_incremental's shape: start_seq passed explicitly (no end_seq).
-                segment_filter_reversed(
-                    segment.bundle,
-                    effective_mask=effective_mask,
-                    out_indices=indices.array,
-                    max_matches=capacity,
-                    kv=kv,
-                    text=text,
-                )
-
-                # _fetch_history's "after" shape: nb_filter_segment with start_seq passed explicitly.
-                segment_filter(
-                    segment.bundle,
-                    effective_mask=effective_mask,
-                    out_indices=indices.array,
-                    max_matches=capacity,
-                    kv=kv,
-                    text=text,
+                    kv=EMPTY_KV_CONDITIONS,
+                    text=EMPTY_TEXT_SEARCH,
                 )
 
                 if match_count > 0:
@@ -361,6 +324,7 @@ class LogTableStore:
                         0,
                         max_msg_bytes,
                     )
+                break
                 break
 
         print("[Warmup] LogTableStore ... done")
@@ -504,7 +468,7 @@ class LogTableStore:
             return
         self.mode = LogViewMode.HISTORY
         self.anchor_seq = anchor_seq
-        self._bake_effective_mask()
+        self._scanner.ensure_effective_mask()
         self._fetch_history(anchor_seq)
 
     def clear_logs(self):
@@ -520,72 +484,13 @@ class LogTableStore:
     def reload_and_redraw(self):
         """Forces a re-fetch under the current mode (used when filter settings change - same
         data, different criteria). Stays anchored to the same position in history mode."""
-        self._effective_mask = None
+        self._scanner.invalidate_mask()
         if self.mode == LogViewMode.HISTORY and self.anchor_seq is not None:
-            self._bake_effective_mask()
+            self._scanner.ensure_effective_mask()
             self._fetch_history(self.anchor_seq)
         else:
             self._last_backend_seq = None
             self._fetch_live(force=True)
-
-    # --- Filtering --------------------------------------------------------------------------
-
-    def _bake_effective_mask(self):
-        reg = self.gui_context.id_registry
-        f = self.log_filter
-
-        # _filter_cache legitimately holds None as its steady-state value (no module/device
-        # filter active) - a bare "is None" check can't tell "not yet computed" apart from
-        # "computed, and the answer is None", so it would otherwise re-derive filter_cache (and
-        # discard/rebuild effective_mask below) on every single call whenever no module/device
-        # filter is set, defeating both this cache and the `is`-identity comparisons callers rely
-        # on (e.g. LogTableStore._fetch_live's filter-changed detection) to tell "truly unchanged"
-        # apart from "recomputed to the same value".
-        if self._prev_total_module_count != (mod_count := reg.module_count()) or not self._filter_cache_computed:
-            self._prev_total_module_count = mod_count
-            self._filter_cache_computed = True
-            self._effective_mask = None
-
-            if m := f.filtered_module:
-                t_list = (
-                    reg.get_descendant_ids(m.id)
-                    if f.filtered_module_children
-                    else np.array([m.id], dtype=dtypes.ID_TYPE)
-                )
-            elif dev := f.allowed_device:
-                t_list = f.allowed_device.get_all_module_ids()
-            else:
-                t_list = None
-
-            self._filter_cache = t_list
-
-        if self._effective_mask is None or len(self._effective_mask) < mod_count:
-            filter_enabled, sidebar_mask = self.filter_sidebar.get_filter()
-            global_threshold = dtypes.LEVEL_TYPE(f.log_level.value)
-
-            if filter_enabled:
-                mask_to_use = sidebar_mask[:mod_count] if len(sidebar_mask) >= mod_count else sidebar_mask
-                raw_effective = np.maximum(mask_to_use, global_threshold)
-                if self._filter_cache is not None:
-                    self._effective_mask = np.full(mod_count, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
-                    self._effective_mask[self._filter_cache] = raw_effective[self._filter_cache]
-                else:
-                    self._effective_mask = raw_effective
-            else:
-                show_hidden = self.filter_sidebar.action_show_non_essential.isChecked()
-
-                if show_hidden:
-                    self._effective_mask = np.full(mod_count, global_threshold, dtype=dtypes.LEVEL_TYPE)
-                else:
-                    essential_mask = reg._essential_array[:mod_count]
-                    self._effective_mask = np.where(essential_mask, global_threshold, LogLevel.OFF.value).astype(
-                        dtypes.LEVEL_TYPE
-                    )
-
-                if self._filter_cache is not None:
-                    mask = np.full(mod_count, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
-                    mask[self._filter_cache] = self._effective_mask[self._filter_cache]
-                    self._effective_mask = mask
 
     # --- LIVE mode fetch --------------------------------------------------------------------
 
@@ -633,7 +538,7 @@ class LogTableStore:
             return  # Nothing new in the backend since the last fetch - skip entirely.
 
         self.filter_sidebar.sync_modules()
-        self._bake_effective_mask()
+        self._scanner.ensure_effective_mask()
         kv = self.log_filter.bake_kv_arrays()
         text = self.log_filter.bake_text_search()
 
@@ -644,71 +549,45 @@ class LogTableStore:
         # them, so they can't be carried forward. Otherwise, the incremental path is strictly
         # cheaper and correct: it only has to look at rows added since self._last_backend_seq.
         filter_changed = (
-            self._prev_fetch_mask is not self._effective_mask
+            self._prev_fetch_mask is not self._scanner.effective_mask
             or self._prev_fetch_kv is not kv
             or self._prev_fetch_text is not text
         )
 
         if force or self._last_backend_seq is None or filter_changed:
             self.last_fetch_changed = True
-            self._fetch_live_full(pool, kv, text)
+            self._fetch_live_full()
         else:
-            self._fetch_live_incremental(pool, kv, text)
+            self._fetch_live_incremental()
 
         self._last_backend_seq = current_backend_seq
-        self._prev_fetch_mask = self._effective_mask
+        self._prev_fetch_mask = self._scanner.effective_mask
         self._prev_fetch_kv = kv
         self._prev_fetch_text = text
 
-    def _fetch_live_full(self, pool, kv, text):
+    def _fetch_live_full(self):
         """Full backward rescan across the entire backend, capped at viewport_rows matches -
         the only correct option when there's no valid "previous fetch" to carry forward from
-        (first fetch, forced refetch, or the filter itself changed)."""
+        (first fetch, forced refetch, or the filter itself changed). Delegates segment iteration
+        to LogSegmentScanner.scan_tail (start_seq=SEQ_NONE - unbounded, matching this method's
+        original "scan every segment, no watermark" loop)."""
         inactive_idx = 1 - self._active
         inactive = self._batches[inactive_idx]
 
-        limit = self.viewport_rows
         write_cursor = self.capacity
-        total_new = 0
-        segment_count = 0
+
+        def _consume(segment, indices_array, match_count):
+            nonlocal write_cursor
+            write_cursor -= match_count
+            nb_segment_extract_fields(
+                segment.bundle, indices_array, match_count, inactive.bundle, write_cursor, MAX_MSG_BYTES
+            )
 
         t_start = time_ns()
+        result = self._scanner.scan_tail(start_seq=SEQ_NONE, max_rows=self.viewport_rows, consume=_consume)
+        total_new = result.total_new_rows
 
-        with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
-            for segment in segments:
-                if segment.size == 0:
-                    continue
-
-                allowed = limit - total_new
-                if allowed <= 0:
-                    break
-
-                segment_count += 1
-
-                match_count = segment_filter_reversed(
-                    segment.bundle,
-                    effective_mask=self._effective_mask,
-                    out_indices=indices.array,
-                    max_matches=allowed,
-                    kv=kv,
-                    text=text,
-                )
-
-                if match_count > 0:
-                    write_cursor -= match_count
-                    nb_segment_extract_fields(
-                        segment.bundle,
-                        indices.array,
-                        match_count,
-                        inactive.bundle,
-                        write_cursor,
-                        MAX_MSG_BYTES,
-                    )
-                    total_new += match_count
-
-        self.logger_fetch.debug(
-            f"live full {(time_ns() - t_start) / 1_000_000:.3f} ms | segments={segment_count} rows={total_new}"
-        )
+        self.logger_fetch.debug(f"live full {(time_ns() - t_start) / 1_000_000:.3f} ms | rows={total_new}")
 
         self._buf_valid_start[inactive_idx] = write_cursor
         self._buf_row_count[inactive_idx] = total_new
@@ -717,7 +596,7 @@ class LogTableStore:
         self._message_cache = [None] * self.capacity
         self.last_fetch_new_rows = total_new
 
-    def _fetch_live_incremental(self, pool, kv, text):
+    def _fetch_live_incremental(self):
         """Backward-scans only rows newer than self._last_backend_seq (bounded via the same
         start_seq mechanism _fetch_history's "before" scan uses), then carries forward the
         currently-active buffer's own newest rows to fill out whatever's left of the viewport -
@@ -738,55 +617,24 @@ class LogTableStore:
         start_seq = self._last_backend_seq
 
         write_cursor = self.capacity
-        total_new = 0
-        segment_count = 0
+
+        def _consume(segment, indices_array, match_count):
+            nonlocal write_cursor
+            write_cursor -= match_count
+            nb_segment_extract_fields(
+                segment.bundle, indices_array, match_count, inactive.bundle, write_cursor, MAX_MSG_BYTES
+            )
 
         t_start = time_ns()
-        t_total_fetch = 0
-        # Identical to _fetch_live_full's scan/extract loop, just bounded by start_seq so it only
-        # ever looks at rows added since the last fetch - segments whose newest row is <=
-        # start_seq are skipped in O(log segment_size) by the kernel's own binary search.
-        with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
-            for segment in segments:
-                if segment.size == 0:
-                    continue
-
-                allowed = limit - total_new
-                if allowed <= 0:
-                    break
-
-                segment_count += 1
-                fetch_start = time_ns()
-                match_count = segment_filter_reversed(
-                    segment.bundle,
-                    effective_mask=self._effective_mask,
-                    out_indices=indices.array,
-                    max_matches=allowed,
-                    start_seq=start_seq,
-                    kv=kv,
-                    text=text,
-                )
-
-                t_total_fetch += time_ns() - fetch_start
-
-                if match_count > 0:
-                    write_cursor -= match_count
-                    nb_segment_extract_fields(
-                        segment.bundle,
-                        indices.array,
-                        match_count,
-                        inactive.bundle,
-                        write_cursor,
-                        MAX_MSG_BYTES,
-                    )
-                    total_new += match_count
+        result = self._scanner.scan_tail(start_seq=start_seq, max_rows=limit, consume=_consume)
+        total_new = result.total_new_rows
 
         if total_new == 0:
             # Nothing actually matched since the last fetch (the backend sequence advanced but
             # no new row passed the filter) - the active buffer's content is still exactly
             # correct, so skip the flip entirely rather than doing a no-op buffer swap.
             # last_fetch_changed stays False - the widget won't bother repainting.
-            self.logger_fetch.debug("live incr 0.000 ms | segments=0 new=0 carried=0 (skipped)")
+            self.logger_fetch.debug("live incr 0.000 ms | new=0 carried=0 (skipped)")
             return
 
         self.last_fetch_changed = True
@@ -827,8 +675,7 @@ class LogTableStore:
             new_cache[valid_start : valid_start + carry_count] = old_cache[src_lo : src_lo + carry_count]
 
         self.logger_fetch.debug(
-            f"live incr {(time_ns() - t_start) / 1_000_000:.3f} ms | segments={segment_count} "
-            f"new={total_new} carried={carry_count} fetch={t_total_fetch / 1000000}"
+            f"live incr {(time_ns() - t_start) / 1_000_000:.3f} ms | new={total_new} carried={carry_count}"
         )
 
         self._active = inactive_idx
@@ -841,90 +688,40 @@ class LogTableStore:
     # --- HISTORY mode fetch -------------------------------------------------------------------
 
     def _fetch_history(self, anchor_seq: int):
-        pool = self.gui_context.registry.central.log_pool
         boundary = self.HISTORY_BEFORE  # fixed split point between the "before" and "after" regions
-        kv = self.log_filter.bake_kv_arrays()
-        text = self.log_filter.bake_text_search()
         active_bundle = self._batches[self._active].bundle
 
-        before_count = 0
-        after_count = 0
+        # "Before"/"after" write cursors move in opposite directions (right-to-left / left-to-
+        # right around the fixed boundary) - same "fill from the right end inward" trick used
+        # elsewhere so multi-segment results land in order with no copying.
+        write_cursor_before = boundary
+
+        def _consume_before(segment, indices_array, match_count):
+            nonlocal write_cursor_before
+            write_cursor_before -= match_count
+            nb_segment_extract_fields(
+                segment.bundle, indices_array, match_count, active_bundle, write_cursor_before, MAX_MSG_BYTES
+            )
+
+        write_cursor_after = boundary
+
+        def _consume_after(segment, indices_array, match_count):
+            nonlocal write_cursor_after
+            nb_segment_extract_fields(
+                segment.bundle, indices_array, match_count, active_bundle, write_cursor_after, MAX_MSG_BYTES
+            )
+            write_cursor_after += match_count
 
         t_start = time_ns()
-
-        # "Before" set: matches with seq <= anchor_seq - 1, closest to the anchor first, scanning
-        # newest-to-oldest and writing right-aligned into [0:boundary) - same "fill from the right
-        # end inward" trick used elsewhere so multi-segment results land in order with no copying.
-        if anchor_seq is not None and anchor_seq > dtypes.SEQ_START:
-            write_cursor = boundary
-            with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
-                for segment in segments:
-                    if segment.size == 0:
-                        continue
-
-                    allowed = self.HISTORY_BEFORE - before_count
-                    if allowed <= 0:
-                        break
-
-                    match_count = segment_filter_reversed(
-                        segment.bundle,
-                        effective_mask=self._effective_mask,
-                        out_indices=indices.array,
-                        max_matches=allowed,
-                        end_seq=anchor_seq - 1,
-                        kv=kv,
-                        text=text,
-                    )
-
-                    if match_count > 0:
-                        write_cursor -= match_count
-                        nb_segment_extract_fields(
-                            segment.bundle,
-                            indices.array,
-                            match_count,
-                            active_bundle,
-                            write_cursor,
-                            MAX_MSG_BYTES,
-                        )
-                        before_count += match_count
-
-        # "After" set: matches with seq >= anchor_seq, ascending, scanning oldest-to-newest and
-        # writing left-aligned starting at the fixed boundary.
-        start_seq_lower_bound = (
-            dtypes.SEQ_NONE if anchor_seq is None or anchor_seq <= dtypes.SEQ_START else anchor_seq - 1
+        result = self._scanner.scan_history_window(
+            anchor_seq=anchor_seq,
+            before_cap=self.HISTORY_BEFORE,
+            after_cap=self.HISTORY_AFTER,
+            consume_before=_consume_before,
+            consume_after=_consume_after,
         )
-
-        write_cursor = boundary
-        with pool.get_snapshot() as segments, pool.acquire_indices_buffer() as indices:
-            for segment in segments:
-                if segment.size == 0:
-                    continue
-
-                allowed = self.HISTORY_AFTER - after_count
-                if allowed <= 0:
-                    break
-
-                match_count = segment_filter(
-                    segment.bundle,
-                    effective_mask=self._effective_mask,
-                    out_indices=indices.array,
-                    max_matches=allowed,
-                    start_seq=start_seq_lower_bound,
-                    kv=kv,
-                    text=text,
-                )
-
-                if match_count > 0:
-                    nb_segment_extract_fields(
-                        segment.bundle,
-                        indices.array,
-                        match_count,
-                        active_bundle,
-                        write_cursor,
-                        MAX_MSG_BYTES,
-                    )
-                    write_cursor += match_count
-                    after_count += match_count
+        before_count = result.before_count
+        after_count = result.after_count
 
         self.logger_fetch.debug(
             f"history {(time_ns() - t_start) / 1_000_000:.3f} ms | before={before_count} after={after_count}"

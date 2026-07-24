@@ -13,7 +13,8 @@ stand-in object exposing only the attributes/methods that branch actually touche
 
 from types import SimpleNamespace
 
-from blinkview.ui.widgets.log_viewer import LogViewerWidget, LogViewMode
+from blinkview.ui.widgets.log_view_mode import LogViewMode
+from blinkview.ui.widgets.log_viewer import LogViewerWidget
 
 
 class FakeScrollbar:

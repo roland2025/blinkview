@@ -126,7 +126,7 @@ addopts = "-ra --showlocals --strict-markers -m \"not memory\""
 testpaths = [
     "tests",
 ]
-pythonpath = ["src"] # Ensures pytest can find your `blinkview` source code
+pythonpath = ["src", "."] # Ensures pytest can find `blinkview` source and the `tests` package
 markers = [
     "memory: measures process-level memory footprint; only meaningful run standalone (pytest -m memory tests/test_registry_memory.py), since pytest imports every test module during collection regardless of execution order, which inflates the reading when run alongside the rest of the suite.",
 ]

@@ -125,15 +125,23 @@ def nb_extract_telemetry_segment_to_end(
     out_values: np.ndarray,  # Full max_points size
     temp_floats: np.ndarray,
     write_idx: int,  # Starting write position (moves backward)
+    effective_mask: np.ndarray,
 ) -> int:
     """
     Fills arrays from write_idx backwards.
     Returns the updated write_idx.
+
+    effective_mask is the same per-module level threshold ops/segments.py's
+    segment_filter/segment_filter_reversed use (row kept iff levels[i] >= effective_mask[modules[i]])
+    - lets a caller exclude rows a log-view filter would also exclude, on top of the existing
+    exact target_module match. A permissive all-zero mask (dtypes.LEVEL_TYPE(0), the lowest
+    threshold) admits every level, reproducing this kernel's original module-only behavior.
     """
     # Metadata for the segment
     count = segment.size[0]
     timestamps = segment.timestamps
     modules = segment.modules
+    levels = segment.levels
     seqs = segment.sequences
     msg_offsets = segment.offsets
     msg_lens = segment.lengths
@@ -151,6 +159,9 @@ def nb_extract_telemetry_segment_to_end(
             break
 
         if modules[i] != target_module:
+            continue
+
+        if levels[i] < effective_mask[modules[i]]:
             continue
 
         # Extract telemetry
@@ -183,6 +194,7 @@ def nb_extract_telemetry_segment_window_backward(
     out_values: np.ndarray,
     temp_floats: np.ndarray,
     write_idx: int,  # Starting write position (moves backward)
+    effective_mask: np.ndarray,
 ) -> int:
     """
     Playback-scrub counterpart to nb_extract_telemetry_segment_to_end: instead of stopping at a
@@ -192,10 +204,13 @@ def nb_extract_telemetry_segment_window_backward(
     writing backward from write_idx - same "moves left" convention as
     nb_extract_telemetry_segment_to_end, so a caller can chain multiple segments' calls together
     without a merge/sort step.
+
+    effective_mask - see nb_extract_telemetry_segment_to_end's docstring.
     """
     count = segment.size[0]
     timestamps = segment.timestamps
     modules = segment.modules
+    levels = segment.levels
     msg_offsets = segment.offsets
     msg_lens = segment.lengths
     msg_buffer = segment.buffer
@@ -221,6 +236,9 @@ def nb_extract_telemetry_segment_window_backward(
             break
 
         if modules[i] != target_module:
+            continue
+
+        if levels[i] < effective_mask[modules[i]]:
             continue
 
         offset = msg_offsets[i]
@@ -250,6 +268,7 @@ def nb_extract_telemetry_segment_window_forward(
     out_values: np.ndarray,
     temp_floats: np.ndarray,
     write_idx: int,  # Starting write position (moves forward)
+    effective_mask: np.ndarray,
 ) -> int:
     """
     Forward-direction counterpart to nb_extract_telemetry_segment_window_backward, for the
@@ -258,10 +277,13 @@ def nb_extract_telemetry_segment_window_forward(
     backward+forward output lands pre-sorted ascending with no merge step, mirroring how
     _fetch_history_window (log_viewer.py) pairs a reversed "before" scan with a forward
     "after" scan.
+
+    effective_mask - see nb_extract_telemetry_segment_to_end's docstring.
     """
     count = segment.size[0]
     timestamps = segment.timestamps
     modules = segment.modules
+    levels = segment.levels
     msg_offsets = segment.offsets
     msg_lens = segment.lengths
     msg_buffer = segment.buffer
@@ -288,6 +310,9 @@ def nb_extract_telemetry_segment_window_forward(
             break
 
         if modules[i] != target_module:
+            continue
+
+        if levels[i] < effective_mask[modules[i]]:
             continue
 
         offset = msg_offsets[i]

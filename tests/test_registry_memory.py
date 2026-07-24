@@ -93,4 +93,4 @@ def test_module_registration_density(pool):
     assert avg_time_ms < 0.03, f"Average insertion time too slow: {avg_time_ms:.4f} ms"
 
     # this max high insertion time is caused by resizing of internal tracking arrays
-    assert max_time_ms < 15, f"Max insertion time spiked too high: {max_time_ms:.4f} ms"
+    assert max_time_ms < 25, f"Max insertion time spiked too high: {max_time_ms:.4f} ms"

@@ -117,4 +117,8 @@ class TaskManager:
             self._running = False
             self._condition.notify()  # Instantly wake the scheduler so it can exit
 
+        # Wait for the scheduler thread to actually exit before shutting down the executor -
+        # otherwise it can race a pending dispatch pass and call executor.submit() after
+        # executor.shutdown() has already run, raising "cannot schedule new futures after shutdown".
+        self._scheduler_thread.join()
         self.executor.shutdown(wait=wait)

@@ -35,6 +35,8 @@ def test_replay_mode_builds_but_does_not_start_sources_and_pipelines(tmp_path):
     central_start.assert_called_once()
     reorder_start.assert_called_once()
 
+    registry.stop()
+
 
 def test_non_replay_mode_starts_sources_and_pipelines(tmp_path):
     """Control case: outside replay mode, sources/pipelines start exactly as before."""
@@ -57,3 +59,4 @@ def test_non_replay_mode_starts_sources_and_pipelines(tmp_path):
     reorder_start.assert_called_once()
 
     registry.central.file_logger.stop()
+    registry.stop()

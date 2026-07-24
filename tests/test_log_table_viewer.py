@@ -12,6 +12,7 @@ from blinkview.core.logger import PrintLogger
 from blinkview.core.module_snapshot import MAX_MSG_BYTES
 from blinkview.core.types.log_batch import LogBundle
 from blinkview.ui.widgets.log_table_viewer import LogTableCanvas, LogTableCol, LogTableStore, _COLUMN_LABELS
+from blinkview.ui.widgets.log_view_mode import LogViewMode
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
 
@@ -69,6 +70,7 @@ class FakeSegment:
     def __init__(self, bundle):
         self.bundle = bundle
         self.size = int(bundle.size[0])
+        self.last_sequence_id = int(bundle.sequences[-1]) if self.size else 0
 
 
 class FakeIndicesHandle:
@@ -178,7 +180,7 @@ def test_rowcount_columncount_empty(model):
 
 
 def test_starts_in_live_mode(model):
-    assert model.mode == "live"
+    assert model.mode == LogViewMode.LIVE
     assert model.anchor_seq is None
 
 
@@ -289,7 +291,7 @@ def test_seq_for_row_and_row_for_seq_round_trip(model):
 def test_clear_logs_resets_state_and_returns_to_live_mode(model, gui_context):
     model.row_count = 2
     _populate_row(model, 0, ts=0, dev_id=0, level=0, mod_id=0, seq=1, message="a")
-    model.mode = "history"
+    model.mode = LogViewMode.HISTORY
     model.anchor_seq = 5
     gui_context.registry.central.log_pool._latest_seq = 42
 
@@ -299,7 +301,7 @@ def test_clear_logs_resets_state_and_returns_to_live_mode(model, gui_context):
     assert model._message_cache[0] is None
     assert model._last_backend_seq == 42
     assert model._valid_start == model.capacity
-    assert model.mode == "live"
+    assert model.mode == LogViewMode.LIVE
     assert model.anchor_seq is None
 
 
@@ -333,7 +335,7 @@ class TestLiveMode:
         assert model.row_count == 123  # untouched: backend sequence didn't change, so no rebuild ran
 
     def test_apply_updates_ignored_in_history_mode(self, model, gui_context):
-        model.mode = "history"
+        model.mode = LogViewMode.HISTORY
         gui_context.registry.central.log_pool._latest_seq = 99
         model.row_count = 7
 
@@ -629,11 +631,11 @@ class TestLiveMode:
         model.apply_updates()  # primes the active buffer via the full-rescan (first-fetch) path
         assert model.row_count == model.viewport_rows
 
-        import blinkview.ui.widgets.log_table_viewer as log_table_viewer_module
+        import blinkview.core.log_fetch as log_fetch_module
         from blinkview.core.dtypes import SEQ_NONE
 
-        reversed_spy = MagicMock(wraps=log_table_viewer_module.segment_filter_reversed)
-        monkeypatch.setattr(log_table_viewer_module, "segment_filter_reversed", reversed_spy)
+        reversed_spy = MagicMock(wraps=log_fetch_module.segment_filter_reversed)
+        monkeypatch.setattr(log_fetch_module, "segment_filter_reversed", reversed_spy)
 
         # Only two new rows arrive - a "device mostly quiet" tick. Mirrors real segment growth
         # (the same active segment gains rows in place) rather than a brand-new segment.
@@ -729,10 +731,10 @@ class TestLiveMode:
         model.apply_updates()
         assert model.row_count == 3
 
-        import blinkview.ui.widgets.log_table_viewer as log_table_viewer_module
+        import blinkview.core.log_fetch as log_fetch_module
 
-        reversed_spy = MagicMock(wraps=log_table_viewer_module.segment_filter_reversed)
-        monkeypatch.setattr(log_table_viewer_module, "segment_filter_reversed", reversed_spy)
+        reversed_spy = MagicMock(wraps=log_fetch_module.segment_filter_reversed)
+        monkeypatch.setattr(log_fetch_module, "segment_filter_reversed", reversed_spy)
 
         model.log_filter.set_text_filter("connection")
         model.reload_and_redraw()
@@ -866,7 +868,7 @@ class TestHistoryMode:
 
         model.enter_history_mode(anchor_seq=10)
 
-        assert model.mode == "history"
+        assert model.mode == LogViewMode.HISTORY
         assert model.row_count == 20  # small backend: entire history fits in the before+after window
         # Rows should be in ascending chronological order (message m0..m19 for seq 1..20).
         first_msg = model.get_cell(0, LogTableCol.MESSAGE)
@@ -881,7 +883,7 @@ class TestHistoryMode:
 
         model.enter_history_mode(anchor_seq=1)
 
-        assert model.mode == "history"
+        assert model.mode == LogViewMode.HISTORY
         # Nothing exists before sequence 1, so the window should start exactly at the anchor.
         assert model.seq_for_row(0) == 1
 
@@ -904,7 +906,7 @@ class TestHistoryMode:
         model.log_filter.set_kv_filter("status=ok")
         model.enter_history_mode(anchor_seq=10)
 
-        assert model.mode == "history"
+        assert model.mode == LogViewMode.HISTORY
         assert model.row_count == 10  # only the even-indexed (status=ok) rows survive
         for row in range(model.row_count):
             assert "status=ok" in model.get_cell(row, LogTableCol.MESSAGE)
@@ -928,7 +930,7 @@ class TestHistoryMode:
         model.log_filter.set_text_filter("needle")
         model.enter_history_mode(anchor_seq=10)
 
-        assert model.mode == "history"
+        assert model.mode == LogViewMode.HISTORY
         assert model.row_count == 10  # only the even-indexed ("needle") rows survive
         for row in range(model.row_count):
             assert model.get_cell(row, LogTableCol.MESSAGE) == "needle"
@@ -939,11 +941,11 @@ class TestHistoryMode:
         self._make_pool(gui_context, device, module, count=5)
 
         model.enter_history_mode(anchor_seq=3)
-        assert model.mode == "history"
+        assert model.mode == LogViewMode.HISTORY
 
         model.enter_live_mode()
 
-        assert model.mode == "live"
+        assert model.mode == LogViewMode.LIVE
         assert model.anchor_seq is None
         assert model.row_count == 5  # small backend: live view shows everything that exists
 
@@ -1007,7 +1009,7 @@ class TestLogTableCanvas:
                 pass
 
         canvas = self._make_canvas(model, gui_context, [(1, "first")])
-        model.mode = "live"
+        model.mode = LogViewMode.LIVE
         triggered = []
         canvas.on_wheel_up_while_live = lambda: triggered.append(True)
 

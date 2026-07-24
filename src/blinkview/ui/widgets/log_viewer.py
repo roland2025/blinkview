@@ -6,41 +6,26 @@
 
 
 from collections import deque
-from enum import Enum
-from typing import TYPE_CHECKING
 
-import numpy as np
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtGui import QAction
 from qtpy.QtWidgets import QComboBox, QLineEdit, QSizePolicy, QSplitter, QToolBar, QVBoxLayout, QWidget
 
-from blinkview.core import dtypes
 from blinkview.core.dtypes import SEQ_NONE
+from blinkview.core.log_fetch import LogSegmentScanner, LogTextFetcher
 from blinkview.core.playback_clock import PlaybackMode
 from blinkview.core.types.formatting import FormattingConfig
-from blinkview.core.warmup_registry import register_warmup
-from blinkview.ops.formatting import nb_segment_estimate_out_size, nb_segment_format
-from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
-from blinkview.ops.segments import segment_filter, segment_filter_reversed
-from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
 from blinkview.ui.widgets.kv_filter_line_edit import KvFilterLineEdit
 from blinkview.ui.widgets.log_highlighter import LogHighlighter
+from blinkview.ui.widgets.log_view_mode import LogViewMode
 from blinkview.ui.widgets.module_filter_sidebar import ModuleFilterSidebar
 from blinkview.ui.widgets.searchable_log_area import SearchableLogArea
 from blinkview.ui.widgets.telemetry_table import TelemetryTable
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
 from blinkview.utils.utc_offset import get_local_utc_offset_seconds
-
-if TYPE_CHECKING:
-    from blinkview.core.warmup import NumbaWarmupHelper
-
-
-class LogViewMode(Enum):
-    LIVE = "live"
-    HISTORY = "history"
 
 
 class LogViewerWidget(QWidget):
@@ -116,7 +101,6 @@ QToolButton[filterEnabled="true"] {
         self.logger = gui_context.logger.child("log_viewer")
 
         self.latest_seq_manual = SEQ_NONE
-        self.latest_seq_seen = SEQ_NONE
 
         self.prev_apply = 0  # Timestamp of the last apply_updates call for throttling
         self.prev_history_poll = 0  # Timestamp of the last history-mode tail poll, same throttle window
@@ -317,10 +301,6 @@ QToolButton[filterEnabled="true"] {
         self.splitter = QSplitter(Qt.Horizontal, self)
         self.layout.addWidget(self.splitter)
 
-        self._prev_total_module_count = None
-        self._filter_cache = None  # Allowed IDs for this tab
-        self._effective_mask = None  # The final baked Numba mask
-
         self.log_filter = LogFilter(
             self.gui_context.id_registry,
             self.allowed_device,
@@ -336,6 +316,19 @@ QToolButton[filterEnabled="true"] {
 
         self.filter_sidebar = ModuleFilterSidebar(
             gui_context=self.gui_context, target_filter=self.log_filter, parent=self, show_hidden=self.show_hidden
+        )
+
+        self._scanner = LogSegmentScanner(
+            self.gui_context.id_registry,
+            lambda: self.gui_context.registry.central.log_pool,
+            self.log_filter,
+            get_sidebar_filter=self.filter_sidebar.get_filter,
+            get_show_hidden=self.filter_sidebar.action_show_non_essential.isChecked,
+        )
+        self._fetcher = LogTextFetcher(
+            self._scanner,
+            self.gui_context.registry.system_ctx.array_pool,
+            tables_provider=self.gui_context.id_registry.bundle,
         )
 
         self.filter_sidebar.restore_state(self.filter_sidebar_state)
@@ -488,7 +481,7 @@ QToolButton[filterEnabled="true"] {
         level_identity = self.level_combo.itemData(index)
         self.log_filter.set_level(level_identity.name_conf)
 
-        self._effective_mask = None  # Invalidate cache
+        self._scanner.invalidate_mask()
 
         self._refresh_view()
 
@@ -571,7 +564,7 @@ QToolButton[filterEnabled="true"] {
             button.style().polish(button)
             button.update()
 
-        self._effective_mask = None  # Invalidate cache
+        self._scanner.invalidate_mask()
 
     def _toggle_module_filter(self, checked):
         """Toggles the visibility of the surgical Module Filter sidebar."""
@@ -607,71 +600,9 @@ QToolButton[filterEnabled="true"] {
 
     def reload_and_redraw(self):
         """Public method to clear current logs and reload from the source with current filters."""
-        self._effective_mask = None  # Invalidate cache
+        self._scanner.invalidate_mask()
 
         self._refresh_view()
-
-    def _ensure_effective_mask(self):
-        """Bakes self._effective_mask/self._filter_cache from the current module registry and
-        filter sidebar state. Shared by apply_updates' per-tick live fetch and
-        _fetch_history_window's static window fetch so both see identical filtering."""
-        reg = self.gui_context.id_registry
-        f = self.log_filter
-
-        if self._prev_total_module_count != (mod_count := reg.module_count()) or self._filter_cache is None:
-            self._prev_total_module_count = mod_count
-            self._effective_mask = None  # Registry grew, invalidate the mask
-
-            if m := f.filtered_module:
-                t_list = (
-                    reg.get_descendant_ids(m.id)
-                    if f.filtered_module_children
-                    else np.array([m.id], dtype=dtypes.ID_TYPE)
-                )
-            elif dev := f.allowed_device:
-                # Tab is restricted to a device (No specific module)
-                t_list = f.allowed_device.get_all_module_ids()
-            else:
-                # Global 'All Logs' view
-                t_list = None
-
-            self._filter_cache = t_list
-
-        # --- Bake Effective Mask (ONLY IF INVALID) ---
-        if self._effective_mask is None or len(self._effective_mask) < mod_count:
-            filter_enabled, sidebar_mask = self.filter_sidebar.get_filter()
-            global_threshold = dtypes.LEVEL_TYPE(f.log_level.value)
-
-            if filter_enabled:
-                # Path 1: Surgical Mode
-                mask_to_use = sidebar_mask[:mod_count] if len(sidebar_mask) >= mod_count else sidebar_mask
-                raw_effective = np.maximum(mask_to_use, global_threshold)
-                if self._filter_cache is not None:
-                    self._effective_mask = np.full(mod_count, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
-                    self._effective_mask[self._filter_cache] = raw_effective[self._filter_cache]
-                else:
-                    self._effective_mask = raw_effective
-            else:
-                # Path 2: Tab Fallback Mode
-                show_hidden = self.filter_sidebar.action_show_non_essential.isChecked()
-
-                if show_hidden:
-                    # Show everything up to the global threshold
-                    self._effective_mask = np.full(mod_count, global_threshold, dtype=dtypes.LEVEL_TYPE)
-                else:
-                    essential_mask = reg._essential_array[:mod_count]
-                    # Apply threshold only to essential modules
-                    self._effective_mask = np.where(essential_mask, global_threshold, LogLevel.OFF.value).astype(
-                        dtypes.LEVEL_TYPE
-                    )
-
-                if self._filter_cache is not None:
-                    # Constrain to the tab's allowed cache
-                    mask = np.full(mod_count, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
-                    mask[self._filter_cache] = self._effective_mask[self._filter_cache]
-                    self._effective_mask = mask
-
-        return mod_count
 
     def _clock(self):
         """Read-only access to the global registry.playback_clock. Only PlaybackControlWidget
@@ -706,7 +637,9 @@ QToolButton[filterEnabled="true"] {
         # it's playing back, throttled on the same cadence as the live tail fetch below. This is
         # level- not edge-triggered so a tab opened after REPLAY already started still picks it
         # up on its next tick, rather than only reacting to a LIVE->REPLAY transition it missed.
-        following = clock is not None and clock.mode is PlaybackMode.REPLAY and self.follow_playback and not self.is_paused
+        following = (
+            clock is not None and clock.mode is PlaybackMode.REPLAY and self.follow_playback and not self.is_paused
+        )
         if following:
             if t_start - self.prev_apply < 100_000_000:
                 return
@@ -743,39 +676,14 @@ QToolButton[filterEnabled="true"] {
                 self._poll_history_tail()
             return
 
-        import time  # Ensure this is imported at the top of your file ideally
-
-        time_ns = time.time_ns
-
-        t_start_total = time_ns()
-
         if t_start - self.prev_apply < 100_000_000:
             return
 
-        # 1. Profile Sidebar Sync
-        t_sidebar_start = time_ns()
         self.filter_sidebar.sync_modules()
-        t_sidebar_end = time_ns()
-        # self.logger.debug(f"[Profile] sync_modules: {(t_sidebar_end - t_sidebar_start) / 1_000_000:.3f} ms")
 
         self.prev_apply = t_start
 
-        array_pool = self.gui_context.registry.system_ctx.array_pool
-        f = self.log_filter
-        reg = self.gui_context.id_registry
-        pool = self.gui_context.registry.central.log_pool
-
         tz_offset_sec = get_local_utc_offset_seconds()
-
-        self._ensure_effective_mask()
-
-        total_new_rows = 0
-        string_batches = []
-        # Sequence ids for each matched row, in the same per-segment chunking as string_batches,
-        # so self._live_seqs can be kept aligned 1:1 with the text area's blocks (see class
-        # docstring above) - lets history mode anchor on the exact row the user was looking at
-        # without SearchableLogArea needing to track any per-line metadata itself.
-        seq_batches = []
         format_cfg = FormattingConfig(
             self.show_ts,
             self.show_dev,
@@ -786,126 +694,32 @@ QToolButton[filterEnabled="true"] {
             show_rx_ts=self.show_rx_ts,
         )
 
-        reached_live_edge = True
-
-        # Track the absolute newest sequence we evaluate so we can "jump" the backlog
-        highest_seq_seen_this_tick = self.latest_seq_seen
-        first_segment = True
-
-        kv = f.bake_kv_arrays()
-        text = f.bake_text_search()
-
-        # filter_debug = self.logger.child("filter").debug
-        # estimate_debug = self.logger.child("estimate").debug
-        # format_debug = self.logger.child("format").debug
-
-        reg_bundle = reg.bundle()
-        # 4. Profile Segment Filtering & Formatting (REVERSED)
-        t_segments_start = time.time_ns()
-        with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
-            for segment in segments:
-                segment_last_sequence_id = segment.last_sequence_id
-
-                # Because we are iterating backwards (newest to oldest segments),
-                # if a segment's LAST sequence is <= our tracker, ALL remaining segments
-                # are guaranteed to be older. We can safely abort the loop entirely.
-                if segment.size == 0 or segment_last_sequence_id <= self.latest_seq_seen:
-                    break
-
-                if first_segment:
-                    highest_seq_seen_this_tick = segment_last_sequence_id
-                    first_segment = False
-
-                allowed_matches = self.max_rows - total_new_rows
-                # t_filter_start = time_ns()
-                match_count = segment_filter_reversed(
-                    segment.bundle,
-                    effective_mask=self._effective_mask,
-                    out_indices=indices.array,
-                    max_matches=allowed_matches,
-                    start_seq=self.latest_seq_seen,
-                    kv=kv,
-                    text=text,
-                )
-                # t_step = time_ns()
-                #
-                # filter_debug(str(t_step - t_filter_start))
-
-                if match_count > 0:
-                    # t_estimate_start = time_ns()
-                    req_bytes = nb_segment_estimate_out_size(
-                        indices.array, match_count, segment.bundle, reg_bundle, format_cfg
-                    )
-
-                    # t_step = time_ns()
-                    # estimate_debug(str(t_step - t_estimate_start))
-
-                    with array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
-                        # t_format_start = time_ns()
-                        bytes_written = nb_segment_format(
-                            handle.array,
-                            indices.array,
-                            match_count,
-                            segment.bundle,
-                            reg_bundle,
-                            format_cfg,
-                            tz_offset_sec,
-                        )
-
-                        # format_debug(str(time_ns() - t_format_start))
-                        decoded_str = handle.array[:bytes_written].tobytes().decode("utf-8", errors="replace")
-                        string_batches.append(decoded_str)
-
-                    # indices.array is a pooled buffer reused next iteration, so copy the matched
-                    # rows' sequence ids out now rather than keeping a view into it.
-                    seq_batches.append(segment.bundle.sequences[indices.array[:match_count]].copy())
-
-                    total_new_rows += match_count
-
-                if total_new_rows >= self.max_rows:
-                    reached_live_edge = False
-                    break
-        t_segments_end = time.time_ns()
-
-        # Update tracker to the absolute newest log evaluated to drop the unprocessed backlog
-        self.latest_seq_seen = max(self.latest_seq_seen, highest_seq_seen_this_tick)
-
-        # if total_new_rows > 0:
+        result = self._fetcher.fetch_live_tail(
+            max_rows=self.max_rows, format_cfg=format_cfg, tz_offset_sec=tz_offset_sec
+        )
 
         # Catch-up logic ...
         was_catching_up = self._is_catching_up
-        if self._is_catching_up and reached_live_edge:
+        if self._is_catching_up and result.reached_live_edge:
             self._is_catching_up = False
 
-        if total_new_rows > 0:
+        if result.total_new_rows > 0:
             if was_catching_up:
                 is_clogged = False
                 self.velocity_tracker.reset()
             else:
-                is_clogged = self.velocity_tracker.update_and_check(total_new_rows)
+                is_clogged = self.velocity_tracker.update_and_check(result.total_new_rows)
 
-            # t_ui_start = time_ns()
             if is_clogged:
                 # Freeze into a browsable history window instead of just dropping this batch
                 # silently - the guards above already guarantee we were live/unpaused, so this
                 # is the only place a clog can be discovered.
                 self._enter_history_mode(auto=True)
             else:
-                # We processed the newest segments first, so they are at the front of the list.
-                # Reversing makes the older segments render first, yielding perfect chronological order.
-                string_batches.reverse()
-                full_string_batch = "".join(string_batches)
+                self.text_area.append_log(result.text)
 
-                self.text_area.append_log(full_string_batch)
-
-                seq_batches.reverse()
-                if seq_batches:
-                    self._live_seqs.extend(np.concatenate(seq_batches).tolist())
-            # t_ui_end = time_ns()
-
-            # self.logger.debug(f"[Profile] UI Text Append: {(t_ui_end - t_ui_start) / 1_000_000:.3f} ms")
-        # t_func_end = time_ns()
-        # self.logger.child("total").debug(f"{t_func_end - t_start_total} rows={total_new_rows}")
+                if len(result.seqs):
+                    self._live_seqs.extend(result.seqs.tolist())
 
     def _refresh_view(self):
         """Reapplies the current filter/level/kv/search/column-visibility settings to whatever's
@@ -956,7 +770,7 @@ QToolButton[filterEnabled="true"] {
             self._playback_anchored = False
 
             # Reset trackers so apply_updates fetches everything again
-            self.latest_seq_seen = self.latest_seq_manual
+            self._fetcher.latest_seq_seen = self.latest_seq_manual
             self.velocity_tracker.reset()
             self._is_catching_up = True
 
@@ -988,7 +802,7 @@ QToolButton[filterEnabled="true"] {
 
         log_pool = self.gui_context.registry.central.log_pool
 
-        self.latest_seq_manual = self.latest_seq_seen = log_pool.latest_sequence()
+        self.latest_seq_manual = self._fetcher.latest_seq_seen = log_pool.latest_sequence()
 
         self.velocity_tracker.reset()
         self._is_catching_up = True
@@ -996,18 +810,8 @@ QToolButton[filterEnabled="true"] {
     # --- Live/history mode transitions -----------------------------------------------------
 
     def _fetch_history_window(self, anchor_seq=None, anchor_ts=None, before_cap=None, after_cap=None):
-        """Fetches a bounded window of formatted lines before/after an anchor point, mirroring
-        LogTableStore._fetch_history (qt-log-table-viewer skill Sec 1/14) but producing
-        already-formatted text instead of columnar rows, since SearchableLogArea is a
-        QPlainTextEdit rather than a direct-paint grid.
-
-        The anchor is either a sequence id (anchor_seq - manual scroll/pause paging) or a
-        timestamp (anchor_ts - playback-clock following); mutually exclusive. segment_filter/
-        segment_filter_reversed (ops/segments.py) accept both bound types natively via binary
-        search over the segment's timestamps/sequences, so no seq<->ts conversion is needed -
-        only the bound kwargs differ below. end_ts is an inclusive upper bound like end_seq, but
-        start_ts is an inclusive lower bound (unlike start_seq, which is exclusive) - hence the
-        asymmetric `anchor_ts` vs `anchor_ts - 1` between the before/after scans.
+        """Delegates to LogTextFetcher.fetch_history_window (core/log_fetch.py), which ports this
+        method's original logic verbatim - see its docstring for the anchor/bound semantics.
 
         before_cap/after_cap default to HISTORY_BEFORE/HISTORY_AFTER (manual browsing); the
         playback-follow path in apply_updates() passes half of the viewport-sized max_rows
@@ -1017,12 +821,7 @@ QToolButton[filterEnabled="true"] {
         """
         before_cap = self.HISTORY_BEFORE if before_cap is None else before_cap
         after_cap = self.HISTORY_AFTER if after_cap is None else after_cap
-        self._ensure_effective_mask()
 
-        reg = self.gui_context.id_registry
-        array_pool = self.gui_context.registry.system_ctx.array_pool
-        pool = self.gui_context.registry.central.log_pool
-        f = self.log_filter
         tz_offset_sec = get_local_utc_offset_seconds()
         format_cfg = FormattingConfig(
             self.show_ts,
@@ -1033,103 +832,23 @@ QToolButton[filterEnabled="true"] {
             show_date=self.show_date,
             show_rx_ts=self.show_rx_ts,
         )
-        kv = f.bake_kv_arrays()
-        text = f.bake_text_search()
-        reg_bundle = reg.bundle()
 
-        def _format_matches(segment, indices_array, match_count):
-            req_bytes = nb_segment_estimate_out_size(indices_array, match_count, segment.bundle, reg_bundle, format_cfg)
-            with array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
-                bytes_written = nb_segment_format(
-                    handle.array, indices_array, match_count, segment.bundle, reg_bundle, format_cfg, tz_offset_sec
-                )
-                return handle.array[:bytes_written].tobytes().decode("utf-8", errors="replace")
-
-        has_seq_anchor = anchor_seq is not None and anchor_seq > dtypes.SEQ_START
-        has_ts_anchor = anchor_ts is not None
-
-        # --- "Before" set: matches strictly before the anchor, scanning newest-to-oldest ---
-        before_count = 0
-        oldest_seq = anchor_seq if has_seq_anchor else None
-        before_batches = []
-
-        if has_seq_anchor or has_ts_anchor:
-            before_kwargs = {"end_seq": anchor_seq - 1} if has_seq_anchor else {"end_ts": anchor_ts - 1}
-            with pool.get_reversed_snapshot() as segments, pool.acquire_indices_buffer() as indices:
-                for segment in segments:
-                    if segment.size == 0:
-                        continue
-
-                    allowed = before_cap - before_count
-                    if allowed <= 0:
-                        break
-
-                    match_count = segment_filter_reversed(
-                        segment.bundle,
-                        effective_mask=self._effective_mask,
-                        out_indices=indices.array,
-                        max_matches=allowed,
-                        kv=kv,
-                        text=text,
-                        **before_kwargs,
-                    )
-
-                    if match_count > 0:
-                        before_batches.append(_format_matches(segment, indices.array, match_count))
-                        oldest_seq = int(segment.bundle.sequences[indices.array[0]])
-                        before_count += match_count
-
-        # A single segment holding more than HISTORY_BEFORE matching rows would previously read
-        # as "reached the start" just because the deque happened to run out right there - it hit
-        # the cap within that segment via max_matches, not because there's genuinely nothing
-        # older. Only treat this as the true start when the fetch came back under quota; hitting
-        # quota exactly always defers to the next backward page, which self-corrects (an empty
-        # follow-up fetch then legitimately reports reached_start).
-        reached_start = before_count < before_cap
-
-        # Segments were scanned newest-to-oldest, so the collected batches need reversing to
-        # read oldest-first, same technique apply_updates uses for its reversed live scan.
-        before_batches.reverse()
-
-        # --- "After" set: matches at/after the anchor, scanning oldest-to-newest ---
-        after_count = 0
-        newest_seq = anchor_seq if has_seq_anchor else None
-        after_batches = []
-
-        if has_seq_anchor:
-            after_kwargs = {"start_seq": anchor_seq - 1}  # start_seq is an exclusive lower bound
-        elif has_ts_anchor:
-            after_kwargs = {"start_ts": anchor_ts}  # start_ts is an inclusive lower bound - no -1
-        else:
-            after_kwargs = {"start_seq": SEQ_NONE}
-
-        with pool.get_snapshot() as segments, pool.acquire_indices_buffer() as indices:
-            for segment in segments:
-                if segment.size == 0:
-                    continue
-
-                allowed = after_cap - after_count
-                if allowed <= 0:
-                    break
-
-                match_count = segment_filter(
-                    segment.bundle,
-                    effective_mask=self._effective_mask,
-                    out_indices=indices.array,
-                    max_matches=allowed,
-                    kv=kv,
-                    text=text,
-                    **after_kwargs,
-                )
-
-                if match_count > 0:
-                    after_batches.append(_format_matches(segment, indices.array, match_count))
-                    newest_seq = int(segment.bundle.sequences[indices.array[match_count - 1]])
-                    after_count += match_count
-
-        text_result = "".join(before_batches) + "".join(after_batches)
-
-        return before_count, after_count, oldest_seq, newest_seq, reached_start, text_result
+        result = self._fetcher.fetch_history_window(
+            anchor_seq=anchor_seq,
+            anchor_ts=anchor_ts,
+            before_cap=before_cap,
+            after_cap=after_cap,
+            format_cfg=format_cfg,
+            tz_offset_sec=tz_offset_sec,
+        )
+        return (
+            result.before_count,
+            result.after_count,
+            result.oldest_seq,
+            result.newest_seq,
+            result.reached_start,
+            result.text,
+        )
 
     def _enter_history_mode(self, auto: bool = False):
         """Called the moment the user scrolls away from the live tail, or when clog protection
@@ -1429,73 +1148,3 @@ QToolButton[filterEnabled="true"] {
         if self.ts_precision != precision:
             self.ts_precision = precision
             self._refresh_view()
-
-    @staticmethod
-    @register_warmup
-    def warmup(helper: "NumbaWarmupHelper"):
-        """Triggers compilation for log filtering/formatting kernels (nb_filter_segment,
-        nb_segment_filter_reversed, nb_segment_estimate_out_size, nb_segment_format). Requires
-        data in the pool, provided by NumbaWarmupHelper.exercise_logging_kernels().
-
-        kv/text are NamedTuples of numpy arrays, and Numba types an array's read-only-ness as
-        part of its signature (see numba-njit skill §3/§9). EMPTY_KV_CONDITIONS/EMPTY_TEXT_SEARCH
-        (ops/kv_filter.py, ops/text_filter.py) are deliberately built from
-        np.frombuffer(b"", ...) rather than np.empty(...) so their buffer fields are already
-        read-only - the same type Numba sees for a real, non-empty query built via
-        build_kv_condition_arrays/build_text_search_arrays. That means this single EMPTY_* call
-        below covers the "real kv/text present" case too; no need to separately warm every
-        real/empty combination (see numba-njit skill §15)."""
-
-        print("[Warmup] LogViewerWidget ...")
-
-        s_seq = 0
-
-        # Build the Unified Effective Mask for Warmup
-        mod_count = helper.registry.module_count()
-        safe_capacity = max(10, mod_count)  # Ensure it's large enough for dummy IDs
-
-        effective_mask = np.full(safe_capacity, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
-
-        effective_mask[helper.floats_mod.id] = LogLevel.ALL.value
-        effective_mask[helper.warmup_mod.id] = LogLevel.ALL.value
-
-        format_cfg = FormattingConfig(True, True, True, True)
-
-        with helper.log_pool.get_snapshot() as segments, helper.log_pool.acquire_indices_buffer() as indices:
-            for segment in segments:
-                match_count = segment_filter(
-                    segment.bundle,
-                    effective_mask=effective_mask,
-                    out_indices=indices.array,
-                    max_matches=1000,
-                    start_seq=s_seq,
-                    kv=EMPTY_KV_CONDITIONS,
-                    text=EMPTY_TEXT_SEARCH,
-                )
-
-                _ = segment_filter_reversed(
-                    segment.bundle,
-                    effective_mask=effective_mask,
-                    out_indices=indices.array,
-                    max_matches=1000,
-                    start_seq=s_seq,
-                    kv=EMPTY_KV_CONDITIONS,
-                    text=EMPTY_TEXT_SEARCH,
-                )
-
-                if match_count > 0:
-                    req_bytes = nb_segment_estimate_out_size(
-                        indices.array, match_count, segment.bundle, helper.registry.bundle(), format_cfg
-                    )
-                    with helper.array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
-                        nb_segment_format(
-                            handle.array,
-                            indices.array,
-                            match_count,
-                            segment.bundle,
-                            helper.registry.bundle(),
-                            format_cfg,
-                            0,
-                        )
-
-        print("[Warmup] LogViewerWidget ... done")

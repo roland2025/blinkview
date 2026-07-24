@@ -578,6 +578,11 @@ class TelemetryPlotter(QWidget):
                 else:
                     continue
             # === FETCH LOGIC ===
+            # No effective_mask passed - fetch_telemetry_arrays defaults to a permissive
+            # (unfiltered) mask, matching this call's pre-existing behavior exactly. The
+            # underlying kernels support level/module filtering identical to the log views'
+            # (ops/telemetry.py), but wiring a real filter source (shared with a log view tab? a
+            # dedicated plotter filter?) into this call is a deliberately separate follow-up.
             with fetch_telemetry_arrays(
                 array_pool, log_pool, module.id, current_module_seq, target_cols, buf.temp_floats, max_points
             ) as batch:
@@ -619,6 +624,8 @@ class TelemetryPlotter(QWidget):
                     )
                     self.replay_buffers[module] = replay_buf
 
+                # See the fetch_telemetry_arrays call above - no effective_mask passed here
+                # either, same permissive-default/no-behavior-change reasoning.
                 with fetch_telemetry_window(
                     array_pool,
                     log_pool,
@@ -1380,11 +1387,10 @@ class TelemetryPlotter(QWidget):
 
             replay_buf = self.replay_buffers.get(module)
             if replay_buf is None:
-                replay_buf = ReplayWindowBuffer(
-                    capacity=self.REPLAY_FETCH_CAP * 2, num_channels=live_buf.num_channels
-                )
+                replay_buf = ReplayWindowBuffer(capacity=self.REPLAY_FETCH_CAP * 2, num_channels=live_buf.num_channels)
                 self.replay_buffers[module] = replay_buf
 
+            # No effective_mask passed - see apply_updates' fetch_telemetry_arrays call for why.
             with fetch_telemetry_window(
                 array_pool,
                 log_pool,

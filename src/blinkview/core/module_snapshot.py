@@ -507,9 +507,7 @@ class LatestModuleValueTracker:
                 if segment.size == 0:
                     continue
 
-                all_found, remaining = nb_build_snapshot_as_of(
-                    segment.bundle, b, count, ts_ns, found_mask, remaining
-                )
+                all_found, remaining = nb_build_snapshot_as_of(segment.bundle, b, count, ts_ns, found_mask, remaining)
                 if all_found:
                     break
 
