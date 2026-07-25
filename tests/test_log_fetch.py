@@ -1,124 +1,16 @@
-from contextlib import contextmanager
-
 import numpy as np
 import pytest
 
 from blinkview.core.array_pool import NumpyArrayPool
-from blinkview.core.dtypes import (
-    BYTE,
-    ID_TYPE,
-    LEN_TYPE,
-    LEVEL_TYPE,
-    OFFSET_TYPE,
-    SEQ_NONE,
-    SEQ_TYPE,
-    TS_TYPE,
-    UINT32,
-    UINT64,
-)
+from blinkview.core.dtypes import LEVEL_TYPE, SEQ_NONE
 from blinkview.core.id_registry.registry import IDRegistry
 from blinkview.core.log_fetch import LogSegmentScanner, LogTextFetcher
 from blinkview.core.types.formatting import FormattingConfig
-from blinkview.core.types.log_batch import LogBundle
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
-
-
-def make_bundle(timestamps, devices, levels, modules, sequences, messages):
-    """Builds a minimal LogBundle backing a fixed set of rows (mirrors tests/test_log_table_viewer.py)."""
-    lengths = np.array([len(m) for m in messages], dtype=LEN_TYPE)
-    offsets = np.zeros(len(messages), dtype=OFFSET_TYPE)
-
-    cursor = 0
-    for i, m in enumerate(messages):
-        offsets[i] = cursor
-        cursor += len(m.encode("utf-8"))
-
-    buffer = np.zeros(max(cursor, 1), dtype=BYTE)
-    cursor = 0
-    for m in messages:
-        b = m.encode("utf-8")
-        if b:
-            buffer[cursor : cursor + len(b)] = np.frombuffer(b, dtype=BYTE)
-        cursor += len(b)
-
-    size = len(messages)
-    return LogBundle(
-        timestamps=np.array(timestamps, dtype=TS_TYPE),
-        rx_timestamps=np.array(timestamps, dtype=TS_TYPE),
-        offsets=offsets,
-        lengths=lengths,
-        buffer=buffer,
-        levels=np.array(levels, dtype=LEVEL_TYPE),
-        modules=np.array(modules, dtype=ID_TYPE),
-        devices=np.array(devices, dtype=ID_TYPE),
-        sequences=np.array(sequences, dtype=SEQ_TYPE),
-        pids=np.zeros(size, dtype=ID_TYPE),
-        tids=np.zeros(size, dtype=ID_TYPE),
-        ext_u32_1=np.zeros(size, dtype=UINT32),
-        ext_u32_2=np.zeros(size, dtype=UINT32),
-        ext_u64_1=np.zeros(size, dtype=UINT64),
-        size=np.array([size], dtype=np.int64),
-        msg_cursor=np.array([cursor], dtype=np.int64),
-        capacity=size,
-        has_levels=True,
-        has_modules=True,
-        has_devices=True,
-        has_sequences=True,
-        has_pids=True,
-        has_tids=True,
-        has_ext_u32_1=False,
-        has_ext_u32_2=False,
-        has_ext_u64_1=False,
-    )
-
-
-class FakeSegment:
-    def __init__(self, bundle):
-        self.bundle = bundle
-        self.size = int(bundle.size[0])
-        self.last_sequence_id = int(bundle.sequences[-1]) if self.size else 0
-
-
-class FakeIndicesHandle:
-    def __init__(self, capacity=4096):
-        self.array = np.zeros(capacity, dtype=np.int64)
-
-
-class FakeLogPool:
-    def __init__(self, latest_seq=0, segments=None):
-        self._latest_seq = latest_seq
-        self._segments = segments or []  # chronological order (oldest first)
-
-    def latest_sequence(self):
-        return self._latest_seq
-
-    @contextmanager
-    def get_reversed_snapshot(self):
-        yield list(reversed(self._segments))
-
-    @contextmanager
-    def get_snapshot(self):
-        yield list(self._segments)
-
-    @contextmanager
-    def acquire_indices_buffer(self):
-        yield FakeIndicesHandle()
-
-
-@pytest.fixture
-def id_registry():
-    return IDRegistry(NumpyArrayPool())
-
-
-@pytest.fixture
-def array_pool():
-    return NumpyArrayPool()
-
-
-@pytest.fixture
-def log_filter(id_registry):
-    return LogFilter(id_registry, log_level=LogLevel.ALL.name_conf)
+from tests.fakes.devices import esp32_wifi
+from tests.fakes.log_bundle import make_log_bundle as make_bundle
+from tests.fakes.log_pool import FakeIndicesHandle, FakeLogPool, FakeSegment
 
 
 def _permissive_sidebar():
@@ -153,8 +45,7 @@ class RecordingConsumer:
 
 class TestScanTail:
     def test_basic_match_chronological_order_and_watermark(self, id_registry, log_filter):
-        device = id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(id_registry)
         bundle = make_bundle(
             timestamps=[1, 2, 3],
             devices=[device.id] * 3,
@@ -177,8 +68,7 @@ class TestScanTail:
         assert consumer.all_seqs == [1, 2, 3]
 
     def test_no_new_data_past_watermark_scans_nothing(self, id_registry, log_filter):
-        device = id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(id_registry)
         bundle = make_bundle(
             timestamps=[1, 2, 3],
             devices=[device.id] * 3,
@@ -196,8 +86,7 @@ class TestScanTail:
         assert result.highest_seq_seen == 3  # unchanged watermark: no segment passed the check
 
     def test_capped_by_max_rows_reports_not_reached_live_edge(self, id_registry, log_filter):
-        device = id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(id_registry)
         bundle = make_bundle(
             timestamps=list(range(10)),
             devices=[device.id] * 10,
@@ -218,8 +107,7 @@ class TestScanTail:
         assert consumer.all_seqs == [7, 8, 9, 10]
 
     def test_kv_and_text_filter_are_applied(self, id_registry, log_filter):
-        device = id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(id_registry)
         bundle = make_bundle(
             timestamps=[1, 2, 3],
             devices=[device.id] * 3,
@@ -266,8 +154,7 @@ class TestScanTail:
         always (False, empty) + get_show_hidden always True must reduce to a flat
         level-threshold-only mask, matching ConsoleSubscriber's original
         np.full(mod_count, log_level) one-liner."""
-        device = id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(id_registry)
         log_filter = LogFilter(id_registry, log_level=LogLevel.WARN.name_conf)
         bundle = make_bundle(
             timestamps=[1, 2],
@@ -292,8 +179,7 @@ class TestScanTail:
 
 class TestScanHistoryWindow:
     def _make_scanner(self, id_registry, log_filter, count=20):
-        device = id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(id_registry)
         bundle = make_bundle(
             timestamps=list(range(count)),
             devices=[device.id] * count,
@@ -359,8 +245,7 @@ class TestLogTextFetcher:
         return LogTextFetcher(scanner, array_pool, tables_provider=id_registry.bundle)
 
     def test_fetch_live_tail_produces_chronological_formatted_text(self, id_registry, array_pool, log_filter):
-        device = id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(id_registry)
         bundle = make_bundle(
             timestamps=[1, 2, 3],
             devices=[device.id] * 3,
@@ -385,8 +270,7 @@ class TestLogTextFetcher:
         assert fetcher.latest_seq_seen == 3
 
     def test_fetch_history_window_spans_before_after_boundary(self, id_registry, array_pool, log_filter):
-        device = id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(id_registry)
         count = 10
         bundle = make_bundle(
             timestamps=list(range(count)),
@@ -416,8 +300,7 @@ class TestLogTextFetcher:
         live tail also appears correctly in a history window anchored just past it - guards the
         scanner/wrapper split introduced by this refactor (per project convention: a chained
         real-kernel test catches dropped-at-a-seam bugs isolated per-stage tests miss)."""
-        device = id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(id_registry)
         bundle = make_bundle(
             timestamps=[1, 2, 3],
             devices=[device.id] * 3,

@@ -15,26 +15,20 @@ import pytest
 import blinkview.ui.widgets.plotter as plotter_module
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.playback_clock import PlaybackMode
-from blinkview.core.registry import Registry
-from blinkview.ui.gui_context import GUIContext
-from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.plotter import TelemetryPlotter
+from tests.fakes.real_registry import make_real_gui_context, make_real_registry
 
 
 @pytest.fixture
 def registry(tmp_path):
-    reg = Registry(session_name="plotter_playback_test", log_dir=tmp_path)
-    reg.configure_system()
+    reg = make_real_registry(tmp_path, "plotter_playback_test")
     yield reg
     reg.stop()
 
 
 @pytest.fixture
 def plotter(qapp, registry):
-    gui_context = GUIContext()
-    gui_context.set_registry(registry)
-    gui_context.set_theme(StyleConfig())
-    gui_context.logger = registry.logger_creator("gui")()
+    gui_context = make_real_gui_context(registry)
 
     device = registry.id_registry.get_device("plottertest")
     module = device.get_module("floats")

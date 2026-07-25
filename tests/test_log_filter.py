@@ -6,8 +6,6 @@
 
 import pytest
 
-from blinkview.core.array_pool import NumpyArrayPool
-from blinkview.core.id_registry.registry import IDRegistry
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
 from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
 from blinkview.utils.log_filter import LogFilter
@@ -15,8 +13,8 @@ from blinkview.utils.log_level import LogLevel
 
 
 @pytest.fixture
-def log_filter():
-    return LogFilter(IDRegistry(NumpyArrayPool()), log_level=LogLevel.ALL.name_conf)
+def log_filter(id_registry):
+    return LogFilter(id_registry, log_level=LogLevel.ALL.name_conf)
 
 
 def test_starts_with_no_kv_conditions(log_filter):

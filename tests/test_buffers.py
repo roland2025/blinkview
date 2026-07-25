@@ -7,15 +7,15 @@
 import numpy as np
 
 from blinkview.core import dtypes
-from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.buffers import ReplayWindowBuffer
 from blinkview.core.numpy_batch_manager import PooledLogBatch
-from blinkview.core.numpy_log import CircularLogPool, fetch_telemetry_window
+from blinkview.core.numpy_log import fetch_telemetry_window
 from blinkview.core.types.log_batch import TelemetryBatch
 from blinkview.ops.telemetry import (
     PLOT_INTERPOLATION_MODE_LINEAR,
     nb_slice_and_downsample,
 )
+from tests.fakes.real_log_pool import make_real_log_pool
 
 MODULE_A = 1
 
@@ -91,8 +91,7 @@ def test_replay_window_buffer_renders_through_the_unmodified_downsample_kernel()
     and out through nb_slice_and_downsample unchanged - confirms the rendering path
     (_update_plots/_update_overview in plotter.py) needs zero changes to consume either buffer
     type, since both expose the identical TelemetryBufferBundle contract."""
-    array_pool = NumpyArrayPool(max_bytes=4 * 1024 * 1024)
-    log_pool = CircularLogPool(array_pool, max_pieces=4, final_buffer_bytes=64 * 1024)
+    array_pool, log_pool = make_real_log_pool()
 
     src = array_pool.create(PooledLogBatch, 20, 4096, has_levels=True, has_modules=True, has_devices=True)
     base = 1_000_000_000_000

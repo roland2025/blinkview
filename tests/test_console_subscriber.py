@@ -6,15 +6,13 @@ from rich.console import Console
 
 import blinkview.subscribers.console  # noqa: F401 - registers "console" with SubscriberFactory
 from blinkview.core.numpy_batch_manager import PooledLogBatch
-from blinkview.core.registry import Registry
 from blinkview.utils.log_level import LogLevel
+from tests.fakes.real_registry import make_real_registry
 
 
 @pytest.fixture
 def registry(tmp_path):
-    reg = Registry(session_name="console_test", profile_name="console_test_profile", log_dir=tmp_path)
-    reg.configure_system()
-    reg.start()
+    reg = make_real_registry(tmp_path, "console_test", profile_name="console_test_profile", start=True)
     yield reg
     reg.stop()
 

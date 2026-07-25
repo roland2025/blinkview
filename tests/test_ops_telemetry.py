@@ -7,16 +7,16 @@
 import numpy as np
 
 from blinkview.core import dtypes
-from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.dtypes import TS_UNSPECIFIED
 from blinkview.core.numpy_batch_manager import PooledLogBatch
-from blinkview.core.numpy_log import CircularLogPool, fetch_telemetry_window
+from blinkview.core.numpy_log import fetch_telemetry_window
 from blinkview.core.types.telemetry import TsWindowBundle
 from blinkview.ops.telemetry import (
     nb_extract_telemetry_segment_window_backward,
     nb_extract_telemetry_segment_window_forward,
 )
-from tests.test_ops_segments import make_bundle
+from tests.fakes.log_bundle import make_log_bundle
+from tests.fakes.real_log_pool import make_real_log_pool
 
 MODULE_A = 1
 MODULE_B = 2
@@ -31,14 +31,16 @@ def make_telemetry_bundle(timestamps, modules, values, levels=None):
     row here - nb_extract_floats_from_bytes handles multi-channel too, but one channel is
     enough to exercise the window-bounding logic these kernels add)."""
     messages = [str(v) for v in values]
-    return make_bundle(
-        timestamps=timestamps,
-        rx_timestamps=timestamps,
+    return make_log_bundle(
+        timestamps,
         devices=[0] * len(timestamps),
         levels=levels if levels is not None else [0] * len(timestamps),
         modules=modules,
         sequences=list(range(1, len(timestamps) + 1)),
         messages=messages,
+        rx_timestamps=timestamps,
+        has_pids=False,
+        has_tids=False,
     )
 
 
@@ -177,8 +179,7 @@ def test_fetch_telemetry_window_permissive_default_mask_reproduces_unfiltered_ou
     """Regression guard for the "zero behavior change until a real filter is wired in" claim:
     not passing effective_mask at all must reproduce exactly what a caller got before this
     parameter existed."""
-    array_pool = NumpyArrayPool(max_bytes=4 * 1024 * 1024)
-    log_pool = CircularLogPool(array_pool, max_pieces=4, final_buffer_bytes=64 * 1024)
+    array_pool, log_pool = make_real_log_pool()
 
     src = array_pool.create(PooledLogBatch, 20, 4096, has_levels=True, has_modules=True, has_devices=True)
     base = 1_000_000_000_000
@@ -214,8 +215,7 @@ def test_fetch_telemetry_window_end_to_end_against_a_real_pool():
     """Exercises fetch_telemetry_window through a real CircularLogPool, verifying the
     before/after halves land pre-concatenated and ascending, and that the anchor row itself
     (ts == anchor_ts_ns) is included exactly once, in the after half."""
-    array_pool = NumpyArrayPool(max_bytes=4 * 1024 * 1024)
-    log_pool = CircularLogPool(array_pool, max_pieces=4, final_buffer_bytes=64 * 1024)
+    array_pool, log_pool = make_real_log_pool()
 
     src = array_pool.create(PooledLogBatch, 20, 4096, has_levels=True, has_modules=True, has_devices=True)
     base = 1_000_000_000_000  # arbitrary epoch-ns anchor, ns-scale spacing
@@ -250,8 +250,7 @@ def test_fetch_telemetry_window_end_to_end_against_a_real_pool():
 
 
 def test_fetch_telemetry_window_caps_each_side_independently():
-    array_pool = NumpyArrayPool(max_bytes=4 * 1024 * 1024)
-    log_pool = CircularLogPool(array_pool, max_pieces=4, final_buffer_bytes=64 * 1024)
+    array_pool, log_pool = make_real_log_pool()
 
     src = array_pool.create(PooledLogBatch, 20, 4096, has_levels=True, has_modules=True, has_devices=True)
     base = 1_000_000_000_000
@@ -284,8 +283,7 @@ def test_fetch_telemetry_window_caps_each_side_independently():
 
 
 def test_fetch_telemetry_window_empty_when_anchor_predates_all_data():
-    array_pool = NumpyArrayPool(max_bytes=4 * 1024 * 1024)
-    log_pool = CircularLogPool(array_pool, max_pieces=4, final_buffer_bytes=64 * 1024)
+    array_pool, log_pool = make_real_log_pool()
 
     src = array_pool.create(PooledLogBatch, 20, 4096, has_levels=True, has_modules=True, has_devices=True)
     base = 1_000_000_000_000

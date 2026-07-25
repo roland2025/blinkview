@@ -11,54 +11,27 @@ from blinkview.ops.segments import (
     nb_segment_filter_reversed,
 )
 from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
+from tests.fakes.log_bundle import make_log_bundle
 
 
 def make_bundle(timestamps, rx_timestamps, devices, levels, modules, sequences, messages, pids=None, tids=None):
-    """Builds a minimal LogBundle backing a fixed set of rows, for kernel-level testing."""
-    lengths = np.array([len(m) for m in messages], dtype=dtypes.LEN_TYPE)
-    offsets = np.zeros(len(messages), dtype=dtypes.OFFSET_TYPE)
+    """Builds a minimal LogBundle backing a fixed set of rows, for kernel-level testing.
 
-    cursor = 0
-    for i, m in enumerate(messages):
-        offsets[i] = cursor
-        cursor += len(m.encode("utf-8"))
-
-    buffer = np.zeros(max(cursor, 1), dtype=dtypes.BYTE)
-    cursor = 0
-    for m in messages:
-        b = m.encode("utf-8")
-        if b:
-            buffer[cursor : cursor + len(b)] = np.frombuffer(b, dtype=dtypes.BYTE)
-        cursor += len(b)
-
-    size = len(messages)
-    return LogBundle(
-        timestamps=np.array(timestamps, dtype=dtypes.TS_TYPE),
-        rx_timestamps=np.array(rx_timestamps, dtype=dtypes.TS_TYPE),
-        offsets=offsets,
-        lengths=lengths,
-        buffer=buffer,
-        levels=np.array(levels, dtype=dtypes.LEVEL_TYPE),
-        modules=np.array(modules, dtype=dtypes.ID_TYPE),
-        devices=np.array(devices, dtype=dtypes.ID_TYPE),
-        sequences=np.array(sequences, dtype=dtypes.SEQ_TYPE),
-        pids=np.array(pids if pids is not None else [0] * size, dtype=dtypes.ID_TYPE),
-        tids=np.array(tids if tids is not None else [0] * size, dtype=dtypes.ID_TYPE),
-        ext_u32_1=np.zeros(size, dtype=dtypes.UINT32),
-        ext_u32_2=np.zeros(size, dtype=dtypes.UINT32),
-        ext_u64_1=np.zeros(size, dtype=dtypes.UINT64),
-        size=np.array([size], dtype=np.int64),
-        msg_cursor=np.array([cursor], dtype=np.int64),
-        capacity=size,
-        has_levels=True,
-        has_modules=True,
-        has_devices=True,
-        has_sequences=True,
+    has_pids/has_tids reflect whether pids/tids were actually passed - several kernel tests in
+    this file (e.g. test_nb_copy_batch_to_segment_zeros_pids_when_batch_lacks_them) rely on a
+    bundle built without pids/tids behaving as if it has no such column at all."""
+    return make_log_bundle(
+        timestamps,
+        devices,
+        levels,
+        modules,
+        sequences,
+        messages,
+        rx_timestamps=rx_timestamps,
+        pids=pids,
+        tids=tids,
         has_pids=pids is not None,
         has_tids=tids is not None,
-        has_ext_u32_1=False,
-        has_ext_u32_2=False,
-        has_ext_u64_1=False,
     )
 
 

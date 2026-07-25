@@ -4,57 +4,22 @@ import pytest
 from blinkview.core import dtypes
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.id_registry import IDRegistry
-from blinkview.core.types.log_batch import LogBundle
 from blinkview.ops.formatting import nb_estimate_batch_capacity, nb_format_log_row_batch
 from blinkview.parsers.unified_log_replay import _LEVEL_BY_CHAR, _LINE_RE, _parse_ts_ns
 from blinkview.utils.log_level import LogLevel
+from tests.fakes.log_bundle import make_log_bundle
 
 
 def make_bundle(timestamps, devices, levels, modules, messages):
-    lengths = np.array([len(m.encode("utf-8")) for m in messages], dtype=dtypes.LEN_TYPE)
-    offsets = np.zeros(len(messages), dtype=dtypes.OFFSET_TYPE)
-
-    cursor = 0
-    for i, m in enumerate(messages):
-        offsets[i] = cursor
-        cursor += len(m.encode("utf-8"))
-
-    buffer = np.zeros(max(cursor, 1), dtype=dtypes.BYTE)
-    cursor = 0
-    for m in messages:
-        b = m.encode("utf-8")
-        if b:
-            buffer[cursor : cursor + len(b)] = np.frombuffer(b, dtype=dtypes.BYTE)
-        cursor += len(b)
-
-    size = len(messages)
-    return LogBundle(
-        timestamps=np.array(timestamps, dtype=dtypes.TS_TYPE),
-        rx_timestamps=np.array(timestamps, dtype=dtypes.TS_TYPE),
-        offsets=offsets,
-        lengths=lengths,
-        buffer=buffer,
-        levels=np.array(levels, dtype=dtypes.LEVEL_TYPE),
-        modules=np.array(modules, dtype=dtypes.ID_TYPE),
-        devices=np.array(devices, dtype=dtypes.ID_TYPE),
-        sequences=np.zeros(size, dtype=dtypes.SEQ_TYPE),
-        pids=np.zeros(size, dtype=dtypes.ID_TYPE),
-        tids=np.zeros(size, dtype=dtypes.ID_TYPE),
-        ext_u32_1=np.zeros(size, dtype=dtypes.UINT32),
-        ext_u32_2=np.zeros(size, dtype=dtypes.UINT32),
-        ext_u64_1=np.zeros(size, dtype=dtypes.UINT64),
-        size=np.array([size], dtype=np.int64),
-        msg_cursor=np.array([cursor], dtype=np.int64),
-        capacity=size,
-        has_levels=True,
-        has_modules=True,
-        has_devices=True,
-        has_sequences=True,
+    return make_log_bundle(
+        timestamps,
+        devices,
+        levels,
+        modules,
+        [0] * len(messages),
+        messages,
         has_pids=False,
         has_tids=False,
-        has_ext_u32_1=False,
-        has_ext_u32_2=False,
-        has_ext_u64_1=False,
     )
 
 

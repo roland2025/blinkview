@@ -12,32 +12,22 @@ handling `!=` in a microbenchmark) while still being wired together wrong."""
 
 import pytest
 
-from blinkview.core.module_snapshot import LatestModuleValueTracker
 from blinkview.core.numpy_batch_manager import PooledLogBatch
-from blinkview.core.registry import Registry
-from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.action_button_delegate import TelemetryCol
-from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.telemetry_table import TelemetryTable
+from tests.fakes.real_registry import make_real_gui_context, make_real_registry
 
 
 @pytest.fixture
 def registry(tmp_path):
-    reg = Registry(session_name="telemetry_table_playback_test", log_dir=tmp_path)
-    reg.configure_system()
-    reg.module_value_tracker = LatestModuleValueTracker(
-        reg.central.log_pool, reg.id_registry.modules_table, reg.system_ctx.array_pool, reg.now_ns
-    )
+    reg = make_real_registry(tmp_path, "telemetry_table_playback_test", with_value_tracker=True)
     yield reg
     reg.stop()
 
 
 @pytest.fixture
 def table(qapp, registry):
-    gui_context = GUIContext()
-    gui_context.set_registry(registry)
-    gui_context.set_theme(StyleConfig())
-    gui_context.logger = registry.logger_creator("gui")()
+    gui_context = make_real_gui_context(registry)
 
     device = registry.id_registry.get_device("tabletest")
     early = device.get_module("early")

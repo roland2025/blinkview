@@ -1,128 +1,32 @@
-from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
-from blinkview.core.array_pool import NumpyArrayPool
-from blinkview.core.dtypes import BYTE, ID_TYPE, LEN_TYPE, LEVEL_TYPE, OFFSET_TYPE, SEQ_TYPE, TS_TYPE, UINT32, UINT64
-from blinkview.core.id_history import IdHistory
-from blinkview.core.id_registry.registry import IDRegistry
-from blinkview.core.logger import PrintLogger
 from blinkview.core.module_snapshot import MAX_MSG_BYTES
-from blinkview.core.types.log_batch import LogBundle
 from blinkview.ui.widgets.log_table_viewer import LogTableCanvas, LogTableCol, LogTableStore, _COLUMN_LABELS
 from blinkview.ui.widgets.log_view_mode import LogViewMode
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
+from tests.fakes.devices import esp32_wifi
+from tests.fakes.log_bundle import make_log_bundle as _make_log_bundle
+from tests.fakes.log_pool import FakeIndicesHandle, FakeLogPool, FakeSegment
+from tests.fakes.registry import FakeCentral, FakeGuiContext, FakeRegistry, FakeSystemCtx
 
 
 def make_bundle(timestamps, rx_timestamps, devices, levels, modules, sequences, messages, pids=None, tids=None):
-    """Builds a minimal LogBundle backing a fixed set of rows (mirrors tests/test_ops_segments.py)."""
-    lengths = np.array([len(m) for m in messages], dtype=LEN_TYPE)
-    offsets = np.zeros(len(messages), dtype=OFFSET_TYPE)
-
-    cursor = 0
-    for i, m in enumerate(messages):
-        offsets[i] = cursor
-        cursor += len(m.encode("utf-8"))
-
-    buffer = np.zeros(max(cursor, 1), dtype=BYTE)
-    cursor = 0
-    for m in messages:
-        b = m.encode("utf-8")
-        if b:
-            buffer[cursor : cursor + len(b)] = np.frombuffer(b, dtype=BYTE)
-        cursor += len(b)
-
-    size = len(messages)
-    return LogBundle(
-        timestamps=np.array(timestamps, dtype=TS_TYPE),
-        rx_timestamps=np.array(rx_timestamps, dtype=TS_TYPE),
-        offsets=offsets,
-        lengths=lengths,
-        buffer=buffer,
-        levels=np.array(levels, dtype=LEVEL_TYPE),
-        modules=np.array(modules, dtype=ID_TYPE),
-        devices=np.array(devices, dtype=ID_TYPE),
-        sequences=np.array(sequences, dtype=SEQ_TYPE),
-        pids=np.array(pids if pids is not None else [0] * size, dtype=ID_TYPE),
-        tids=np.array(tids if tids is not None else [0] * size, dtype=ID_TYPE),
-        ext_u32_1=np.zeros(size, dtype=UINT32),
-        ext_u32_2=np.zeros(size, dtype=UINT32),
-        ext_u64_1=np.zeros(size, dtype=UINT64),
-        size=np.array([size], dtype=np.int64),
-        msg_cursor=np.array([cursor], dtype=np.int64),
-        capacity=size,
-        has_levels=True,
-        has_modules=True,
-        has_devices=True,
-        has_sequences=True,
-        has_pids=True,
-        has_tids=True,
-        has_ext_u32_1=False,
-        has_ext_u32_2=False,
-        has_ext_u64_1=False,
+    """Builds a minimal LogBundle backing a fixed set of rows."""
+    return _make_log_bundle(
+        timestamps,
+        devices,
+        levels,
+        modules,
+        sequences,
+        messages,
+        rx_timestamps=rx_timestamps,
+        pids=pids,
+        tids=tids,
     )
-
-
-class FakeSegment:
-    def __init__(self, bundle):
-        self.bundle = bundle
-        self.size = int(bundle.size[0])
-        self.last_sequence_id = int(bundle.sequences[-1]) if self.size else 0
-
-
-class FakeIndicesHandle:
-    def __init__(self, capacity=4096):
-        self.array = np.zeros(capacity, dtype=np.int64)
-
-
-class FakeLogPool:
-    def __init__(self, latest_seq=0, segments=None):
-        self._latest_seq = latest_seq
-        self._segments = segments or []  # chronological order (oldest first)
-
-    def latest_sequence(self):
-        return self._latest_seq
-
-    @contextmanager
-    def get_reversed_snapshot(self):
-        yield list(reversed(self._segments))
-
-    @contextmanager
-    def get_snapshot(self):
-        yield list(self._segments)
-
-    @contextmanager
-    def acquire_indices_buffer(self):
-        yield FakeIndicesHandle()
-
-
-class FakeCentral:
-    def __init__(self):
-        self.log_pool = FakeLogPool()
-
-
-class FakeSystemCtx:
-    def __init__(self):
-        self.array_pool = NumpyArrayPool()
-
-
-class FakeRegistry:
-    def __init__(self):
-        self.central = FakeCentral()
-        self.system_ctx = FakeSystemCtx()
-        self.pid_history = IdHistory()
-
-
-class FakeGuiContext:
-    """Minimal stand-in for GUIContext: only exposes what LogTableStore touches directly."""
-
-    def __init__(self, id_registry):
-        self.id_registry = id_registry
-        self.registry = FakeRegistry()
-        self.logger = PrintLogger("test")
 
 
 class FakeFilterSidebar:
@@ -136,11 +40,6 @@ class FakeFilterSidebar:
 
     def sync_modules(self):
         pass
-
-
-@pytest.fixture
-def id_registry():
-    return IDRegistry(NumpyArrayPool())
 
 
 @pytest.fixture
@@ -185,8 +84,7 @@ def test_starts_in_live_mode(model):
 
 
 def test_data_resolves_device_level_module_and_message(model, gui_context):
-    device = gui_context.id_registry.get_device("esp32")
-    module = device.get_module("wifi")
+    device, module = esp32_wifi(gui_context.id_registry)
 
     model.row_count = 1
     _populate_row(
@@ -207,8 +105,7 @@ def test_data_resolves_device_level_module_and_message(model, gui_context):
 
 
 def test_data_process_and_thread_fall_back_to_dash_when_unset(model, gui_context):
-    device = gui_context.id_registry.get_device("esp32")
-    module = device.get_module("wifi")
+    device, module = esp32_wifi(gui_context.id_registry)
 
     model.row_count = 1
     _populate_row(model, 0, ts=0, dev_id=device.id, level=0, mod_id=module.id, seq=1, message="hi")
@@ -218,8 +115,7 @@ def test_data_process_and_thread_fall_back_to_dash_when_unset(model, gui_context
 
 
 def test_data_thread_shows_raw_tid(model, gui_context):
-    device = gui_context.id_registry.get_device("esp32")
-    module = device.get_module("wifi")
+    device, module = esp32_wifi(gui_context.id_registry)
 
     model.row_count = 1
     _populate_row(model, 0, ts=0, dev_id=device.id, level=0, mod_id=module.id, seq=1, message="hi", pid=123, tid=456)
@@ -228,8 +124,7 @@ def test_data_thread_shows_raw_tid(model, gui_context):
 
 
 def test_data_process_resolves_via_shared_pid_history(model, gui_context):
-    device = gui_context.id_registry.get_device("esp32")
-    module = device.get_module("wifi")
+    device, module = esp32_wifi(gui_context.id_registry)
 
     key = (device.id << 32) | 123
     gui_context.registry.pid_history.update(key, "com.example.app", 1_000)
@@ -243,8 +138,7 @@ def test_data_process_resolves_via_shared_pid_history(model, gui_context):
 
 
 def test_data_process_falls_back_to_dash_when_pid_unresolved(model, gui_context):
-    device = gui_context.id_registry.get_device("esp32")
-    module = device.get_module("wifi")
+    device, module = esp32_wifi(gui_context.id_registry)
 
     model.row_count = 1
     # pid is set, but nothing was ever recorded in pid_history for it.
@@ -344,8 +238,7 @@ class TestLiveMode:
         assert model.row_count == 7  # apply_updates() is a live-mode-only mechanism
 
     def test_fetch_live_rebuilds_from_backend_segment(self, model, gui_context):
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         bundle = make_bundle(
             timestamps=[1, 2, 3],
@@ -366,8 +259,7 @@ class TestLiveMode:
         assert model.get_cell(2, LogTableCol.MESSAGE) == "third"
 
     def test_fetch_live_honors_kv_filter(self, model, gui_context):
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         bundle = make_bundle(
             timestamps=[1, 2, 3],
@@ -389,8 +281,7 @@ class TestLiveMode:
         assert model.get_cell(1, LogTableCol.MESSAGE) == "status=ok id=3"
 
     def test_fetch_live_honors_backend_text_filter_on_message(self, model, gui_context):
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         bundle = make_bundle(
             timestamps=[1, 2, 3],
@@ -438,8 +329,7 @@ class TestLiveMode:
         """The old Qt-proxy approach only filtered whatever rows had already been fetched into
         the live window - the backend filter must re-scan the whole segment so a match that's
         NOT among the most recent rows still surfaces and fills the viewport."""
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         count = 50
         messages = ["needle" if i == 0 else f"noise {i}" for i in range(count)]
@@ -465,8 +355,7 @@ class TestLiveMode:
         """An append-only tick (no filter change) should be served by the incremental path:
         previously-matched rows are carried forward rather than re-derived, and the newly
         arrived matching rows are appended after them in order."""
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         bundle = make_bundle(
             timestamps=[1, 2, 3],
@@ -509,8 +398,7 @@ class TestLiveMode:
     def test_fetch_live_incremental_evicts_oldest_rows_beyond_viewport(self, model, gui_context):
         """When new matches overflow the viewport, the oldest carried-over rows must be evicted
         (not arbitrary ones), and no sequence number should ever appear twice."""
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         model.viewport_rows = 3
 
@@ -557,8 +445,7 @@ class TestLiveMode:
         now-active buffer, not go stale/empty and not leak some other row's cached text -
         regression test for _bind_active() no longer blindly nulling the whole cache every tick
         (see _fetch_live_incremental's new_cache carry-forward)."""
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         model.viewport_rows = 3
 
@@ -611,8 +498,7 @@ class TestLiveMode:
         added since the last fetch - not an unbounded rescan of the whole backend (which would
         pass start_seq=SEQ_NONE, the default). The whole point of this change is bounding scan
         cost to genuinely new activity."""
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         big_count = 500
         big_bundle = make_bundle(
@@ -666,8 +552,7 @@ class TestLiveMode:
         """When more new rows arrive since the last tick than fit in the viewport, the NEWEST
         ones must be kept (this is a live tail) - a naive forward/ascending scan capped at
         max_matches would instead keep the oldest of the new rows, which is wrong here."""
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         model.viewport_rows = 20
 
@@ -713,8 +598,7 @@ class TestLiveMode:
         """Changing the filter must force a full rescan (previously-matched rows no longer
         reflect the new filter and can't be carried forward), even though reload_and_redraw()
         doesn't require the backend sequence to have moved."""
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         bundle = make_bundle(
             timestamps=[1, 2, 3],
@@ -745,8 +629,7 @@ class TestLiveMode:
         assert model.get_cell(1, LogTableCol.MESSAGE) == "connection restored"
 
     def test_fetch_live_incremental_no_duplication_or_gaps_across_many_ticks(self, model, gui_context):
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         total = 0
         pool = FakeLogPool(latest_seq=0, segments=[])
@@ -780,8 +663,7 @@ class TestLiveMode:
     def test_clear_logs_resets_both_double_buffers(self, model, gui_context):
         """After clear_logs(), a stale row from the buffer that was NOT active at clear time must
         not resurface via the incremental path's carry-over on a later tick."""
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         bundle = make_bundle(
             timestamps=[1, 2, 3],
@@ -862,8 +744,7 @@ class TestHistoryMode:
         return bundle
 
     def test_enter_history_mode_fetches_before_and_after_anchor(self, model, gui_context):
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
         self._make_pool(gui_context, device, module, count=20)
 
         model.enter_history_mode(anchor_seq=10)
@@ -877,8 +758,7 @@ class TestHistoryMode:
         assert last_msg == "m19"
 
     def test_history_mode_anchor_at_first_message_has_no_before_rows(self, model, gui_context):
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
         self._make_pool(gui_context, device, module, count=5)
 
         model.enter_history_mode(anchor_seq=1)
@@ -888,8 +768,7 @@ class TestHistoryMode:
         assert model.seq_for_row(0) == 1
 
     def test_history_mode_honors_kv_filter_in_both_before_and_after_scans(self, model, gui_context):
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         messages = [f"status={'ok' if i % 2 == 0 else 'fail'} id={i}" for i in range(20)]
         bundle = make_bundle(
@@ -912,8 +791,7 @@ class TestHistoryMode:
             assert "status=ok" in model.get_cell(row, LogTableCol.MESSAGE)
 
     def test_history_mode_honors_backend_text_filter_in_both_before_and_after_scans(self, model, gui_context):
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
 
         messages = ["needle" if i % 2 == 0 else "noise" for i in range(20)]
         bundle = make_bundle(
@@ -936,8 +814,7 @@ class TestHistoryMode:
             assert model.get_cell(row, LogTableCol.MESSAGE) == "needle"
 
     def test_enter_live_mode_resets_anchor_and_refetches(self, model, gui_context):
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
         self._make_pool(gui_context, device, module, count=5)
 
         model.enter_history_mode(anchor_seq=3)
@@ -956,8 +833,7 @@ class TestLogTableCanvas:
     Qt widget layer painting from the store, not the store itself."""
 
     def _make_canvas(self, model, gui_context, rows):
-        device = gui_context.id_registry.get_device("esp32")
-        module = device.get_module("wifi")
+        device, module = esp32_wifi(gui_context.id_registry)
         model.row_count = len(rows)
         for i, (seq, message) in enumerate(rows):
             _populate_row(model, i, ts=i, dev_id=device.id, level=0, mod_id=module.id, seq=seq, message=message)
