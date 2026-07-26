@@ -757,6 +757,53 @@ class TestHistoryMode:
         assert first_msg == "m0"
         assert last_msg == "m19"
 
+    def test_enter_history_mode_with_anchor_ts_fetches_before_and_after(self, model, gui_context):
+        """Timestamp counterpart to anchor_seq, used by LogTableViewerWidget's playback-clock
+        following: end_ts is an inclusive upper bound for "before", start_ts an inclusive lower
+        bound for "after" (see LogSegmentScanner.scan_history_window's docstring)."""
+        device, module = esp32_wifi(gui_context.id_registry)
+        self._make_pool(gui_context, device, module, count=20)  # timestamps 0..19, seqs 1..20
+
+        model.enter_history_mode(anchor_ts=10)
+
+        assert model.mode == LogViewMode.HISTORY
+        assert model.anchor_seq is None
+        assert model.anchor_ts == 10
+        # "before": ts <= 9 (m0..m9); "after": ts >= 10 (m10..m19).
+        assert model.row_count == 20
+        assert model.get_cell(0, LogTableCol.MESSAGE) == "m0"
+        assert model.get_cell(9, LogTableCol.MESSAGE) == "m9"
+        assert model.get_cell(10, LogTableCol.MESSAGE) == "m10"
+        assert model.get_cell(model.row_count - 1, LogTableCol.MESSAGE) == "m19"
+
+    def test_anchor_scroll_row_ts_anchored_returns_before_after_boundary(self, model, gui_context):
+        device, module = esp32_wifi(gui_context.id_registry)
+        self._make_pool(gui_context, device, module, count=20)
+
+        model.enter_history_mode(anchor_ts=10)
+
+        # 10 rows (m0..m9) fall in the "before" region - the boundary row is index 10.
+        assert model.anchor_scroll_row() == 10
+
+    def test_anchor_scroll_row_seq_anchored_matches_row_for_seq(self, model, gui_context):
+        device, module = esp32_wifi(gui_context.id_registry)
+        self._make_pool(gui_context, device, module, count=20)
+
+        model.enter_history_mode(anchor_seq=10)
+
+        assert model.anchor_scroll_row() == model.row_for_seq(10)
+
+    def test_reload_and_redraw_preserves_anchor_ts(self, model, gui_context):
+        device, module = esp32_wifi(gui_context.id_registry)
+        self._make_pool(gui_context, device, module, count=20)
+
+        model.enter_history_mode(anchor_ts=10)
+        model.log_filter.set_level(LogLevel.ERROR.name_conf)  # forces a reload
+        model.reload_and_redraw()
+
+        assert model.mode == LogViewMode.HISTORY
+        assert model.anchor_ts == 10
+
     def test_history_mode_anchor_at_first_message_has_no_before_rows(self, model, gui_context):
         device, module = esp32_wifi(gui_context.id_registry)
         self._make_pool(gui_context, device, module, count=5)
@@ -832,47 +879,46 @@ class TestLogTableCanvas:
     QTableView) - none of the LogTableStore tests above touch this class at all, since it's the
     Qt widget layer painting from the store, not the store itself."""
 
-    def _make_canvas(self, model, gui_context, rows):
+    def _make_canvas(self, qtbot, model, gui_context, rows):
         device, module = esp32_wifi(gui_context.id_registry)
         model.row_count = len(rows)
         for i, (seq, message) in enumerate(rows):
             _populate_row(model, i, ts=i, dev_id=device.id, level=0, mod_id=module.id, seq=seq, message=message)
         canvas = LogTableCanvas(model)
+        qtbot.addWidget(canvas)
         canvas.resize(400, 200)
         return canvas
 
-    def test_paint_event_runs_without_error(self, model, gui_context):
+    def test_paint_event_runs_without_error(self, qtbot, model, gui_context):
         from qtpy.QtGui import QPaintEvent
 
-        canvas = self._make_canvas(model, gui_context, [(1, "first"), (2, "second"), (3, "third")])
+        canvas = self._make_canvas(qtbot, model, gui_context, [(1, "first"), (2, "second"), (3, "third")])
         canvas.paintEvent(QPaintEvent(canvas.viewport().rect()))  # must not raise
 
-    def test_row_at_hit_tests_header_and_rows_correctly(self, model, gui_context):
+    def test_row_at_hit_tests_header_and_rows_correctly(self, qtbot, model, gui_context):
         from qtpy.QtCore import QPoint
 
         from blinkview.ui.widgets.log_table_viewer import HEADER_HEIGHT, ROW_HEIGHT
 
-        canvas = self._make_canvas(model, gui_context, [(1, "first"), (2, "second"), (3, "third")])
+        canvas = self._make_canvas(qtbot, model, gui_context, [(1, "first"), (2, "second"), (3, "third")])
         assert canvas._row_at(QPoint(10, 5)) is None  # inside the header strip
         assert canvas._row_at(QPoint(10, HEADER_HEIGHT + 1)) == 0
         assert canvas._row_at(QPoint(10, HEADER_HEIGHT + ROW_HEIGHT + 1)) == 1
         assert canvas._row_at(QPoint(10, 10_000)) is None  # far below the last row
 
-    def test_mouse_press_selects_row_by_seq(self, model, gui_context):
-        from qtpy.QtCore import QPointF, Qt
-        from qtpy.QtGui import QMouseEvent
+    def test_mouse_press_selects_row_by_seq(self, qtbot, model, gui_context):
+        from qtpy.QtCore import QPoint, Qt
 
         from blinkview.ui.widgets.log_table_viewer import HEADER_HEIGHT, ROW_HEIGHT
 
-        canvas = self._make_canvas(model, gui_context, [(1, "first"), (2, "second")])
-        pos = QPointF(10, HEADER_HEIGHT + ROW_HEIGHT + 1)  # second visible row
-        event = QMouseEvent(QMouseEvent.MouseButtonPress, pos, pos, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        canvas = self._make_canvas(qtbot, model, gui_context, [(1, "first"), (2, "second")])
+        pos = QPoint(10, HEADER_HEIGHT + ROW_HEIGHT + 1)  # second visible row
 
-        canvas.mousePressEvent(event)
+        qtbot.mouseClick(canvas.viewport(), Qt.LeftButton, pos=pos)
 
         assert canvas.selected_seq == 2
 
-    def test_wheel_up_while_live_triggers_callback_not_default_scroll(self, model, gui_context):
+    def test_wheel_up_while_live_triggers_callback_not_default_scroll(self, qtbot, model, gui_context):
         class FakeDelta:
             def y(self):
                 return 120
@@ -884,7 +930,7 @@ class TestLogTableCanvas:
             def accept(self):
                 pass
 
-        canvas = self._make_canvas(model, gui_context, [(1, "first")])
+        canvas = self._make_canvas(qtbot, model, gui_context, [(1, "first")])
         model.mode = LogViewMode.LIVE
         triggered = []
         canvas.on_wheel_up_while_live = lambda: triggered.append(True)
@@ -893,16 +939,16 @@ class TestLogTableCanvas:
 
         assert triggered == [True]
 
-    def test_autosize_columns_measures_visible_row_content(self, model, gui_context):
+    def test_autosize_columns_measures_visible_row_content(self, qtbot, model, gui_context):
         canvas = self._make_canvas(
-            model, gui_context, [(1, "short"), (2, "a much, much longer message than the others")]
+            qtbot, model, gui_context, [(1, "short"), (2, "a much, much longer message than the others")]
         )
         canvas.autosize_columns()
         assert canvas._col_width[LogTableCol.TIMESTAMP] > 0
         assert canvas._col_width[LogTableCol.MESSAGE] > 0
 
-    def test_set_column_visible_recomputes_message_stretch_width(self, model, gui_context):
-        canvas = self._make_canvas(model, gui_context, [(1, "hello")])
+    def test_set_column_visible_recomputes_message_stretch_width(self, qtbot, model, gui_context):
+        canvas = self._make_canvas(qtbot, model, gui_context, [(1, "hello")])
         before = canvas._col_width[LogTableCol.MESSAGE]
 
         canvas.set_column_visible(LogTableCol.RX_TIMESTAMP, True)

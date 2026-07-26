@@ -55,10 +55,10 @@ def gui_context():
 
 
 @pytest.fixture
-def widget(qapp, gui_context):
+def widget(qapp, qtbot, gui_context):
     w = PlaybackControlWidget(gui_context)
+    qtbot.addWidget(w)
     yield w
-    w.deleteLater()
 
 
 def test_constructs_in_live_mode_registered_as_updatable(widget, gui_context):
@@ -75,23 +75,27 @@ def test_apply_updates_ticks_the_clock_and_syncs_labels(widget, gui_context):
     assert widget.seek_bar.current_ts_ns == gui_context.registry.playback_clock.current_ts_ns
 
 
-def test_status_click_enters_and_leaves_replay(widget, gui_context):
-    widget._on_status_clicked(True)
+def test_status_click_enters_and_leaves_replay(widget, gui_context, qtbot):
+    from qtpy.QtCore import Qt
+
+    qtbot.mouseClick(widget.status_button, Qt.LeftButton)
     assert gui_context.registry.playback_clock.mode is PlaybackMode.REPLAY
     assert widget.play_button.isEnabled() is True
 
-    widget._on_status_clicked(False)
+    qtbot.mouseClick(widget.status_button, Qt.LeftButton)
     assert gui_context.registry.playback_clock.mode is PlaybackMode.LIVE
     assert widget.play_button.isEnabled() is False
 
 
-def test_play_pause_click_drives_clock_is_playing(widget, gui_context):
-    widget._on_status_clicked(True)  # must be in REPLAY before play() is meaningful
+def test_play_pause_click_drives_clock_is_playing(widget, gui_context, qtbot):
+    from qtpy.QtCore import Qt
 
-    widget._on_play_clicked(True)
+    qtbot.mouseClick(widget.status_button, Qt.LeftButton)  # must be in REPLAY before play() is meaningful
+
+    qtbot.mouseClick(widget.play_button, Qt.LeftButton)
     assert gui_context.registry.playback_clock.is_playing is True
 
-    widget._on_play_clicked(False)
+    qtbot.mouseClick(widget.play_button, Qt.LeftButton)
     assert gui_context.registry.playback_clock.is_playing is False
 
 
@@ -107,36 +111,41 @@ def test_seek_emit_with_large_nanosecond_timestamp_does_not_overflow(widget, gui
     assert clock.current_ts_ns == min(huge_ts, BOUNDS[1])
 
 
-def test_seek_bar_scrub_signals_drive_clock_is_scrubbing(widget, gui_context):
-    """SeekBarWidget.scrubStarted/scrubEnded (emitted by mousePress/mouseRelease) must reach
-    PlaybackClock.is_scrubbing, so a drag suspends tick()'s own auto-advance for the duration -
-    see test_playback_clock.py's scrubbing tests for the underlying clock behavior."""
+def test_seek_bar_scrub_signals_drive_clock_is_scrubbing(widget, gui_context, qtbot):
+    """A real mouse press-then-release on the seek bar (not a direct scrubStarted/scrubEnded
+    signal emit) must reach PlaybackClock.is_scrubbing, so a drag suspends tick()'s own
+    auto-advance for the duration - see test_playback_clock.py's scrubbing tests for the
+    underlying clock behavior.
+
+    seek_bar is only enabled in REPLAY (see _sync_from_clock) - genuinely disabled while LIVE, so
+    it must never receive real mouse events in that state; entering REPLAY first (via a real
+    status_button click, not a direct call) mirrors the only way a user could actually reach a
+    scrub. The old direct-signal-emit version of this test didn't need that step, since it
+    bypassed the disabled-widget guard Qt itself enforces."""
+    from qtpy.QtCore import Qt
+
+    qtbot.mouseClick(widget.status_button, Qt.LeftButton)  # enter REPLAY - required to enable seek_bar
+
     clock = gui_context.registry.playback_clock
     assert clock.is_scrubbing is False
 
-    widget.seek_bar.scrubStarted.emit()
+    qtbot.mousePress(widget.seek_bar, Qt.LeftButton)
     assert clock.is_scrubbing is True
 
-    widget.seek_bar.scrubEnded.emit()
+    qtbot.mouseRelease(widget.seek_bar, Qt.LeftButton)
     assert clock.is_scrubbing is False
 
 
-def test_speed_slider_right_click_resets_to_default_value(qapp):
+def test_speed_slider_right_click_resets_to_default_value(qapp, qtbot):
     from qtpy.QtCore import Qt
 
-    class FakeRightClickEvent:
-        def button(self):
-            return Qt.RightButton
-
-        def accept(self):
-            pass
-
     slider = SpeedSliderWidget(Qt.Horizontal, default_value=10)
+    qtbot.addWidget(slider)
     slider.setMinimum(-80)
     slider.setMaximum(80)
     slider.setValue(42)
     assert slider.value() == 42
 
-    slider.mousePressEvent(FakeRightClickEvent())
+    qtbot.mouseClick(slider, Qt.RightButton)
 
     assert slider.value() == 10

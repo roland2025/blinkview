@@ -516,6 +516,47 @@ def nb_bundle_push(
     )
 
 
+@app_njit()
+def nb_can_push(
+    bundle: LogBundle,
+    raw_timestamp: float,
+    offset_ns: int,
+    arb_id: int,
+    data: np.ndarray,  # Expects a uint8 view
+    is_ext: bool,
+    is_rem: bool,
+    is_err: bool,
+    is_fd: bool,
+    is_rx: bool,
+    brs: bool,
+    esi: bool,
+) -> bool:
+    # 1. Project Monotonic/Boot time to Epoch Nanoseconds
+    # $$T_{ns} = T_{offset} + \text{int}(T_{raw} \times 10^9)$$
+    ts_ns = offset_ns + int(raw_timestamp * 1_000_000_000)
+
+    # 2. Fast Bit-Packing for ext_u32_2
+    flags = 0
+    if is_ext:
+        flags |= 0x01  # Bit 0: Extended vs Standard
+    if is_rem:
+        flags |= 0x02  # Bit 1: Remote Frame
+    if is_err:
+        flags |= 0x04  # Bit 2: Error Frame
+    if is_fd:
+        flags |= 0x08  # Bit 3: CAN FD Frame
+    if is_rx:
+        flags |= 0x10  # Bit 4: Rx vs Tx
+    if brs:
+        flags |= 0x20  # Bit 5: Bit Rate Switch
+    if esi:
+        flags |= 0x40  # Bit 6: Error State Indicator
+
+    # 3. Direct push into the bundle
+    # level, module, device, seq are 0 for raw CAN ingress
+    return nb_bundle_push(bundle, ts_ns, ts_ns, data, 0, 0, 0, 0, arb_id, flags, 0)
+
+
 @app_njit(inline="always")
 def nb_bundle_push_len(
     bundle: LogBundle,

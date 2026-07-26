@@ -24,7 +24,7 @@ def registry(tmp_path):
 
 
 @pytest.fixture
-def watch(qapp, registry):
+def watch(qapp, qtbot, registry):
     gui_context = make_real_gui_context(registry)
     gui_context.set_gui_config_manager(ConfigNodeManager(gui_context))
     gui_context.logger = registry.logger_creator("gui")()
@@ -52,13 +52,13 @@ def watch(qapp, registry):
     registry.playback_clock.tick(registry.now_ns())
 
     w = TelemetryWatch(gui_context)
+    qtbot.addWidget(w)
     entry = RowEntry(label="Test Row", modules=[module])
     w.entries.append(entry)
     w.rebuild_ui()
     w.module = module  # stash for tests
     w.entry = entry
     yield w
-    w.deleteLater()
 
 
 def test_live_apply_updates_shows_the_latest_message(watch):

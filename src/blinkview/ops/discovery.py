@@ -6,7 +6,7 @@
 
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.modules import MODULE_ID_FULL, MODULE_ID_UNKNOWN, MODULE_TEMP_ID_BASE
-from blinkview.utils.fnv1a_64 import nb_fnv1a_64_fast
+from blinkview.ops.strings import nb_fnv1a_64_fast
 
 
 @app_njit()

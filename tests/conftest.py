@@ -19,16 +19,6 @@ from blinkview.utils.log_filter import LogFilter  # noqa: E402
 from blinkview.utils.log_level import LogLevel  # noqa: E402
 
 
-@pytest.fixture(scope="session")
-def qapp():
-    from qtpy.QtWidgets import QApplication
-
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    return app
-
-
 @pytest.fixture
 def id_registry():
     return IDRegistry(NumpyArrayPool())

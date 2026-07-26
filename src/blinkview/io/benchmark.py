@@ -11,52 +11,9 @@ import numpy as np
 from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.configurable import configuration_property
 from blinkview.core.constants import SysCat
-from blinkview.core.numba_config import app_njit
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
-
-
-@app_njit()
-def nb_blast_benchmark_cache(
-    bundle,  # LogBundle (NamedTuple of Numpy arrays)
-    start_ts,
-    chunks,  # Generation params
-    c_buf,
-    c_offs,
-    c_lens,
-    c_items,  # Compiled cache arrays
-):
-    """Numba kernel to bulk-insert cached messages using LogBundle."""
-    # Read current cursors from the 1-element arrays
-    row_cursor = bundle.size[0]
-    byte_cursor = bundle.msg_cursor[0]
-
-    written_bytes = 0
-
-    for i in range(chunks):
-        idx = i % c_items
-
-        # 1. Write Metadata
-        bundle.timestamps[row_cursor] = start_ts + i
-        bundle.offsets[row_cursor] = byte_cursor
-
-        c_len = c_lens[idx]
-        bundle.lengths[row_cursor] = c_len
-
-        # 2. Fast byte copy into the contiguous buffer
-        c_off = c_offs[idx]
-        bundle.buffer[byte_cursor : byte_cursor + c_len] = c_buf[c_off : c_off + c_len]
-
-        byte_cursor += c_len
-        row_cursor += 1
-        written_bytes += c_len
-
-    # Update the batch's internal trackers directly via the array references!
-    bundle.size[0] = row_cursor
-    bundle.msg_cursor[0] = byte_cursor
-
-    # We only need to return written_bytes for the global benchmark counters
-    return written_bytes
+from blinkview.ops.benchmark import nb_blast_benchmark_cache
 
 
 @DeviceFactory.register("benchmark")

@@ -26,7 +26,7 @@ def registry(tmp_path):
 
 
 @pytest.fixture
-def table(qapp, registry):
+def table(qapp, qtbot, registry):
     gui_context = make_real_gui_context(registry)
 
     device = registry.id_registry.get_device("tabletest")
@@ -58,10 +58,10 @@ def table(qapp, registry):
     registry.playback_clock.tick(registry.now_ns())
 
     w = TelemetryTable(gui_context)
+    qtbot.addWidget(w)
     w.early = early
     w.late = late
     yield w
-    w.deleteLater()
 
 
 def _msg_for_module(table, module):

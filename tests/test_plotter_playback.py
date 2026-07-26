@@ -27,7 +27,7 @@ def registry(tmp_path):
 
 
 @pytest.fixture
-def plotter(qapp, registry):
+def plotter(qapp, qtbot, registry):
     gui_context = make_real_gui_context(registry)
 
     device = registry.id_registry.get_device("plottertest")
@@ -51,11 +51,11 @@ def plotter(qapp, registry):
     registry.playback_clock.tick(registry.now_ns())
 
     w = TelemetryPlotter(gui_context)
+    qtbot.addWidget(w)
     w.modules = [module]
     w.resize(800, 600)
     w.module = module  # stash for tests
     yield w
-    w.deleteLater()
 
 
 def test_live_fetch_discovers_and_populates_the_module_buffer(plotter):

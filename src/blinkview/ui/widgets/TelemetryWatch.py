@@ -13,6 +13,7 @@ from typing import List, Optional
 from PySide6.QtCore import QRect
 from PySide6.QtGui import QColor, QCursor, QPen
 from PySide6.QtWidgets import QToolTip
+from shiboken6 import isValid
 from qtpy.QtCore import QMimeData, Qt, QTimer, Signal
 from qtpy.QtGui import QAction, QDrag, QFont, QPainter, QPalette, QPixmap
 from qtpy.QtWidgets import (
@@ -1244,11 +1245,14 @@ class TelemetryWatch(QWidget):
 
         self.container.setUpdatesEnabled(True)
 
+        # Guarded with isValid(): the widget (and this scrollbar) can be destroyed before this
+        # 50ms-deferred callback fires - e.g. the containing dialog/tab closing right after a
+        # rebuild_ui() call - which would otherwise crash on a deleted C++ QScrollBar.
         if scroll_to_bottom:
             self._stashed_scroll_pos = 0
-            QTimer.singleShot(50, lambda: scrollbar.setValue(scrollbar.maximum()))
+            QTimer.singleShot(50, lambda: isValid(scrollbar) and scrollbar.setValue(scrollbar.maximum()))
         else:
-            QTimer.singleShot(50, lambda: scrollbar.setValue(self._stashed_scroll_pos))
+            QTimer.singleShot(50, lambda: isValid(scrollbar) and scrollbar.setValue(self._stashed_scroll_pos))
 
     def _toggle_row_expanded(self, entry: RowEntry):
         entry.is_expanded = not entry.is_expanded
