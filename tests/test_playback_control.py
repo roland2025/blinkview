@@ -149,3 +149,169 @@ def test_speed_slider_right_click_resets_to_default_value(qapp, qtbot):
     qtbot.mouseClick(slider, Qt.RightButton)
 
     assert slider.value() == 10
+
+
+def test_speed_changed_updates_label_and_clock_speed(widget, gui_context):
+    widget.speed_slider.setValue(20)  # 2.0x
+
+    assert widget.speed_label.text() == "2.0x"
+    assert gui_context.registry.playback_clock.speed == 2.0
+
+
+def test_apply_updates_resyncs_when_tick_advances_playback_time(widget, gui_context, qtbot):
+    from qtpy.QtCore import Qt
+
+    qtbot.mouseClick(widget.status_button, Qt.LeftButton)  # enter REPLAY
+
+    clock = gui_context.registry.playback_clock
+    # Seek away from the live edge first - playing forward from current_ts_ns == bounds_max_ns
+    # would immediately clamp back to the edge and auto-go-live, leaving nothing to observe.
+    widget._on_seek_requested((clock.bounds_min_ns + clock.bounds_max_ns) // 2)
+
+    qtbot.mouseClick(widget.play_button, Qt.LeftButton)  # start playing
+
+    # The very first tick() call only establishes the wall-clock baseline (no prior timestamp to
+    # diff against, so elapsed time is 0) - playback only visibly advances from the *next* tick.
+    gui_context.registry._now_ns = 1_000_000_000
+    widget.apply_updates()
+    ts_before = clock.current_ts_ns
+
+    gui_context.registry._now_ns = 2_000_000_000  # 1s of wall time elapses while playing
+    widget.apply_updates()
+
+    assert clock.current_ts_ns != ts_before
+    assert widget.seek_bar.current_ts_ns == clock.current_ts_ns
+
+
+def test_apply_updates_does_not_resync_when_tick_reports_no_change(widget, gui_context):
+    # Constructing the widget already ran an initial _sync_from_clock(); a second
+    # apply_updates() at the same wall time with nothing else changed (still LIVE, bounds
+    # unchanged) must produce a no-op tick() and skip re-syncing.
+    calls = []
+    original = widget._sync_from_clock
+    widget._sync_from_clock = lambda: (calls.append(True), original())[-1]
+
+    widget.apply_updates()  # now_ns still 0 - nothing observable changes
+
+    assert calls == []
+
+
+class TestNoRegistryGuards:
+    """gui_context.registry can be None (e.g. before a session is fully wired up) - every clock
+    accessor must no-op rather than raise."""
+
+    @pytest.fixture
+    def widget_without_registry(self, qapp, qtbot):
+        ctx = FakeGuiContext()
+        ctx.registry = None
+        w = PlaybackControlWidget(ctx)
+        qtbot.addWidget(w)
+        return w
+
+    def test_construction_does_not_raise(self, widget_without_registry):
+        assert widget_without_registry.time_label.text() == "--:--:--.---"
+
+    def test_apply_updates_is_a_noop(self, widget_without_registry):
+        widget_without_registry.apply_updates()  # must not raise
+
+    def test_status_clicked_is_a_noop(self, widget_without_registry):
+        widget_without_registry._on_status_clicked(True)  # must not raise
+
+    def test_play_clicked_is_a_noop(self, widget_without_registry):
+        widget_without_registry._on_play_clicked(True)  # must not raise
+
+    def test_seek_requested_is_a_noop(self, widget_without_registry):
+        widget_without_registry._on_seek_requested(123)  # must not raise
+
+    def test_speed_changed_still_updates_the_label_but_not_a_clock(self, widget_without_registry):
+        widget_without_registry._on_speed_changed(20)
+        assert widget_without_registry.speed_label.text() == "2.0x"
+
+
+class TestSeekBarHelpers:
+    def test_ts_to_x_with_zero_span_returns_zero(self, qapp, qtbot):
+        from blinkview.ui.widgets.playback_control import SeekBarWidget
+
+        bar = SeekBarWidget()
+        qtbot.addWidget(bar)
+        bar.bounds_min_ns = 1000
+        bar.bounds_max_ns = 1000  # zero span
+
+        assert bar._ts_to_x(1000) == 0
+
+    def test_x_to_ts_with_zero_span_returns_bounds_min(self, qapp, qtbot):
+        from blinkview.ui.widgets.playback_control import SeekBarWidget
+
+        bar = SeekBarWidget()
+        qtbot.addWidget(bar)
+        bar.bounds_min_ns = 500
+        bar.bounds_max_ns = 500
+
+        assert bar._x_to_ts(10) == 500
+
+    def test_ts_to_x_and_x_to_ts_are_roughly_inverse(self, qapp, qtbot):
+        from blinkview.ui.widgets.playback_control import SeekBarWidget
+
+        bar = SeekBarWidget()
+        qtbot.addWidget(bar)
+        bar.resize(200, 30)
+        bar.bounds_min_ns = 0
+        bar.bounds_max_ns = 1000
+
+        x = bar._ts_to_x(500)
+        ts_back = bar._x_to_ts(x)
+        assert abs(ts_back - 500) < 20  # rounding tolerance
+
+
+class TestSeekBarMouseTracking:
+    def test_hover_without_button_sets_hover_x_without_seeking(self, qapp, qtbot):
+        from qtpy.QtCore import QEvent, QPointF, Qt
+        from qtpy.QtGui import QMouseEvent
+
+        from blinkview.ui.widgets.playback_control import SeekBarWidget
+
+        bar = SeekBarWidget()
+        qtbot.addWidget(bar)
+        bar.resize(200, 30)
+
+        seeks = []
+        bar.seekRequested.connect(seeks.append)
+
+        event = QMouseEvent(QEvent.MouseMove, QPointF(50, 5), Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+        bar.mouseMoveEvent(event)
+
+        assert bar._hover_x == 50
+        assert seeks == []
+
+    def test_drag_with_left_button_held_emits_seek_requested(self, qapp, qtbot):
+        from qtpy.QtCore import QEvent, QPointF, Qt
+        from qtpy.QtGui import QMouseEvent
+
+        from blinkview.ui.widgets.playback_control import SeekBarWidget
+
+        bar = SeekBarWidget()
+        qtbot.addWidget(bar)
+        bar.resize(200, 30)
+        bar.bounds_min_ns = 0
+        bar.bounds_max_ns = 1000
+
+        seeks = []
+        bar.seekRequested.connect(seeks.append)
+
+        event = QMouseEvent(QEvent.MouseMove, QPointF(100, 5), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        bar.mouseMoveEvent(event)
+
+        assert len(seeks) == 1
+
+    def test_leave_event_clears_hover_x(self, qapp, qtbot):
+        from qtpy.QtCore import QEvent
+
+        from blinkview.ui.widgets.playback_control import SeekBarWidget
+
+        bar = SeekBarWidget()
+        qtbot.addWidget(bar)
+        bar._hover_x = 42
+
+        bar.leaveEvent(QEvent(QEvent.Leave))
+
+        assert bar._hover_x is None

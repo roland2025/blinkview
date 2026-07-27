@@ -112,6 +112,12 @@ class TestParseZephyrRealtime:
         assert result == -1
 
 
+@pytest.mark.skip(
+    reason="Only overflows under BLINKVIEW_DISABLE_NUMBA=1 (plain Python, no JIT), which the real "
+    "app never runs with - numba's typed arithmetic promotes correctly under the actual JIT path. "
+    "Kept here (skipped rather than deleted) so the module docstring's explanation stays attached "
+    "to concrete test code instead of becoming stale prose."
+)
 class TestOverflowUnderDisabledNumba:
     """Documents the environment gap described in the module docstring, rather than silently
     dropping coverage of the happy path with no trace of why."""

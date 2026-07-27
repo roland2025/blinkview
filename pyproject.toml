@@ -121,6 +121,14 @@ managed = true
 package = true
 
 
+[tool.coverage.run]
+# ops/ holds numba @app_njit kernels - coverage.py can't trace through JIT-compiled code, so
+# line-coverage percentages there are unreliable/misleadingly low regardless of actual test
+# thoroughness (kernels are tested directly, just not visible to coverage instrumentation).
+omit = [
+    "src/blinkview/ops/*",
+]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-ra --showlocals --strict-markers -m \"not memory\""
