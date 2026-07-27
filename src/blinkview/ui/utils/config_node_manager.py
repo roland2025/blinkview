@@ -9,6 +9,7 @@ from typing import Any
 from qtpy.QtCore import QObject, QTimer, Signal, Slot
 
 from blinkview.core.config_manager import ConfigManager
+from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.config_node import ConfigNode
 
@@ -103,7 +104,7 @@ class ConfigNodeManager(QObject):
         )
         print(f"context: {self.gui_context}, create_widget: {self.gui_context.create_widget}")
         self.gui_context.create_widget(
-            "DynamicConfigWidget",
+            WidgetName.DYNAMIC_CONFIG,
             f"Settings: {child_name or path}",
             False,
             params={"drop_keys": drop_keys, "editable": editable, "path": path},

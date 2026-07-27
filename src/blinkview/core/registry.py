@@ -11,37 +11,68 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Optional
 
 from blinkview.core.array_pool import NumpyArrayPool
-from blinkview.core.base_reorder import ReorderFactory
-from blinkview.core.central_storage import CentralFactory
 from blinkview.core.config_manager import ConfigManager
-from blinkview.core.factory_registry import FactoryRegistry
+from blinkview.core.constants import FactoryCategory
+from blinkview.core.factory_category_registry import build_system_factory_registry
 from blinkview.core.id_history import IdHistory
 from blinkview.core.id_registry import IDRegistry
 from blinkview.core.logger import PrintLogger, SystemLogger
 from blinkview.core.module_snapshot import LatestModuleValueTracker
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.plugin_manager import PluginManager
-from blinkview.core.reorderer import Reorder
 from blinkview.core.settings_manager import SettingsManager
 from blinkview.core.sources import SourcesManager
 from blinkview.core.system_context import SystemContext
 from blinkview.core.task_manager import TaskManager
-from blinkview.io import *
-from blinkview.io.BaseReader import DeviceFactory
-from blinkview.parsers import *
-from blinkview.parsers import adb_decoder, frame_decoders, frame_parsers, multi_rule_key_value
-from blinkview.storage import *
-from blinkview.storage.file_logger import FileLogger
 from blinkview.storage.file_manager import FileManager
-from blinkview.subscribers import subscriber
 from blinkview.subscribers.subscriber import SubscriberFactory
-from blinkview.utils import level_map
 from blinkview.utils.time_utils import TimeUtils
 
 if TYPE_CHECKING:
-    from .central_storage import CentralStorage
-    from .pipeline_manager import PipelineManager
-    from .playback_clock import PlaybackClock
+    from blinkview.core.pipeline_manager import PipelineManager
+    from blinkview.core.playback_clock import PlaybackClock
+    from blinkview.core.central_storage import CentralStorage
+    
+    from blinkview.storage.file_logger import FileLogger
+
+
+def _import_registerable_modules():
+    """Triggers the @XFactory.register(...)/@register_factory_category(...) import-time side
+    effects that build_system_factory_registry() below depends on. Deliberately kept as a plain
+    function call rather than top-level imports: isort/ruff will happily re-sort a top-level
+    `from blinkview import io as io` ahead of `from blinkview.core.id_registry import IDRegistry`
+    (shorter dotted path sorts first), and doing so reintroduces a real circular import
+    (core.types.parsing <-> core.id_registry <-> utils.level_map) that only "works" when
+    core.id_registry finishes resolving before blinkview.io/parsers/storage pull in
+    core.types.parsing themselves. This function runs after every normal import above has already
+    completed, so it can't be silently reordered into the broken position by an autoformatter.
+
+    core.central_storage is imported here too, deliberately duplicating the TYPE_CHECKING import
+    above: CentralStorage is only referenced in a string-quoted annotation (no runtime need), so
+    an "optimize imports" pass will happily move it under TYPE_CHECKING - which is correct for the
+    annotation but silently drops CentralFactory's @register_factory_category(FactoryCategory.
+    CENTRAL) registration, since TYPE_CHECKING imports never execute. Import the module here,
+    independent of the annotation's import, so the registration survives regardless of what an
+    autoformatter decides about the annotation-only reference.
+
+    subscribers.subscriber is imported here too, for the same reason, pre-emptively: the module
+    is currently imported at the top for a real, direct use (`SubscriberFactory.build(...)` in
+    build_subscriber()), which incidentally also registers TimeSyncerFactory
+    (@register_factory_category(FactoryCategory.TIME_SYNC)) defined in that same module - but that
+    registration would silently vanish the moment build_subscriber() stops calling
+    SubscriberFactory directly and someone removes the now "unused" top-level import. Duplicating
+    it here decouples the registration from whatever direct use of SubscriberFactory happens to
+    exist elsewhere in this file."""
+    from blinkview import io as io
+    from blinkview import parsers as parsers
+    from blinkview import storage as storage
+    from blinkview.core import central_storage as central_storage
+    from blinkview.core.reorderer import Reorder as Reorder
+    from blinkview.subscribers import subscriber as subscriber
+    from blinkview.utils import level_map as level_map
+
+
+_import_registerable_modules()
 
 
 class Registry:
@@ -76,28 +107,7 @@ class Registry:
 
         self.logger = self.logger_creator("registry")()
 
-        factories = FactoryRegistry()
-        factories.register("reorder", ReorderFactory)
-        factories.register("central", CentralFactory)
-        factories.register("source", DeviceFactory)
-        factories.register("parser", parser.ParserFactory)
-        factories.register("time_sync", subscriber.TimeSyncerFactory)
-        factories.register("pipeline_transformer", transformer.TransformerFactory)
-        factories.register("pipeline_assembler", assembler.AssemblerFactory)
-        factories.register("pipeline_printable", transformer.PipelinePrintableFactory)
-        factories.register("pipeline_decode", transformer.PipelineDecodeFactory)
-        factories.register("pipeline_transform", transformer.PipelineTransformFactory)
-        factories.register("can_parser", can_bus.CanParserFactory)
-        factories.register("can_assembler", can_bus.CanAssemblerFactory)
-        factories.register("can_decode", can_bus.CanDecoderFactory)
-        factories.register("can_transform", can_bus.CanTransformFactory)
-        # factories.register("log_level_map", level_map.LogLevelMapFactory)
-        factories.register("logging_processor", file_logger.BatchProcessorFactory)
-        factories.register("file_logging", file_logger.FileLoggerFactory)
-        factories.register("frame_decoder", frame_decoders.FrameDecoderFactory)
-        factories.register("frame_parser", frame_parsers.FrameParserFactory)
-        factories.register("frame_section_parser", frame_parsers.FrameSectionParserFactory)
-        factories.register("key_value_rule", multi_rule_key_value.ExtractionRuleFactory)
+        factories = build_system_factory_registry()
 
         self.file_manager = FileManager(
             session_name=session_name, profile_name=profile_name, log_dir=log_dir, config_path=config_path
@@ -120,11 +130,11 @@ class Registry:
         self.plugins = PluginManager(self, self.logger_creator("plugins")())
 
         self.key_to_base_class = {
-            "central": factories.get_produced_type("central"),
-            "reorder": factories.get_produced_type("reorder"),
+            "central": factories.get_produced_type(FactoryCategory.CENTRAL),
+            "reorder": factories.get_produced_type(FactoryCategory.REORDER),
         }
 
-        print(f"[Registry] key_to_base_class mapping: {self.key_to_base_class}")
+        # print(f"[Registry] key_to_base_class mapping: {self.key_to_base_class}")
 
         for key, base_cls in self.key_to_base_class.items():
             if base_cls is not None and hasattr(base_cls, "get_config_schema"):
@@ -330,7 +340,7 @@ class Registry:
 
                     local_ctx = SimpleNamespace(get_logger=self.logger_creator("reorder"))
 
-                    self.reorder = factories.build("reorder", reorder_config, system_ctx, local_ctx)
+                    self.reorder = factories.build(FactoryCategory.REORDER, reorder_config, system_ctx, local_ctx)
 
                     self.config.subscribe("/reorder", self.reorder)
 
@@ -351,7 +361,9 @@ class Registry:
                         logging_id="session",
                     )
 
-                    self.central = factories.build("central", central_storage_config, system_ctx, local_ctx)
+                    self.central = factories.build(
+                        FactoryCategory.CENTRAL, central_storage_config, system_ctx, local_ctx
+                    )
                     if self.reorder is not None:
                         self.reorder.subscribe(self.central)
 

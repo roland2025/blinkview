@@ -4,9 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import List, Optional
-
-import numpy as np
+from typing import Optional
 
 from blinkview.core import dtypes
 from blinkview.core.configurable import (

@@ -42,8 +42,10 @@ from blinkview.core.module_snapshot import MAX_MSG_BYTES, LatestModuleValueTrack
 from blinkview.core.playback_clock import PlaybackMode
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.telemetry_table import nb_initialize_new_modules, nb_update_visible_state
+from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.in_development import set_as_in_development
+from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.action_button_delegate import TelemetryCol, TelemetryDelegate
 
 if TYPE_CHECKING:
@@ -652,6 +654,7 @@ class TelemetryTableModel(QAbstractTableModel):
         return None
 
 
+@register_widget_factory(WidgetName.TELEMETRY_TABLE)
 class TelemetryTable(QWidget):
     def __init__(self, gui_context, state=None, parent=None):
         super().__init__(parent)
@@ -962,7 +965,7 @@ class TelemetryTable(QWidget):
             title += " (+ Children)"
 
         self.gui_context.create_widget(
-            "LogViewerWidget",
+            WidgetName.LOG_VIEWER,
             title,
             as_window=True,
             params={"filtered_module": module, "include_children": include_children},
@@ -999,7 +1002,7 @@ class TelemetryTable(QWidget):
                 show_hidden = module.device == self.gui_context.registry.system_device
 
                 self.gui_context.create_widget(
-                    "LogTableViewerWidget" if as_table else "LogViewerWidget",
+                    WidgetName.LOG_TABLE_VIEWER if as_table else WidgetName.LOG_VIEWER,
                     title,
                     as_window=True,
                     params={
@@ -1023,7 +1026,7 @@ class TelemetryTable(QWidget):
 
             case "view_graph" | "view_graph_with_children":
                 self.gui_context.create_widget(
-                    "TelemetryPlotter",
+                    WidgetName.TELEMETRY_PLOTTER,
                     f"Graph: {module.name}",
                     as_window=True,
                     params={"modules": [module] if action_id == "view_graph" else module.get_all_descendants()},

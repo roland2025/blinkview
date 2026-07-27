@@ -112,9 +112,8 @@ line-length = 120
 [tool.ruff.lint]
 # "E" is Pycodestyle, "F" is Pyflakes, "I" is Isort
 select = ["E", "F", "I"]
-# F401: Unused imports (your choice)
 # E203: Whitespace before ':' (the fix for your slice)
-ignore = ["F401", "E203"]
+ignore = [ "E203"]
 
 [tool.uv]
 managed = true

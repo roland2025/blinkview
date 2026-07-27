@@ -11,7 +11,7 @@ from typing import Iterable, List
 
 from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable, configuration_property
-from blinkview.core.constants import SysCat
+from blinkview.core.constants import FactoryCategory, SysCat
 from blinkview.core.logger import BaseLogger
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.system_context import SystemContext
@@ -32,7 +32,7 @@ from blinkview.utils.settings_updater import update_object_from_config
     title="Log incoming data",
     type="object",
     hidden=True,
-    _factory="file_logging",
+    _factory=FactoryCategory.FILE_LOGGING,
     _factory_default="default",
 )
 @configurable
@@ -94,7 +94,9 @@ class BaseDaemon:
                             get_logger=self.shared.registry.logger_creator("file_logging", self.local.logging_id),
                             logging_id=self.local.logging_id,
                         )
-                        self.file_logger = self.shared.factories.build("file_logging", logging_cfg, self.shared, ns)
+                        self.file_logger = self.shared.factories.build(
+                            FactoryCategory.FILE_LOGGING, logging_cfg, self.shared, ns
+                        )
                         self.file_logger.start()
                     self.subscribe(self.file_logger)
                 else:

@@ -38,7 +38,9 @@ from qtpy.QtGui import QAction, QColor
 from qtpy.QtWidgets import QComboBox, QLabel, QMenu, QSizePolicy, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.core.device_identity import ModuleIdentity
+from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
+from blinkview.ui.widget_registry import register_widget_factory
 
 
 @dataclass
@@ -80,6 +82,7 @@ class SeriesContainer:
             self.ov_y.append(np.zeros(10000, dtype=dtypes.PLOT_VAL_TYPE))
 
 
+@register_widget_factory(WidgetName.TELEMETRY_PLOTTER)
 class TelemetryPlotter(QWidget):
     # Per-side sample cap for a REPLAY-follow fetch (ops/telemetry.py's window kernels via
     # fetch_telemetry_window) - independent of max_points (which bounds the LIVE ring).

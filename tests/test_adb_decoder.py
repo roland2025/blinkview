@@ -54,9 +54,7 @@ class TestAdbModuleName:
 class TestAdbLongTimestamp:
     def test_bundle_returns_expected_parser_id_and_empty_config(self, id_registry):
         parser = AdbLongTimestamp()
-        parser.local = SimpleNamespace(
-            device_id=id_registry.get_device("adb_ts_test"), sync_state=None
-        )
+        parser.local = SimpleNamespace(device_id=id_registry.get_device("adb_ts_test"), sync_state=None)
         configure(parser)
 
         parser_id, state, config = parser.bundle()

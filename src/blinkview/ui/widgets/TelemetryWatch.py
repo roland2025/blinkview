@@ -13,7 +13,6 @@ from typing import List, Optional
 from PySide6.QtCore import QRect
 from PySide6.QtGui import QColor, QCursor, QPen
 from PySide6.QtWidgets import QToolTip
-from shiboken6 import isValid
 from qtpy.QtCore import QMimeData, Qt, QTimer, Signal
 from qtpy.QtGui import QAction, QDrag, QFont, QPainter, QPalette, QPixmap
 from qtpy.QtWidgets import (
@@ -33,11 +32,14 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
 
 from blinkview.core import dtypes
 from blinkview.core.device_identity import ModuleIdentity
 from blinkview.core.playback_clock import PlaybackMode
+from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
+from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.message_box import MessageBox
 from blinkview.utils.generate_id import generate_id
@@ -412,6 +414,7 @@ class DraggableRowLabel(QLabel):
         super().mouseReleaseEvent(event)
 
 
+@register_widget_factory(WidgetName.TELEMETRY_WATCH)
 @add_custom_print
 class TelemetryWatch(QWidget):
     signal_destroy = Signal(QWidget)
@@ -1739,7 +1742,7 @@ class TelemetryWatch(QWidget):
                 for mod in entry.modules:
                     module_filters[mod.name_with_device()] = {"enabled": True, "level": "ALL"}
 
-                widget_cls = "LogTableViewerWidget" if action_id == "view_logs_table" else "LogViewerWidget"
+                widget_cls = WidgetName.LOG_TABLE_VIEWER if action_id == "view_logs_table" else WidgetName.LOG_VIEWER
 
                 # Open the log viewer (text or table) with surgical filtering enabled
                 self.gui_context.create_widget(
@@ -1759,7 +1762,7 @@ class TelemetryWatch(QWidget):
 
             case "view_graph":
                 self.gui_context.create_widget(
-                    "TelemetryPlotter",
+                    WidgetName.TELEMETRY_PLOTTER,
                     f"Graph: {entry.label} ({entry.first_module_name()})",
                     as_window=True,
                     params={"modules": entry.modules},

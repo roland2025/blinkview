@@ -7,22 +7,23 @@
 from types import SimpleNamespace
 from typing import Any, Callable, List, NamedTuple
 
-from ..core.base_daemon import BaseDaemon
-from ..core.batch_queue import BatchQueue
-from ..core.configurable import (
+from blinkview.core.base_daemon import BaseDaemon
+from blinkview.core.batch_queue import BatchQueue
+from blinkview.core.configurable import (
     configuration_factory,
     configuration_property,
 )
-from ..core.constants import SysCat
-from ..core.factory import BaseFactory
-from ..core.limits import BATCH_MAXLEN
-from ..core.types.parsing import SyncState, create_default_sync
+from blinkview.core.constants import FactoryCategory, SysCat
+from blinkview.core.factory import BaseFactory
+from blinkview.core.factory_category_registry import register_factory_category
+from blinkview.core.limits import BATCH_MAXLEN
+from blinkview.core.types.parsing import SyncState, create_default_sync
 
 # Define the signature for a transformation
 TransformFunc = Callable[[Any], Any]
 
 
-@configuration_factory("parser")
+@configuration_factory(FactoryCategory.PARSER)
 @configuration_property(
     "max_batch",
     type="integer",
@@ -66,7 +67,7 @@ TransformFunc = Callable[[Any], Any]
     type="object",
     hidden=True,
     required=False,
-    _factory="time_sync",
+    _factory=FactoryCategory.TIME_SYNC,
 )
 class BaseParser(BaseDaemon):
     max_batch: int
@@ -111,7 +112,7 @@ class BaseParser(BaseDaemon):
                     self.unregister_child(self.time_syncer)
                     self.time_syncer = None
                 self.time_syncer = factory_build(
-                    "time_sync", time_sync_conf, system_ctx=self.shared, local_ctx=sync_ctx
+                    FactoryCategory.TIME_SYNC, time_sync_conf, system_ctx=self.shared, local_ctx=sync_ctx
                 )
                 self.subscribe(self.time_syncer)
                 self.register_child(self.time_syncer)
@@ -120,5 +121,6 @@ class BaseParser(BaseDaemon):
         return changed
 
 
+@register_factory_category(FactoryCategory.PARSER)
 class ParserFactory(BaseFactory[BaseParser]):
     pass

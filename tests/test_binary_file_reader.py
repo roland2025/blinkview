@@ -79,9 +79,7 @@ class TestStreamMode:
         f = tmp_path / "data.bin"
         f.write_bytes(content)
 
-        reader = make_reader(
-            file_path=str(f), read_mode="stream", chunk_size=4, frequency=1000, delay=5, loop=False
-        )
+        reader = make_reader(file_path=str(f), read_mode="stream", chunk_size=4, frequency=1000, delay=5, loop=False)
         reader.enabled = True
 
         received = run_and_collect(reader, timeout=5.0, expected_len=len(content))
@@ -110,9 +108,7 @@ class TestStreamMode:
         f = tmp_path / "loop.bin"
         f.write_bytes(content)
 
-        reader = make_reader(
-            file_path=str(f), read_mode="stream", chunk_size=4, frequency=1000, delay=5, loop=True
-        )
+        reader = make_reader(file_path=str(f), read_mode="stream", chunk_size=4, frequency=1000, delay=5, loop=True)
         reader.enabled = True
 
         # With loop=True the reader never stops on its own - collect more bytes than the
@@ -129,9 +125,7 @@ class TestMemoryMode:
         f = tmp_path / "mem.bin"
         f.write_bytes(content)
 
-        reader = make_reader(
-            file_path=str(f), read_mode="memory", chunk_size=4, frequency=1000, delay=5, loop=False
-        )
+        reader = make_reader(file_path=str(f), read_mode="memory", chunk_size=4, frequency=1000, delay=5, loop=False)
         reader.enabled = True
 
         received = run_and_collect(reader, timeout=5.0, expected_len=len(content))

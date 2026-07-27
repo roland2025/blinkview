@@ -6,25 +6,28 @@
 
 from typing import Optional
 
-from ..utils.throughput import Speedometer
-from .base_daemon import BaseDaemon
-from .batch_queue import BatchQueue
-from .configurable import configuration_factory, configuration_property, override_property
-from .factory import BaseFactory
-from .limits import CENTRAL_STORAGE_BUFFER_SIZE_MB, CENTRAL_STORAGE_MAX_PIECES, CENTRAL_STORAGE_MAXLEN
-from .numpy_batch_manager import log_batch
-from .numpy_log import (
+from blinkview.core.base_daemon import BaseDaemon
+from blinkview.core.batch_queue import BatchQueue
+from blinkview.core.configurable import configuration_factory, configuration_property, override_property
+from blinkview.core.constants import FactoryCategory
+from blinkview.core.factory import BaseFactory
+from blinkview.core.factory_category_registry import register_factory_category
+from blinkview.core.limits import CENTRAL_STORAGE_BUFFER_SIZE_MB, CENTRAL_STORAGE_MAX_PIECES, CENTRAL_STORAGE_MAXLEN
+from blinkview.core.numpy_batch_manager import log_batch
+from blinkview.core.numpy_log import (
     CircularLogPool,
 )
+from blinkview.utils.throughput import Speedometer
 
 
-@configuration_factory("central")
+@configuration_factory(FactoryCategory.CENTRAL)
 @override_property("enabled", default=True, hidden=True)
 class BaseCentralStorage(BaseDaemon):
     def __init__(self):
         super().__init__()
 
 
+@register_factory_category(FactoryCategory.CENTRAL)
 class CentralFactory(BaseFactory[BaseCentralStorage]):
     pass
 

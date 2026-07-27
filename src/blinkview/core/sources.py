@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable
+from blinkview.core.constants import FactoryCategory
 
 
 @bindable
@@ -62,7 +63,7 @@ class SourcesManager:
                         push_log=registry.reorder.put if is_reorder_enabled else registry.central.put,
                         logging_id=item_id,
                     )
-                    item = factories.build("source", source_config, system_ctx, local_ctx)
+                    item = factories.build(FactoryCategory.SOURCE, source_config, system_ctx, local_ctx)
                     item.reference_id = item_id
                     self.sources[item_id] = item
                     # registry.config.subscribe(f"/sources/{item_id}", item)
@@ -167,7 +168,7 @@ class SourcesManager:
         try:
             return self.sources[name].get_config_schema()
         except KeyError:
-            return self.shared.factories.get_base_schema("source")
+            return self.shared.factories.get_base_schema(FactoryCategory.SOURCE)
 
     def start(self):
         with self.lock:

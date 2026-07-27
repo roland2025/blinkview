@@ -10,14 +10,14 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ..core import dtypes
-from ..core.configurable import configuration_property
-from ..core.limits import BATCH_MAXLEN
-from ..core.numpy_batch_manager import PooledLogBatch
-from ..core.types.empty import EMPTY_BYTES
-from ..ops.segments import nb_can_push
-from ..utils.throughput import Speedometer, ThroughputAutoTuner
-from .BaseReader import BaseReader, DeviceFactory
+from blinkview.core import dtypes
+from blinkview.core.configurable import configuration_property
+from blinkview.core.limits import BATCH_MAXLEN
+from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.core.types.empty import EMPTY_BYTES
+from blinkview.io.BaseReader import BaseReader, DeviceFactory
+from blinkview.ops.segments import nb_can_push
+from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 if TYPE_CHECKING:
     from can import Bus, CanError, Message

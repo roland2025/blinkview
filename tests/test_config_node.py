@@ -94,7 +94,10 @@ class TestRecvConfigSchema:
 
         deep_schema = {
             "properties": {
-                "a": {"type": "object", "properties": {"b": {"type": "object", "properties": {"c": {"type": "string"}}}}}
+                "a": {
+                    "type": "object",
+                    "properties": {"b": {"type": "object", "properties": {"c": {"type": "string"}}}},
+                }
             }
         }
         node.recv_config_schema("/devices/abc", {}, deep_schema)

@@ -8,11 +8,11 @@ from threading import Lock
 from types import SimpleNamespace
 from typing import Dict
 
-from ..parsers.parser import BaseParser
-from .bindable import bindable
-from .configurable import configurable
-from .constants import SysCat
-from .system_context import SystemContext
+from blinkview.core.bindable import bindable
+from blinkview.core.configurable import configurable
+from blinkview.core.constants import FactoryCategory, SysCat
+from blinkview.core.system_context import SystemContext
+from blinkview.parsers.parser import BaseParser
 
 
 @configurable
@@ -72,7 +72,7 @@ class PipelineManager:
                         device_id=device_id,
                     )
 
-                    item = factories.build("parser", item_config, self.shared, local_ctx)
+                    item = factories.build(FactoryCategory.PARSER, item_config, self.shared, local_ctx)
                     self.pipelines[item_id] = item
                     item.reference_id = item_id
                     # Register for individual config updates
@@ -251,7 +251,7 @@ class PipelineManager:
             return self.pipelines[name].get_config_schema()
         except KeyError:
             print(f"[DynamicConfigWidget] No schema found for pipeline '{name}'")
-            return self.shared.factories.get_base_schema("parser")
+            return self.shared.factories.get_base_schema(FactoryCategory.PARSER)
 
     def get(self, id_: str):
         print(f"PipelineManager: Retrieving pipeline with ID '{id_}' all: {list(self.pipelines.keys())}")

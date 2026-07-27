@@ -6,7 +6,9 @@
 
 from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable, configuration_property
+from blinkview.core.constants import FactoryCategory
 from blinkview.core.factory import BaseFactory
+from blinkview.core.factory_category_registry import register_factory_category
 from blinkview.core.types.frames import FrameConfig
 from blinkview.core.types.parsing import CodecID
 
@@ -17,6 +19,7 @@ class FrameDecoderBase:
     pass
 
 
+@register_factory_category(FactoryCategory.FRAME_DECODER)
 class FrameDecoderFactory(BaseFactory[FrameDecoderBase]):
     pass
 

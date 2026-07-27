@@ -7,13 +7,13 @@
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from ..core.configurable import configuration_property
-from ..core.device_identity import DeviceIdentity
-from ..core.numpy_batch_manager import PooledLogBatch
-from ..utils.log_level import LogLevel
-from ..utils.paths import resolve_config_path
-from ..utils.throughput import Speedometer, ThroughputAutoTuner
-from .parser import BaseParser, ParserFactory
+from blinkview.core.configurable import configuration_property
+from blinkview.core.device_identity import DeviceIdentity
+from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.parsers.parser import BaseParser, ParserFactory
+from blinkview.utils.log_level import LogLevel
+from blinkview.utils.paths import resolve_config_path
+from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 
 @dataclass(slots=True)

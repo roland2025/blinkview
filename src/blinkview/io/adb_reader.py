@@ -11,14 +11,14 @@ import subprocess
 from threading import Lock
 from time import perf_counter, sleep
 
-from ..core.configurable import configuration_property, override_property
-from ..core.numpy_batch_manager import PooledLogBatch
-from ..core.time_sync_engine import TimeSyncEngine
-from ..core.types.parsing import SyncState
-from ..parsers.binary_parser import BinaryParser
-from ..utils.adb import detect_adb_path
-from ..utils.throughput import Speedometer, ThroughputAutoTuner
-from .BaseReader import BaseReader, DeviceFactory
+from blinkview.core.configurable import configuration_property, override_property
+from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.core.time_sync_engine import TimeSyncEngine
+from blinkview.core.types.parsing import SyncState
+from blinkview.io.BaseReader import BaseReader, DeviceFactory
+from blinkview.parsers.binary_parser import BinaryParser
+from blinkview.utils.adb import detect_adb_path
+from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 
 @DeviceFactory.register("adb")

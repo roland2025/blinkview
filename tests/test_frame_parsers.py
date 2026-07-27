@@ -54,18 +54,14 @@ def make_generic_parser(id_registry, device_name="frame_parser_test", **override
 
 class TestGenericFrameParserPipeline:
     def test_builds_pipeline_steps_via_the_real_factory(self, id_registry):
-        parser, _device = make_generic_parser(
-            id_registry, steps=[{"type": "skip_words", "count": 3}]
-        )
+        parser, _device = make_generic_parser(id_registry, steps=[{"type": "skip_words", "count": 3}])
 
         assert len(parser.pipeline) == 1
         assert isinstance(parser.pipeline[0], SkipWordsParser)
         assert parser.pipeline[0].count == 3
 
     def test_bundle_config_resolves_module_and_device_ids(self, id_registry):
-        parser, device = make_generic_parser(
-            id_registry, filter_squash_spaces=True, parser_errors_hidden=True
-        )
+        parser, device = make_generic_parser(id_registry, filter_squash_spaces=True, parser_errors_hidden=True)
 
         bundle = parser.bundle()
 
@@ -101,9 +97,7 @@ class TestGenericFrameParserPipeline:
         assert parser.post_process("anything") is False
 
     def test_single_module_name_step_uses_its_post_process_directly(self, id_registry):
-        parser, _device = make_generic_parser(
-            id_registry, steps=[{"type": "module_name_fixed_width", "max_length": 8}]
-        )
+        parser, _device = make_generic_parser(id_registry, steps=[{"type": "module_name_fixed_width", "max_length": 8}])
 
         parser.bundle()
 

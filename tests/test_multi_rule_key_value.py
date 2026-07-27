@@ -90,7 +90,10 @@ class TestKeyValueExtractionRule:
     def test_strips_configured_prefix_before_parsing(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            KeyValueExtractionRule, id_registry, "kv_prefix_dev", module_name="kv_prefix_dev.parent",
+            KeyValueExtractionRule,
+            id_registry,
+            "kv_prefix_dev",
+            module_name="kv_prefix_dev.parent",
             prefix_strip="Data: ",
         )
         ctx, in_batch = _make_local_ctx(pool, "Data: level=high")
@@ -109,7 +112,9 @@ class TestKeyValueExtractionRule:
 
     def test_quoted_values_keep_internal_spaces(self, id_registry):
         pool = NumpyArrayPool()
-        rule, device = _make_rule(KeyValueExtractionRule, id_registry, "kv_quote_dev", module_name="kv_quote_dev.parent")
+        rule, device = _make_rule(
+            KeyValueExtractionRule, id_registry, "kv_quote_dev", module_name="kv_quote_dev.parent"
+        )
         ctx, in_batch = _make_local_ctx(pool, 'msg="hello world" done=1')
         rule.local = SimpleNamespace(device_id=device, parser_local=ctx)
 
@@ -127,7 +132,10 @@ class TestKeyValueExtractionRule:
     def test_module_suffix_overrides_the_name_prefix(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            KeyValueExtractionRule, id_registry, "kv_suffix_dev", module_name="kv_suffix_dev.parent",
+            KeyValueExtractionRule,
+            id_registry,
+            "kv_suffix_dev",
+            module_name="kv_suffix_dev.parent",
             module_suffix="renamed",
         )
         ctx, in_batch = _make_local_ctx(pool, "a=1")
@@ -147,8 +155,12 @@ class TestKeyValueExtractionRule:
     def test_custom_delimiters(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            KeyValueExtractionRule, id_registry, "kv_delim_dev", module_name="kv_delim_dev.parent",
-            field_delimiter=";", kv_delimiter=":",
+            KeyValueExtractionRule,
+            id_registry,
+            "kv_delim_dev",
+            module_name="kv_delim_dev.parent",
+            field_delimiter=";",
+            kv_delimiter=":",
         )
         ctx, in_batch = _make_local_ctx(pool, "a:1;b:2")
         rule.local = SimpleNamespace(device_id=device, parser_local=ctx)
@@ -171,8 +183,15 @@ class TestAnchorWordExtractionRule:
     def test_contains_match_extracts_word_at_index(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            AnchorWordExtractionRule, id_registry, "anchor_dev", module_name="anchor_dev.parent",
-            module_suffix="extracted", match="contains", pattern="TOKEN", index=2, count=1,
+            AnchorWordExtractionRule,
+            id_registry,
+            "anchor_dev",
+            module_name="anchor_dev.parent",
+            module_suffix="extracted",
+            match="contains",
+            pattern="TOKEN",
+            index=2,
+            count=1,
         )
         ctx, in_batch = _make_local_ctx(pool, "info TOKEN abc def ghi")
         rule.local = SimpleNamespace(device_id=device, parser_local=ctx)
@@ -191,8 +210,15 @@ class TestAnchorWordExtractionRule:
     def test_no_match_produces_no_row(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            AnchorWordExtractionRule, id_registry, "anchor_nomatch_dev", module_name="anchor_nomatch_dev.parent",
-            module_suffix="extracted", match="contains", pattern="NOPE", index=0, count=1,
+            AnchorWordExtractionRule,
+            id_registry,
+            "anchor_nomatch_dev",
+            module_name="anchor_nomatch_dev.parent",
+            module_suffix="extracted",
+            match="contains",
+            pattern="NOPE",
+            index=0,
+            count=1,
         )
         ctx, in_batch = _make_local_ctx(pool, "info TOKEN abc")
         rule.local = SimpleNamespace(device_id=device, parser_local=ctx)
@@ -209,8 +235,15 @@ class TestAnchorWordExtractionRule:
     def test_starts_with_match_type(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            AnchorWordExtractionRule, id_registry, "anchor_sw_dev", module_name="anchor_sw_dev.parent",
-            module_suffix="extracted", match="starts_with", pattern="info", index=1, count=1,
+            AnchorWordExtractionRule,
+            id_registry,
+            "anchor_sw_dev",
+            module_name="anchor_sw_dev.parent",
+            module_suffix="extracted",
+            match="starts_with",
+            pattern="info",
+            index=1,
+            count=1,
         )
         ctx, in_batch = _make_local_ctx(pool, "info TOKEN abc")
         rule.local = SimpleNamespace(device_id=device, parser_local=ctx)
@@ -229,8 +262,15 @@ class TestAnchorWordExtractionRule:
     def test_ends_with_match_type_rejects_non_matching(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            AnchorWordExtractionRule, id_registry, "anchor_ew_dev", module_name="anchor_ew_dev.parent",
-            module_suffix="extracted", match="ends_with", pattern="xyz", index=0, count=1,
+            AnchorWordExtractionRule,
+            id_registry,
+            "anchor_ew_dev",
+            module_name="anchor_ew_dev.parent",
+            module_suffix="extracted",
+            match="ends_with",
+            pattern="xyz",
+            index=0,
+            count=1,
         )
         ctx, in_batch = _make_local_ctx(pool, "info TOKEN abc")
         rule.local = SimpleNamespace(device_id=device, parser_local=ctx)
@@ -247,8 +287,15 @@ class TestAnchorWordExtractionRule:
     def test_count_zero_extracts_all_remaining_words(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            AnchorWordExtractionRule, id_registry, "anchor_all_dev", module_name="anchor_all_dev.parent",
-            module_suffix="extracted", match="contains", pattern="TOKEN", index=1, count=0,
+            AnchorWordExtractionRule,
+            id_registry,
+            "anchor_all_dev",
+            module_name="anchor_all_dev.parent",
+            module_suffix="extracted",
+            match="contains",
+            pattern="TOKEN",
+            index=1,
+            count=0,
         )
         ctx, in_batch = _make_local_ctx(pool, "info TOKEN abc def ghi")
         rule.local = SimpleNamespace(device_id=device, parser_local=ctx)
@@ -268,9 +315,7 @@ class TestAnchorWordExtractionRule:
 class TestJsonLiteExtractionRule:
     def test_extracts_quoted_string_value(self, id_registry):
         pool = NumpyArrayPool()
-        rule, device = _make_rule(
-            JsonLiteExtractionRule, id_registry, "json_dev", module_name="parent", json_key="key"
-        )
+        rule, device = _make_rule(JsonLiteExtractionRule, id_registry, "json_dev", module_name="parent", json_key="key")
         ctx, in_batch = _make_local_ctx(pool, '{"key":"value","other":1}')
         rule.local = SimpleNamespace(device_id=device, parser_local=ctx)
 
@@ -324,7 +369,10 @@ class TestJsonLiteExtractionRule:
     def test_key_not_found_produces_no_row(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            JsonLiteExtractionRule, id_registry, "json_missing_dev", module_name="parent",
+            JsonLiteExtractionRule,
+            id_registry,
+            "json_missing_dev",
+            module_name="parent",
             json_key="missing",
         )
         ctx, in_batch = _make_local_ctx(pool, '{"key":"value"}')
@@ -344,7 +392,10 @@ class TestDsvExtractionRule:
     def test_maps_positional_fields_by_name(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            DsvExtractionRule, id_registry, "dsv_dev", module_name="dsv_dev.parent",
+            DsvExtractionRule,
+            id_registry,
+            "dsv_dev",
+            module_name="dsv_dev.parent",
             field_delimiter=";",
             field_names=[{"name": "f1"}, {"name": "f2", "ignore": True}, {"name": "f3"}],
         )
@@ -368,8 +419,13 @@ class TestDsvExtractionRule:
     def test_startswith_gate_rejects_non_matching_lines(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            DsvExtractionRule, id_registry, "dsv_sw_dev", module_name="dsv_sw_dev.parent",
-            field_delimiter=";", startswith="SIG:", field_names=[{"name": "f1"}],
+            DsvExtractionRule,
+            id_registry,
+            "dsv_sw_dev",
+            module_name="dsv_sw_dev.parent",
+            field_delimiter=";",
+            startswith="SIG:",
+            field_names=[{"name": "f1"}],
         )
         ctx, in_batch = _make_local_ctx(pool, "NOPE;A")
         rule.local = SimpleNamespace(device_id=device, parser_local=ctx)
@@ -386,8 +442,14 @@ class TestDsvExtractionRule:
     def test_prefix_strip_after_startswith(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            DsvExtractionRule, id_registry, "dsv_prefix_dev", module_name="dsv_prefix_dev.parent",
-            field_delimiter=";", startswith="SIG:", prefix_strip=" ", field_names=[{"name": "f1"}],
+            DsvExtractionRule,
+            id_registry,
+            "dsv_prefix_dev",
+            module_name="dsv_prefix_dev.parent",
+            field_delimiter=";",
+            startswith="SIG:",
+            prefix_strip=" ",
+            field_names=[{"name": "f1"}],
         )
         ctx, in_batch = _make_local_ctx(pool, "SIG: A;rest")
         rule.local = SimpleNamespace(device_id=device, parser_local=ctx)
@@ -408,8 +470,13 @@ class TestPositionalExtractionRule:
     def test_extracts_word_range_by_index_and_count(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            PositionalExtractionRule, id_registry, "pos_dev", module_name="pos_dev.parent",
-            module_suffix="extracted", word_index=1, word_count=2,
+            PositionalExtractionRule,
+            id_registry,
+            "pos_dev",
+            module_name="pos_dev.parent",
+            module_suffix="extracted",
+            word_index=1,
+            word_count=2,
         )
         ctx, in_batch = _make_local_ctx(pool, "one two three four")
         rule.local = SimpleNamespace(device_id=device, parser_local=ctx)
@@ -428,8 +495,13 @@ class TestPositionalExtractionRule:
     def test_count_zero_extracts_to_end(self, id_registry):
         pool = NumpyArrayPool()
         rule, device = _make_rule(
-            PositionalExtractionRule, id_registry, "pos_all_dev", module_name="pos_all_dev.parent",
-            module_suffix="extracted", word_index=2, word_count=0,
+            PositionalExtractionRule,
+            id_registry,
+            "pos_all_dev",
+            module_name="pos_all_dev.parent",
+            module_suffix="extracted",
+            word_index=2,
+            word_count=0,
         )
         ctx, in_batch = _make_local_ctx(pool, "one two three four")
         rule.local = SimpleNamespace(device_id=device, parser_local=ctx)

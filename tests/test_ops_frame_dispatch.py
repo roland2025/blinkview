@@ -37,9 +37,7 @@ class TestDispatchNewline:
         f_buf = _buf(msg)
         out_buf = np.zeros(32, dtype=dtypes.BYTE)
 
-        status, cursor, consumed = nb_dispatch_frame_decoder(
-            f_buf, 0, len(f_buf), out_buf, 0, _cfg(CodecID.NEWLINE), 0
-        )
+        status, cursor, consumed = nb_dispatch_frame_decoder(f_buf, 0, len(f_buf), out_buf, 0, _cfg(CodecID.NEWLINE), 0)
 
         assert status == STATE_COMPLETE
         assert consumed == len(msg)

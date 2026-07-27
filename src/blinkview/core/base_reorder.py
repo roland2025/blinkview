@@ -6,13 +6,14 @@
 
 from typing import List
 
-from .base_daemon import BaseDaemon
-from .configurable import configuration_factory, configuration_property, override_property
-from .constants import SysCat
-from .factory import BaseFactory
+from blinkview.core.base_daemon import BaseDaemon
+from blinkview.core.configurable import configuration_factory, configuration_property, override_property
+from blinkview.core.constants import FactoryCategory, SysCat
+from blinkview.core.factory import BaseFactory
+from blinkview.core.factory_category_registry import register_factory_category
 
 
-@configuration_factory("reorder")
+@configuration_factory(FactoryCategory.REORDER)
 @configuration_property(
     "delay", type="integer", default=100, description="Delay window in milliseconds for reordering logs"
 )
@@ -25,5 +26,6 @@ class BaseReorder(BaseDaemon):
         self.targets: List[SysCat] = [SysCat.STORAGE]
 
 
+@register_factory_category(FactoryCategory.REORDER)
 class ReorderFactory(BaseFactory[BaseReorder]):
     pass

@@ -12,6 +12,7 @@ from qtpy.QtWidgets import (
 )
 
 from blinkview.core.base_daemon import BaseDaemon
+from blinkview.ui.constants import WidgetName
 from blinkview.ui.widgets.base_list_item import BaseListItemWidget
 from blinkview.ui.widgets.base_sidebar_widget import BaseSidebarWidget
 
@@ -33,7 +34,7 @@ class PipelineListItemWidget(BaseListItemWidget):
         name = self.config_node.get("name")
         if not name:
             return
-        self.gui_context.create_widget("LogViewerWidget", f"Logs: {name}", params={"allowed_device": name})
+        self.gui_context.create_widget(WidgetName.LOG_VIEWER, f"Logs: {name}", params={"allowed_device": name})
 
     def _show_log_context_menu(self, pos):
         name = self.config_node.get("name")
@@ -44,7 +45,7 @@ class PipelineListItemWidget(BaseListItemWidget):
         action_table_view = QAction("Open as Table", self)
         action_table_view.triggered.connect(
             lambda: self.gui_context.create_widget(
-                "LogTableViewerWidget", f"Logs: {name}", params={"allowed_device": name}
+                WidgetName.LOG_TABLE_VIEWER, f"Logs: {name}", params={"allowed_device": name}
             )
         )
         context_menu.addAction(action_table_view)

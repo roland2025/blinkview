@@ -8,10 +8,10 @@ from threading import Lock
 from time import sleep
 from typing import Optional
 
-from ..core.configurable import configuration_property, override_property
-from ..core.numpy_batch_manager import PooledLogBatch
-from ..utils.throughput import Speedometer, ThroughputAutoTuner
-from .BaseReader import BaseReader, DeviceFactory
+from blinkview.core.configurable import configuration_property, override_property
+from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.io.BaseReader import BaseReader, DeviceFactory
+from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 
 @DeviceFactory.register("serial")
@@ -288,7 +288,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
     def open(self):
         try:
-            from ..parsers.binary_parser import BinaryParser
+            from blinkview.parsers.binary_parser import BinaryParser
 
             if self.flash_handshake and self._handshake_task_id is None:
                 self._handshake_task_id = self.shared.tasks.run_periodic(0.3, self._check_flash_handshake)

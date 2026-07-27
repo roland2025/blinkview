@@ -9,8 +9,10 @@ from typing import Callable
 
 from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable, configuration_property, override_property
+from blinkview.core.constants import FactoryCategory
 from blinkview.core.device_identity import DeviceIdentity
 from blinkview.core.factory import BaseFactory
+from blinkview.core.factory_category_registry import register_factory_category
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.system_context import SystemContext
 from blinkview.parsers.parser import BaseParser, ParserFactory
@@ -48,6 +50,7 @@ class ExtractionRule:
         raise NotImplementedError
 
 
+@register_factory_category(FactoryCategory.KEY_VALUE_RULE)
 class ExtractionRuleFactory(BaseFactory[ExtractionRule]):
     pass
 
@@ -740,7 +743,7 @@ class PositionalExtractionRule(ExtractionRule):
     title="Polymorphic Parsing Rules",
     items={
         "type": "object",
-        "_factory": "key_value_rule",
+        "_factory": FactoryCategory.KEY_VALUE_RULE,
         "title": "Extraction Rule Setup",
     },
 )
@@ -764,7 +767,9 @@ class MultiRuleKeyValueParser(BaseParser):
         local_ctx = SimpleNamespace(device_id=self.local.device_id, parser_local=self.local)
 
         for rule_cfg in config.get("rules", []):
-            rule_obj = factory_build("key_value_rule", rule_cfg, system_ctx=self.shared, local_ctx=local_ctx)
+            rule_obj = factory_build(
+                FactoryCategory.KEY_VALUE_RULE, rule_cfg, system_ctx=self.shared, local_ctx=local_ctx
+            )
             self._instantiated_rules.append(rule_obj)
 
         return changed

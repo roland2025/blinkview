@@ -15,8 +15,10 @@ from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.log_fetch import LogSegmentScanner, LogTextFetcher
 from blinkview.core.playback_clock import PlaybackMode
 from blinkview.core.types.formatting import FormattingConfig
+from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
+from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.kv_filter_line_edit import KvFilterLineEdit
 from blinkview.ui.widgets.log_highlighter import LogHighlighter
 from blinkview.ui.widgets.log_view_mode import LogViewMode
@@ -28,6 +30,7 @@ from blinkview.utils.log_level import LogLevel
 from blinkview.utils.utc_offset import get_local_utc_offset_seconds
 
 
+@register_widget_factory(WidgetName.LOG_VIEWER)
 class LogViewerWidget(QWidget):
     # Live mode keeps only a small tail of blocks for cheap paint/scroll cost; history mode
     # (entered when the user scrolls away from the tail) fetches a bounded window of rows before

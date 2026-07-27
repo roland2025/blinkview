@@ -151,9 +151,7 @@ class TestOwningPipelineDeviceIds:
             "p2": FakePipeline(sources=["other"], device_id=200),
             "p3": FakePipeline(sources="adb1", device_id=300),  # single string, not a list
         }
-        reader.shared = SimpleNamespace(
-            registry=SimpleNamespace(pipelines=SimpleNamespace(pipelines=pipelines))
-        )
+        reader.shared = SimpleNamespace(registry=SimpleNamespace(pipelines=SimpleNamespace(pipelines=pipelines)))
 
         assert sorted(reader._owning_pipeline_device_ids()) == [100, 300]
 

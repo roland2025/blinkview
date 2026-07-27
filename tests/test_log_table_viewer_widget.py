@@ -94,9 +94,7 @@ class TestRestoreAndGetState:
             show_rx_ts=False,
             show_process_thread=True,
             ts_precision=6,
-            log_filter=SimpleNamespace(
-                kv_filter_text="k=v", text_filter_text="needle", log_level=LogLevel.WARN
-            ),
+            log_filter=SimpleNamespace(kv_filter_text="k=v", text_filter_text="needle", log_level=LogLevel.WARN),
             filter_sidebar=SimpleNamespace(
                 get_state=lambda: {"x": 1}, action_show_non_essential=SimpleNamespace(isChecked=lambda: True)
             ),
@@ -280,9 +278,7 @@ class TestHistoryHelpers:
         assert calls == [(42, True)]
 
     def test_history_newest_ref_seq_uses_last_row_when_present(self):
-        stub = SimpleNamespace(
-            model=SimpleNamespace(row_count=3, seq_for_row=lambda row: f"row{row}", anchor_seq=99)
-        )
+        stub = SimpleNamespace(model=SimpleNamespace(row_count=3, seq_for_row=lambda row: f"row{row}", anchor_seq=99))
         assert LogTableViewerWidget._history_newest_ref_seq(stub) == "row2"
 
     def test_history_newest_ref_seq_falls_back_to_anchor_seq_when_empty(self):
@@ -313,14 +309,18 @@ class TestHistoryHelpers:
 
     def test_scroll_to_row_ignores_none_and_negative(self):
         calls = []
-        stub = SimpleNamespace(view=SimpleNamespace(verticalScrollBar=lambda: SimpleNamespace(setValue=lambda v: calls.append(v))))
+        stub = SimpleNamespace(
+            view=SimpleNamespace(verticalScrollBar=lambda: SimpleNamespace(setValue=lambda v: calls.append(v)))
+        )
         LogTableViewerWidget._scroll_to_row(stub, None)
         LogTableViewerWidget._scroll_to_row(stub, -1)
         assert calls == []
 
     def test_scroll_to_row_sets_value_for_valid_row(self):
         calls = []
-        stub = SimpleNamespace(view=SimpleNamespace(verticalScrollBar=lambda: SimpleNamespace(setValue=lambda v: calls.append(v))))
+        stub = SimpleNamespace(
+            view=SimpleNamespace(verticalScrollBar=lambda: SimpleNamespace(setValue=lambda v: calls.append(v)))
+        )
         LogTableViewerWidget._scroll_to_row(stub, 7)
         assert calls == [7]
 

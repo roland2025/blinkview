@@ -6,9 +6,9 @@
 
 from typing import NamedTuple
 
-from ..core.numba_config import app_njit
-from ..core.types.parsing import UnifiedParserConfig
-from .strings import nb_skip_n_words
+from blinkview.core.numba_config import app_njit
+from blinkview.core.types.parsing import UnifiedParserConfig
+from blinkview.ops.strings import nb_skip_n_words
 
 
 class SkipWordsConfig(NamedTuple):

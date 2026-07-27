@@ -36,8 +36,10 @@ from blinkview.ops.formatting import nb_format_local_timestamp
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
 from blinkview.ops.segments import nb_segment_extract_fields, segment_filter_reversed
 from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
+from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.log_velocity_tracker import LogVelocityTracker
+from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.kv_filter_line_edit import KvFilterLineEdit
 from blinkview.ui.widgets.log_view_mode import LogViewMode
 from blinkview.ui.widgets.module_filter_sidebar import ModuleFilterSidebar
@@ -1022,6 +1024,7 @@ class LogTableCanvas(QAbstractScrollArea):
         self._col_width[col] = width + 8
 
 
+@register_widget_factory(WidgetName.LOG_TABLE_VIEWER)
 class LogTableViewerWidget(QWidget):
     """Table-based alternative to LogViewerWidget, sharing the same LogFilter/ModuleFilterSidebar
     filtering capability but rendering structured rows directly via LogTableCanvas instead of

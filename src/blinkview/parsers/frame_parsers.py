@@ -13,7 +13,9 @@ from numba.typed import List as NumbaList
 from blinkview.core import dtypes
 from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable, configuration_property, override_property
+from blinkview.core.constants import FactoryCategory
 from blinkview.core.factory import BaseFactory
+from blinkview.core.factory_category_registry import register_factory_category
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.system_context import SystemContext
 from blinkview.core.types.empty import EMPTY_BYTES, EMPTY_BYTES_RO
@@ -55,6 +57,7 @@ class FrameParser:
     pass
 
 
+@register_factory_category(FactoryCategory.FRAME_PARSER)
 class FrameParserFactory(BaseFactory[FrameParser]):
     pass
 
@@ -67,6 +70,7 @@ class FrameSectionParser(FrameParser):
     local: SimpleNamespace
 
 
+@register_factory_category(FactoryCategory.FRAME_SECTION_PARSER)
 class FrameSectionParserFactory(FrameParserFactory):
     pass
 
@@ -85,7 +89,7 @@ class FrameSectionParserFactory(FrameParserFactory):
     ui_order=15,
     items={
         "type": "object",
-        "_factory": "frame_section_parser",
+        "_factory": FactoryCategory.FRAME_SECTION_PARSER,
         "title": "Parser step",
     },
 )
@@ -127,7 +131,7 @@ class GenericFrameParser(FrameParser):
         )
         for step_cfg in config.get("steps", []):
             step = self.shared.factories.build(
-                "frame_section_parser", config=step_cfg, system_ctx=self.shared, local_ctx=local_ctx
+                FactoryCategory.FRAME_SECTION_PARSER, config=step_cfg, system_ctx=self.shared, local_ctx=local_ctx
             )
 
             pipeline.append(step)

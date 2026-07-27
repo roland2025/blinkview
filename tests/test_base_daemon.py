@@ -60,7 +60,7 @@ def make_daemon_with_shared(file_logger=None):
     daemon.name = "test-daemon"
     daemon.shared = SimpleNamespace(
         factories=FakeFactories(file_logger or FakeFileLogger()),
-        registry=SimpleNamespace(file_manager=FakeFileManager(), logger_creator=lambda *a, **kw: (lambda: None)),
+        registry=SimpleNamespace(file_manager=FakeFileManager(), logger_creator=lambda *a, **kw: lambda: None),
     )
     daemon.local = SimpleNamespace(logging_id="log-1")
     return daemon

@@ -4,10 +4,11 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from ..core.base_daemon import BaseDaemon
-from ..core.batch_queue import BatchQueue
-from ..core.constants import SysCat
-from ..core.factory import BaseFactory
+from blinkview.core.base_daemon import BaseDaemon
+from blinkview.core.batch_queue import BatchQueue
+from blinkview.core.constants import FactoryCategory, SysCat
+from blinkview.core.factory import BaseFactory
+from blinkview.core.factory_category_registry import register_factory_category
 
 
 class BaseSubscriber(BaseDaemon):
@@ -25,5 +26,6 @@ class SubscriberFactory(BaseFactory[BaseSubscriber]):
     pass
 
 
+@register_factory_category(FactoryCategory.TIME_SYNC)
 class TimeSyncerFactory(BaseFactory[SubscriberFactory]):
     pass

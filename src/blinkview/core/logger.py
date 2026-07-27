@@ -7,7 +7,7 @@
 from traceback import format_exc
 from typing import Callable, Optional
 
-from ..utils.log_level import LevelIdentity, LogLevel
+from blinkview.utils.log_level import LevelIdentity, LogLevel
 
 
 class BaseLogger:

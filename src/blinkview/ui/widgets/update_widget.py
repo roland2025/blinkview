@@ -21,8 +21,10 @@ from qtpy.QtWidgets import (
 )
 
 from blinkview import __version__
+from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.update_checker import check_post_update
+from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.message_box import MessageBox
 from blinkview.utils.updater import UpdateError, Updater
 
@@ -34,6 +36,7 @@ class TaskSignals(QObject):
     error_occurred = Signal(str)
 
 
+@register_widget_factory(WidgetName.UPDATE_WIDGET)
 class UpdateWidget(QWidget):
     def __init__(self, gui_context, _=None, parent=None):
         super().__init__(parent)

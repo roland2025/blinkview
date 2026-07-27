@@ -8,8 +8,8 @@ from pathlib import Path
 from time import sleep
 from typing import Callable
 
-from ..core.bindable import bindable
-from ..core.configurable import configuration_property
+from blinkview.core.bindable import bindable
+from blinkview.core.configurable import configuration_property
 
 
 @configuration_property(

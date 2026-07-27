@@ -24,10 +24,13 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from blinkview.ui.constants import WidgetName
 from blinkview.ui.utils.config_node import ConfigNode
+from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.config_widget_factory import WidgetFactory
 
 
+@register_widget_factory(WidgetName.DYNAMIC_CONFIG)
 class DynamicConfigWidget(QWidget):
     signal_unregister = Signal(object)
     signal_destroy = Signal(QWidget)

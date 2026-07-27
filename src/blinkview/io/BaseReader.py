@@ -6,16 +6,17 @@
 
 from typing import Callable, Iterable, Optional
 
-from ..core.base_daemon import BaseDaemon
-from ..core.configurable import configuration_factory, configuration_property
-from ..core.constants import SysCat
-from ..core.factory import BaseFactory
-from ..core.logger import BaseLogger
+from blinkview.core.base_daemon import BaseDaemon
+from blinkview.core.configurable import configuration_factory, configuration_property
+from blinkview.core.constants import FactoryCategory, SysCat
+from blinkview.core.factory import BaseFactory
+from blinkview.core.factory_category_registry import register_factory_category
+from blinkview.core.logger import BaseLogger
 
 PutFnType = Callable[[Iterable[tuple]], None]
 
 
-@configuration_factory("source")
+@configuration_factory(FactoryCategory.SOURCE)
 @configuration_property(
     "name",
     type="string",
@@ -60,5 +61,6 @@ class BaseReader(BaseDaemon):
         return changed
 
 
+@register_factory_category(FactoryCategory.SOURCE)
 class DeviceFactory(BaseFactory[BaseReader]):
     pass

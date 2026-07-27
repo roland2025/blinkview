@@ -9,7 +9,9 @@ from typing import Any
 
 from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable
+from blinkview.core.constants import FactoryCategory
 from blinkview.core.factory import BaseFactory
+from blinkview.core.factory_category_registry import register_factory_category
 
 
 @configurable
@@ -18,5 +20,6 @@ class BaseAssembler:
     pass
 
 
+@register_factory_category(FactoryCategory.PIPELINE_ASSEMBLER)
 class AssemblerFactory(BaseFactory[BaseAssembler]):
     pass

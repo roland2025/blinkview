@@ -11,18 +11,12 @@ from queue import Empty, Queue
 from threading import Thread
 
 import readchar
-
-# Inject CWD before importing local blinkview modules
-cwd = os.getcwd()
-if cwd not in sys.path:
-    sys.path.insert(0, cwd)
-
 from rich.console import Console
 
 # Internal BlinkView imports
-from .core.registry import Registry
-from .subscribers.console import ConsoleSubscriber  # noqa: F401 - registers "console" with SubscriberFactory
-from .utils.log_level import LogLevel
+from blinkview.core.registry import Registry
+from blinkview.subscribers.console import ConsoleSubscriber  # noqa: F401 - registers "console" with SubscriberFactory
+from blinkview.utils.log_level import LogLevel
 
 
 class BlinkViewApp:

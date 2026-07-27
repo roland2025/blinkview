@@ -10,6 +10,7 @@ import numpy as np
 
 from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property, on_config_change, override_property
+from blinkview.core.constants import FactoryCategory
 from blinkview.core.device_identity import DeviceIdentity
 from blinkview.core.numpy_batch_manager import PooledLogBatch, log_batch
 from blinkview.core.time_sync_engine import TimeSyncEngine
@@ -30,7 +31,7 @@ from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
     type="object",
     required=True,
     ui_order=40,
-    _factory="frame_decoder",
+    _factory=FactoryCategory.FRAME_DECODER,
     _factory_default="line_decoder",
 )
 @configuration_property(
@@ -38,7 +39,7 @@ from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
     title="Frame parser",
     type="object",
     ui_order=50,
-    _factory="frame_parser",
+    _factory=FactoryCategory.FRAME_PARSER,
     _factory_default="default",
     required=True,
 )
@@ -93,7 +94,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 device_id=self.local.device_id,
             )
             self._frame_codec = factory_build(
-                "frame_decoder", self.frame_decoder, system_ctx=self.shared, local_ctx=frame_ctx
+                FactoryCategory.FRAME_DECODER, self.frame_decoder, system_ctx=self.shared, local_ctx=frame_ctx
             )
 
         frame_parser = getattr(self, "frame_parser", None)
@@ -105,7 +106,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 sync_state=self.sync_state,
             )
             self._frame_parser = factory_build(
-                "frame_parser", frame_parser, system_ctx=self.shared, local_ctx=parser_ctx
+                FactoryCategory.FRAME_PARSER, frame_parser, system_ctx=self.shared, local_ctx=parser_ctx
             )
         self.thread_needs_restart = True
 
@@ -283,14 +284,18 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 get_logger=helper.logger.child_creator("decoder"),
                 device_id=device_id,
             )
-            frame_codec = factory_build("frame_decoder", frame_config, system_ctx=helper.shared, local_ctx=frame_ctx)
+            frame_codec = factory_build(
+                FactoryCategory.FRAME_DECODER, frame_config, system_ctx=helper.shared, local_ctx=frame_ctx
+            )
 
             parser_ctx = SimpleNamespace(
                 get_logger=helper.logger.child_creator("parser"),
                 device_id=device_id,
                 sync_state=create_default_sync(helper.shared.time_ns()),
             )
-            frame_parser = factory_build("frame_parser", parser_config, system_ctx=helper.shared, local_ctx=parser_ctx)
+            frame_parser = factory_build(
+                FactoryCategory.FRAME_PARSER, parser_config, system_ctx=helper.shared, local_ctx=parser_ctx
+            )
 
             codec = frame_codec
 

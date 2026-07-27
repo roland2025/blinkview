@@ -7,14 +7,14 @@
 import queue
 from typing import TYPE_CHECKING
 
-from ..core.limits import BATCH_MAXLEN
+from blinkview.core.limits import BATCH_MAXLEN
 
 if TYPE_CHECKING:
     import logging
     from logging import LogRecord
 
-from ..core.configurable import configuration_property
-from .BaseReader import BaseReader, DeviceFactory
+from blinkview.core.configurable import configuration_property
+from blinkview.io.BaseReader import BaseReader, DeviceFactory
 
 
 def _get_logger_handler_class():

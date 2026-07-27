@@ -9,6 +9,7 @@ def check_for_updates_silently(gui_context, parent=None):
     from packaging.version import parse as parse_version
 
     from blinkview import __version__
+    from blinkview.ui.constants import WidgetName
     from blinkview.ui.gui_context import GUIContext
     from blinkview.ui.widgets.toast import ToastType
     from blinkview.ui.widgets.toast_dispatcher import toast_dispatcher
@@ -36,7 +37,7 @@ def check_for_updates_silently(gui_context, parent=None):
                     action_text="INSTALL",
                     action_callback=lambda: gui_context.set_update_version(latest),
                     click_callback=lambda: gui_context.create_widget(
-                        "UpdateWidget", "Updates", as_window=True, reattach_on_close=False
+                        WidgetName.UPDATE_WIDGET, "Updates", as_window=True, reattach_on_close=False
                     ),
                     parent=parent,  # Anchor specifically to the viewer window
                 )

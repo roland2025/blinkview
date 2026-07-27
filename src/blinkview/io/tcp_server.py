@@ -9,11 +9,11 @@ from time import sleep
 
 import numpy as np
 
-from ..core import dtypes
-from ..core.configurable import configuration_property, override_property
-from ..core.numpy_batch_manager import PooledLogBatch
-from ..utils.throughput import Speedometer, ThroughputAutoTuner
-from .BaseReader import BaseReader, DeviceFactory
+from blinkview.core import dtypes
+from blinkview.core.configurable import configuration_property, override_property
+from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.io.BaseReader import BaseReader, DeviceFactory
+from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 
 @DeviceFactory.register("tcp_server")

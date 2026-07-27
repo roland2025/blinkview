@@ -192,9 +192,7 @@ class TestResolveSession:
     def test_last_returns_the_newest_session(self, tmp_path):
         project_dir = tmp_path / "proj"
         _write_session(project_dir, "older", {"session_id": "older", "created_at": "2026-01-01T00:00:00Z"})
-        newer_dir = _write_session(
-            project_dir, "newer", {"session_id": "newer", "created_at": "2026-06-01T00:00:00Z"}
-        )
+        newer_dir = _write_session(project_dir, "newer", {"session_id": "newer", "created_at": "2026-06-01T00:00:00Z"})
         (newer_dir / "session.000").write_text("data")
         older_dir = project_dir / "older"
         (older_dir / "session.000").write_text("data")

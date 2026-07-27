@@ -7,11 +7,11 @@
 from pathlib import Path
 from time import sleep
 
-from ..core.configurable import configuration_property
-from ..core.numpy_batch_manager import PooledLogBatch
-from ..utils.paths import resolve_config_path
-from ..utils.throughput import Speedometer
-from .BaseReader import BaseReader, DeviceFactory
+from blinkview.core.configurable import configuration_property
+from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.io.BaseReader import BaseReader, DeviceFactory
+from blinkview.utils.paths import resolve_config_path
+from blinkview.utils.throughput import Speedometer
 
 
 @DeviceFactory.register("binary_file")

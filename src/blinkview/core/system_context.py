@@ -8,14 +8,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
+    from blinkview.core.array_pool import NumpyArrayPool
+    from blinkview.core.factory_registry import FactoryRegistry  # Adjust import path as needed
+    from blinkview.core.id_history import IdHistory
     from blinkview.core.id_registry import IDRegistry  # Adjust import path as needed
-
-    from .array_pool import NumpyArrayPool
-    from .factory_registry import FactoryRegistry  # Adjust import path as needed
-    from .id_history import IdHistory
-    from .registry import Registry
-    from .settings_manager import SettingsManager
-    from .task_manager import TaskManager
+    from blinkview.core.registry import Registry
+    from blinkview.core.settings_manager import SettingsManager
+    from blinkview.core.task_manager import TaskManager
 
 
 @dataclass(frozen=True)

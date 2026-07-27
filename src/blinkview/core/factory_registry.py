@@ -7,7 +7,7 @@
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .factory import BaseFactory
+    from blinkview.core.factory import BaseFactory
 
 
 class FactoryRegistry:

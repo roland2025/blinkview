@@ -56,9 +56,7 @@ def _run_kernel(pool, frame_state, lines, frame_config=None):
     for line in lines:
         in_batch.insert(1000, 1000, line)
 
-    out_batch = pool.create(
-        PooledLogBatch, 16, 4096, has_levels=True, has_modules=True, has_devices=True
-    )
+    out_batch = pool.create(PooledLogBatch, 16, 4096, has_levels=True, has_modules=True, has_devices=True)
 
     o_cfg = OutputConfig(compact_buffer=True)
     parser_bundle = _empty_parser_bundle()

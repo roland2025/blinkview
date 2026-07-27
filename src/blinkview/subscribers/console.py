@@ -7,14 +7,14 @@
 import numpy as np
 from rich.text import Text
 
-from ..core.dtypes import SEQ_NONE
-from ..core.constants import SysCat
-from ..core.log_fetch import LogSegmentScanner, LogTextFetcher
-from ..core.types.formatting import FormattingConfig
-from ..utils.log_filter import LogFilter
-from ..utils.log_level import LogLevel
-from ..utils.utc_offset import get_local_utc_offset_seconds
-from .subscriber import BaseSubscriber, SubscriberFactory
+from blinkview.core.constants import SysCat
+from blinkview.core.dtypes import SEQ_NONE
+from blinkview.core.log_fetch import LogSegmentScanner, LogTextFetcher
+from blinkview.core.types.formatting import FormattingConfig
+from blinkview.subscribers.subscriber import BaseSubscriber, SubscriberFactory
+from blinkview.utils.log_filter import LogFilter
+from blinkview.utils.log_level import LogLevel
+from blinkview.utils.utc_offset import get_local_utc_offset_seconds
 
 _EMPTY_SIDEBAR_MASK = np.zeros(0, dtype=np.uint8)
 

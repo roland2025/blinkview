@@ -40,6 +40,7 @@ from blinkview.core.registry import Registry
 from blinkview.core.settings_manager import SettingsManager
 from blinkview.core.task_manager import TaskManager
 from blinkview.ui.cli_args import setup_gui_parser
+from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.native_dark_mode import set_native_dark_mode
 from blinkview.ui.utils.config_node_manager import ConfigNodeManager
@@ -47,20 +48,26 @@ from blinkview.ui.utils.in_development import set_as_in_development
 from blinkview.ui.utils.ui_state_handler import UIStateHandler
 from blinkview.ui.utils.update_checker import check_for_updates_silently
 from blinkview.ui.utils.window_manager import WindowManager
-from blinkview.ui.widgets.config.dynamic_config import DynamicConfigWidget
+from blinkview.ui.widget_registry import build_widget_factory_map
+
+# Each of these registers a widget class (@register_widget_factory(...)) as an import-time side
+# effect for build_widget_factory_map() above. The "as x" re-export alias is deliberate, not
+# decorative: it's the standard pyflakes/ruff/pyright signal for an intentional re-export.
+from blinkview.ui.widgets.config.dynamic_config import DynamicConfigWidget as DynamicConfigWidget
 from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.config_tool_button_widget import SourcesToolButton
 from blinkview.ui.widgets.device_sidebar import DeviceSidebarWidget
-from blinkview.ui.widgets.log_table_viewer import LogTableViewerWidget
-from blinkview.ui.widgets.log_viewer import LogViewerWidget
+from blinkview.ui.widgets.log_table_viewer import LogTableViewerWidget as LogTableViewerWidget
+from blinkview.ui.widgets.log_viewer import LogViewerWidget as LogViewerWidget
 from blinkview.ui.widgets.pipelines_sidebar import PipelinesSidebarWidget
 from blinkview.ui.widgets.playback_control import PlaybackControlWidget
-from blinkview.ui.widgets.plotter import TelemetryPlotter
-from blinkview.ui.widgets.telemetry_table import TelemetryTable
+from blinkview.ui.widgets.plotter import TelemetryPlotter as TelemetryPlotter
+from blinkview.ui.widgets.telemetry_table import TelemetryTable as TelemetryTable
 from blinkview.ui.widgets.TelemetryWatch import TelemetryWatch
 from blinkview.ui.widgets.title_bar import TitleBar
 from blinkview.ui.widgets.toast import ToastManager, ToastType
-from blinkview.ui.widgets.update_widget import UpdateWidget, check_post_update
+from blinkview.ui.widgets.update_widget import UpdateWidget as UpdateWidget
+from blinkview.ui.widgets.update_widget import check_post_update
 from blinkview.ui.windows.detached_tab_window import DetachedTabWindow
 from blinkview.utils.format_metric import format_metric
 from blinkview.utils.used_modules import print_used_modules
@@ -149,14 +156,14 @@ class BlinkMainWindow(QMainWindow):
         self.toolbar.addWidget(self.main_menu_btn)
 
         self.btn_open_logs = QAction("Live Logs", self)
-        self.btn_open_logs.triggered.connect(lambda _: self.create_widget("LogViewerWidget", "Live Logs"))
+        self.btn_open_logs.triggered.connect(lambda _: self.create_widget(WidgetName.LOG_VIEWER, "Live Logs"))
         self.toolbar.addAction(self.btn_open_logs)
         self._wire_table_view_context_menu(self.btn_open_logs, "Live Logs (Table)")
 
         self.btn_open_system_logs = QAction("System Logs", self)
         self.btn_open_system_logs.triggered.connect(
             lambda _: self.create_widget(
-                "LogViewerWidget", "System Logs", params={"allowed_device": "SYSTEM", "show_hidden": True}
+                WidgetName.LOG_VIEWER, "System Logs", params={"allowed_device": "SYSTEM", "show_hidden": True}
             )
         )
         self.toolbar.addAction(self.btn_open_system_logs)
@@ -169,7 +176,9 @@ class BlinkMainWindow(QMainWindow):
         # --- Telemetry Action ---
         self.btn_open_telemetry = QAction("Telemetry", self)
         # Use an icon if you have one, e.g., QIcon("chart.png")
-        self.btn_open_telemetry.triggered.connect(lambda _: self.create_widget("TelemetryTable", "Live Telemetry"))
+        self.btn_open_telemetry.triggered.connect(
+            lambda _: self.create_widget(WidgetName.TELEMETRY_TABLE, "Live Telemetry")
+        )
         self.toolbar.addAction(self.btn_open_telemetry)
 
         self.toolbar.addSeparator()
@@ -325,15 +334,7 @@ class BlinkMainWindow(QMainWindow):
         self.timer_slow = QTimer(self)
         self.timer_slow.timeout.connect(self.gui_context.on_heartbeat)
 
-        self.widget_factories = {
-            "LogViewerWidget": LogViewerWidget,
-            "LogTableViewerWidget": LogTableViewerWidget,
-            "TelemetryTable": TelemetryTable,
-            "DynamicConfigWidget": DynamicConfigWidget,
-            "TelemetryPlotter": TelemetryPlotter,
-            "TelemetryWatch": TelemetryWatch,
-            "UpdateWidget": UpdateWidget,
-        }
+        self.widget_factories = build_widget_factory_map()
 
         self.gui_context.set_gui_state_handler(UIStateHandler(self))
         self.gui_context.registry.file_manager.set_gui_context(self.gui_context)
@@ -500,7 +501,7 @@ class BlinkMainWindow(QMainWindow):
             menu = QMenu(self)
             table_action = menu.addAction("Open as Table")
             table_action.triggered.connect(
-                lambda: self.create_widget("LogTableViewerWidget", tab_name, params=params or {})
+                lambda: self.create_widget(WidgetName.LOG_TABLE_VIEWER, tab_name, params=params or {})
             )
             menu.exec_(button.mapToGlobal(pos))
 
@@ -558,7 +559,7 @@ class BlinkMainWindow(QMainWindow):
 
         update_act = menu.addAction("Check for updates")
         update_act.triggered.connect(
-            lambda: self.create_widget("UpdateWidget", "Updates", as_window=True, reattach_on_close=False)
+            lambda: self.create_widget(WidgetName.UPDATE_WIDGET, "Updates", as_window=True, reattach_on_close=False)
         )
 
         # set_as_in_development(update_act, self)
@@ -950,4 +951,4 @@ class BlinkMainWindow(QMainWindow):
 
         name = conf.get("name", "Default")
 
-        self.create_widget("TelemetryWatch", f"Watch {name}", params={"id": watch_id})
+        self.create_widget(WidgetName.TELEMETRY_WATCH, f"Watch {name}", params={"id": watch_id})

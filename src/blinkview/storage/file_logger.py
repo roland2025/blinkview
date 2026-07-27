@@ -10,18 +10,20 @@ from typing import Callable
 
 import numpy as np
 
-from ..core import dtypes
-from ..core.bindable import bindable
-from ..core.configurable import configuration_property
-from ..core.factory import BaseFactory
-from ..core.numpy_batch_manager import PooledLogBatch
-from ..core.system_context import SystemContext
-from ..ops.formatting import (
+from blinkview.core import dtypes
+from blinkview.core.bindable import bindable
+from blinkview.core.configurable import configuration_property
+from blinkview.core.constants import FactoryCategory
+from blinkview.core.factory import BaseFactory
+from blinkview.core.factory_category_registry import register_factory_category
+from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.core.system_context import SystemContext
+from blinkview.ops.formatting import (
     nb_estimate_batch_capacity,
     nb_format_binary_batch,
     nb_format_log_row_batch,
 )
-from ..subscribers.subscriber import BaseSubscriber
+from blinkview.subscribers.subscriber import BaseSubscriber
 
 
 class BaseFileLogger(BaseSubscriber):
@@ -29,6 +31,7 @@ class BaseFileLogger(BaseSubscriber):
         super().__init__()
 
 
+@register_factory_category(FactoryCategory.FILE_LOGGING)
 class FileLoggerFactory(BaseFactory[BaseFileLogger]):
     pass
 
@@ -38,7 +41,7 @@ class FileLoggerFactory(BaseFactory[BaseFileLogger]):
     "processor",
     required=True,
     type="object",
-    _factory="logging_processor",
+    _factory=FactoryCategory.LOGGING_PROCESSOR,
     _factory_default="log_row",
     _factory_dropdown_hidden=True,
 )
@@ -78,7 +81,9 @@ class FileLogger(BaseFileLogger):
 
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
-        self.batch_processor = self.shared.factories.build("logging_processor", config.get("processor"), self.shared)
+        self.batch_processor = self.shared.factories.build(
+            FactoryCategory.LOGGING_PROCESSOR, config.get("processor"), self.shared
+        )
         self.process_batch = self.batch_processor.process
 
         self.shared.registry.file_manager.add_file_logger(self)
@@ -235,6 +240,7 @@ class BaseBatchProcessor:
         return view
 
 
+@register_factory_category(FactoryCategory.LOGGING_PROCESSOR)
 class BatchProcessorFactory(BaseFactory[BaseBatchProcessor]):
     pass
 
