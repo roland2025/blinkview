@@ -11,7 +11,6 @@
 # import is an intentional public re-export, not an accidental unused one" - see
 # core/factory_category_registry.py's module docstring for the registration mechanism itself.
 from blinkview.parsers import adb_decoder as adb_decoder
-from blinkview.parsers import assembler as assembler
 from blinkview.parsers import binary_parser as binary_parser
 from blinkview.parsers import can_parser as can_parser
 from blinkview.parsers import frame_decoders as frame_decoders
@@ -24,7 +23,6 @@ from blinkview.parsers import time_sync_profiler as time_sync_profiler
 
 __all__ = [
     "adb_decoder",
-    "assembler",
     "binary_parser",
     "can_parser",
     "frame_decoders",

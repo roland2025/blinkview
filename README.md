@@ -133,7 +133,10 @@ blink
   * CAN-bus (with DBC decoding)
   * SEGGER RTT
   * TCP/UDP sockets
-  * ADB logcat  *(experimental, filtering and integration still evolving)*.
+  * ADB logcat—dedicated long-format decoder with timestamp, level, module, and PID/TID extraction built in as ready-to-use pipeline steps.
+  * Live file tailing—follows a growing text/log file (`tail -f`-style), with truncation/rotation detection, for desktop and console application logs.
+  * Binary file replay—for offline analysis or replaying a previously captured session.
+* **Generic Desktop/Console Log Parsing:** Timestamp formats beyond embedded-device conventions—ISO 8601-style (`YYYY-MM-DD HH:MM:SS[.,]fff`, e.g. Python `logging`/log4j output) and classic RFC3164 syslog (`Mon DD HH:MM:SS`)—so plain desktop/service logs parse without a custom pipeline.
 * **Text Log Viewer:** 
   * Advanced filtering by device, module, and log level.
   * High-speed text search and highlighting.
@@ -142,6 +145,11 @@ blink
 * **Table-Based Log Viewer:** A structured, columnar alternative to the text viewer—Time, Device, Level, Module, and Message as resizable columns. Shares the same live-tail / bounded-history fetch model and `key=value` filtering as the text viewer.
 * **Parsing & Extraction:**
   * Key-Value parser *(Highly optimized pure Python; Numba JIT backend planned)* for extracting structured data from raw text streams.
+* **Playback & Scrubbing:** Treats live and recorded data as one continuous timeline, not two separate modes.
+  * **LIVE / REPLAY:** Drop out of the live tail at any point to scrub history, then jump straight back to live.
+  * **Jog Wheel:** Press-and-drag precise scrubbing—the cursor hides and the drag speed (not distance) determines step size, from single-row stepping at a slow drag up to a fast shuttle.
+  * **Named Ranges:** Mark start/end points and name them like clips in a video editor. Saved alongside the session's own captured data, so ranges are there again the next time that session is replayed.
+* **Extended Scrollback:** A fixed number of segments are kept hot in RAM; beyond that, evicted segments can be archived to a memory-mapped disk tier (ideally on NVMe) instead of being dropped—extending scrollback far past what fits in memory, transparently, with no change to filtering/search.
 * **Session Persistence:** Automatically remembers window positions and active log filter settings. Pick up exactly where you left off without re-configuring your workspace.
 * **Watch / Command List:** 
   * Monitor specific variables and latest state values.
@@ -161,6 +169,7 @@ BlinkView is designed for high-throughput telemetry. It utilizes a multi-threade
 *   **Numba JIT Compilation:** Core parsing, filtering, and reordering logic is compiled to machine code for near-native performance.
 *   **KV Extraction:** A dedicated extractor identifies key-value pairs within the stream for real-time monitoring.
 *   **Time-Reordering:** A reorder layer buffers incoming packets to handle varying transport latencies and produce a cohesive chronological stream.
+*   **Pooled, Struct-of-Arrays Storage:** Log rows are held as pooled NumPy arrays (not per-message Python objects), with an optional memory-mapped disk tier for older segments—the same filter/search kernels run unmodified whether a segment is in RAM or on disk.
 
 ```mermaid
 graph TD

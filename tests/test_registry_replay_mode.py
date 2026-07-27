@@ -38,6 +38,35 @@ def test_replay_mode_builds_but_does_not_start_sources_and_pipelines(tmp_path):
     registry.stop()
 
 
+def test_replay_mode_never_writes_its_own_metadata_json(tmp_path):
+    """Loading a replay used to unconditionally mint a fresh timestamped session folder,
+    complete with its own metadata.json, purely as a side effect of Registry/FileManager
+    construction - which then showed up as a spurious extra entry in the Load Session menu
+    (session_lister.list_sessions treats any folder with a metadata.json as a session). A replay
+    run isn't capturing anything, so it must never write one - not at construction, not at
+    configure_system(), not at shutdown."""
+    registry = _build_registry(tmp_path, replay_mode=True)
+    registry.configure_system()
+
+    assert not (registry.file_manager.session_dir / "metadata.json").exists()
+
+    registry.stop()
+
+    assert not (registry.file_manager.session_dir / "metadata.json").exists()
+
+
+def test_non_replay_mode_still_creates_its_session_folder_immediately(tmp_path):
+    """Control case: a live capture's own session folder is created eagerly, unchanged."""
+    registry = _build_registry(tmp_path, replay_mode=False)
+    registry.configure_system()
+
+    assert registry.file_manager.session_dir.exists()
+    assert (registry.file_manager.session_dir / "metadata.json").exists()
+
+    registry.central.file_logger.stop()
+    registry.stop()
+
+
 def test_non_replay_mode_starts_sources_and_pipelines(tmp_path):
     """Control case: outside replay mode, sources/pipelines start exactly as before."""
     registry = _build_registry(tmp_path, replay_mode=False)

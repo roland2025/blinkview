@@ -303,3 +303,44 @@ class TestPlaybackFollow:
         assert viewer.follow_playback is True
         assert viewer._playback_anchored is True
         clock.end_scrub()
+
+    def test_opening_while_replay_already_active_follows_without_manual_pause(self, qapp, qtbot, registry):
+        """A tab opened *after* the clock is already in REPLAY (e.g. the user scrubs first, then
+        opens a new Log Viewer tab to look at that point in time) must start following
+        immediately, not land in a manually-paused state that requires a Resume click before the
+        view reacts to further scrubbing. This is the was_live/anchor_ts is None guard in
+        _reanchor_history (see the blinkview-playback-wiring skill, Trap A) exercised on the
+        live->history transition that happens on this tab's very first tick, rather than one that
+        happens after the tab has already been following for a while."""
+        device = registry.id_registry.get_device("late_viewer_test")
+        module = device.get_module("mod1")
+        _push_messages(registry, device, module, 20)
+
+        clock = registry.playback_clock
+        clock.tick(registry.now_ns())  # refresh bounds against the rows just pushed
+        mid_ts = (clock.bounds_min_ns + clock.bounds_max_ns) // 2
+        clock.enter_replay(at_ts_ns=mid_ts)
+        clock.tick(registry.now_ns())
+
+        gui_context = make_real_gui_context(registry)
+        late_viewer = LogViewerWidget(gui_context)
+        qtbot.addWidget(late_viewer)
+        late_viewer.resize(800, 600)
+
+        late_viewer.prev_apply = 0
+        late_viewer.apply_updates()
+
+        assert late_viewer.is_paused is False
+        assert late_viewer.view_mode == LogViewMode.HISTORY
+        assert late_viewer._playback_anchored is True
+        assert late_viewer.follow_playback is True
+
+        # Scrubbing further after the tab opened must keep following without any Resume click.
+        new_ts = mid_ts + 200_000_000
+        clock.seek(new_ts)
+        clock.tick(registry.now_ns())
+        late_viewer.prev_apply = 0
+        late_viewer.apply_updates()
+
+        assert late_viewer.history_anchor_ts_ns == new_ts
+        assert late_viewer.is_paused is False

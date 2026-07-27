@@ -7,6 +7,7 @@
 import pytest
 
 from blinkview.core.playback_clock import PlaybackClock, PlaybackMode
+from blinkview.core.playback_ranges import PlaybackRangeStore
 from blinkview.ui.widgets.playback_control import PlaybackControlWidget, SpeedSliderWidget
 
 BASE = 1_000_000_000_000
@@ -16,6 +17,9 @@ BOUNDS = (BASE, BASE + 10_000_000_000_000)  # wide span so ordinary ticks/seeks 
 class FakeLogPool:
     def get_time_bounds(self):
         return BOUNDS
+
+    def find_ts_n_rows_away(self, current_ts_ns, delta_rows):
+        return current_ts_ns + delta_rows * 1_000_000
 
 
 class FakeCentral:
@@ -28,6 +32,7 @@ class FakeRegistry:
     def __init__(self):
         self.central = FakeCentral()
         self.playback_clock = PlaybackClock(self.central.log_pool)
+        self.playback_ranges = PlaybackRangeStore()
         self._now_ns = 0
 
     def now_ns(self):
@@ -315,3 +320,162 @@ class TestSeekBarMouseTracking:
         bar.leaveEvent(QEvent(QEvent.Leave))
 
         assert bar._hover_x is None
+
+
+class TestJogWheelWiring:
+    def test_jog_step_delegates_to_clock_and_enters_replay(self, widget, gui_context):
+        clock = gui_context.registry.playback_clock
+        assert clock.mode is PlaybackMode.LIVE
+        before = clock.current_ts_ns
+
+        widget.jog_wheel.stepRequested.emit(-3)
+
+        assert clock.mode is PlaybackMode.REPLAY
+        assert clock.current_ts_ns == before - 3_000_000
+        assert widget.seek_bar.current_ts_ns == clock.current_ts_ns  # UI resynced
+
+
+class TestMarkInMarkOut:
+    def test_mark_in_records_current_position_and_enables_mark_out(self, widget, gui_context, qtbot):
+        from qtpy.QtCore import Qt
+
+        clock = gui_context.registry.playback_clock
+        clock.seek(BASE + 1_000_000_000)
+        assert widget.mark_out_button.isEnabled() is False
+
+        qtbot.mouseClick(widget.mark_in_button, Qt.LeftButton)
+
+        assert widget._pending_mark_in_ts == BASE + 1_000_000_000
+        assert widget.mark_out_button.isEnabled() is True
+
+    def test_mark_out_without_mark_in_is_a_noop(self, widget, gui_context, qtbot):
+        from qtpy.QtCore import Qt
+
+        qtbot.mouseClick(widget.mark_out_button, Qt.LeftButton)  # button is disabled but call directly
+        widget._on_mark_out_clicked()
+
+        assert gui_context.registry.playback_ranges.ranges == []
+
+    def test_mark_out_creates_a_named_range_via_dialog(self, widget, gui_context, monkeypatch):
+        from qtpy.QtWidgets import QInputDialog
+
+        clock = gui_context.registry.playback_clock
+        clock.seek(BASE + 1_000_000_000)
+        widget._on_mark_in_clicked()
+
+        clock.seek(BASE + 5_000_000_000)
+        monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("boot sequence", True)))
+
+        widget._on_mark_out_clicked()
+
+        ranges = gui_context.registry.playback_ranges.ranges
+        assert len(ranges) == 1
+        assert ranges[0].name == "boot sequence"
+        assert (ranges[0].start_ts_ns, ranges[0].end_ts_ns) == (BASE + 1_000_000_000, BASE + 5_000_000_000)
+        assert widget._pending_mark_in_ts is None
+        assert widget.mark_out_button.isEnabled() is False
+
+    def test_cancelling_the_name_dialog_discards_the_pending_mark(self, widget, gui_context, monkeypatch):
+        from qtpy.QtWidgets import QInputDialog
+
+        widget._on_mark_in_clicked()
+        monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False)))
+
+        widget._on_mark_out_clicked()
+
+        assert gui_context.registry.playback_ranges.ranges == []
+        assert widget._pending_mark_in_ts is None
+
+    def test_ranges_combo_populates_from_the_store_and_selecting_seeks(self, widget, gui_context):
+        store = gui_context.registry.playback_ranges
+        store.add("crash", BASE + 1_000_000_000, BASE + 2_000_000_000)
+
+        # _sync_ranges is folded into _sync_from_clock, which apply_updates() only calls when
+        # clock.tick() reports an observable change - here we're testing range-sync in isolation,
+        # so call it directly rather than contriving a clock change too.
+        widget._sync_ranges()
+
+        assert widget.ranges_combo.count() == 1
+        assert widget.ranges_combo.itemText(0) == "crash"
+
+        widget._on_range_selected(0)
+
+        clock = gui_context.registry.playback_clock
+        assert clock.current_ts_ns == BASE + 1_000_000_000
+        assert clock.mode is PlaybackMode.REPLAY
+
+    def test_seek_bar_receives_range_bands(self, widget, gui_context):
+        store = gui_context.registry.playback_ranges
+        store.add("crash", BASE + 1_000_000_000, BASE + 2_000_000_000)
+
+        widget._sync_ranges()
+
+        assert len(widget.seek_bar._ranges) == 1
+        assert widget.seek_bar._ranges[0].name == "crash"
+
+    def test_rebuilding_combo_preserves_selection_when_ranges_unchanged(self, widget, gui_context):
+        store = gui_context.registry.playback_ranges
+        store.add("a", 0, 10)
+        store.add("b", 10, 20)
+        widget._sync_ranges()
+
+        widget.ranges_combo.setCurrentIndex(1)
+        widget._sync_ranges()  # same range set again - must not reset the combo
+
+        assert widget.ranges_combo.currentIndex() == 1
+
+
+class TestZoomSeekBar:
+    def test_hidden_by_default(self, widget, gui_context):
+        assert widget.zoom_row.isHidden() is True
+
+    def test_selecting_a_range_shows_a_zoomed_bar_bounded_to_it(self, widget, gui_context):
+        store = gui_context.registry.playback_ranges
+        store.add("crash", BASE + 1_000_000_000, BASE + 2_000_000_000)
+        widget._sync_ranges()
+
+        widget._on_range_selected(0)
+
+        assert widget.zoom_row.isHidden() is False
+        assert widget.zoom_label.text() == "crash"
+        assert widget.zoom_seek_bar.bounds_min_ns == BASE + 1_000_000_000
+        assert widget.zoom_seek_bar.bounds_max_ns == BASE + 2_000_000_000
+
+    def test_marking_out_a_range_activates_its_zoom_bar(self, widget, gui_context, monkeypatch):
+        from qtpy.QtWidgets import QInputDialog
+
+        clock = gui_context.registry.playback_clock
+        clock.seek(BASE + 1_000_000_000)
+        widget._on_mark_in_clicked()
+        clock.seek(BASE + 5_000_000_000)
+        monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("boot sequence", True)))
+
+        widget._on_mark_out_clicked()
+
+        assert widget.zoom_row.isHidden() is False
+        assert widget.zoom_label.text() == "boot sequence"
+        assert widget.zoom_seek_bar.bounds_min_ns == BASE + 1_000_000_000
+        assert widget.zoom_seek_bar.bounds_max_ns == BASE + 5_000_000_000
+
+    def test_zoom_bar_seek_drives_the_shared_clock(self, widget, gui_context):
+        store = gui_context.registry.playback_ranges
+        store.add("crash", BASE + 1_000_000_000, BASE + 2_000_000_000)
+        widget._sync_ranges()
+        widget._on_range_selected(0)
+
+        widget.zoom_seek_bar.seekRequested.emit(BASE + 1_500_000_000)
+
+        clock = gui_context.registry.playback_clock
+        assert clock.current_ts_ns == BASE + 1_500_000_000
+
+    def test_removing_the_active_range_hides_the_zoom_bar(self, widget, gui_context):
+        store = gui_context.registry.playback_ranges
+        rng = store.add("crash", BASE + 1_000_000_000, BASE + 2_000_000_000)
+        widget._sync_ranges()
+        widget._on_range_selected(0)
+        assert widget.zoom_row.isHidden() is False
+
+        store.remove(rng.id)
+        widget._sync_zoom_bar()
+
+        assert widget.zoom_row.isHidden() is True

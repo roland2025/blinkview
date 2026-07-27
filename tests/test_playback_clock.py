@@ -10,13 +10,18 @@ BASE = 1_000_000_000_000  # arbitrary epoch-ns anchor, far from 0 to catch sign/
 
 
 class FakeLogPool:
-    """Minimal stand-in for CircularLogPool - only get_time_bounds() is used by PlaybackClock."""
+    """Minimal stand-in for CircularLogPool - get_time_bounds()/find_ts_n_rows_away() are the
+    only methods PlaybackClock calls."""
 
-    def __init__(self, bounds=(0, 0)):
+    def __init__(self, bounds=(0, 0), row_step_ns=1_000_000):
         self.bounds = bounds
+        self.row_step_ns = row_step_ns  # simulates evenly-spaced rows for step_rows tests
 
     def get_time_bounds(self):
         return self.bounds
+
+    def find_ts_n_rows_away(self, current_ts_ns, delta_rows):
+        return current_ts_ns + delta_rows * self.row_step_ns
 
 
 def make_clock(bounds):
@@ -179,3 +184,106 @@ def test_scrubbing_suspends_auto_pause_at_rewind_bound():
     assert clock.is_playing is True  # tick()'s auto-pause-at-bound branch never ran
 
     clock.end_scrub()
+
+
+def test_step_rows_delegates_to_log_pool_and_enters_replay():
+    clock = make_clock((BASE, BASE + 10_000_000_000))
+    assert clock.mode is PlaybackMode.LIVE
+
+    clock.step_rows(-3)  # step backward from the live edge so the clamp doesn't mask the delta
+
+    assert clock.mode is PlaybackMode.REPLAY
+    assert clock.current_ts_ns == BASE + 10_000_000_000 - 3_000_000
+
+
+def test_step_rows_zero_is_a_true_noop_and_does_not_enter_replay():
+    clock = make_clock((BASE, BASE + 10_000_000_000))
+    clock.step_rows(0)
+    assert clock.mode is PlaybackMode.LIVE
+    assert clock.current_ts_ns == BASE + 10_000_000_000
+
+
+class TestEnterReplayWhenReady:
+    def test_seeks_immediately_when_data_already_exists(self):
+        clock = make_clock((BASE, BASE + 10_000_000_000))
+
+        clock.enter_replay_when_ready(BASE + 3_000_000_000)
+
+        assert clock.mode is PlaybackMode.REPLAY
+        assert clock.current_ts_ns == BASE + 3_000_000_000
+
+    def test_defaults_to_bounds_min_when_data_already_exists_and_no_target_given(self):
+        clock = make_clock((BASE, BASE + 10_000_000_000))
+
+        clock.enter_replay_when_ready()
+
+        assert clock.mode is PlaybackMode.REPLAY
+        assert clock.current_ts_ns == BASE
+
+    def test_defers_the_seek_until_data_appears(self):
+        pool = FakeLogPool((0, 0))  # empty pool - nothing loaded yet
+        clock = PlaybackClock(pool)
+
+        clock.enter_replay_when_ready(BASE + 3_000_000_000)
+
+        # Mode flips to REPLAY right away (so the UI shows DVR mode immediately) even though the
+        # target seek can't land yet - bounds are still empty, clamping would force it to 0.
+        assert clock.mode is PlaybackMode.REPLAY
+        assert clock.current_ts_ns == 0
+
+        pool.bounds = (BASE, BASE + 10_000_000_000)  # data has now streamed in
+        clock.tick(0)
+
+        assert clock.current_ts_ns == BASE + 3_000_000_000
+
+    def test_defers_to_bounds_min_once_data_appears_when_no_target_given(self):
+        pool = FakeLogPool((0, 0))
+        clock = PlaybackClock(pool)
+
+        clock.enter_replay_when_ready()  # no known target yet - land at the start once loaded
+        pool.bounds = (BASE, BASE + 10_000_000_000)
+        clock.tick(0)
+
+        assert clock.current_ts_ns == BASE
+
+    def test_a_manual_seek_before_bounds_refresh_cancels_the_pending_one(self):
+        """seek()/tick() both only ever refresh clock.bounds_* from within tick() itself, so a
+        seek() called directly (bypassing tick()) always clamps against whatever bounds the
+        clock currently has cached - here, still the empty [0, 0] from construction. That seek
+        must still cancel the deferred target, or the *next* tick() (the first one to actually
+        see real bounds) would silently overwrite the user's seek with the stale pending one."""
+        pool = FakeLogPool((0, 0))
+        clock = PlaybackClock(pool)
+
+        clock.enter_replay_when_ready(BASE + 3_000_000_000)
+        clock.seek(BASE + 999)  # clamps to 0 - clock.bounds_max_ns is still 0 at this point
+
+        pool.bounds = (BASE, BASE + 10_000_000_000)
+        clock.tick(0)
+
+        assert clock.current_ts_ns == 0  # stays where the direct seek() left it
+
+    def test_going_live_before_data_appears_cancels_the_pending_seek(self):
+        pool = FakeLogPool((0, 0))
+        clock = PlaybackClock(pool)
+
+        clock.enter_replay_when_ready(BASE + 3_000_000_000)
+        clock.go_live()
+        pool.bounds = (BASE, BASE + 10_000_000_000)
+        clock.tick(0)
+
+        assert clock.mode is PlaybackMode.LIVE
+        assert clock.current_ts_ns == BASE + 10_000_000_000
+
+
+def test_step_rows_clamps_like_seek():
+    pool = FakeLogPool((BASE, BASE + 10_000_000_000), row_step_ns=1_000_000_000_000)
+    clock = PlaybackClock(pool)
+    clock.enter_replay(BASE + 2_000_000_000)
+
+    clock.step_rows(-1)  # would overshoot far past bounds_min_ns at this row_step_ns
+
+    assert clock.current_ts_ns == BASE
+
+    clock.step_rows(1000)  # would overshoot far past bounds_max_ns
+    assert clock.current_ts_ns == BASE + 10_000_000_000

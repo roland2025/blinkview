@@ -20,8 +20,10 @@ from blinkview.parsers.frame_parsers import (
     FrameSectionParserFactory,
     GenericFrameParser,
     IntegerTimestampParser,
+    Iso8601DesktopTimestampParser,
     ModuleNameNormalizer,
     SkipWordsParser,
+    SyslogTimestampParser,
     ZephyrRealTimeParser,
     ZephyrUptimeFormattedParser,
 )
@@ -267,6 +269,32 @@ class TestTimestampParsers:
 
         assert parser_id == ParserID.TS_ZEPHYR_REALTIME
         assert state is parser.state
+
+    def test_iso8601_desktop_parser_bundle(self, id_registry):
+        parser = self._configured(Iso8601DesktopTimestampParser, id_registry)
+
+        parser_id, state, _config = parser.bundle()
+
+        assert parser_id == ParserID.TS_ISO8601
+        assert state is parser.state
+
+    def test_syslog_parser_bundle_defaults_to_current_year(self, id_registry):
+        parser = self._configured(SyslogTimestampParser, id_registry)
+
+        parser_id, state, config = parser.bundle()
+
+        assert parser_id == ParserID.TS_SYSLOG
+        assert state is parser.state
+        from datetime import datetime
+
+        assert config.syslog_year == datetime.now().year
+
+    def test_syslog_parser_bundle_uses_configured_year(self, id_registry):
+        parser = self._configured(SyslogTimestampParser, id_registry, year=1999)
+
+        _parser_id, _state, config = parser.bundle()
+
+        assert config.syslog_year == 1999
 
     def test_timestamp_parser_sets_utc_offset_on_state(self, id_registry):
         parser = self._configured(IntegerTimestampParser, id_registry)

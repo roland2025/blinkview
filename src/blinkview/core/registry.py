@@ -29,10 +29,10 @@ from blinkview.subscribers.subscriber import SubscriberFactory
 from blinkview.utils.time_utils import TimeUtils
 
 if TYPE_CHECKING:
+    from blinkview.core.central_storage import CentralStorage
     from blinkview.core.pipeline_manager import PipelineManager
     from blinkview.core.playback_clock import PlaybackClock
-    from blinkview.core.central_storage import CentralStorage
-    
+    from blinkview.core.playback_ranges import PlaybackRangeStore
     from blinkview.storage.file_logger import FileLogger
 
 
@@ -76,6 +76,11 @@ _import_registerable_modules()
 
 
 class Registry:
+    # Name of the auto-created "whole recording" range (see _enter_replay_mode_if_detected) -
+    # matched by name (not id) to avoid re-adding a duplicate on every subsequent replay-of-a-
+    # replay generation, since a fresh add() always mints a new uuid.
+    DEFAULT_REPLAY_RANGE_NAME = "Full recording"
+
     def __init__(
         self,
         session_name: str = None,
@@ -110,7 +115,11 @@ class Registry:
         factories = build_system_factory_registry()
 
         self.file_manager = FileManager(
-            session_name=session_name, profile_name=profile_name, log_dir=log_dir, config_path=config_path
+            session_name=session_name,
+            profile_name=profile_name,
+            log_dir=log_dir,
+            config_path=config_path,
+            replay_mode=replay_mode,
         )
 
         default_config = {
@@ -189,6 +198,7 @@ class Registry:
         self.central: "CentralStorage" = None
         self.reorder = None
         self.playback_clock: Optional["PlaybackClock"] = None
+        self.playback_ranges: Optional["PlaybackRangeStore"] = None
 
         self.module_value_tracker: LatestModuleValueTracker = None
 
@@ -288,6 +298,168 @@ class Registry:
 
         return schema
 
+    def _save_playback_ranges(self):
+        """PlaybackRangeStore's on_change callback - fires on every add/remove/rename. Always
+        writes to *this* session's own folder (sits right alongside the raw captured log data),
+        regardless of whether this session is itself a live capture or a replay of an older one -
+        see core/playback_ranges.py's module docstring."""
+        if self.playback_ranges is None or self.file_manager is None:
+            return
+        try:
+            self.playback_ranges.save_to_file(self.file_manager.get_playback_ranges_path())
+        except OSError as e:
+            self.logger.warning(f"Failed to save playback ranges: {e}")
+
+    def _iter_replay_source_dirs(self):
+        """Yields the resolved parent directory of every configured source's `file_path` (duck-
+        typed - BinaryFileReader/FileTailReader shaped - rather than importing those reader
+        classes, so it picks up any future file-based reader for free). Shared basis for
+        detecting "this session is a replay of a file" and for finding sibling files
+        (playback_ranges.json, metadata.json) a previous session saved alongside its own captured
+        data."""
+        if self.sources is None:
+            return
+
+        from blinkview.utils.paths import resolve_config_path
+
+        for source in self.sources.sources.values():
+            file_path = getattr(source, "file_path", None)
+            if not file_path:
+                continue
+            try:
+                yield resolve_config_path(file_path).parent
+            except Exception:
+                continue
+
+    def _is_replay_session(self) -> bool:
+        """True if any configured source reads from a file rather than a live device - the
+        trigger for auto-entering DVR playback mode (see _enter_replay_mode_if_detected)."""
+        return next(self._iter_replay_source_dirs(), None) is not None
+
+    def _discover_replay_ranges_path(self) -> Optional[Path]:
+        """Best-effort: if any configured source is replaying a file that lives inside a
+        previous blinkview session's folder, returns that folder's playback_ranges.json if one
+        exists there."""
+        for source_dir in self._iter_replay_source_dirs():
+            candidate = source_dir / "playback_ranges.json"
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _load_replay_playback_ranges(self):
+        """Opportunistically preloads ranges saved during/after a previous capture, when this
+        run is replaying that capture's file. Merges (replace=False) rather than overwrites,
+        since this session's own (currently empty, freshly-created) ranges file was already the
+        load target for anything saved earlier in this same run. Superseded by
+        load_replay_session() for actually driving DVR mode, but kept as a standalone method
+        since it's simple, self-contained, and already covered by its own tests."""
+        if self.playback_ranges is None:
+            return
+
+        path = self._discover_replay_ranges_path()
+        if path is not None:
+            self.playback_ranges.load_from_file(path, replace=False)
+
+    @staticmethod
+    def _parse_iso_utc_to_epoch_ns(iso_str) -> Optional[int]:
+        """Parses a metadata.json wall-clock timestamp (created_at/finished_at, ISO 8601 with a
+        trailing 'Z') into epoch-ns - the same units as log row timestamps/PlaybackClock bounds,
+        on the assumption (true for this app's normal ingestion path) that log timestamps are
+        real epoch time rather than device-relative. A close-enough default marker, not a
+        precise one: clock sync lag between session start and the first actual log row means the
+        range's exact edges may be off by a small amount - the user can always re-mark it via
+        Mark In/Mark Out."""
+        if not iso_str:
+            return None
+        from datetime import datetime, timezone
+
+        try:
+            dt = datetime.fromisoformat(iso_str.rstrip("Z")).replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        return int(dt.timestamp() * 1_000_000_000)
+
+    def load_replay_session(self, session_dir):
+        """Wires this registry's DVR playback mode and named ranges to a previously-recorded
+        session living at `session_dir`: merges in that session's own saved
+        playback_ranges.json (if any), adds a DEFAULT_REPLAY_RANGE_NAME range spanning the whole
+        recording from its metadata.json created_at/finished_at (if a cleanly-finished one
+        exists - without waiting for the replay to actually stream all the way back in), and
+        switches PlaybackClock into REPLAY (deferred via enter_replay_when_ready() until real
+        data exists).
+
+        Two callers, because this app has two distinct replay mechanisms:
+        - _enter_replay_mode_if_detected() - auto-triggered at configure_system() time for the
+          dev-replay workflow: a configured BinaryFileReader/FileTailReader source whose
+          file_path happens to live inside a previous session's folder.
+        - MainWindow.start_replay() - the production "Load Session..." menu path, which starts a
+          UnifiedLogReplay directly against registry.central and never touches self.sources at
+          all, so it can't be auto-detected the same way and must call this explicitly once it
+          already knows the session's folder (session_info.path from utils/session_lister.py).
+        """
+        if self.playback_clock is None:
+            return
+
+        session_dir = Path(session_dir)
+
+        # Everything this registry might write from here on (playback ranges, gui state, the
+        # watchlist, ...) gets redirected into session_dir/replay/ instead of session_dir itself
+        # or the live workspace profile - see FileManager._redirect_to_replay_scratch. The
+        # original session's own files are never opened for writing.
+        self.file_manager.replay_source_dir = session_dir
+
+        if self.playback_ranges is not None:
+            ranges_path = session_dir / "playback_ranges.json"
+            if ranges_path.exists():
+                self.playback_ranges.load_from_file(ranges_path, replace=False)
+
+        default_start_ts_ns = None
+        metadata_path = session_dir / "metadata.json"
+        if metadata_path.exists() and self.playback_ranges is not None:
+            import json
+
+            try:
+                with metadata_path.open("r", encoding="utf-8") as f:
+                    metadata = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                metadata = None
+
+            if metadata is not None:
+                start_ts_ns = self._parse_iso_utc_to_epoch_ns(metadata.get("created_at"))
+                end_ts_ns = self._parse_iso_utc_to_epoch_ns(metadata.get("finished_at"))
+                if start_ts_ns is not None and end_ts_ns is not None and end_ts_ns > start_ts_ns:
+                    default_start_ts_ns = start_ts_ns
+                    already_present = any(r.name == self.DEFAULT_REPLAY_RANGE_NAME for r in self.playback_ranges.ranges)
+                    if not already_present:
+                        self.playback_ranges.add(self.DEFAULT_REPLAY_RANGE_NAME, start_ts_ns, end_ts_ns)
+
+        self.playback_clock.enter_replay_when_ready(default_start_ts_ns)
+
+    def _enter_replay_mode_if_detected(self):
+        """Auto-activates DVR playback mode (see load_replay_session) the moment the dev-replay
+        workflow is detected: any configured source reading from a file rather than a live
+        device - the user shouldn't have to notice they loaded a replay and manually click into
+        REPLAY mode. Searches every candidate source directory (not just the first) for one with
+        metadata.json/playback_ranges.json to load_replay_session with, same as
+        _discover_replay_ranges_path used to; falls back to a bare enter_replay_when_ready() (DVR
+        mode with no session-specific data) if a file-based source is configured but neither
+        sidecar file is found anywhere."""
+        if self.playback_clock is None:
+            return
+
+        candidate_dirs = list(self._iter_replay_source_dirs())
+        if not candidate_dirs:
+            return
+
+        session_dir = next(
+            (d for d in candidate_dirs if (d / "metadata.json").exists() or (d / "playback_ranges.json").exists()),
+            None,
+        )
+        if session_dir is not None:
+            self.load_replay_session(session_dir)
+        else:
+            self.playback_clock.enter_replay_when_ready()
+
     def stop(self):
         """Cleanly tear down the session."""
         if not self._is_running:
@@ -372,8 +544,10 @@ class Registry:
                     self.central.reference_id = "central"
 
                     from blinkview.core.playback_clock import PlaybackClock
+                    from blinkview.core.playback_ranges import PlaybackRangeStore
 
                     self.playback_clock = PlaybackClock(self.central.log_pool)
+                    self.playback_ranges = PlaybackRangeStore(on_change=self._save_playback_ranges)
             except Exception as e:
                 # print(f"[Registry] Error configuring central storage: {e}")
                 self.logger.exception("Error configuring central storage", e)
@@ -398,6 +572,11 @@ class Registry:
             except Exception as e:
                 print(f"[Registry] Error during sources configuration: {e}")
                 self.logger.error("Error during sources configuration", e)
+
+            # load_replay_session (called by this) already covers what _load_replay_playback_
+            # ranges() alone used to - that standalone method is kept as its own tested unit,
+            # not called separately here to avoid loading the same ranges file twice.
+            self._enter_replay_mode_if_detected()
             try:
                 from blinkview.core.pipeline_manager import PipelineManager
 

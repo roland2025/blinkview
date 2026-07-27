@@ -43,20 +43,51 @@ class PlaybackClock:
 
         self._last_tick_wall_ns: Optional[int] = None
 
+        # See enter_replay_when_ready(): a seek requested before the pool has any data yet
+        # (bounds_max_ns == 0) can't be clamped into a meaningful range immediately - it's
+        # deferred here and resolved on the first tick() where real data has appeared.
+        self._pending_seek_ts_ns: Optional[int] = None
+        self._has_pending_seek = False
+
         self._refresh_bounds()
         self.current_ts_ns = self.bounds_max_ns
 
     def _refresh_bounds(self):
         self.bounds_min_ns, self.bounds_max_ns = self._log_pool.get_time_bounds()
 
+    def _cancel_pending_seek(self):
+        """Clears any enter_replay_when_ready() seek still waiting for data to appear - called
+        by every other method that sets current_ts_ns itself, so a deferred target can never
+        clobber a real seek/go_live/etc. that happened to land first."""
+        self._has_pending_seek = False
+        self._pending_seek_ts_ns = None
+
     def go_live(self):
         self.mode = PlaybackMode.LIVE
         self.is_playing = False
         self.current_ts_ns = self.bounds_max_ns
+        self._cancel_pending_seek()
 
     def enter_replay(self, at_ts_ns: Optional[int] = None):
         self.mode = PlaybackMode.REPLAY
         self.current_ts_ns = self._clamp(at_ts_ns if at_ts_ns is not None else self.current_ts_ns)
+        self._cancel_pending_seek()
+
+    def enter_replay_when_ready(self, at_ts_ns: Optional[int] = None):
+        """Like enter_replay(), but safe to call before the pool has any data yet (e.g. right
+        after configuring a replay source, before its first batch has streamed in) - seeking
+        immediately in that state would just get clamped down to the still-empty [0, 0] bounds.
+        If data already exists, behaves exactly like enter_replay(). Otherwise, switches to
+        REPLAY now (so the UI reflects DVR mode right away) but defers the actual seek to the
+        first tick() where bounds_max_ns becomes nonzero - landing on at_ts_ns if given, or on
+        bounds_min_ns (the start of whatever loads) if at_ts_ns is None."""
+        self.mode = PlaybackMode.REPLAY
+        if self.bounds_max_ns > 0:
+            self.current_ts_ns = self._clamp(at_ts_ns if at_ts_ns is not None else self.bounds_min_ns)
+            self._cancel_pending_seek()
+        else:
+            self._pending_seek_ts_ns = at_ts_ns
+            self._has_pending_seek = True
 
     def play(self, speed: Optional[float] = None):
         if self.mode is not PlaybackMode.REPLAY:
@@ -75,6 +106,20 @@ class PlaybackClock:
         if self.mode is not PlaybackMode.REPLAY:
             self.enter_replay()
         self.current_ts_ns = self._clamp(ts_ns)
+        self._cancel_pending_seek()
+
+    def step_rows(self, delta_rows: int):
+        """Steps the cursor by an exact number of *rows* rather than a time delta - the jog-wheel
+        precise-scrub control's primitive (core/numpy_log.py's CircularLogPool.find_ts_n_rows_away
+        does the actual row counting; the caller here has already translated drag velocity into a
+        row count). Enters REPLAY if not already there, same as seek()."""
+        if delta_rows == 0:
+            return
+        if self.mode is not PlaybackMode.REPLAY:
+            self.enter_replay()
+        new_ts = self._log_pool.find_ts_n_rows_away(self.current_ts_ns, delta_rows)
+        self.current_ts_ns = self._clamp(new_ts)
+        self._cancel_pending_seek()
 
     def begin_scrub(self):
         """Marks a manual scrub-bar drag in progress. While set, tick() must not auto-advance
@@ -99,6 +144,12 @@ class PlaybackClock:
         prev_min, prev_max = self.bounds_min_ns, self.bounds_max_ns
 
         self._refresh_bounds()
+
+        if self._has_pending_seek and self.bounds_max_ns > 0:
+            target = self._pending_seek_ts_ns if self._pending_seek_ts_ns is not None else self.bounds_min_ns
+            self.current_ts_ns = self._clamp(target)
+            self._has_pending_seek = False
+            self._pending_seek_ts_ns = None
 
         if self.mode is PlaybackMode.LIVE:
             self.current_ts_ns = self.bounds_max_ns

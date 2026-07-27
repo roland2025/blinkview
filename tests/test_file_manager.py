@@ -42,6 +42,8 @@ def make_manager(tmp_path, **overrides):
     fm.session_display_name = "Untitled"
     fm.session_dir = tmp_path / "session"
     fm.session_dir.mkdir(parents=True, exist_ok=True)
+    fm.replay_source_dir = None
+    fm.replay_mode = False
     fm.config_dir = tmp_path / "config"
     fm.config_dir.mkdir(parents=True, exist_ok=True)
     fm.config_file_name = "myconfig"
@@ -346,6 +348,89 @@ class TestCreateSessionDir:
         assert session_dir.exists()
         assert session_dir.parent == fm.log_dir / fm.project_name
         assert session_dir.name.endswith("_profile_Untitled")
+
+
+class TestReplayScratchRedirect:
+    """FileManager.replay_source_dir - once set, the original session's own files (and the live
+    workspace profile) must never be opened for writing; get_config_path/get_session_path/
+    get_playback_ranges_path instead mirror into a `replay/` scratch subfolder of the original
+    session, seeded with a one-time copy of whatever already exists."""
+
+    def test_get_playback_ranges_path_redirects_and_seeds_from_original(self, tmp_path):
+        fm = make_manager(tmp_path)
+        original_session = tmp_path / "original_session"
+        original_session.mkdir()
+        (original_session / "playback_ranges.json").write_text('{"version": 1, "ranges": []}')
+        fm.replay_source_dir = original_session
+
+        path = fm.get_playback_ranges_path()
+
+        assert path == original_session / "replay" / "playback_ranges.json"
+        assert path.read_text() == '{"version": 1, "ranges": []}'
+
+    def test_get_playback_ranges_path_does_not_require_original_to_exist(self, tmp_path):
+        fm = make_manager(tmp_path)
+        original_session = tmp_path / "original_session"
+        original_session.mkdir()
+        fm.replay_source_dir = original_session
+
+        path = fm.get_playback_ranges_path()
+
+        assert path == original_session / "replay" / "playback_ranges.json"
+        assert not path.exists()
+
+    def test_writing_into_the_redirected_path_never_touches_the_original_file(self, tmp_path):
+        fm = make_manager(tmp_path)
+        original_session = tmp_path / "original_session"
+        original_session.mkdir()
+        original_ranges = original_session / "playback_ranges.json"
+        original_ranges.write_text('{"version": 1, "ranges": [{"id": "a"}]}')
+        fm.replay_source_dir = original_session
+
+        path = fm.get_playback_ranges_path()
+        path.write_text('{"version": 1, "ranges": []}')
+
+        assert original_ranges.read_text() == '{"version": 1, "ranges": [{"id": "a"}]}'
+
+    def test_get_config_path_redirects_into_replay_scratch(self, tmp_path):
+        fm = make_manager(tmp_path)
+        original_session = tmp_path / "original_session"
+        original_session.mkdir()
+        fm.replay_source_dir = original_session
+
+        path = fm.get_config_path("gui_config")
+
+        assert path == original_session / "replay" / "myconfig.gui_config.json"
+
+    def test_get_session_path_redirects_into_replay_scratch_and_seeds_from_original_session(self, tmp_path):
+        fm = make_manager(tmp_path)
+        original_session = tmp_path / "original_session"
+        original_session.mkdir()
+        (original_session / "myconfig.gui_state.autosave.json").write_text('{"layout": "old"}')
+        fm.replay_source_dir = original_session
+
+        path = fm.get_session_path("gui_state", "autosave")
+
+        assert path == original_session / "replay" / "myconfig.gui_state.autosave.json"
+        assert path.read_text() == '{"layout": "old"}'
+
+    def test_repeated_calls_do_not_re_seed_over_an_already_edited_scratch_copy(self, tmp_path):
+        fm = make_manager(tmp_path)
+        original_session = tmp_path / "original_session"
+        original_session.mkdir()
+        (original_session / "playback_ranges.json").write_text('{"version": 1, "ranges": []}')
+        fm.replay_source_dir = original_session
+
+        path = fm.get_playback_ranges_path()
+        path.write_text('{"version": 1, "ranges": [{"id": "new"}]}')
+
+        path_again = fm.get_playback_ranges_path()
+        assert path_again.read_text() == '{"version": 1, "ranges": [{"id": "new"}]}'
+
+    def test_non_replay_mode_is_unaffected(self, tmp_path):
+        fm = make_manager(tmp_path)
+        assert fm.get_playback_ranges_path() == fm.session_dir / "playback_ranges.json"
+        assert fm.get_config_path("gui_config") == fm.config_dir / "myconfig.gui_config.json"
 
 
 class TestStop:

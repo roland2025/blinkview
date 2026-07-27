@@ -4,6 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import tempfile
+from pathlib import Path
 from typing import Optional
 
 from blinkview.core.base_daemon import BaseDaemon
@@ -12,11 +14,18 @@ from blinkview.core.configurable import configuration_factory, configuration_pro
 from blinkview.core.constants import FactoryCategory
 from blinkview.core.factory import BaseFactory
 from blinkview.core.factory_category_registry import register_factory_category
-from blinkview.core.limits import CENTRAL_STORAGE_BUFFER_SIZE_MB, CENTRAL_STORAGE_MAX_PIECES, CENTRAL_STORAGE_MAXLEN
+from blinkview.core.limits import (
+    CENTRAL_STORAGE_BUFFER_SIZE_MB,
+    CENTRAL_STORAGE_COLD_MAX_PIECES,
+    CENTRAL_STORAGE_COLD_STORAGE_ENABLED,
+    CENTRAL_STORAGE_MAX_PIECES,
+    CENTRAL_STORAGE_MAXLEN,
+)
 from blinkview.core.numpy_batch_manager import log_batch
 from blinkview.core.numpy_log import (
     CircularLogPool,
 )
+from blinkview.utils.paths import resolve_config_path
 from blinkview.utils.throughput import Speedometer
 
 
@@ -54,6 +63,30 @@ class CentralFactory(BaseFactory[BaseCentralStorage]):
     description="Total in memory = max_pieces * buffer_size_mb",
     ui_order=12,
 )
+@configuration_property(
+    "cold_storage_enabled",
+    type="boolean",
+    default=CENTRAL_STORAGE_COLD_STORAGE_ENABLED,
+    description="Extend scrollback beyond RAM by archiving evicted segments to disk (memmap-backed) "
+    "instead of dropping them. See plans/mmap-coldstore.md.",
+    ui_order=13,
+)
+@configuration_property(
+    "cold_max_pieces",
+    type="integer",
+    default=CENTRAL_STORAGE_COLD_MAX_PIECES,
+    description="Maximum number of additional pieces kept on disk once cold storage is enabled.",
+    ui_order=14,
+)
+@configuration_property(
+    "cold_storage_dir",
+    type="string",
+    default="",
+    ui_type="file",
+    description="Directory for cold-storage segment files (ideally a fast local NVMe path). "
+    "Empty = use a fresh OS temp directory for this session.",
+    ui_order=15,
+)
 @override_property(
     "logging", hidden=False, required=True, default={"enabled": True, "processor": {"type": "log_row"}}, ui_order=20
 )
@@ -61,6 +94,9 @@ class CentralStorage(BaseCentralStorage):
     maxlen: int
     max_pieces: int
     buffer_size_mb: int
+    cold_storage_enabled: bool
+    cold_max_pieces: int
+    cold_storage_dir: str
 
     def __init__(self):
         super().__init__()
@@ -71,12 +107,31 @@ class CentralStorage(BaseCentralStorage):
 
         self.log_pool: Optional[CircularLogPool] = None
 
+    def _resolve_cold_storage_dir(self) -> Path:
+        """Always creates and returns a fresh, uniquely-named subdirectory - never the raw
+        configured directory itself. The cold-storage archiver later deletes this directory
+        wholesale on cleanup (see ColdStorageArchiver.cleanup); reusing a caller-supplied
+        directory as-is would risk rmtree-ing files that were already there and unrelated to this
+        session. `cold_storage_dir`, if set, is only used as *where* to create that subdirectory
+        (e.g. a fast NVMe mount) - empty defaults to the OS temp root."""
+        base = resolve_config_path(self.cold_storage_dir) if self.cold_storage_dir else None
+        return Path(tempfile.mkdtemp(prefix="blinkview_coldstore_", dir=base))
+
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
         if self.log_pool is None:
             buffer_bytes = self.buffer_size_mb * 1024 * 1024
+
+            cold_max_pieces = self.cold_max_pieces if self.cold_storage_enabled else 0
+            cold_storage_dir = self._resolve_cold_storage_dir() if cold_max_pieces > 0 else None
+
             self.log_pool = CircularLogPool(
-                self.shared.array_pool, max_pieces=self.max_pieces, final_buffer_bytes=buffer_bytes
+                self.shared.array_pool,
+                max_pieces=self.max_pieces,
+                final_buffer_bytes=buffer_bytes,
+                cold_max_pieces=cold_max_pieces,
+                cold_storage_dir=cold_storage_dir,
+                logger=self.logger,
             )
         else:
             # Runtime dynamic updates
@@ -84,6 +139,11 @@ class CentralStorage(BaseCentralStorage):
 
             new_bytes = self.buffer_size_mb * 1024 * 1024
             self.log_pool.update_final_buffer_bytes(new_bytes)
+
+            # Cold storage's enabled/dir can only take effect on (re)creation - see
+            # CircularLogPool.__init__ - but the piece-count ceiling can still be adjusted live.
+            if self.cold_storage_enabled:
+                self.log_pool.update_cold_max_pieces(self.cold_max_pieces)
 
         return changed
 

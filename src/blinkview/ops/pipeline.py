@@ -17,6 +17,7 @@ from blinkview.ops.codec_adb_long import (
     nb_parse_adb_tag,
     nb_parse_adb_timestamp_monotonic,
 )
+from blinkview.ops.desktop_timestamp import nb_parse_iso8601_desktop, nb_parse_syslog_timestamp
 from blinkview.ops.generic import nb_skip_words_parser
 from blinkview.ops.levels import nb_parse_log_level
 from blinkview.ops.modules import nb_parse_fixed_width_name, nb_parse_module_tags_statemachine
@@ -37,6 +38,8 @@ TS_ZEPHYR_UPTIME_FORMATTED = ParserID.TS_ZEPHYR_UPTIME_FORMATTED
 TS_ZEPHYR_REALTIME = ParserID.TS_ZEPHYR_REALTIME
 TS_INTEGER = ParserID.TS_INTEGER
 TS_IDF_V1 = ParserID.TS_IDF_V1
+TS_ISO8601 = ParserID.TS_ISO8601
+TS_SYSLOG = ParserID.TS_SYSLOG
 
 PID_TID_ADB_LONG = ParserID.PID_TID_ADB_LONG
 LEVEL_MAP_ADB_LONG = ParserID.LEVEL_MAP_ADB_LONG
@@ -74,6 +77,12 @@ def nb_process_bundle(buffer, cursor, end_cursor, out_b, out_idx, bundle):
 
     elif p_id == TS_ZEPHYR_REALTIME:
         return nb_parse_zephyr_realtime(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == TS_ISO8601:
+        return nb_parse_iso8601_desktop(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == TS_SYSLOG:
+        return nb_parse_syslog_timestamp(buffer, cursor, end_cursor, out_b, out_idx, state, config)
 
     elif p_id == PID_TID_ADB_LONG:
         return nb_parse_adb_pid_tid(buffer, cursor, end_cursor, out_b, out_idx, state, config)

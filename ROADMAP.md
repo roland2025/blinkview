@@ -8,20 +8,6 @@ Here is a running list of ideas for future improvement, in no specific order and
 
 Focusing on maximizing throughput, optimizing resource utilization, and stabilizing core APIs.
 
-### Memory-Mapped Log Storage
-
-* Save session data in a memory-mapped (`mmap`) file format to allow the UI to handle massive log files seamlessly.
-* Enable "infinite" scroll-back capability by reading data directly from disk with minimal memory overhead and instant seek times.
-
-### View previous sessions
-
-* Load previous session data back into UI
-* Replay support
-
-### Multi-Rule Key-Value Extractor Numba Backend
-
-* Migrate the heavy regex/string manipulation loops in the KV extraction layer to highly optimized Numba JIT-compiled functions.
-
 ### Interactive Plot-to-Log Navigation
 
 * Implement bidirectional cross-probing. Clicking a data point in the Telemetry Plotter automatically snaps the Text Log Viewer to the corresponding log entry.
@@ -79,21 +65,6 @@ Integrate lightweight, local LLM backends (via Ollama / llama.cpp)
 
 Improving workspace flexibility, developer daily workflow, and visual accessibility.
 
-### Smart Viewport Retention on Scrollback Saturation
-
-* Fix the behavior where the text view keeps shifting out from under the user when inspecting older logs after the scrollback buffer hits its max-line limit.
-* Automatically detach from auto-scroll and lock the current viewport position when the user scrolls up, keeping the data on screen stable while incoming logs safely append to the ring buffer in the background.
-
-### View Previous Sessions
-
-Load historical session data back into the UI to inspect and review past debug runs without needing the hardware connected.
-
-Support full log and telemetry replay, letting you step through captured data chronologically as if it were happening live.
-
-### Table-Based Log Viewer
-
-* Pivot to a structured, tabular grid layout for logs with resizable and configurable columns (like timestamp, device source, log level, and message body) to make scanning complex multi-source data way easier.
-
 ### High Refresh Rate ImGui Plotting
 
 * Explore upgrading the telemetry visualization engine to use Dear ImGui (like ImPlot) for hardware-accelerated, ultra-high refresh rate plotting that keeps the UI smooth even under heavy data loads.
@@ -112,4 +83,3 @@ Allows aligning logs manually from multiple sources.
 * **Calculate clock skew and offset:** Run a linear regression ($T = mx + c$) on the remote-provided timestamps (`remote_ts`) to find the clock frequency drift ($m$) and boot offset ($c$).
 * **Dynamic viewport shift:** Apply the calculated scale and offset factors to the UI timeline coordinates without modifying the underlying database.
 * **Persist synchronization metadata:** Save anchor pairs to configuration file.
-* 

@@ -204,6 +204,71 @@ class PooledLogBatch:
             has_ext_u64_1=has_ext_u64_1,
         )
 
+    @classmethod
+    def from_memmap(cls, path: Any, metadata: Any = None) -> "PooledLogBatch":
+        """Alternate constructor: builds a frozen, read-only PooledLogBatch backed by a
+        memory-mapped cold-segment file (core/cold_segment.py) instead of NumpyArrayPool slabs.
+        Every other method on this class (release(), retain(), __iter__, __getitem__, start_ts,
+        last_sequence_id, ...) works unmodified against the result - the only difference from a
+        normally-constructed instance is where the column arrays physically live, which is
+        exactly the point (Numba kernels accept np.memmap/np.frombuffer views identically to pool
+        arrays). The arrays are read-only, matching a cold segment's frozen-forever contract -
+        insert()/append() on the result will raise rather than silently corrupt anything."""
+        from blinkview.core.cold_segment import open_cold_segment_arrays
+
+        self = object.__new__(cls)
+        self._pool = None
+        self.metadata = metadata
+        self._ref_count = 1
+        self._lock = Lock()
+        self.in_use = True
+
+        header, handles = open_cold_segment_arrays(path)
+
+        self._ts_h = handles["timestamps"]
+        self._rx_ts_h = handles["rx_timestamps"]
+        self._off_h = handles["offsets"]
+        self._len_h = handles["lengths"]
+        self._buf_h = handles["buffer"]
+        self._lvl_h = handles["levels"]
+        self._mod_h = handles["modules"]
+        self._dev_h = handles["devices"]
+        self._seq_h = handles["sequences"]
+        self._pid_h = handles["pids"]
+        self._tid_h = handles["tids"]
+        self._ext_u32_1_h = self._ext_u32_2_h = self._ext_u64_1_h = None
+
+        self.bundle = LogBundle(
+            timestamps=self._ts_h.array,
+            rx_timestamps=self._rx_ts_h.array,
+            levels=self._lvl_h.array,
+            modules=self._mod_h.array,
+            devices=self._dev_h.array,
+            sequences=self._seq_h.array,
+            pids=self._pid_h.array,
+            tids=self._tid_h.array,
+            offsets=self._off_h.array,
+            lengths=self._len_h.array,
+            buffer=self._buf_h.array,
+            ext_u32_1=np.empty(0, dtype=np.uint32),
+            ext_u32_2=np.empty(0, dtype=np.uint32),
+            ext_u64_1=np.empty(0, dtype=np.uint64),
+            size=np.array([header.row_count], dtype=np.int64),
+            msg_cursor=np.array([header.buffer_len], dtype=np.int64),
+            capacity=header.row_count,
+            has_levels=True,
+            has_modules=True,
+            has_devices=True,
+            has_sequences=True,
+            has_pids=True,
+            has_tids=True,
+            has_ext_u32_1=False,
+            has_ext_u32_2=False,
+            has_ext_u64_1=False,
+        )
+
+        return self
+
     @property
     def size(self) -> int:
         return int(b.size[0]) if (b := self.bundle) else 0

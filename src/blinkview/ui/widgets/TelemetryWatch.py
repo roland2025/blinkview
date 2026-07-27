@@ -1281,7 +1281,7 @@ class TelemetryWatch(QWidget):
         return {"tab_name": self.tab_name, "id": self.watch_id}
 
     def restore(self, state: dict):
-        self.print(f"restore: {state}")
+        # self.print(f"restore: {state}")
         self.tab_name = state.get("tab_name", self.tab_name)
         self.watch_id = state.get("id") or self.watch_id
 
@@ -1292,9 +1292,9 @@ class TelemetryWatch(QWidget):
         self.rebuild_ui()
 
     def update_config_schema(self, config_: dict, schema_: dict):
-        self.print(f"update_config_schema: {config_}")
+        # self.print(f"update_config_schema: {config_}")
         raw_entries = config_.get("entries", [])
-        self.print(f"id: {self.watch_id}")
+        # self.print(f"id: {self.watch_id}")
         self.name = config_.get("name")
 
         existing_by_key = {}

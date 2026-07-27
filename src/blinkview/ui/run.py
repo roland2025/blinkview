@@ -157,6 +157,13 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
             replay_mode=replay_mode,
         )
 
+        if replay_session_info is not None:
+            # Set before BlinkMainWindow is constructed below, so every ConfigManager it builds
+            # (watchlist, gui state, ...) resolves its file paths through the replay/ scratch
+            # redirect from the start, rather than baking in the live workspace paths first -
+            # see Registry.load_replay_session / FileManager._redirect_to_replay_scratch.
+            registry.file_manager.replay_source_dir = Path(replay_session_info.path)
+
         from blinkview.ui.main_window import BlinkMainWindow
 
         viewer = BlinkMainWindow(registry, set_update_version=set_update_version)

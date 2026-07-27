@@ -14,6 +14,7 @@ from . import adb_time_syncer as adb_time_syncer
 from . import benchmark as benchmark
 from . import binary_file_reader as binary_file_reader
 from . import can_bus as can_bus
+from . import file_tail_reader as file_tail_reader
 from . import logging as logging
 from . import rtt as rtt
 from . import serial_time_syncer as serial_time_syncer
@@ -28,6 +29,7 @@ __all__ = [
     "benchmark",
     "binary_file_reader",
     "can_bus",
+    "file_tail_reader",
     "logging",
     "rtt",
     "serial_time_syncer",

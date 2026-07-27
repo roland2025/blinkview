@@ -52,6 +52,8 @@ class ParserID:
 
     TS_IDF_V1 = 17
 
+    TS_SYSLOG = 18
+
 
 class CodecID:
     NONE = 0
@@ -250,6 +252,7 @@ class UnifiedParserConfig(NamedTuple):
 
     timestamp_precision: int = TS_PRECISION_MS  # For time parsers, indicates the expected timestamp format/precision
     timestamp_unix: bool = False  # specifies, it the received timestamp is unix timestamp
+    syslog_year: int = 0  # Assumed year for year-less timestamp formats (e.g. RFC3164 syslog)
 
 
 EmptyUnifiedParserConfig = UnifiedParserConfig()

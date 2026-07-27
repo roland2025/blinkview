@@ -623,12 +623,17 @@ class TelemetryPlotter(QWidget):
                 replay_buf = self.replay_buffers.get(module)
                 if replay_buf is None:
                     replay_buf = ReplayWindowBuffer(
-                        capacity=self.REPLAY_FETCH_CAP * 2, num_channels=live_buf.num_channels
+                        # +2: room for fetch_telemetry_window's plus_one edge samples, on top of
+                        # the before_cap+after_cap budget - see plus_one's docstring for why.
+                        capacity=self.REPLAY_FETCH_CAP * 2 + 2,
+                        num_channels=live_buf.num_channels,
                     )
                     self.replay_buffers[module] = replay_buf
 
                 # See the fetch_telemetry_arrays call above - no effective_mask passed here
-                # either, same permissive-default/no-behavior-change reasoning.
+                # either, same permissive-default/no-behavior-change reasoning. plus_one=True so
+                # the line always reaches the left/right edge of the view (see its docstring),
+                # regardless of how sparse the data is - unlike a fixed-time fetch-span padding.
                 with fetch_telemetry_window(
                     array_pool,
                     log_pool,
@@ -640,6 +645,7 @@ class TelemetryPlotter(QWidget):
                     after_span_ns=half_span_ns,
                     before_cap=self.REPLAY_FETCH_CAP,
                     after_cap=self.REPLAY_FETCH_CAP,
+                    plus_one=True,
                 ) as batch:
                     if replay_buf.update(batch):
                         updated = True
@@ -1390,10 +1396,14 @@ class TelemetryPlotter(QWidget):
 
             replay_buf = self.replay_buffers.get(module)
             if replay_buf is None:
-                replay_buf = ReplayWindowBuffer(capacity=self.REPLAY_FETCH_CAP * 2, num_channels=live_buf.num_channels)
+                # +2: see apply_updates' matching ReplayWindowBuffer construction for why.
+                replay_buf = ReplayWindowBuffer(
+                    capacity=self.REPLAY_FETCH_CAP * 2 + 2, num_channels=live_buf.num_channels
+                )
                 self.replay_buffers[module] = replay_buf
 
             # No effective_mask passed - see apply_updates' fetch_telemetry_arrays call for why.
+            # plus_one=True - see apply_updates' fetch_telemetry_window call for why.
             with fetch_telemetry_window(
                 array_pool,
                 log_pool,
@@ -1405,6 +1415,7 @@ class TelemetryPlotter(QWidget):
                 after_span_ns=half_span_ns,
                 before_cap=self.REPLAY_FETCH_CAP,
                 after_cap=self.REPLAY_FETCH_CAP,
+                plus_one=True,
             ) as batch:
                 replay_buf.update(batch)
 

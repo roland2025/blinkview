@@ -144,6 +144,7 @@ class BlinkMainWindow(QMainWindow):
 
         # Setup the Toolbar and Button
         self.toolbar = QToolBar("Main Toolbar")
+        self.toolbar.setObjectName("MainToolbar")  # Required for state saving later
 
         self.main_menu_btn = QToolButton()
         self.main_menu_btn.setText("Menu")
@@ -600,7 +601,13 @@ class BlinkMainWindow(QMainWindow):
 
     def start_replay(self, session_info):
         """Loads a previously-recorded session's unified log into Central Storage.
-        Only meaningful when this window's registry was launched with replay_mode=True."""
+        Only meaningful when this window's registry was launched with replay_mode=True.
+
+        This path never touches registry.sources (UnifiedLogReplay subscribes straight to
+        registry.central), so it can't be picked up by Registry._enter_replay_mode_if_detected's
+        source-duck-typing the way the dev-replay (BinaryFileReader/FileTailReader) workflow is -
+        load_replay_session must be called explicitly here instead, now that we already know the
+        session's own folder (session_info.path)."""
         from blinkview.parsers.unified_log_replay import UnifiedLogReplay
         from blinkview.utils.session_lister import unified_log_parts
 
@@ -614,6 +621,8 @@ class BlinkMainWindow(QMainWindow):
         replay_reader.bind_system(registry.system_ctx, SimpleNamespace(get_logger=registry.logger_creator("replay")))
         replay_reader.subscribe(registry.central)
         replay_reader.start()
+
+        registry.load_replay_session(session_info.path)
 
     def _relaunch_as_replay(self, session_info):
         """Spawns `blink replay <session_id>` as a new process. Called from a normal (non-replay)

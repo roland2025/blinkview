@@ -67,7 +67,6 @@ def test_real_registrations_spot_check_across_subsystems():
     from blinkview.core.base_reorder import ReorderFactory
     from blinkview.core.central_storage import CentralFactory
     from blinkview.io.BaseReader import DeviceFactory
-    from blinkview.parsers.assembler import AssemblerFactory
     from blinkview.parsers.frame_decoders import FrameDecoderFactory
     from blinkview.parsers.multi_rule_key_value import ExtractionRuleFactory
 
@@ -76,7 +75,6 @@ def test_real_registrations_spot_check_across_subsystems():
     assert registry.get_factory(FactoryCategory.REORDER) is ReorderFactory
     assert registry.get_factory(FactoryCategory.CENTRAL) is CentralFactory
     assert registry.get_factory(FactoryCategory.SOURCE) is DeviceFactory
-    assert registry.get_factory(FactoryCategory.PIPELINE_ASSEMBLER) is AssemblerFactory
     assert registry.get_factory(FactoryCategory.FRAME_DECODER) is FrameDecoderFactory
     assert registry.get_factory(FactoryCategory.KEY_VALUE_RULE) is ExtractionRuleFactory
 

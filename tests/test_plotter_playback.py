@@ -245,6 +245,66 @@ def test_autoscroll_button_tracks_follow_playback_during_replay_and_lets_you_res
     assert plotter.autoscroll_action.isChecked() is True
 
 
+def test_replay_follow_fetches_one_sample_past_each_displayed_edge(plotter):
+    """Regression test: the REPLAY-follow fetch used to request exactly [current_ts -
+    half_span, current_ts + half_span] - the same span later applied as the view range - so
+    nb_slice_and_downsample_linear's own edge-snap logic (which needs one real sample just past
+    each visible boundary to interpolate the line through) had nothing to snap to, and the
+    plotted line stopped short of the left/right edge instead of filling the whole view.
+
+    fetch_telemetry_window's plus_one=True fixes this by fetching the single nearest sample just
+    outside each boundary, unbounded on the far side - so it's found regardless of how sparse
+    the data is, unlike a fixed-time padding on the fetched span. Verified here against real data
+    (the `plotter` fixture's 20 samples, 100ms apart) with the window narrow enough (0.5s, so a
+    250ms half-span) that its boundary deliberately falls strictly between two samples rather
+    than landing on one."""
+    for _ in range(3):
+        plotter.apply_updates(force=True)  # discover the module on the live edge
+
+    plotter.view_duration = 0.5  # half-span 250ms - narrower than a 100ms sample gap
+
+    clock = plotter.gui_context.registry.playback_clock
+    base_ts = clock.bounds_min_ns  # ts of the fixture's first (index 0) sample
+    target_ts = base_ts + 1_000_000_000  # exactly sample index 10
+    clock.enter_replay(target_ts)
+    plotter.apply_updates(force=True)
+
+    replay_buf = plotter.replay_buffers[plotter.module]
+    x_ns = replay_buf.x_data_int64[: replay_buf.size]
+
+    half_span_ns = int(plotter.view_duration * 1_000_000_000 / 2)
+    window_min_ns = target_ts - half_span_ns  # base + 750ms
+    window_max_ns = target_ts + half_span_ns  # base + 1250ms
+
+    assert x_ns.min() < window_min_ns  # the edge neighbor just before the left boundary (700ms)
+    assert x_ns.max() > window_max_ns  # the edge neighbor just past the right boundary (1300ms)
+
+
+def test_manual_pan_refetch_also_fetches_one_sample_past_each_edge(plotter):
+    """Same plus_one requirement as the follow-fetch test above, but for the one-shot re-fetch
+    triggered by a manual pan/zoom during REPLAY (_refetch_replay_window)."""
+    for _ in range(3):
+        plotter.apply_updates(force=True)
+
+    clock = plotter.gui_context.registry.playback_clock
+    clock.enter_replay(clock.bounds_min_ns + 1_000_000_000)
+    plotter.apply_updates(force=True)
+
+    base_s = clock.bounds_min_ns / 1_000_000_000.0
+    t_min_s, t_max_s = base_s + 0.75, base_s + 1.25  # same boundary-between-samples setup
+
+    plotter._refetch_replay_window(t_min_s, t_max_s)
+
+    replay_buf = plotter.replay_buffers[plotter.module]
+    x_ns = replay_buf.x_data_int64[: replay_buf.size]
+
+    window_min_ns = int(round(t_min_s * 1_000_000_000))
+    window_max_ns = int(round(t_max_s * 1_000_000_000))
+
+    assert x_ns.min() < window_min_ns
+    assert x_ns.max() > window_max_ns
+
+
 def test_returning_to_live_resets_follow_playback_for_the_next_replay_session(plotter):
     plotter.apply_updates(force=True)
     clock = plotter.gui_context.registry.playback_clock

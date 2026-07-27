@@ -195,7 +195,9 @@ def nb_extract_telemetry_segment_window_backward(
     temp_floats: np.ndarray,
     write_idx: int,  # Starting write position (moves backward)
     effective_mask: np.ndarray,
-) -> int:
+    capture_edge: bool,
+    edge_remaining: int,
+):
     """
     Playback-scrub counterpart to nb_extract_telemetry_segment_to_end: instead of stopping at a
     forward-fetch sequence watermark, this is bounded by an arbitrary [window.start_ts,
@@ -204,6 +206,19 @@ def nb_extract_telemetry_segment_window_backward(
     writing backward from write_idx - same "moves left" convention as
     nb_extract_telemetry_segment_to_end, so a caller can chain multiple segments' calls together
     without a merge/sort step.
+
+    capture_edge/edge_remaining - see fetch_telemetry_window's plus_one docstring
+    (core/numpy_log.py). When capture_edge is True and edge_remaining > 0 (the edge row hasn't
+    already been captured by a newer segment's call), this same call - after exhausting the
+    bounded window scan above - also looks for exactly one more matching row immediately outside
+    window.start_ts: the whole segment (newest row first) if this segment's data entirely
+    predates window.start_ts, otherwise just the rows below the window's own local lower bound
+    within this segment. Writes it at write_idx - 1, contiguous with whatever window rows were
+    already written, so the caller never needs a second pass or a separate output slot to stitch
+    together afterward.
+
+    Returns (write_idx, edge_remaining) - both threaded into the next (older) segment's call the
+    same way write_idx already was before capture_edge existed.
 
     effective_mask - see nb_extract_telemetry_segment_to_end's docstring.
     """
@@ -217,9 +232,12 @@ def nb_extract_telemetry_segment_window_backward(
 
     loop_start = 0
     loop_end = count
+    starts_before_segment = False  # True if this whole segment predates window.start_ts
 
     if window.start_ts != TS_UNSPECIFIED:
         idx = nb_fast_find_first_ge(timestamps, count, window.start_ts)
+        if idx >= count:
+            starts_before_segment = True
         if idx > loop_start:
             loop_start = idx
 
@@ -228,33 +246,62 @@ def nb_extract_telemetry_segment_window_backward(
         if idx < loop_end:
             loop_end = idx
 
-    if loop_start >= loop_end:
-        return write_idx
+    if loop_end == 0:
+        # Nothing in this segment is <= window.end_ts - it entirely postdates the window, so
+        # it's not even an edge candidate (that requires being <= window.end_ts, same as any
+        # in-window row).
+        return write_idx, edge_remaining
 
-    for i in range(loop_end - 1, loop_start - 1, -1):
-        if write_idx <= 0:
-            break
+    if loop_start < loop_end:
+        for i in range(loop_end - 1, loop_start - 1, -1):
+            if write_idx <= 0:
+                break
 
-        if modules[i] != target_module:
-            continue
+            if modules[i] != target_module:
+                continue
 
-        if levels[i] < effective_mask[modules[i]]:
-            continue
+            if levels[i] < effective_mask[modules[i]]:
+                continue
 
-        offset = msg_offsets[i]
-        length = msg_lens[i]
-        extracted_count = nb_extract_floats_from_bytes(msg_buffer, offset, length, temp_floats)
+            offset = msg_offsets[i]
+            length = msg_lens[i]
+            extracted_count = nb_extract_floats_from_bytes(msg_buffer, offset, length, temp_floats)
 
-        if extracted_count >= num_channels:
-            write_idx -= 1
-            ts_int = timestamps[i]
-            out_times[write_idx] = ts_int / 1_000_000_000.0
-            out_times_int64[write_idx] = ts_int
+            if extracted_count >= num_channels:
+                write_idx -= 1
+                ts_int = timestamps[i]
+                out_times[write_idx] = ts_int / 1_000_000_000.0
+                out_times_int64[write_idx] = ts_int
 
-            for c in range(num_channels):
-                out_values[write_idx, c] = temp_floats[c]
+                for c in range(num_channels):
+                    out_values[write_idx, c] = temp_floats[c]
 
-    return write_idx
+    if capture_edge and edge_remaining > 0 and write_idx > 0:
+        edge_scan_from = count if starts_before_segment else loop_start
+        for i in range(edge_scan_from - 1, -1, -1):
+            if modules[i] != target_module:
+                continue
+
+            if levels[i] < effective_mask[modules[i]]:
+                continue
+
+            offset = msg_offsets[i]
+            length = msg_lens[i]
+            extracted_count = nb_extract_floats_from_bytes(msg_buffer, offset, length, temp_floats)
+
+            if extracted_count >= num_channels:
+                write_idx -= 1
+                ts_int = timestamps[i]
+                out_times[write_idx] = ts_int / 1_000_000_000.0
+                out_times_int64[write_idx] = ts_int
+
+                for c in range(num_channels):
+                    out_values[write_idx, c] = temp_floats[c]
+
+                edge_remaining -= 1
+                break
+
+    return write_idx, edge_remaining
 
 
 @app_njit()
@@ -269,7 +316,9 @@ def nb_extract_telemetry_segment_window_forward(
     temp_floats: np.ndarray,
     write_idx: int,  # Starting write position (moves forward)
     effective_mask: np.ndarray,
-) -> int:
+    capture_edge: bool,
+    edge_remaining: int,
+):
     """
     Forward-direction counterpart to nb_extract_telemetry_segment_window_backward, for the
     "after the scrub anchor" half of a window. Scans the bounded [window.start_ts,
@@ -277,6 +326,13 @@ def nb_extract_telemetry_segment_window_forward(
     backward+forward output lands pre-sorted ascending with no merge step, mirroring how
     _fetch_history_window (log_viewer.py) pairs a reversed "before" scan with a forward
     "after" scan.
+
+    capture_edge/edge_remaining - mirror image of nb_extract_telemetry_segment_window_backward's
+    (see its docstring): once the bounded scan is exhausted, looks for exactly one more matching
+    row past window.end_ts - the whole segment (oldest row first) if this segment's data entirely
+    postdates window.end_ts, otherwise just the rows at/after the window's own local upper bound
+    within this segment - written at write_idx (then incremented), contiguous with whatever
+    window rows were already written.
 
     effective_mask - see nb_extract_telemetry_segment_to_end's docstring.
     """
@@ -291,6 +347,7 @@ def nb_extract_telemetry_segment_window_forward(
 
     loop_start = 0
     loop_end = count
+    ends_after_segment = False  # True if this whole segment postdates window.end_ts
 
     if window.start_ts != TS_UNSPECIFIED:
         idx = nb_fast_find_first_ge(timestamps, count, window.start_ts)
@@ -299,37 +356,68 @@ def nb_extract_telemetry_segment_window_forward(
 
     if window.end_ts != TS_UNSPECIFIED:
         idx = nb_fast_find_first_gt(timestamps, count, window.end_ts)
+        if idx <= 0:
+            ends_after_segment = True
         if idx < loop_end:
             loop_end = idx
 
-    if loop_start >= loop_end:
-        return write_idx
+    if loop_start == count:
+        # Nothing in this segment is >= window.start_ts - it entirely predates the window, so
+        # it's not even an edge candidate (that requires being >= window.start_ts, same as any
+        # in-window row).
+        return write_idx, edge_remaining
 
-    for i in range(loop_start, loop_end):
-        if write_idx >= max_write:
-            break
+    if loop_start < loop_end:
+        for i in range(loop_start, loop_end):
+            if write_idx >= max_write:
+                break
 
-        if modules[i] != target_module:
-            continue
+            if modules[i] != target_module:
+                continue
 
-        if levels[i] < effective_mask[modules[i]]:
-            continue
+            if levels[i] < effective_mask[modules[i]]:
+                continue
 
-        offset = msg_offsets[i]
-        length = msg_lens[i]
-        extracted_count = nb_extract_floats_from_bytes(msg_buffer, offset, length, temp_floats)
+            offset = msg_offsets[i]
+            length = msg_lens[i]
+            extracted_count = nb_extract_floats_from_bytes(msg_buffer, offset, length, temp_floats)
 
-        if extracted_count >= num_channels:
-            ts_int = timestamps[i]
-            out_times[write_idx] = ts_int / 1_000_000_000.0
-            out_times_int64[write_idx] = ts_int
+            if extracted_count >= num_channels:
+                ts_int = timestamps[i]
+                out_times[write_idx] = ts_int / 1_000_000_000.0
+                out_times_int64[write_idx] = ts_int
 
-            for c in range(num_channels):
-                out_values[write_idx, c] = temp_floats[c]
+                for c in range(num_channels):
+                    out_values[write_idx, c] = temp_floats[c]
 
-            write_idx += 1
+                write_idx += 1
 
-    return write_idx
+    if capture_edge and edge_remaining > 0 and write_idx < max_write:
+        edge_scan_from = 0 if ends_after_segment else loop_end
+        for i in range(edge_scan_from, count):
+            if modules[i] != target_module:
+                continue
+
+            if levels[i] < effective_mask[modules[i]]:
+                continue
+
+            offset = msg_offsets[i]
+            length = msg_lens[i]
+            extracted_count = nb_extract_floats_from_bytes(msg_buffer, offset, length, temp_floats)
+
+            if extracted_count >= num_channels:
+                ts_int = timestamps[i]
+                out_times[write_idx] = ts_int / 1_000_000_000.0
+                out_times_int64[write_idx] = ts_int
+
+                for c in range(num_channels):
+                    out_values[write_idx, c] = temp_floats[c]
+
+                write_idx += 1
+                edge_remaining -= 1
+                break
+
+    return write_idx, edge_remaining
 
 
 @app_njit()

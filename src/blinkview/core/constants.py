@@ -23,7 +23,6 @@ class FactoryCategory:
     SOURCE = "source"
     PARSER = "parser"
     TIME_SYNC = "time_sync"
-    PIPELINE_ASSEMBLER = "pipeline_assembler"
     LOGGING_PROCESSOR = "logging_processor"
     FILE_LOGGING = "file_logging"
     FRAME_DECODER = "frame_decoder"

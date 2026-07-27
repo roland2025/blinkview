@@ -11,7 +11,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from blinkview import __version__ as blinkview_version
 from blinkview.core.settings_manager import SettingsManager
@@ -40,7 +40,14 @@ def get_session_identity(config_path) -> str:
 
 
 class FileManager:
-    def __init__(self, session_name: str = None, profile_name: str = None, log_dir=None, config_path=None):
+    def __init__(
+        self,
+        session_name: str = None,
+        profile_name: str = None,
+        log_dir=None,
+        config_path=None,
+        replay_mode: bool = False,
+    ):
         self.system_context: SystemContext = None
         self.gui_context = None
 
@@ -112,7 +119,19 @@ class FileManager:
         self.session_display_name = self._sanitize(session_name or "Untitled")
         print(f"[FileManager] session_display_name={self.session_display_name}")
 
-        self.session_dir = self._create_session_dir()
+        self.replay_mode = replay_mode
+
+        # replay_source_dir, once set (by Registry.load_replay_session/ui.run.run), is the
+        # folder of the *original* session being replayed. Nothing under it is ever modified
+        # directly - get_config_path/get_session_path/get_playback_ranges_path instead mirror
+        # into a "replay/" scratch subfolder of it (see _redirect_to_replay_scratch).
+        self.replay_source_dir: Optional[Path] = None
+
+        # In replay mode, this session's own folder is created lazily (only if something with
+        # nowhere better to go - e.g. FileManager.stop()'s final bookkeeping - actually needs to
+        # write) rather than unconditionally on every replay launch, which used to leave an
+        # empty timestamped folder behind purely as a side effect of opening a replay.
+        self.session_dir = self._create_session_dir(create=not replay_mode)
         print(f"[FileManager] session_dir={self.session_dir}")
 
         # Write initial metadata
@@ -144,7 +163,8 @@ class FileManager:
             "loggers": {},
         }
 
-        self.write_metadata()
+        if not replay_mode:
+            self.write_metadata()
 
         self._file_loggers = []
 
@@ -164,7 +184,7 @@ class FileManager:
         self._snapshot_master_to_session("gui_config")
         self._snapshot_master_to_session("gui_state")
 
-    def _create_session_dir(self) -> Path:
+    def _create_session_dir(self, create: bool = True) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Identity (Examples_Can) + Display Name (Untitled)
@@ -176,7 +196,8 @@ class FileManager:
 
         # Path: logs/ProjectName/20260314_124429_Examples_Can_Untitled
         path = self.log_dir / self.project_name / folder_name
-        path.mkdir(parents=True, exist_ok=True)
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
         return path
 
     def _get_git_info(self) -> Dict[str, Any]:
@@ -197,14 +218,55 @@ class FileManager:
             return {"hash": "unknown", "dirty": False}
 
     def write_metadata(self):
-        """Writes or updates the metadata.json file in the session folder."""
+        """Writes or updates the metadata.json file in the session folder. Never called while
+        replaying (see __init__/replay_mode) - this is always *this run's own* bookkeeping
+        folder, never the original session being replayed."""
+        self._ensure_session_dir()
         meta_file = self.session_dir / "metadata.json"
 
         with meta_file.open("w") as f:
             json.dump(self.metadata, f, indent=4)
 
+    def _ensure_session_dir(self):
+        """Materializes the (possibly not-yet-created, in replay mode) session folder on first
+        real write - see the `create=not replay_mode` comment in __init__."""
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+
+    def _redirect_to_replay_scratch(self, original_path: Path, filename: str) -> Path:
+        """While replaying (self.replay_source_dir set), mirrors `original_path` (which would
+        otherwise point at a file inside the *original* session's own folder, or the live
+        workspace profile) into a `replay/` scratch subfolder of that original session instead -
+        seeding it with a one-time copy of the current content on first access. Every subsequent
+        read/write for that file, for the lifetime of this replay, goes through that scratch copy
+        only - the original session's files (and the live workspace profile) are never opened for
+        writing. Reopening the same session for replay later picks the scratch copy back up
+        (still routed through this same method), so edits made during a previous replay of this
+        session persist across replay runs without ever having touched the original."""
+        scratch_dir = self.replay_source_dir / "replay"
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        target = scratch_dir / filename
+        if not target.exists() and original_path.exists():
+            import shutil
+
+            shutil.copy2(original_path, target)
+        return target
+
     def get_path(self, filename: str) -> Path:
         """Helper to get a full path for a new file within the session folder."""
+        self._ensure_session_dir()
+        return self.session_dir / filename
+
+    def get_playback_ranges_path(self) -> Path:
+        """A fixed filename (not routed through get_session_path's <config_file_name>-prefixed
+        naming) so it can be found by simple, stable-name lookup when a *different* run later
+        replays a file that lives inside this session's folder - see
+        Registry._discover_replay_ranges_path / core/playback_ranges.py.
+
+        While replaying, redirected into that original session's `replay/` scratch subfolder
+        (see _redirect_to_replay_scratch) instead of the original playback_ranges.json itself."""
+        filename = "playback_ranges.json"
+        if self.replay_source_dir is not None:
+            return self._redirect_to_replay_scratch(self.replay_source_dir / filename, filename)
         return self.session_dir / filename
 
     def __repr__(self):
@@ -217,6 +279,7 @@ class FileManager:
         """
         import shutil
 
+        self._ensure_session_dir()
         snapshot_dir = self.session_dir / "snapshot"
         snapshot_dir.mkdir(exist_ok=True)
 
@@ -256,6 +319,7 @@ class FileManager:
 
         filename = f"{logging_id}.{part_suffix}.{ext}"
 
+        self._ensure_session_dir()
         return self.session_dir / filename
 
     def stop(self):
@@ -288,7 +352,12 @@ class FileManager:
         self.metadata["finished_at"] = finished_time.isoformat() + "Z"
         self.metadata["duration_seconds"] = round(duration, 3)
 
-        self.write_metadata()
+        # Replay runs never get their own metadata.json - writing one would make this run itself
+        # show up as a selectable entry in the Load Session menu (session_lister.list_sessions
+        # only considers folders that have one), recreating exactly the clutter this mode exists
+        # to avoid. The in-memory dict above is still finalized for anything that inspects it.
+        if not self.replay_mode:
+            self.write_metadata()
 
     def add_file_logger(self, file_logger: FileLogger):
         logger_id = file_logger.local.logging_id
@@ -370,16 +439,24 @@ class FileManager:
         self.save_gui_state("final")
 
     def get_config_path(self, type_name: str = None) -> Path:
-        """Traffic Cop for Config vs State."""
-        if type_name is None:
-            return self.config_dir / f"{self.config_file_name}.json"
-
-        return self.config_dir / f"{self.config_file_name}.{type_name}.json"
+        """Traffic Cop for Config vs State. While replaying, redirected into the original
+        session's `replay/` scratch subfolder (see _redirect_to_replay_scratch) instead of the
+        live workspace profile, so editing e.g. the watchlist while replaying an old session
+        can't clobber the profile's current live settings."""
+        filename = f"{self.config_file_name}.json" if type_name is None else f"{self.config_file_name}.{type_name}.json"
+        original = self.config_dir / filename
+        if self.replay_source_dir is not None:
+            return self._redirect_to_replay_scratch(original, filename)
+        return original
 
     def get_session_path(self, type_name: str = None, suffix: str = None) -> Path:
-        """Brands session files with the profile context."""
+        """Brands session files with the profile context. While replaying, redirected into the
+        original session's `replay/` scratch subfolder instead of that session's own top-level
+        files (see _redirect_to_replay_scratch)."""
         base = self.config_file_name if type_name is None else f"{self.config_file_name}.{type_name}"
         filename = f"{base}.{suffix}.json" if suffix else f"{base}.json"
+        if self.replay_source_dir is not None:
+            return self._redirect_to_replay_scratch(self.replay_source_dir / filename, filename)
         return self.session_dir / filename
 
     def _snapshot_master_to_session(self, type_name: str):

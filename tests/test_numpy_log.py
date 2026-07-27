@@ -296,3 +296,93 @@ class TestAcquireIndicesBuffer:
             assert len(handle.array) >= 123
         finally:
             handle.release()
+
+
+class TestFindTsNRowsAway:
+    def _pool_with_rows(self, global_pool, count, ts_start=100, max_pieces=16, segment_capacity=4):
+        """10 rows across multiple 4-row segments (3 segments: [4,4,2]) so stepping exercises
+        real segment-boundary crossing, not just within-segment indexing."""
+        tiny_pool = NumpyArrayPool(min_bytes=32, max_bytes=1024 * 1024)
+        log_pool = CircularLogPool(tiny_pool, max_pieces=max_pieces)
+        log_pool.segment_capacity = segment_capacity
+        log_pool._optimized = True
+        log_pool.clear()
+
+        messages = [f"m{i}".encode() for i in range(count)]
+        batch = make_source_batch(tiny_pool, messages, ts_start=ts_start)
+        log_pool.batch_append(batch)
+        batch.release()
+        return log_pool
+
+    def test_steps_forward_across_segment_boundaries(self, global_pool):
+        log_pool = self._pool_with_rows(global_pool, 10)
+        try:
+            # rows at ts 100..109 (seq 1..10). From ts=100 (row 1), 3 rows forward -> ts=103.
+            assert log_pool.find_ts_n_rows_away(100, 3) == 103
+            # From ts=100, 9 rows forward -> the last row (ts=109).
+            assert log_pool.find_ts_n_rows_away(100, 9) == 109
+        finally:
+            log_pool.release_all()
+
+    def test_steps_backward_across_segment_boundaries(self, global_pool):
+        log_pool = self._pool_with_rows(global_pool, 10)
+        try:
+            assert log_pool.find_ts_n_rows_away(109, -3) == 106
+            assert log_pool.find_ts_n_rows_away(109, -9) == 100
+        finally:
+            log_pool.release_all()
+
+    def test_clamps_when_overshooting_forward(self, global_pool):
+        log_pool = self._pool_with_rows(global_pool, 10)
+        try:
+            assert log_pool.find_ts_n_rows_away(105, 1000) == 109
+        finally:
+            log_pool.release_all()
+
+    def test_clamps_when_overshooting_backward(self, global_pool):
+        log_pool = self._pool_with_rows(global_pool, 10)
+        try:
+            assert log_pool.find_ts_n_rows_away(105, -1000) == 100
+        finally:
+            log_pool.release_all()
+
+    def test_zero_delta_is_a_noop(self, global_pool):
+        log_pool = self._pool_with_rows(global_pool, 10)
+        try:
+            assert log_pool.find_ts_n_rows_away(104, 0) == 104
+        finally:
+            log_pool.release_all()
+
+    def test_ties_at_current_ts_are_not_recounted(self, global_pool):
+        """Two rows can legitimately share a timestamp (same-ns arrivals). Stepping from that
+        exact timestamp must land on a genuinely different row on either side, not re-select one
+        of the tied rows."""
+        tiny_pool = NumpyArrayPool(min_bytes=32, max_bytes=1024 * 1024)
+        log_pool = CircularLogPool(tiny_pool, max_pieces=16)
+        log_pool.segment_capacity = 4
+        log_pool._optimized = True
+        log_pool.clear()
+        try:
+            batch = tiny_pool.create(
+                PooledLogBatch,
+                req_capacity=5,
+                buffer_bytes=32,
+                has_levels=True,
+                has_modules=True,
+                has_devices=True,
+                has_sequences=True,
+            )
+            # ts: 100, 100, 100, 105, 110 - three-way tie at 100.
+            for ts, msg in [(100, b"a"), (100, b"b"), (100, b"c"), (105, b"d"), (110, b"e")]:
+                assert batch.insert(ts, ts, msg, LogLevel.INFO.value, 0, 0, 0)
+            log_pool.batch_append(batch)
+            batch.release()
+
+            assert log_pool.find_ts_n_rows_away(100, 1) == 105
+            assert log_pool.find_ts_n_rows_away(105, -1) == 100
+        finally:
+            log_pool.release_all()
+
+    def test_empty_pool_returns_current_ts_unchanged(self, log_pool):
+        assert log_pool.find_ts_n_rows_away(12345, 5) == 12345
+        assert log_pool.find_ts_n_rows_away(12345, -5) == 12345

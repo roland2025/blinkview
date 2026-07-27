@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from datetime import datetime
 from types import SimpleNamespace
 from typing import List
 
@@ -246,6 +247,13 @@ class ModuleNameParserBase(FrameSectionParser):
                 name_bytes=np.empty(self.TRACKER_CAPACITY * self.AVG_NAME_LEN, dtype=dtypes.BYTE),
             )
         )
+        # Buffers above are fixed-capacity and never reallocated for the parser's lifetime,
+        # so the memoryviews (cheaper per-element access than numpy scalar indexing) can be
+        # built once here instead of on every post_process() call.
+        modules_state = self.tracker_state.modules
+        self._tracker_starts_mv = memoryview(modules_state.starts)
+        self._tracker_lengths_mv = memoryview(modules_state.lengths)
+        self._tracker_name_bytes_mv = memoryview(modules_state.name_bytes)
 
     def post_process(self, batch: PooledLogBatch) -> bool:
         state = self.tracker_state.modules
@@ -260,14 +268,16 @@ class ModuleNameParserBase(FrameSectionParser):
 
         active_modules = batch.bundle.modules[: batch.size]
         get_module = self.local.device_id.get_module
+        starts = self._tracker_starts_mv
+        lengths = self._tracker_lengths_mv
+        name_bytes = self._tracker_name_bytes_mv
 
         for i in range(unresolved_count):
-            start = state.starts[i]
-            length = state.lengths[i]
+            start = starts[i]
+            length = lengths[i]
 
             # Extract the raw bytes and decode
-            name_bytes = state.name_bytes[start : start + length]
-            module_name_str = name_bytes.tobytes().decode("ascii")
+            module_name_str = name_bytes[start : start + length].tobytes().decode("ascii")
 
             # get_module handles the discovery/registration logic
             try:
@@ -565,6 +575,60 @@ class ZephyrRealTimeParser(TimestampParser):
         changed = super().apply_config(config)
 
         self._bundle = ParserID.TS_ZEPHYR_REALTIME, self.state, EmptyUnifiedParserConfig
+
+        return changed
+
+    def bundle(self):
+        return self._bundle
+
+
+@FrameSectionParserFactory.register("timestamp_iso8601_desktop")
+class Iso8601DesktopTimestampParser(TimestampParser):
+    """Parses 'YYYY-MM-DD HH:MM:SS[.,]fff' - the common desktop log format used by
+    Python's `logging` module, log4j, and plain ISO8601 output (no bracket wrapper)."""
+
+    def __init__(self):
+        super().__init__()
+        self._bundle = None
+
+    def apply_config(self, config: dict):
+        changed = super().apply_config(config)
+
+        self._bundle = ParserID.TS_ISO8601, self.state, EmptyUnifiedParserConfig
+
+        return changed
+
+    def bundle(self):
+        return self._bundle
+
+
+@configuration_property(
+    "year",
+    type="integer",
+    title="Assumed year",
+    required=False,
+    default=0,
+    help="Year to assume for syslog timestamps, which have no year field. 0 = use the current year.",
+)
+@FrameSectionParserFactory.register("timestamp_syslog")
+class SyslogTimestampParser(TimestampParser):
+    """Parses classic RFC3164 syslog timestamps: 'Mon DD HH:MM:SS' (e.g. "Jan  2 15:04:05").
+    Since the format has no year field, one is assumed - either the configured `year`, or the
+    current year at config-apply time."""
+
+    year: int
+
+    def __init__(self):
+        super().__init__()
+        self._bundle = None
+
+    def apply_config(self, config: dict):
+        changed = super().apply_config(config)
+
+        assumed_year = self.year if getattr(self, "year", 0) else datetime.now().year
+        ts_config = UnifiedParserConfig(syslog_year=assumed_year)
+
+        self._bundle = ParserID.TS_SYSLOG, self.state, ts_config
 
         return changed
 

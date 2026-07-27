@@ -78,6 +78,36 @@ class TestApplyConfig:
         assert storage.log_pool is pool
         assert storage.log_pool.max_pieces == storage.max_pieces
 
+    def test_cold_storage_disabled_by_default(self):
+        storage = make_storage()
+        assert storage.log_pool._archiver is None
+        assert storage.log_pool.cold_max_pieces == 0
+
+    def test_cold_storage_enabled_creates_archiver_and_temp_dir(self, tmp_path):
+        storage = make_storage(cold_storage_enabled=True, cold_max_pieces=3, cold_storage_dir=str(tmp_path))
+
+        try:
+            assert storage.log_pool._archiver is not None
+            assert storage.log_pool.cold_max_pieces == 3
+            # A fresh, uniquely-named subdirectory is created under the configured dir - not the
+            # configured dir itself (see CentralStorage._resolve_cold_storage_dir) - so an eventual
+            # cleanup rmtree can never touch anything the caller already had in tmp_path.
+            created_dirs = list(tmp_path.iterdir())
+            assert len(created_dirs) == 1
+            assert created_dirs[0].is_dir()
+            assert storage.log_pool._archiver._dir == created_dirs[0]
+        finally:
+            storage.log_pool.release_all()
+
+    def test_reapplying_config_can_grow_cold_max_pieces_live(self, tmp_path):
+        storage = make_storage(cold_storage_enabled=True, cold_max_pieces=2, cold_storage_dir=str(tmp_path))
+
+        try:
+            storage.apply_config({"cold_storage_enabled": True, "cold_max_pieces": 5})
+            assert storage.log_pool.cold_max_pieces == 5
+        finally:
+            storage.log_pool.release_all()
+
 
 class TestRun:
     def test_ingested_batches_are_appended_to_the_log_pool_and_distributed(self):
