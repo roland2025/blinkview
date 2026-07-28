@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
 

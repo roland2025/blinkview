@@ -4,9 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import os
 import signal
-import sys
 from queue import Empty, Queue
 from threading import Thread
 

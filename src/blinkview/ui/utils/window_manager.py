@@ -6,9 +6,8 @@
 
 from base64 import b64decode, b64encode
 
-from qtpy.QtCore import QByteArray, QPoint, QTimer
+from qtpy.QtCore import QByteArray, QTimer
 from qtpy.QtGui import QGuiApplication
-from qtpy.QtWidgets import QMainWindow
 
 
 def get_window_geometry_data(window, threshold=15) -> dict:

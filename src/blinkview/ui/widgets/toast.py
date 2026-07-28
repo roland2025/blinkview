@@ -4,8 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from qtpy.QtCore import QEasingCurve, QObject, QPropertyAnimation, QRectF, Qt, QVariantAnimation, Signal, Slot
-from qtpy.QtGui import QColor, QCursor, QPainter, QPen
+from qtpy.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, QVariantAnimation
+from qtpy.QtGui import QColor, QPainter, QPen
 from qtpy.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QWidget
 
 

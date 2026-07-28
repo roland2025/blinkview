@@ -5,9 +5,9 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import re
-from threading import Lock, RLock
+from threading import RLock
 from time import perf_counter_ns
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from blinkview.core import dtypes
 from blinkview.core.id_registry.tables import IndexedStringTable

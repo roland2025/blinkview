@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from blinkview.core.numba_config import app_njit
-from blinkview.ops.constants import CHAR_LPAREN, CHAR_RPAREN, CHAR_SPACE
+from blinkview.ops.constants import CHAR_LPAREN, CHAR_RPAREN
 from blinkview.ops.strings import nb_skip_whitespace
 from blinkview.ops.timestamps import nb_parse_int_timestamp
 

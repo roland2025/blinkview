@@ -5,11 +5,14 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import time
+from typing import TYPE_CHECKING
 
-from blinkview.core.configurable import configuration_property, override_property
-from blinkview.core.device_identity import DeviceIdentity
+from blinkview.core.configurable import configuration_property
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.parsers.parser import BaseParser, ParserFactory
+
+if TYPE_CHECKING:
+    from blinkview.core.device_identity import DeviceIdentity
 
 
 @ParserFactory.register("module_gen")
@@ -38,7 +41,7 @@ class ModuleGenParser(BaseParser):
         # Calculate pacing intervals
         ns_per_module = int(1e9 / modules_per_sec) if modules_per_sec > 0 else 1e9
 
-        device_identity: DeviceIdentity = self.local.device_id
+        device_identity: "DeviceIdentity" = self.local.device_id
         device_identity_id = device_identity.id
         _get_module = device_identity.get_module
 

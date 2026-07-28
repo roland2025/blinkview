@@ -17,7 +17,6 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from blinkview.ui.utils.in_development import set_as_in_development
 from blinkview.ui.widgets.message_box import MessageBox
 
 

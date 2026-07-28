@@ -4,10 +4,14 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from typing import TYPE_CHECKING
+
 from blinkview.core.configurable import override_property
-from blinkview.core.device_identity import DeviceIdentity
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.parsers.parser import BaseParser, ParserFactory
+
+if TYPE_CHECKING:
+    from blinkview.core.device_identity import DeviceIdentity
 
 
 @ParserFactory.register("key_value_equal")
@@ -37,7 +41,7 @@ class KeyValueEqualParser(BaseParser):
         max_timeout = self.delay / 1000.0
         max_timeout_ns = int(max_timeout * 1e9)  #
 
-        device_identity: DeviceIdentity = self.local.device_id
+        device_identity: "DeviceIdentity" = self.local.device_id
         device_identity_id = device_identity.id
         system_identity_id = self.shared.id_registry.get_device("SYSTEM").id
         _get_module = device_identity.get_module

@@ -6,7 +6,7 @@
 
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
 

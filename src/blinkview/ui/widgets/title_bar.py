@@ -4,22 +4,11 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from qtpy.QtCore import Qt, QTimer, Signal, Slot
-from qtpy.QtGui import QAction, QCloseEvent, QFont, QIcon
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
-    QApplication,
-    QDockWidget,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
-    QListWidget,
-    QMainWindow,
-    QMenu,
-    QPlainTextEdit,
     QPushButton,
-    QTabWidget,
-    QToolBar,
-    QVBoxLayout,
     QWidget,
 )
 

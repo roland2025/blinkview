@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from threading import Event, Lock, Thread
-from time import sleep, time
+from time import sleep
 from types import SimpleNamespace
 from typing import Iterable, List
 

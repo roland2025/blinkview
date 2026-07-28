@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from qtpy.QtCore import QEvent, QPoint, Qt, QTimer, Slot
+from qtpy.QtCore import QEvent, QPoint, Qt
 from qtpy.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor, QTextDocument
 from qtpy.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QTextEdit, QToolButton, QVBoxLayout, QWidget
 

@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from blinkview.utils.global_settings import GlobalSettings
 from blinkview.utils.project_settings import ProjectSettings, get_project_root

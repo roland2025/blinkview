@@ -8,19 +8,8 @@ import numpy as np
 
 from blinkview.core.numba_config import app_njit
 from blinkview.ops.constants import (
-    CHAR_CR,
-    CHAR_ESC,
-    CHAR_LBRACKET,
-    CHAR_LF,
     CHAR_LOWER_A,
     CHAR_LOWER_Z,
-    CHAR_NINE,
-    CHAR_RBRACKET,
-    CHAR_SPACE,
-    CHAR_TAB,
-    CHAR_UPPER_A,
-    CHAR_UPPER_Z,
-    CHAR_ZERO,
 )
 
 

@@ -8,8 +8,6 @@ import queue
 import time
 from types import SimpleNamespace
 
-import pytest
-
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.logger import PrintLogger
 from blinkview.io.binary_file_reader import BinaryFileReader

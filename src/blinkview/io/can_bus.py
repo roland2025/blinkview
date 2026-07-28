@@ -4,7 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import time
 from time import sleep
 from typing import TYPE_CHECKING, Any
 

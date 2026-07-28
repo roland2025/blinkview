@@ -6,7 +6,6 @@
 
 import threading
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from packaging import version
 

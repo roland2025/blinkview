@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import NamedTuple, Tuple
+from typing import NamedTuple
 
 import numpy as np
 from numba import typeof, types

@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import numpy as np
 

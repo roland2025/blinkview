@@ -9,7 +9,7 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.parsing import SyncState
-from blinkview.ops.constants import CHAR_NINE, CHAR_SPACE, CHAR_TAB, CHAR_ZERO
+from blinkview.ops.constants import CHAR_NINE, CHAR_ZERO
 from blinkview.ops.strings import nb_skip_whitespace
 
 

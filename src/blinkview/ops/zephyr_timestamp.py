@@ -14,7 +14,6 @@ from blinkview.ops.constants import (
     CHAR_NINE,
     CHAR_RBRACKET,
     CHAR_SPACE,
-    CHAR_TAB,
     CHAR_ZERO,
 )
 from blinkview.ops.strings import nb_skip_whitespace

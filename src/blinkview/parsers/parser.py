@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from types import SimpleNamespace
-from typing import Any, Callable, List, NamedTuple
+from typing import Any, Callable, List
 
 from blinkview.core.base_daemon import BaseDaemon
 from blinkview.core.batch_queue import BatchQueue

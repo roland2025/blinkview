@@ -4,7 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from blinkview.core.id_registry.types import StringTableParams
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.parsing import UnifiedParserConfig
 from blinkview.ops.strings import nb_skip_whitespace

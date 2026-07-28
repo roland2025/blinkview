@@ -4,16 +4,11 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import weakref
-from dataclasses import dataclass
-from typing import List, Set
 
 import numpy as np
-from qtpy.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer, Signal
-from qtpy.QtGui import QColor
+from qtpy.QtCore import QAbstractTableModel, QModelIndex, Qt
 
 from blinkview.core import dtypes
-from blinkview.ui.gui_context import GUIContext
 from blinkview.utils.log_level import LogLevel
 
 

@@ -21,7 +21,6 @@ from blinkview.core.limits import (
     CENTRAL_STORAGE_MAX_PIECES,
     CENTRAL_STORAGE_MAXLEN,
 )
-from blinkview.core.numpy_batch_manager import log_batch
 from blinkview.core.numpy_log import (
     CircularLogPool,
 )

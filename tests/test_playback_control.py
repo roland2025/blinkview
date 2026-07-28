@@ -282,7 +282,10 @@ class TestSeekBarMouseTracking:
         seeks = []
         bar.seekRequested.connect(seeks.append)
 
-        event = QMouseEvent(QEvent.MouseMove, QPointF(50, 5), Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+        local_pos = QPointF(50, 5)
+        event = QMouseEvent(
+            QEvent.MouseMove, local_pos, bar.mapToGlobal(local_pos.toPoint()), Qt.NoButton, Qt.NoButton, Qt.NoModifier
+        )
         bar.mouseMoveEvent(event)
 
         assert bar._hover_x == 50
@@ -303,7 +306,15 @@ class TestSeekBarMouseTracking:
         seeks = []
         bar.seekRequested.connect(seeks.append)
 
-        event = QMouseEvent(QEvent.MouseMove, QPointF(100, 5), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        local_pos = QPointF(100, 5)
+        event = QMouseEvent(
+            QEvent.MouseMove,
+            local_pos,
+            bar.mapToGlobal(local_pos.toPoint()),
+            Qt.LeftButton,
+            Qt.LeftButton,
+            Qt.NoModifier,
+        )
         bar.mouseMoveEvent(event)
 
         assert len(seeks) == 1

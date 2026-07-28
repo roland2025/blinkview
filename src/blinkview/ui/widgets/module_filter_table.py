@@ -4,24 +4,17 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import json
-import weakref
-from dataclasses import dataclass, field
-from typing import List, Optional, Set
 
 import numpy as np
-from qtpy.QtCore import QAbstractTableModel, QModelIndex, QObject, QSortFilterProxyModel, Qt, QTimer, Signal
-from qtpy.QtGui import QAction, QColor, QFont
+from qtpy.QtCore import QObject, Qt, QTimer, Signal
+from qtpy.QtGui import QAction, QFont
 from qtpy.QtWidgets import QComboBox, QHeaderView, QMenu, QStyledItemDelegate, QTableView
 
 from blinkview.core import dtypes
-from blinkview.core.device_identity import ModuleIdentity
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.id_registry import NO_PARENT
 from blinkview.ops.module_filter import nb_inherit_states, nb_rebuild_from_explicit, nb_update_subtree
-from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.module_filter_model import FastModuleFilterModel
-from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LevelIdentity, LogLevel
 
 

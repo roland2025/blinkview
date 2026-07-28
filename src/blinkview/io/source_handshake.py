@@ -6,7 +6,6 @@
 
 from pathlib import Path
 from time import sleep
-from typing import Callable
 
 from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configuration_property

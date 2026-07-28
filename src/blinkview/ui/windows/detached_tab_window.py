@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from qtpy.QtCore import Qt, QTimer
-from qtpy.QtWidgets import QMainWindow, QMenu
+from qtpy.QtWidgets import QMainWindow
 from shiboken6 import isValid
 
 from blinkview.ui.gui_context import GUIContext

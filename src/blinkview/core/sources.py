@@ -6,7 +6,6 @@
 
 from threading import Lock
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 
 from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable

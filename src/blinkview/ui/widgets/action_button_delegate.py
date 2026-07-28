@@ -9,7 +9,7 @@ from time import perf_counter
 
 from PySide6.QtCore import QSize
 from qtpy.QtCore import Qt
-from qtpy.QtGui import QBrush, QColor, QFont, QPalette
+from qtpy.QtGui import QBrush, QColor, QFont
 from qtpy.QtWidgets import QApplication, QStyle, QStyledItemDelegate, QStyleOptionButton
 
 from blinkview.ui.widgets.config.style_config import StyleConfig

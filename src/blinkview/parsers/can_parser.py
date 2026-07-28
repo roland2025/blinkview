@@ -5,15 +5,17 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from blinkview.core.configurable import configuration_property
-from blinkview.core.device_identity import DeviceIdentity
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.parsers.parser import BaseParser, ParserFactory
 from blinkview.utils.log_level import LogLevel
 from blinkview.utils.paths import resolve_config_path
 from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
+
+if TYPE_CHECKING:
+    from blinkview.core.device_identity import DeviceIdentity
 
 
 @dataclass(slots=True)
@@ -105,7 +107,7 @@ class CantoolsParser(BaseParser):
             max_timeout = getattr(self, "delay", 50) / 1000.0
             stop_is_set = self._stop_event.is_set
 
-            device: DeviceIdentity = self.local.device_id
+            device: "DeviceIdentity" = self.local.device_id
 
             device_id_int = device.id
 

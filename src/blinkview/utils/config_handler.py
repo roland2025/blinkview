@@ -44,7 +44,8 @@ def handle_config(args):
             else:
                 print("Error: Not in a BlinkView project. Use --global or run 'init'.")
                 return
-        scope_name = "local"
+        else:
+            scope_name = "local"
 
     # Handle --keys
     if args.keys:

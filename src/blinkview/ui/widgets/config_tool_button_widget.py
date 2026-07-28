@@ -8,8 +8,6 @@ from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtGui import QCursor
 from qtpy.QtWidgets import QInputDialog, QMenu, QToolButton
 
-from blinkview.ui.widgets.toast import ToastManager, ToastType
-
 
 class BaseToolButtonWidget(QToolButton):
     types_fetched = Signal(list)

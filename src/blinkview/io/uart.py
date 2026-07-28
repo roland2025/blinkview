@@ -6,7 +6,6 @@
 
 from threading import Lock
 from time import sleep
-from typing import Optional
 
 from blinkview.core.configurable import configuration_property, override_property
 from blinkview.core.numpy_batch_manager import PooledLogBatch

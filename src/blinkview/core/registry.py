@@ -467,32 +467,33 @@ class Registry:
 
     def stop(self):
         """Cleanly tear down the session."""
-        if not self._is_running:
-            return
+        if self._is_running:
+            if self.sources is not None:
+                self.sources.stop()
 
-        if self.sources is not None:
-            self.sources.stop()
+            if self.pipelines is not None:
+                self.pipelines.stop()
 
-        if self.pipelines is not None:
-            self.pipelines.stop()
+            if self.reorder is not None:
+                self.reorder.stop()
+            if self.central is not None:
+                self.central.stop()
 
-        if self.reorder is not None:
-            self.reorder.stop()
-        if self.central is not None:
-            self.central.stop()
+            self.file_manager.stop()
 
-        self.file_manager.stop()
+            for sub in self._subscribers.copy():
+                stop_fn = getattr(sub, "stop", None)
+                if stop_fn is not None:
+                    sub.stop()
+                self.unsubscribe(sub)
 
-        for sub in self._subscribers.copy():
-            stop_fn = getattr(sub, "stop", None)
-            if stop_fn is not None:
-                sub.stop()
-            self.unsubscribe(sub)
+            self._is_running = False
+            print("Session stopped.")
 
+        # TaskManager's scheduler thread is started unconditionally in __init__, independent
+        # of start()/_is_running, so it must always be shut down here - even if start() was
+        # never called - or it leaks as a zombie thread that races interpreter shutdown.
         self.system_ctx.tasks.shutdown()
-
-        self._is_running = False
-        print("Session stopped.")
 
     def configure_system(self):
         try:

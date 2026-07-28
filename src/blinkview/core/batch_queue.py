@@ -4,7 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import itertools
 from collections import deque
 from threading import Condition, Lock
 from time import time

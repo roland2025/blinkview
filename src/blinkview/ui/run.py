@@ -18,7 +18,7 @@ def register_desktop_entry():
 
     import shutil
 
-    from blinkview import ICON_PATH, __app_id__, __app_name__, __author__, __version__
+    from blinkview import ICON_PATH, __app_id__, __app_name__, __author__
 
     apps_dir = Path.home() / ".local" / "share" / "applications"
     desktop_file = apps_dir / f"{__app_id__}.desktop"

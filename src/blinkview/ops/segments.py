@@ -5,12 +5,8 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import numpy as np
-from numba import types, uint32, uint64
 
 from blinkview.core.dtypes import (
-    ID_TYPE,
-    ID_UNSPECIFIED,
-    LEVEL_UNSPECIFIED,
     SEQ_NONE,
     SEQ_TYPE,
     TS_TYPE,

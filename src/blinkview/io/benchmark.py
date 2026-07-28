@@ -4,8 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from time import sleep
-
 import numpy as np
 
 from blinkview.core.batch_queue import BatchQueue

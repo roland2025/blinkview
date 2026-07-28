@@ -4,27 +4,21 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import gc
-import os
 import signal
 import sys
-from pathlib import Path
 from time import perf_counter, time
 from types import SimpleNamespace
 from typing import Optional
 
 from qtpy.QtCore import QCoreApplication, Qt, QTimer, Signal, Slot
-from qtpy.QtGui import QAction, QFont, QIcon
+from qtpy.QtGui import QAction, QFont
 from qtpy.QtWidgets import (
     QApplication,
-    QComboBox,
     QDockWidget,
     QInputDialog,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMenu,
-    QPushButton,
     QTabWidget,
     QToolBar,
     QToolButton,
@@ -36,10 +30,6 @@ from blinkview import __version__ as blinkview_version
 from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.config_manager import ConfigManager
 from blinkview.core.numba_setup import IS_CACHE_WARM
-from blinkview.core.registry import Registry
-from blinkview.core.settings_manager import SettingsManager
-from blinkview.core.task_manager import TaskManager
-from blinkview.ui.cli_args import setup_gui_parser
 from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.native_dark_mode import set_native_dark_mode
@@ -72,6 +62,7 @@ from blinkview.ui.windows.detached_tab_window import DetachedTabWindow
 from blinkview.utils.format_metric import format_metric
 from blinkview.utils.used_modules import print_used_modules
 
+# import gc
 # Enable GC debugging to see when collections happen
 # gc.set_debug(gc.DEBUG_STATS)
 #

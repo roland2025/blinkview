@@ -4,13 +4,12 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from qtpy.QtCore import QSize, Qt
-from qtpy.QtWidgets import QComboBox, QHeaderView, QLabel, QTableView, QToolBar, QVBoxLayout, QWidget
+from qtpy.QtCore import QSize
+from qtpy.QtWidgets import QLabel, QToolBar, QVBoxLayout, QWidget
 
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.module_filter_table import ModuleFilterTable, TempLogFilter
 from blinkview.utils.log_filter import LogFilter
-from blinkview.utils.log_level import LogLevel
 
 
 class ModuleFilterSidebar(QWidget):

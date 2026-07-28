@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from typing import Callable, Union
+from typing import Union
 
 
 class LevelIdentity:

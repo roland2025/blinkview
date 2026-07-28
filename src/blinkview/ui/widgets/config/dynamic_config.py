@@ -25,7 +25,6 @@ from qtpy.QtWidgets import (
 )
 
 from blinkview.ui.constants import WidgetName
-from blinkview.ui.utils.config_node import ConfigNode
 from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.config_widget_factory import WidgetFactory
 
@@ -44,6 +43,7 @@ class DynamicConfigWidget(QWidget):
         self.drop_keys = None
         self.editable = None
         self.child_name = None
+        self._closed = False
 
         self._set_defaults()
 
@@ -186,13 +186,15 @@ class DynamicConfigWidget(QWidget):
 
     def closeEvent(self, event):
         """Called automatically when the widget is instructed to close."""
-        print(f"[Widget] Closing. Deregistering node for {self.node.active_path}")
+        if not self._closed:
+            self._closed = True
+            print(f"[Widget] Closing. Deregistering node for {self.node.active_path}")
 
-        # Clean up the backend connection
-        self.node.signal_received.disconnect(self.update_config_schema)
-        self.node.deregister()
+            # Clean up the backend connection
+            self.node.signal_received.disconnect(self.update_config_schema)
+            self.node.deregister()
 
-        self.signal_unregister.emit(self)  # Notify any listeners that this widget is closing
+            self.signal_unregister.emit(self)  # Notify any listeners that this widget is closing
 
         # Accept the event so Qt proceeds with destroying the widget
         event.accept()

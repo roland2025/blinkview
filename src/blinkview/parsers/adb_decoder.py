@@ -18,7 +18,7 @@ from blinkview.core.types.parsing import (
     UnifiedParserConfig,
 )
 from blinkview.ops.codec_adb_long import nb_decode_adb_long_frame
-from blinkview.ops.constants import CHAR_LBRACKET, CHAR_LF, CHAR_ZERO
+from blinkview.ops.constants import CHAR_LF
 from blinkview.parsers.frame_decoders import FrameDecoder, FrameDecoderFactory
 from blinkview.parsers.frame_parsers import (
     FrameSectionParser,

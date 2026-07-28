@@ -6,7 +6,6 @@
 
 from qtpy.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 
-from blinkview.utils.level_map import LevelMap
 from blinkview.utils.log_level import LogLevel
 
 

@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from qtpy.QtCore import Qt, QTimer, Signal
+from qtpy.QtCore import QTimer, Signal
 from qtpy.QtGui import QAction, QCursor
 from qtpy.QtWidgets import (
     QInputDialog,

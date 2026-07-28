@@ -6,9 +6,8 @@
 
 from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property, override_property
-from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.time_sync_engine import TimeSyncEngine
-from blinkview.ops.segments import nb_find_next_module_index, nb_find_next_module_match
+from blinkview.ops.segments import nb_find_next_module_index
 from blinkview.parsers.parser import BaseParser, ParserFactory
 from blinkview.subscribers.subscriber import BaseSubscriber, TimeSyncerFactory
 

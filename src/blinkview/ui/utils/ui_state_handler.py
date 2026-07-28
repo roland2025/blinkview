@@ -6,14 +6,10 @@
 
 import json
 from base64 import b64decode, b64encode
-from pathlib import Path
 
-from qtpy.QtCore import QByteArray, QPoint, QTimer
-from qtpy.QtGui import QGuiApplication
+from qtpy.QtCore import QByteArray, QTimer
 
 from blinkview.ui.utils.window_manager import get_window_geometry_data, restore_window_geometry_safe
-from blinkview.ui.widgets.log_viewer import LogViewerWidget
-from blinkview.utils.atomic_json_dump import atomic_json_dump
 
 
 class UIStateHandler:
@@ -121,11 +117,11 @@ class UIStateHandler:
     def load_ui_state(self, file_path, ui_state_restored_cb=None):
         """Restores dock/tab/floating-window states from JSON. Assumes restore_window_geometry()
         has already positioned the main window."""
+        self.ui_restored_cb = ui_state_restored_cb
+
         if not file_path.exists():
             self.on_ui_restoration_complete()
             return
-
-        self.ui_restored_cb = ui_state_restored_cb
 
         try:
             data = json.loads(file_path.read_text())
@@ -180,7 +176,13 @@ class UIStateHandler:
                 )
 
                 if not new_win:
-                    continue  # Skip unknown widgets
+                    # Skip unknown widgets - still counts as "resolved" so windows_to_restore
+                    # reaches 0 and on_ui_restoration_complete() fires even when a saved
+                    # floating window references a widget class that no longer exists.
+                    windows_to_restore -= 1
+                    if windows_to_restore <= 0:
+                        self.on_ui_restoration_complete()
+                    continue
 
                 # Ghost Mode
                 new_win.setWindowOpacity(0.0)

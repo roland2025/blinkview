@@ -5,15 +5,14 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property, on_config_change, override_property
 from blinkview.core.constants import FactoryCategory
-from blinkview.core.device_identity import DeviceIdentity
-from blinkview.core.numpy_batch_manager import PooledLogBatch, log_batch
-from blinkview.core.time_sync_engine import TimeSyncEngine
+from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import SyncState, create_default_sync
 from blinkview.core.warmup_registry import register_warmup
@@ -24,6 +23,9 @@ from blinkview.parsers.parser import BaseParser, ParserFactory
 from blinkview.parsers.state import FrameState
 from blinkview.storage.file_logger import BinaryBatchProcessor, LogRowBatchProcessor
 from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
+
+if TYPE_CHECKING:
+    from blinkview.core.device_identity import DeviceIdentity
 
 
 @configuration_property(
@@ -116,7 +118,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
     def name_changed(self, name, old):
         self.logger.info(f"Device name changed from '{old}' to '{name}'")
         # If the device name changes, we may want to update the device identity in the assembler
-        dev_id: DeviceIdentity = self.local.device_id
+        dev_id: "DeviceIdentity" = self.local.device_id
         dev_id.name = name
 
     def run(self):

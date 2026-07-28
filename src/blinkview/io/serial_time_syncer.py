@@ -4,13 +4,11 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from time import sleep, time
 
 import numpy as np
 
 from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property, override_property
-from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.time_sync_engine import TimeSyncEngine
 from blinkview.ops.segments import nb_find_next_module_index
 from blinkview.ops.strings import nb_find_and_parse_int

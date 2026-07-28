@@ -8,7 +8,6 @@ from typing import NamedTuple
 
 import numpy as np
 
-from blinkview.core.id_registry.types import StringTableParams
 from blinkview.core.types.empty import (
     EMPTY_BYTES,
     EMPTY_BYTES_RO,

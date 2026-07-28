@@ -6,19 +6,21 @@
 
 from threading import RLock
 from time import perf_counter_ns
-from typing import Dict, List
+from typing import TYPE_CHECKING, Dict, List
 
 import numpy as np
 
 from blinkview.core import dtypes
 from blinkview.core.array_pool import NumpyArrayPool
-from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
 from blinkview.core.id_registry.tables import IndexedStringTable
 from blinkview.core.id_registry.types import RegistryParams
 from blinkview.core.logger import PrintLogger
 from blinkview.ops.id_registry import NO_PARENT, nb_get_descendants
 from blinkview.utils.level_map import LevelMap
 from blinkview.utils.log_level import LogLevel
+
+if TYPE_CHECKING:
+    from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
 
 
 class IDRegistry:
@@ -58,16 +60,16 @@ class IDRegistry:
         self._essential_array = np.zeros(self._parent_capacity, dtype=np.bool_)
 
         # Fast Lookups
-        self.devices: Dict[int, DeviceIdentity] = {}
-        self.device_lookup: Dict[str, DeviceIdentity] = {}
+        self.devices: Dict[int, "DeviceIdentity"] = {}
+        self.device_lookup: Dict[str, "DeviceIdentity"] = {}
 
-        self.modules: Dict[int, ModuleIdentity] = {}
+        self.modules: Dict[int, "ModuleIdentity"] = {}
 
         # Thread-safe Snapshot List
-        self.device_list: List[DeviceIdentity] = []
+        self.device_list: List["DeviceIdentity"] = []
 
         # non-sequential list of modules
-        self.module_list: List[ModuleIdentity] = []
+        self.module_list: List["ModuleIdentity"] = []
 
         self.level_map = LevelMap()
 
@@ -99,7 +101,7 @@ class IDRegistry:
             self._module_id_counter += 1
             return current
 
-    def register_new_modules(self, registration_data: List[tuple[ModuleIdentity, int]]):
+    def register_new_modules(self, registration_data: "List[tuple[ModuleIdentity, int]]"):
         """
         Internal callback called by DeviceIdentity when a new module is created.
         Uses Atomic Swap for the global list.
@@ -136,8 +138,10 @@ class IDRegistry:
                 # 4. Capture the essential flag set at construction time
                 self._essential_array[module.id] = module.is_essential
 
-    def get_device(self, name: str, essential: bool = True) -> DeviceIdentity:
+    def get_device(self, name: str, essential: bool = True) -> "DeviceIdentity":
         """Retrieve or create a DeviceIdentity by name."""
+        from blinkview.core.device_identity import DeviceIdentity
+
         name = name.lower()
 
         # HOT PATH: Simple lookup (Dicts are thread-safe for reading in CPython)
@@ -172,11 +176,13 @@ class IDRegistry:
 
             return new_device
 
-    def get_all_devices(self) -> List[DeviceIdentity]:
+    def get_all_devices(self) -> List["DeviceIdentity"]:
         """Lock-free access to all registered hardware devices."""
         return self.device_list
 
     def resolve_module(self, mod_identifier):
+        from blinkview.core.device_identity import ModuleIdentity
+
         if mod_identifier is None:
             return None
 
@@ -194,7 +200,7 @@ class IDRegistry:
         except Exception:
             return None
 
-    def resolve_modules(self, identifiers: list) -> list[ModuleIdentity]:
+    def resolve_modules(self, identifiers: list) -> "list[ModuleIdentity]":
         """
         Resolves a list of strings or identities into a list of valid ModuleIdentity objects.
         Automatically filters out any that could not be resolved.
@@ -205,6 +211,8 @@ class IDRegistry:
         return [m for ident in identifiers if (m := self.resolve_module(ident)) is not None]
 
     def resolve_device(self, dev_identifier):
+        from blinkview.core.device_identity import DeviceIdentity
+
         if dev_identifier is None:
             return None
 
@@ -236,7 +244,7 @@ class IDRegistry:
         # Pass our cached array and current counter straight to Numba
         return nb_get_descendants(target_id, self._parent_array, self._module_id_counter)
 
-    def get_descendant_modules(self, target_id: int) -> list[ModuleIdentity]:
+    def get_descendant_modules(self, target_id: int) -> "list[ModuleIdentity]":
         """Python path: Returns actual objects for UI or high-level logic."""
         # 1. Get the IDs from the Numba-optimized path
         ids = nb_get_descendants(target_id, self._parent_array, self._module_id_counter)
@@ -247,7 +255,7 @@ class IDRegistry:
         # We use 'self.modules' directly here
         return [modules[mid] for mid in ids]
 
-    def get_parent(self, mod_id: int) -> ModuleIdentity | None:
+    def get_parent(self, mod_id: int) -> "ModuleIdentity | None":
         parent_id = self._parent_array[mod_id]
         if parent_id == NO_PARENT:
             return None
