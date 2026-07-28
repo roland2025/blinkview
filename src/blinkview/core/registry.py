@@ -409,7 +409,12 @@ class Registry:
         self.file_manager.replay_source_dir = session_dir
 
         if self.playback_ranges is not None:
-            ranges_path = session_dir / "playback_ranges.json"
+            # Goes through the same replay/ scratch redirect as saving (get_playback_ranges_path,
+            # now that replay_source_dir is set above) rather than session_dir/playback_ranges.json
+            # directly - otherwise a range added during a previous replay of this same session
+            # (which only ever gets written into the scratch copy, never the original file) would
+            # be silently lost the next time this session is replayed.
+            ranges_path = self.file_manager.get_playback_ranges_path()
             if ranges_path.exists():
                 self.playback_ranges.load_from_file(ranges_path, replace=False)
 

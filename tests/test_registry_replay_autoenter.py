@@ -294,3 +294,30 @@ class TestLoadReplaySession:
             assert project_dir_after == project_dir_before
         finally:
             replay.stop()
+
+    def test_range_added_during_a_replay_is_restored_next_time_the_session_is_reloaded(self, tmp_path):
+        """A range added while replaying gets saved into the original session's `replay/`
+        scratch copy (FileManager._redirect_to_replay_scratch), not the original top-level
+        playback_ranges.json (which must stay untouched). load_replay_session must therefore read
+        that same scratch copy back on the *next* replay of this session, not the original file -
+        otherwise anything added during a replay is silently lost the moment that replay ends."""
+        original = make_real_registry(tmp_path, "original_l")
+        session_dir = original.file_manager.session_dir
+        original.file_manager.stop()
+        original.stop()
+
+        first_replay = make_real_registry(tmp_path, "replay_l1")
+        try:
+            first_replay.load_replay_session(session_dir)
+            first_replay.playback_ranges.add("added during replay", 500, 600)
+        finally:
+            first_replay.stop()
+
+        second_replay = make_real_registry(tmp_path, "replay_l2")
+        try:
+            second_replay.load_replay_session(session_dir)
+
+            names = [r.name for r in second_replay.playback_ranges.ranges]
+            assert "added during replay" in names
+        finally:
+            second_replay.stop()
