@@ -98,9 +98,16 @@ class TestWriteReadRoundTrip:
             assert list(handles["tids"].array) == list(src.tids[:n])
             assert bytes(handles["buffer"].array) == bytes(src.buffer[: segment.msg_cursor])
 
-            # Read-only: a cold segment is frozen and must never be silently mutable.
-            assert handles["timestamps"].array.flags.writeable is False
-            assert handles["buffer"].array.flags.writeable is False
+            # Writable (copy-on-write): matches the live-pool array type so segment kernels don't
+            # recompile a second specialization for cold data (see cold_segment._MmapFileRef), but
+            # a write never reaches the on-disk file - the frozen segment file itself is untouched.
+            assert handles["timestamps"].array.flags.writeable is True
+            assert handles["buffer"].array.flags.writeable is True
+            handles["buffer"].array[0] = handles["buffer"].array[0] ^ 0xFF
+            with open(path, "rb") as f:
+                f.seek(header.table[-1][0])
+                on_disk_first_byte = f.read(1)[0]
+            assert on_disk_first_byte == bytes(src.buffer[: segment.msg_cursor])[0]
         finally:
             for h in handles.values():
                 h.release()
@@ -131,6 +138,48 @@ class TestWriteReadRoundTrip:
             read_cold_segment_header(path)
 
 
+class TestColdSegmentCheapPropertiesReadFromCacheNotArrays:
+    """PooledLogBatch.start_ts/end_ts/first_sequence_id/last_sequence_id are polled frequently by
+    segment-scan early-break checks (scan_tail, scan_history_window, build_snapshot_as_of, ...) -
+    see plans/fetch-telemetry-window-cold-segment-perf.md. For a cold (memmap-backed) segment
+    from_memmap() populates them once, up front, straight from the on-disk header - not on every
+    read - to avoid a page-fault on every single poll. Proven here by corrupting the underlying
+    mmap'd arrays *after* construction: if the properties were still doing a live array read,
+    they'd pick up the corrupted values; instead they must keep returning what was cached at
+    construction time."""
+
+    def test_properties_survive_the_underlying_arrays_being_corrupted_afterward(self, global_pool, tmp_path):
+        rows = [
+            (100, b"hello", LogLevel.INFO.value, 1, 2, 5, 0, 0),
+            (200, b"world", LogLevel.WARN.value, 1, 2, 6, 0, 0),
+        ]
+        segment = make_real_segment(global_pool, rows)
+        path = tmp_path / "segment.blkseg"
+        write_cold_segment_file(path, segment.bundle)
+        segment.release()
+
+        cold_segment = PooledLogBatch.from_memmap(path, metadata=ColdSegmentMeta(str(path), 100, 200, 5, 6))
+
+        assert cold_segment.start_ts == 100
+        assert cold_segment.end_ts == 200
+        assert cold_segment.first_sequence_id == 5
+        assert cold_segment.last_sequence_id == 6
+
+        # Corrupt the real mmap'd arrays after construction - a genuine array read would now
+        # return these values instead of what was cached at from_memmap() time.
+        cold_segment.bundle.timestamps[0] = 999
+        cold_segment.bundle.timestamps[-1] = 888
+        cold_segment.bundle.sequences[0] = 77
+        cold_segment.bundle.sequences[-1] = 66
+
+        assert cold_segment.start_ts == 100
+        assert cold_segment.end_ts == 200
+        assert cold_segment.first_sequence_id == 5
+        assert cold_segment.last_sequence_id == 6
+
+        cold_segment.release()
+
+
 class TestFromMemmapMatchesLiveKernels:
     def test_segment_filter_produces_identical_matches_via_mmap(self, global_pool, tmp_path):
         rows = [
@@ -142,7 +191,7 @@ class TestFromMemmapMatchesLiveKernels:
         path = tmp_path / "segment.blkseg"
         write_cold_segment_file(path, segment.bundle)
 
-        cold_segment = PooledLogBatch.from_memmap(path, metadata=ColdSegmentMeta(str(path), 100, 200))
+        cold_segment = PooledLogBatch.from_memmap(path, metadata=ColdSegmentMeta(str(path), 100, 200, 1, 3))
 
         mask = np.full(4, LogLevel.ALL.value, dtype=np.uint8)
 

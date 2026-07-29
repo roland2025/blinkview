@@ -478,6 +478,17 @@ class Registry:
                 self.reorder.stop()
             if self.central is not None:
                 self.central.stop()
+                # CentralStorage.stop() only stops the ingestion thread - log data (and any cold-
+                # storage mmaps) deliberately survive it, see plans/mmap-coldstore.md, so a plain
+                # daemon .stop() (as CentralStorage's own unit tests exercise in isolation) stays
+                # queryable. But Registry.stop() is the real end-of-session teardown (BlinkMainWindow
+                # .closeEvent, CLI shutdown) - nothing queries this pool again after this point, so
+                # release it here. This is what actually lets ColdStorageArchiver's atexit cleanup
+                # delete the session's cold-storage files: on Windows a memory-mapped file can't be
+                # deleted, and without this, every cold segment's mmap was still open (release_all()
+                # was otherwise only ever called by warmup.py's throwaway dummy pool).
+                if self.central.log_pool is not None:
+                    self.central.log_pool.release_all()
 
             self.file_manager.stop()
 

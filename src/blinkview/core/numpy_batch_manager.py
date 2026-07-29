@@ -45,6 +45,17 @@ class PooledLogBatch:
         "_ext_u32_1_h",
         "_ext_u32_2_h",
         "_ext_u64_1_h",
+        # Plain-int cache of first/last row seq+ts, so start_ts/end_ts/first_sequence_id/
+        # last_sequence_id never have to index into the (possibly mmap'd) bundle arrays - see
+        # plans/fetch-telemetry-window-cold-segment-perf.md. Uniform for hot and cold segments:
+        # hot segments update it incrementally at insert time (_note_inserted_row/
+        # note_appended_rows); cold (memmap) segments populate it once, up front, straight from
+        # the on-disk header in from_memmap - no per-read branching on segment type needed either
+        # way.
+        "_cached_first_seq",
+        "_cached_first_ts",
+        "_cached_last_seq",
+        "_cached_last_ts",
     )
 
     def __init__(
@@ -74,6 +85,11 @@ class PooledLogBatch:
         self._pid_h = self._tid_h = None
         self._ext_u32_1_h = self._ext_u32_2_h = self._ext_u64_1_h = None
         self.bundle: Optional[LogBundle] = None
+
+        self._cached_first_seq = None
+        self._cached_first_ts = None
+        self._cached_last_seq = SEQ_NONE
+        self._cached_last_ts = None
 
         self._allocate(
             req_capacity,
@@ -238,6 +254,20 @@ class PooledLogBatch:
         self._tid_h = handles["tids"]
         self._ext_u32_1_h = self._ext_u32_2_h = self._ext_u64_1_h = None
 
+        # Populated once, up front, straight from the on-disk header - a cold segment never
+        # changes again, so unlike a hot segment there's no later insert()/note_appended_rows()
+        # call to keep this in sync with; it's simply set correctly from the start.
+        if header.row_count > 0:
+            self._cached_first_seq = header.first_seq
+            self._cached_first_ts = header.earliest_ts
+            self._cached_last_seq = header.last_seq
+            self._cached_last_ts = header.latest_ts
+        else:
+            self._cached_first_seq = None
+            self._cached_first_ts = None
+            self._cached_last_seq = SEQ_NONE
+            self._cached_last_ts = None
+
         self.bundle = LogBundle(
             timestamps=self._ts_h.array,
             rx_timestamps=self._rx_ts_h.array,
@@ -284,6 +314,10 @@ class PooledLogBatch:
             b.msg_cursor[0] = 0
         if new_metadata is not None:
             self.metadata = new_metadata
+        self._cached_first_seq = None
+        self._cached_first_ts = None
+        self._cached_last_seq = SEQ_NONE
+        self._cached_last_ts = None
 
     @property
     def msg_cursor(self) -> int:
@@ -313,9 +347,12 @@ class PooledLogBatch:
 
         data_view = np.frombuffer(msg_data, dtype=dtypes.BYTE)
 
-        return nb_bundle_push(
+        success = nb_bundle_push(
             b, ts_ns, rx_ts_ns, data_view, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1, pid, tid
         )
+        if success:
+            self._note_inserted_row(ts_ns, seq)
+        return success
 
     def insert_view(
         self,
@@ -340,7 +377,7 @@ class PooledLogBatch:
         if not (b := self.bundle):
             return False
 
-        return nb_bundle_push_len(
+        success = nb_bundle_push_len(
             b,
             ts_ns,
             rx_ts_ns,
@@ -356,6 +393,9 @@ class PooledLogBatch:
             pid,
             tid,
         )
+        if success:
+            self._note_inserted_row(ts_ns, seq)
+        return success
 
     def insert(
         self,
@@ -393,9 +433,44 @@ class PooledLogBatch:
         #     f"ext_u64_1: {type(ext_u64_1).__name__}, "
         # )
 
-        return nb_bundle_push(
+        success = nb_bundle_push(
             b, ts_ns, rx_ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1, pid, tid
         )
+        if success:
+            self._note_inserted_row(ts_ns, seq)
+        return success
+
+    def _note_inserted_row(self, ts_ns: int, seq) -> None:
+        """Updates the plain-int first/last seq+ts cache after a single successful insert -
+        called with the exact values just inserted, so no array read-back is needed here."""
+        if self._cached_first_seq is None:
+            self._cached_first_seq = seq
+            self._cached_first_ts = ts_ns
+        self._cached_last_seq = seq
+        self._cached_last_ts = ts_ns
+
+    def note_appended_rows(self, new_row_count: int) -> None:
+        """Counterpart to _note_inserted_row for writers that append rows directly into
+        self.bundle's arrays via a Numba kernel rather than going through insert()/insert_any()
+        (CircularLogPool.batch_append's nb_copy_batch_to_segment is the main one - by far the
+        highest-throughput path real ingested data takes). Reads back just the newly-written
+        tail of the arrays - cheap here since those exact locations were just written and are
+        still hot in cache, unlike re-deriving them on every later read, which is the cost this
+        cache exists to avoid. Must be called with the pool's own lock held (matching the
+        Numba write it's following) so this read observes a fully-written row, not a torn one."""
+        if new_row_count <= 0:
+            return
+        b = self.bundle
+        if b is None:
+            return
+        size = int(b.size[0])
+        last_idx = size - 1
+        self._cached_last_seq = b.sequences[last_idx]
+        self._cached_last_ts = b.timestamps[last_idx]
+        if self._cached_first_seq is None:
+            first_idx = size - new_row_count
+            self._cached_first_seq = b.sequences[first_idx]
+            self._cached_first_ts = b.timestamps[first_idx]
 
     def append(self, msg_bytes: bytes) -> bool:
         if not (b := self.bundle):
@@ -549,12 +624,22 @@ class PooledLogBatch:
     @property
     def start_ts(self) -> int:
         """
-        Returns the timestamp of the first message.
+        Returns the timestamp of the first message, from the plain-int cache maintained by
+        insert()/note_appended_rows() (hot segments) or populated once up front from the on-disk
+        header (from_memmap/cold segments) - never by indexing into b.timestamps[0], since that's
+        a numpy scalar array read on what's otherwise a cheap, frequently-polled property (see
+        plans/fetch-telemetry-window-cold-segment-perf.md).
         If empty, returns max int64 so time-delta checks safely fail.
         """
         # 9223372036854775807 is (2**63 - 1), the max for int64
-        b = self.bundle
-        return b.timestamps[0] if b is not None and b.size[0] > 0 else 9223372036854775807
+        return self._cached_first_ts if self._cached_first_ts is not None else 9223372036854775807
+
+    @property
+    def end_ts(self) -> int:
+        """Counterpart to start_ts: the timestamp of the last message. If empty, returns min
+        int64 so time-delta/range checks safely fail on the other side."""
+        # -9223372036854775808 is -(2**63), the min for int64
+        return self._cached_last_ts if self._cached_last_ts is not None else -9223372036854775808
 
     def __getitem__(self, index):
         """
@@ -613,15 +698,17 @@ class PooledLogBatch:
 
     @property
     def last_sequence_id(self) -> dtypes.SEQ_TYPE:
-        if (b := self.bundle) and (sz := b.size[0]) > 0:
-            return b.sequences[sz - 1]
-        return SEQ_NONE
+        """From the same plain-int cache as start_ts, instead of b.sequences[sz - 1]'s numpy
+        scalar array index. This property backs the early-break check in every reverse segment
+        scan (scan_tail, scan_history_window, build_snapshot_as_of, ...), so it's polled once per
+        segment visited by every single one of those scans (see
+        plans/fetch-telemetry-window-cold-segment-perf.md)."""
+        return self._cached_last_seq
 
     @property
     def first_sequence_id(self) -> dtypes.SEQ_TYPE:
-        if (b := self.bundle) and b.size[0] > 0:
-            return b.sequences[0]
-        return SEQ_NONE
+        """See last_sequence_id's docstring - same cached shortcut."""
+        return self._cached_first_seq if self._cached_first_seq is not None else SEQ_NONE
 
 
 lock_log_batch = Lock()

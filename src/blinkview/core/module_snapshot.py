@@ -341,6 +341,14 @@ class LatestModuleValueTracker:
                 if segment.size == 0:
                     continue
 
+                # A segment entirely newer than ts_ns can't contribute anything (every row would
+                # just be skipped by the kernel's own `ts > max_ts_ns` check anyway) - skip the
+                # whole (row-by-row linear scan) kernel call using its cached start_ts, same as
+                # fetch_telemetry_window/scan_history_window - see
+                # plans/fetch-telemetry-window-cold-segment-perf.md.
+                if segment.start_ts > ts_ns:
+                    continue
+
                 all_found, remaining = nb_build_snapshot_as_of(segment.bundle, b, count, ts_ns, found_mask, remaining)
                 if all_found:
                     break

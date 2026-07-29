@@ -214,36 +214,40 @@ class CircularLogPool:
             return SegmentSnapshot(chain(self.cold_segments, self.segments))
 
     def get_counts(self) -> tuple[int, int, int]:
+        """Returns (current_total_rows, max_total_rows, latest_sequence). current_total already
+        summed both tiers' rows, but max_total used to only account for the hot tier's capacity
+        (self.max_pieces * active_cap), ignoring the cold tier entirely - once cold storage held
+        real data, the reported usage percentage (current/max) would be inflated, potentially
+        past 100%, since the numerator grew with cold rows the denominator never counted. Cold
+        segments aren't retained by this call (unlike get_snapshot()), so approximating their
+        capacity as `active_cap` too (the same per-piece assumption already made for hot pieces)
+        is enough to fix the ratio without touching every cold segment's own capacity."""
         with self._lock:
             current_total = sum(seg.size for seg in self.segments) + sum(seg.size for seg in self.cold_segments)
             active_cap = self.active_segment.capacity if self.active_segment else self.segment_capacity
-            max_total = self.max_pieces * active_cap
+            max_total = (self.max_pieces + self.cold_max_pieces) * active_cap
             return current_total, max_total, int(self.sequence)
 
     def get_time_bounds(self) -> tuple[int, int]:
         """Returns (earliest_ts_ns, latest_ts_ns) of currently retained rows (hot + cold), or
-        (0, 0) if empty. The cold-side earliest read comes straight from the cached header field
-        on the oldest cold segment's metadata (see ColdSegmentMeta) rather than
-        `bundle.timestamps[0]`, so this never has to fault in a cold segment's mmap'd pages just
-        to answer a bounds query."""
+        (0, 0) if empty. Reads straight from each boundary segment's cached start_ts/end_ts
+        (see PooledLogBatch) rather than indexing into its bundle arrays, so this never has to
+        fault in a cold segment's mmap'd pages just to answer a bounds query."""
         with self._lock:
             if self.cold_segments:
-                oldest_cold = self.cold_segments[0]
-                earliest = oldest_cold.metadata.earliest_ts
-            elif self.segments:
-                oldest = self.segments[0]
-                earliest = oldest.bundle.timestamps[0] if oldest.size else 0
+                earliest = self.cold_segments[0].start_ts
+            elif self.segments and self.segments[0].size:
+                earliest = self.segments[0].start_ts
             else:
                 return 0, 0
 
             newest = self.active_segment
             if newest is not None and newest.size:
-                latest = newest.bundle.timestamps[newest.size - 1]
-            elif self.segments:
-                newest_hot = self.segments[-1]
-                latest = newest_hot.bundle.timestamps[newest_hot.size - 1] if newest_hot.size else 0
+                latest = newest.end_ts
+            elif self.segments and self.segments[-1].size:
+                latest = self.segments[-1].end_ts
             elif self.cold_segments:
-                latest = self.cold_segments[-1].metadata.latest_ts
+                latest = self.cold_segments[-1].end_ts
             else:
                 latest = 0
 
@@ -331,6 +335,12 @@ class CircularLogPool:
             while rows_written < size:
                 # Fast Path: Symmetrical Copy (Bundle to Bundle)
                 copied = nb_copy_batch_to_segment(self.active_segment.bundle, b_src, rows_written, self.sequence)
+                if copied > 0:
+                    # nb_copy_batch_to_segment writes straight into the segment's arrays,
+                    # bypassing PooledLogBatch.insert()/insert_any() - refresh its cheap
+                    # first/last seq+ts cache here instead (see
+                    # plans/fetch-telemetry-window-cold-segment-perf.md).
+                    self.active_segment.note_appended_rows(copied)
 
                 rows_written += copied
                 self.sequence += copied
@@ -679,6 +689,14 @@ def fetch_telemetry_window(
                 break
             if segment.size == 0:
                 continue
+            # Every segment (hot or cold) carries a cached start_ts/end_ts - cheap enough to
+            # check regardless of how many segments there are. A segment entirely outside the
+            # window can only matter if it might still supply the plus_one edge row, so skip the
+            # (mmap-touching, for cold segments) kernel call otherwise - see
+            # plans/fetch-telemetry-window-cold-segment-perf.md.
+            overlaps = segment.end_ts >= before_window.start_ts and segment.start_ts <= before_window.end_ts
+            if not overlaps and not (plus_one and before_edge_remaining > 0):
+                continue
             before_write_idx, before_edge_remaining = nb_extract_telemetry_segment_window_backward(
                 segment.bundle,
                 target_module_int,
@@ -705,6 +723,10 @@ def fetch_telemetry_window(
             if after_write_idx >= after_slot_count:
                 break
             if segment.size == 0:
+                continue
+            # See the mirrored comment in the before-loop above.
+            overlaps = segment.end_ts >= after_window.start_ts and segment.start_ts <= after_window.end_ts
+            if not overlaps and not (plus_one and after_edge_remaining > 0):
                 continue
             after_write_idx, after_edge_remaining = nb_extract_telemetry_segment_window_forward(
                 segment.bundle,

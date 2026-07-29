@@ -59,7 +59,7 @@ class CanLogBatch(PooledLogBatch):
 
         # 2. Extract hardware attributes safely
         # We use getattr for FD flags to support non-FD drivers/interfaces
-        return nb_can_push(
+        success = nb_can_push(
             b,
             msg.timestamp,
             offset_ns,
@@ -73,6 +73,15 @@ class CanLogBatch(PooledLogBatch):
             msg.bitrate_switch,
             msg.error_state_indicator,
         )
+        if success:
+            # nb_can_push writes straight into the bundle (bypassing insert()/insert_any()), so
+            # the first/last seq+ts cache those maintain incrementally never sees this row -
+            # update it here too, so self.start_ts (relied on by can_bus.py's flush-timing logic)
+            # doesn't get stuck at its "empty" sentinel forever. seq is always 0 for raw CAN
+            # ingress (see nb_can_push); ts_ns mirrors its own projection formula exactly, so no
+            # extra array read-back is needed.
+            self._note_inserted_row(offset_ns + int(msg.timestamp * 1_000_000_000), 0)
+        return success
 
 
 @DeviceFactory.register("can")

@@ -4,10 +4,14 @@ import numpy as np
 
 
 class FakeSegment:
-    def __init__(self, bundle):
+    def __init__(self, bundle, metadata=None):
         self.bundle = bundle
         self.size = int(bundle.size[0])
         self.last_sequence_id = int(bundle.sequences[-1]) if self.size else 0
+        self.first_sequence_id = int(bundle.sequences[0]) if self.size else 0
+        self.start_ts = int(bundle.timestamps[0]) if self.size else 9223372036854775807
+        self.end_ts = int(bundle.timestamps[-1]) if self.size else -9223372036854775808
+        self.metadata = metadata
 
 
 class FakeIndicesHandle:

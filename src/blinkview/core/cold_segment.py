@@ -71,12 +71,16 @@ if _FIXED_HEADER_SIZE + _TABLE_SIZE > HEADER_SIZE:
 class ColdSegmentMeta(NamedTuple):
     """Set as PooledLogBatch.metadata for a cold (memmap-backed) segment - see
     PooledLogBatch.from_memmap and ColdStorageArchiver. Carries just enough of the header to
-    answer "is this segment in range" (CircularLogPool.get_time_bounds) and "which file do I
-    delete on eviction" without touching (page-faulting in) any of the mmap'd column data."""
+    answer "is this segment in range" (CircularLogPool.get_time_bounds, and the fetch-scaling
+    fixes in plans/fetch-telemetry-window-cold-segment-perf.md), "what are its seq bounds"
+    (PooledLogBatch.first_sequence_id/last_sequence_id), and "which file do I delete on eviction"
+    - all without touching (page-faulting in) any of the mmap'd column data."""
 
     path: str
     earliest_ts: int
     latest_ts: int
+    first_seq: int
+    last_seq: int
 
 
 class ColdSegmentHeader:
@@ -167,14 +171,24 @@ def read_cold_segment_header(path: Union[str, Path]) -> ColdSegmentHeader:
 
 
 class _MmapFileRef:
-    """Refcounted holder of one shared read-only mmap over a cold segment file. Every column is a
-    np.frombuffer view into this single mapping (not a separate np.memmap per column), so
-    releasing all of a segment's array handles closes exactly one mmap/file object."""
+    """Refcounted holder of one shared copy-on-write mmap over a cold segment file. Every column
+    is a np.frombuffer view into this single mapping (not a separate np.memmap per column), so
+    releasing all of a segment's array handles closes exactly one mmap/file object.
+
+    Uses ACCESS_COPY rather than ACCESS_READ: np.frombuffer's writeable flag mirrors the
+    underlying buffer's, so an ACCESS_READ mapping produces a *read-only* array - a different
+    Numba array type (`readonly array(...)`) than the writable pool-backed arrays every segment
+    kernel is normally called with (see .claude/skills/numba-njit/SKILL.md #15). That silently
+    forces a second compiled specialization of every kernel touching cold-segment data (visible as
+    `[cache] ... saved` lines for kernels that were already warmed) the first time playback scrubs
+    into cold storage. ACCESS_COPY keeps the mapping's pages copy-on-write - the array comes back
+    writable (matching the live-pool type) but no code here ever writes through it, and nothing
+    is ever flushed back to the file."""
 
     def __init__(self, path: Union[str, Path]):
         self._file = open(path, "rb")
         try:
-            self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
+            self._mmap = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_COPY)
         except Exception:
             self._file.close()
             raise

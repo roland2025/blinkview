@@ -272,6 +272,17 @@ class LogSegmentScanner:
                     if allowed <= 0:
                         break
 
+                    # Skip segments that provably can't contain a match before calling into the
+                    # (binary-search-based) kernel - both checks are plain-int cache reads
+                    # (PooledLogBatch.first_sequence_id/start_ts), cheap for hot and cold segments
+                    # alike. Without this, scanning back to an old anchor across many archived
+                    # cold segments calls the kernel on every one of them even though none can
+                    # match - see plans/fetch-telemetry-window-cold-segment-perf.md.
+                    if has_seq_anchor and segment.first_sequence_id > anchor_seq - 1:
+                        continue
+                    if has_ts_anchor and segment.start_ts > anchor_ts - 1:
+                        continue
+
                     match_count = segment_filter_reversed(
                         segment.bundle,
                         effective_mask=self._effective_mask,
@@ -314,6 +325,12 @@ class LogSegmentScanner:
                 allowed = after_cap - after_count
                 if allowed <= 0:
                     break
+
+                # Mirror image of the before-loop's skip above.
+                if has_seq_anchor and segment.last_sequence_id <= anchor_seq - 1:
+                    continue
+                if has_ts_anchor and segment.end_ts < anchor_ts:
+                    continue
 
                 match_count = segment_filter(
                     segment.bundle,

@@ -83,7 +83,7 @@ class CentralFactory(BaseFactory[BaseCentralStorage]):
     default="",
     ui_type="file",
     description="Directory for cold-storage segment files (ideally a fast local NVMe path). "
-    "Empty = use a fresh OS temp directory for this session.",
+    "Empty = use this session's own log folder (<session_dir>/cold/).",
     ui_order=15,
 )
 @override_property(
@@ -107,14 +107,22 @@ class CentralStorage(BaseCentralStorage):
         self.log_pool: Optional[CircularLogPool] = None
 
     def _resolve_cold_storage_dir(self) -> Path:
-        """Always creates and returns a fresh, uniquely-named subdirectory - never the raw
-        configured directory itself. The cold-storage archiver later deletes this directory
-        wholesale on cleanup (see ColdStorageArchiver.cleanup); reusing a caller-supplied
-        directory as-is would risk rmtree-ing files that were already there and unrelated to this
-        session. `cold_storage_dir`, if set, is only used as *where* to create that subdirectory
-        (e.g. a fast NVMe mount) - empty defaults to the OS temp root."""
-        base = resolve_config_path(self.cold_storage_dir) if self.cold_storage_dir else None
-        return Path(tempfile.mkdtemp(prefix="blinkview_coldstore_", dir=base))
+        """Always creates and returns a fresh directory the cold-storage archiver can rmtree
+        wholesale on cleanup (see ColdStorageArchiver.cleanup) without risking files unrelated to
+        this session.
+
+        Default (cold_storage_dir unset): a `cold/` subfolder directly under this session's own
+        log folder (`FileManager.session_dir`) - it lives and dies with the session, next to
+        `metadata.json`/`gui/`/etc., and gets cleared out at program shutdown via the archiver's
+        atexit hook. `cold_storage_dir`, if the user sets it (e.g. to point at a faster NVMe mount
+        than wherever `logs/` lives), is instead used as *where* to create a uniquely-named temp
+        subdirectory - it must not be reused as-is since it may already contain unrelated files."""
+        if self.cold_storage_dir:
+            base = resolve_config_path(self.cold_storage_dir)
+            return Path(tempfile.mkdtemp(prefix="blinkview_coldstore_", dir=base))
+        cold_dir = self.shared.registry.file_manager.session_dir / "cold"
+        cold_dir.mkdir(parents=True, exist_ok=True)
+        return cold_dir
 
     def apply_config(self, config: dict):
         changed = super().apply_config(config)

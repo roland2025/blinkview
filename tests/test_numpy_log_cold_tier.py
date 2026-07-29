@@ -123,6 +123,26 @@ class TestHotToColdEviction:
         # 1002), not just the hot tier's.
         assert (earliest, latest) == (1002, 1005)
 
+    def test_get_counts_max_total_accounts_for_the_cold_tier(self, cold_log_pool, global_pool):
+        """Regression test: get_counts()'s current_total already summed rows across both hot and
+        cold segments, but max_total used to only multiply the hot tier's max_pieces by a
+        segment's capacity, silently ignoring cold_max_pieces entirely - so once cold storage
+        held real data, the toolbar's reported usage (current_total / max_total) would be
+        inflated, potentially past 100%, since the numerator grew with cold rows the denominator
+        never counted."""
+        push_rows(cold_log_pool, global_pool, 8, ts_start=100)
+
+        # 8 rows in, only max_pieces(2) + cold_max_pieces(2) = 4 one-row segments retained.
+        assert wait_for(lambda: snapshot_seqs(cold_log_pool) == [5, 6, 7, 8])
+
+        current_total, max_total, _ = cold_log_pool.get_counts()
+
+        assert current_total == 4  # 4 retained rows (seq 5-8), 1 row/segment
+        # max_total must account for BOTH tiers' piece ceilings, not just the hot tier's -
+        # otherwise this pool (genuinely full at 4/4 slots) would misreport as 4/2 = 200% used.
+        assert max_total == (cold_log_pool.max_pieces + cold_log_pool.cold_max_pieces) * 1
+        assert current_total <= max_total
+
 
 class TestRealKernelFetchThroughColdTier:
     def test_scan_history_window_retrieves_rows_that_only_exist_in_cold_storage(

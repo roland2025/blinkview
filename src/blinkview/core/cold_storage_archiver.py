@@ -81,7 +81,9 @@ class ColdStorageArchiver:
             try:
                 path = self._next_path()
                 header = write_cold_segment_file(path, segment.bundle)
-                meta = ColdSegmentMeta(str(path), header.earliest_ts, header.latest_ts)
+                meta = ColdSegmentMeta(
+                    str(path), header.earliest_ts, header.latest_ts, header.first_seq, header.last_seq
+                )
                 cold_segment = PooledLogBatch.from_memmap(path, metadata=meta)
                 self._on_archived(cold_segment)
             except Exception:

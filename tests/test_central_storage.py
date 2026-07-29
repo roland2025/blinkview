@@ -5,12 +5,15 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import queue
+import tempfile
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.central_storage import BaseCentralStorage, CentralFactory, CentralStorage
 from blinkview.core.factory import BaseFactory
+from blinkview.core.limits import CENTRAL_STORAGE_COLD_MAX_PIECES
 from blinkview.core.logger import PrintLogger
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 
@@ -18,7 +21,14 @@ from blinkview.core.numpy_batch_manager import PooledLogBatch
 def make_storage(**config_overrides):
     storage = CentralStorage()
     storage.logger = PrintLogger("test.central_storage")
-    storage.shared = SimpleNamespace(array_pool=NumpyArrayPool())
+    # Cold storage is enabled by default now, and its default directory (when cold_storage_dir
+    # isn't overridden) is resolved from the session's own FileManager.session_dir - fake one up
+    # so tests that don't care about cold storage specifically don't have to plumb it through.
+    session_dir = Path(tempfile.mkdtemp(prefix="test_central_storage_session_"))
+    file_manager = SimpleNamespace(session_dir=session_dir)
+    storage.shared = SimpleNamespace(
+        array_pool=NumpyArrayPool(), registry=SimpleNamespace(file_manager=file_manager)
+    )
     storage.apply_config(config_overrides)
     return storage
 
@@ -47,14 +57,14 @@ class TestDefaults:
         assert storage.buffer_size_mb > 0
 
     def test_enabled_defaults_to_true_via_hydrate_config(self):
-        storage = CentralStorage()
-        storage.logger = PrintLogger("test.central_storage")
-        storage.shared = SimpleNamespace(array_pool=NumpyArrayPool())
+        storage = make_storage()
 
         hydrated = storage.hydrate_config({})
-        storage.apply_config(hydrated)
-
-        assert storage.enabled is True
+        try:
+            storage.apply_config(hydrated)
+            assert storage.enabled is True
+        finally:
+            storage.log_pool.release_all()
 
     def test_base_central_storage_is_a_base_daemon_subclass_with_factory(self):
         from blinkview.core.base_daemon import BaseDaemon
@@ -78,8 +88,19 @@ class TestApplyConfig:
         assert storage.log_pool is pool
         assert storage.log_pool.max_pieces == storage.max_pieces
 
-    def test_cold_storage_disabled_by_default(self):
+    def test_cold_storage_enabled_by_default(self):
         storage = make_storage()
+        try:
+            assert storage.log_pool._archiver is not None
+            assert storage.log_pool.cold_max_pieces == CENTRAL_STORAGE_COLD_MAX_PIECES
+            # Default cold_storage_dir resolves to a "cold" subfolder of the session's own log
+            # folder (see CentralStorage._resolve_cold_storage_dir), not an OS temp directory.
+            assert storage.log_pool._archiver._dir == storage.shared.registry.file_manager.session_dir / "cold"
+        finally:
+            storage.log_pool.release_all()
+
+    def test_cold_storage_can_be_disabled(self):
+        storage = make_storage(cold_storage_enabled=False)
         assert storage.log_pool._archiver is None
         assert storage.log_pool.cold_max_pieces == 0
 

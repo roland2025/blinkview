@@ -14,7 +14,7 @@ import pytest
 
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.logger import PrintLogger
-from blinkview.io.can_bus import CANReader
+from blinkview.io.can_bus import CanLogBatch, CANReader
 
 
 def make_reader(**config_overrides):
@@ -65,6 +65,32 @@ class TestDefaults:
         assert reader.bitrate == 250000
         assert reader.delay == 50
         assert reader.log_rx_tx is False
+
+
+class TestCanLogBatchStartTsTracksRealInserts:
+    """Regression test for a real bug: CanLogBatch.insert_can() pushes rows via a custom Numba
+    kernel (nb_can_push) rather than PooledLogBatch.insert()/insert_any()/insert_view() - the
+    only three methods PooledLogBatch's first/last seq+ts cache (added for
+    plans/fetch-telemetry-window-cold-segment-perf.md) was originally wired into. Without this
+    fix, batch.start_ts stayed stuck at its "empty" sentinel (max int64) forever after a real
+    insert_can() call, which silently broke can_bus.py's time-based flush check
+    (`now - batch.start_ts >= delay_ns` never fires when start_ts is astronomically large) -
+    caught by test_can_bus_reader.py's real loopback tests timing out with zero messages
+    delivered, since small test batches never fill up enough to hit the size-based flush instead.
+    """
+
+    def test_start_ts_reflects_the_first_inserted_message_not_the_empty_sentinel(self):
+        pool = NumpyArrayPool()
+        batch = pool.create(CanLogBatch, req_capacity=4, buffer_bytes=64)
+
+        assert batch.start_ts == 9223372036854775807  # empty sentinel before any insert
+
+        msg = can.Message(arbitration_id=0x123, data=[1, 2, 3], is_extended_id=False, timestamp=0.0)
+        assert batch.insert_can(msg, offset_ns=1_000_000_000) is True
+
+        assert batch.start_ts == 1_000_000_000
+
+        batch.release()
 
 
 class TestRealLoopbackIngestion:
