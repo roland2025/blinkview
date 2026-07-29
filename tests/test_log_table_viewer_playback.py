@@ -79,3 +79,66 @@ class TestPlaybackFollow:
 
         assert late_viewer.model.anchor_ts == new_ts
         assert late_viewer.is_paused is False
+
+
+class TestForceLive:
+    def _make_viewer(self, qtbot, registry, gui_context, device_name="force_live_table_test"):
+        device = registry.id_registry.get_device(device_name)
+        module = device.get_module("mod1")
+        _push_messages(registry, device, module, 20)
+        registry.playback_clock.tick(registry.now_ns())
+
+        w = LogTableViewerWidget(gui_context)
+        qtbot.addWidget(w)
+        w.resize(800, 600)
+        return w
+
+    def test_live_button_hidden_until_replay(self, qapp, qtbot, registry):
+        gui_context = make_real_gui_context(registry)
+        w = self._make_viewer(qtbot, registry, gui_context)
+
+        w.prev_apply = 0
+        w.apply_updates()
+        assert w.action_force_live.isVisible() is False
+
+    def test_toggling_live_pins_tab_to_live_tail_during_replay(self, qapp, qtbot, registry):
+        gui_context = make_real_gui_context(registry)
+        w = self._make_viewer(qtbot, registry, gui_context)
+
+        clock = registry.playback_clock
+        mid_ts = (clock.bounds_min_ns + clock.bounds_max_ns) // 2
+        clock.enter_replay(at_ts_ns=mid_ts)
+        clock.tick(registry.now_ns())
+        w.prev_apply = 0
+        w.apply_updates()
+        assert w._playback_anchored is True
+        assert w.action_force_live.isVisible() is True
+
+        w.action_force_live.setChecked(True)
+        assert w.model.mode == LogViewMode.LIVE
+        assert w._playback_anchored is False
+
+        clock.seek(mid_ts + 200_000_000)
+        clock.tick(registry.now_ns())
+        w.prev_apply = 0
+        w.apply_updates()
+        assert w.model.mode == LogViewMode.LIVE
+        assert w._playback_anchored is False
+
+        w.action_force_live.setChecked(False)
+        w.prev_apply = 0
+        w.apply_updates()
+        assert w._playback_anchored is True
+        assert w.model.mode == LogViewMode.HISTORY
+
+    def test_force_live_state_survives_get_state_restore(self, qapp, qtbot, registry):
+        gui_context = make_real_gui_context(registry)
+        w = self._make_viewer(qtbot, registry, gui_context)
+        w.action_force_live.setChecked(True)
+
+        state = w.get_state()
+        w2 = LogTableViewerWidget(gui_context, state=state)
+        qtbot.addWidget(w2)
+
+        assert w2.force_live is True
+        assert w2.action_force_live.isChecked() is True

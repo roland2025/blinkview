@@ -32,6 +32,20 @@ class FakeLogPool:
         yield list(reversed(self._segments))
 
     @contextmanager
+    def get_reversed_snapshot_since(self, last_known_seq):
+        """Mirrors CircularLogPool.get_reversed_snapshot_since: a segment with cold-style
+        metadata (has a `.last_seq`) that's already <= last_known_seq, and everything older than
+        it, is skipped - a segment with no such metadata (hot-like, metadata=None) is always
+        included, matching the real method's "always retain hot" behavior."""
+        relevant = []
+        for seg in reversed(self._segments):
+            meta = seg.metadata
+            if meta is not None and getattr(meta, "last_seq", None) is not None and meta.last_seq <= last_known_seq:
+                break
+            relevant.append(seg)
+        yield relevant
+
+    @contextmanager
     def get_snapshot(self):
         yield list(self._segments)
 

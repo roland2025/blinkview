@@ -72,7 +72,12 @@ from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.cold_segment import ColdSegmentMeta, write_cold_segment_file
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.numpy_batch_manager import PooledLogBatch
-from blinkview.core.numpy_log import CircularLogPool, allocate_telemetry_workspace, fetch_telemetry_arrays, fetch_telemetry_window
+from blinkview.core.numpy_log import (
+    CircularLogPool,
+    allocate_telemetry_workspace,
+    fetch_telemetry_arrays,
+    fetch_telemetry_window,
+)
 
 MODULE_A = 3
 BASE_TS = 1_000_000_000_000
@@ -274,6 +279,68 @@ class TestGetTimeBoundsDoesNotScaleWithSegmentCount:
         )
 
         assert ratio < 8, f"get_time_bounds unexpectedly scaled {ratio:.1f}x with cold segment count."
+
+
+class TestGetReversedSnapshotSinceDoesNotScaleWithSegmentCount:
+    """CircularLogPool.get_reversed_snapshot_since (the fix for the 60Hz
+    LatestModuleValueTracker.update()/10Hz LogSegmentScanner.scan_tail retain/release cost
+    scaling with total segment count, not just relevant-row count - see
+    plans/lazy-retain-skip-for-fetch-scans.md) should skip retain()/release() for every cold
+    segment already-known-stale, unlike get_reversed_snapshot which retains every segment in
+    both tiers unconditionally regardless of last_known_seq."""
+
+    def test_get_reversed_snapshot_since_stays_flat_going_from_4_to_128_cold_segments(self, tmp_path):
+        _, log_pool_small, _, _ = _build_pool_with_cold_segments(tmp_path / "small", 4)
+        _, log_pool_large, _, _ = _build_pool_with_cold_segments(tmp_path / "large", 128)
+
+        def call_only_newest_relevant(log_pool, n):
+            def call():
+                # last_known_seq = n - 1 excludes every segment except the newest (seq=n) - see
+                # _build_pool_with_cold_segments/_make_cold_segment's seq=index+1 assignment.
+                with log_pool.get_reversed_snapshot_since(n - 1) as segments:
+                    return len(segments)
+
+            return call
+
+        small_time = _time_calls(call_only_newest_relevant(log_pool_small, 4))
+        large_time = _time_calls(call_only_newest_relevant(log_pool_large, 128))
+
+        ratio = large_time / small_time if small_time > 0 else float("inf")
+        print(
+            f"\nget_reversed_snapshot_since (only newest relevant): 4 segments = {small_time * 1000:.4f} ms, "
+            f"128 segments = {large_time * 1000:.4f} ms, ratio = {ratio:.1f}x"
+        )
+        assert ratio < 8, (
+            f"get_reversed_snapshot_since unexpectedly scaled {ratio:.1f}x with cold segment "
+            f"count even though only the newest segment was ever relevant."
+        )
+
+    def test_skips_retain_for_stale_cold_segments_but_not_the_relevant_one(self, tmp_path):
+        """Correctness, not just perf: confirms the returned snapshot actually contains only the
+        segments that couldn't be proven stale, not merely that it's fast."""
+        _, log_pool, _, _ = _build_pool_with_cold_segments(tmp_path, 5)
+
+        with log_pool.get_reversed_snapshot_since(3) as segments:
+            # seq 1..5 across 5 cold segments, plus the pool's always-included (empty, hot)
+            # active segment - last_known_seq=3 should leave the cold segments with last_seq
+            # 4 and 5 (indices 3, 4), newest-first.
+            assert [int(s.last_sequence_id) for s in segments if s.size > 0] == [5, 4]
+
+        with log_pool.get_reversed_snapshot_since(0) as segments:
+            # SEQ_NONE-like watermark - nothing is stale, full rescan behavior.
+            assert [int(s.last_sequence_id) for s in segments if s.size > 0] == [5, 4, 3, 2, 1]
+
+    def test_hot_segments_are_always_included_regardless_of_last_known_seq(self, tmp_path):
+        """Hot segments have no immutable last_seq to check cheaply (see
+        get_reversed_snapshot_since's docstring) - they're always retained/included, matching
+        get_reversed_snapshot's behavior for the hot tier."""
+        array_pool = NumpyArrayPool()
+        log_pool = CircularLogPool(array_pool, max_pieces=2, final_buffer_bytes=64 * 1024)
+        log_pool.active_segment.insert_any(BASE_TS, BASE_TS, b"hot row", level=0, module=MODULE_A, device=0, seq=1)
+
+        with log_pool.get_reversed_snapshot_since(999_999) as segments:
+            assert len(segments) == 1
+            assert segments[0] is log_pool.segments[-1]
 
 
 class TestScanHistoryWindowScalesWithSegmentCount:

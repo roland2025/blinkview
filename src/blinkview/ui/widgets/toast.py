@@ -42,25 +42,26 @@ class ToastIcon(QLabel):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
 
-        # Create the circle rect and slide it by the per-type offset
-        rect = QRectF(3, 3, 26, 26).translated(0.5 + self.ring_offset[0], 4 + self.ring_offset[1])
+            # Create the circle rect and slide it by the per-type offset
+            rect = QRectF(3, 3, 26, 26).translated(0.5 + self.ring_offset[0], 4 + self.ring_offset[1])
 
-        # Draw track
-        pen = QPen(QColor(255, 255, 255, 30))
-        pen.setWidth(3)
-        painter.setPen(pen)
-        painter.drawEllipse(rect)
+            # Draw track
+            pen = QPen(QColor(255, 255, 255, 30))
+            pen.setWidth(3)
+            painter.setPen(pen)
+            painter.drawEllipse(rect)
 
-        # Draw progress
-        pen.setColor(self._color)
-        painter.setPen(pen)
-        start_angle = 90 * 16
-        span_angle = int(self._progress * 360 * 16)
-        painter.drawArc(rect, start_angle, span_angle)
-
-        painter.end()
+            # Draw progress
+            pen.setColor(self._color)
+            painter.setPen(pen)
+            start_angle = 90 * 16
+            span_angle = int(self._progress * 360 * 16)
+            painter.drawArc(rect, start_angle, span_angle)
+        finally:
+            painter.end()
         super().paintEvent(event)
 
 

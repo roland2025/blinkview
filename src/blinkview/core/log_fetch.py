@@ -191,8 +191,14 @@ class LogSegmentScanner:
         highest_seq_seen = start_seq
         first_segment = True
 
+        # get_reversed_snapshot_since (not get_reversed_snapshot): this is the same "since
+        # start_seq" incremental query the loop below already bounds via the per-segment
+        # last_sequence_id break - already-consumed cold segments can't contribute a row past
+        # start_seq again, so skip retaining them at all (see
+        # CircularLogPool.get_reversed_snapshot_since's docstring). start_seq=SEQ_NONE (full
+        # rescan) degenerates to "skip nothing", matching this method's own documented behavior.
         log_pool = self.get_log_pool()
-        with log_pool.get_reversed_snapshot() as segments, log_pool.acquire_indices_buffer() as indices:
+        with log_pool.get_reversed_snapshot_since(start_seq) as segments, log_pool.acquire_indices_buffer() as indices:
             for segment in segments:
                 segment_last_sequence_id = segment.last_sequence_id
 

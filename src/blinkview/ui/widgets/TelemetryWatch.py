@@ -154,18 +154,19 @@ class FlashLabel(QLabel):
 
     def paintEvent(self, event):
         painter = QPainter(self)
+        try:
+            # Binary check - no math inside the paint event
+            if self.is_flashing:
+                painter.fillRect(self.rect(), self.color_flash_base)
 
-        # Binary check - no math inside the paint event
-        if self.is_flashing:
-            painter.fillRect(self.rect(), self.color_flash_base)
+            # Respect the color palette (text color)
+            painter.setPen(self.palette().color(QPalette.WindowText))
 
-        # Respect the color palette (text color)
-        painter.setPen(self.palette().color(QPalette.WindowText))
-
-        # 5px horizontal padding to match the table view look
-        rect = self.contentsRect().adjusted(5, 0, -5, 0)
-        painter.drawText(rect, self.alignment(), self.text())
-        painter.end()
+            # 5px horizontal padding to match the table view look
+            rect = self.contentsRect().adjusted(5, 0, -5, 0)
+            painter.drawText(rect, self.alignment(), self.text())
+        finally:
+            painter.end()
 
     def enterEvent(self, event):
         super().enterEvent(event)
@@ -337,13 +338,15 @@ class HighlightingContainer(QWidget):
 
         if self.highlight_rect:
             painter = QPainter(self)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.fillRect(self.highlight_rect, QColor(85, 170, 255, 25))
+            try:
+                painter.setRenderHint(QPainter.Antialiasing)
+                painter.fillRect(self.highlight_rect, QColor(85, 170, 255, 25))
 
-            pen = QPen(QColor("#55aaff"), 1.0, Qt.SolidLine)
-            painter.setPen(pen)
-            painter.drawRect(self.highlight_rect.adjusted(0, 0, -1, -1))
-            painter.end()
+                pen = QPen(QColor("#55aaff"), 1.0, Qt.SolidLine)
+                painter.setPen(pen)
+                painter.drawRect(self.highlight_rect.adjusted(0, 0, -1, -1))
+            finally:
+                painter.end()
 
 
 class DraggableRowLabel(QLabel):

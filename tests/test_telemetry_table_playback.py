@@ -125,3 +125,26 @@ def test_returning_to_live_shows_the_latest_message_again(table):
     clock.go_live()
     table.apply_updates(force=True)
     assert _msg_for_module(table, table.early) == "state-4"
+
+
+def test_force_live_pins_this_table_to_live_while_clock_is_in_replay(table):
+    clock = table.gui_context.registry.playback_clock
+    clock.enter_replay(clock.bounds_min_ns)
+    table.apply_updates(force=True)
+    assert _msg_for_module(table, table.early) == "state-0"  # still following REPLAY
+
+    table.action_force_live.setChecked(True)
+    table._toggle_force_live(True)
+    table.apply_updates(force=True)
+    assert _msg_for_module(table, table.early) == "state-4"
+
+    # Scrubbing further must not pull this table back into REPLAY.
+    clock.seek(clock.bounds_min_ns + 1_000_000_000)
+    table.apply_updates(force=True)
+    assert _msg_for_module(table, table.early) == "state-4"
+
+    # Un-toggling resumes following the clock's current position.
+    table.action_force_live.setChecked(False)
+    table._toggle_force_live(False)
+    table.apply_updates(force=True)
+    assert _msg_for_module(table, table.early) == "state-1"

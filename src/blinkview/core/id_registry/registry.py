@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from pathlib import Path
 from threading import RLock
 from time import perf_counter_ns
 from typing import TYPE_CHECKING, Dict, List
@@ -42,9 +43,10 @@ class IDRegistry:
         "_parent_capacity",
         "_parent_array",
         "_essential_array",
+        "discovery_log",
     )
 
-    def __init__(self, array_pool):
+    def __init__(self, array_pool, replay_source_dir=None):
         self._lock = RLock()
         self.logger = PrintLogger("id_registry")
 
@@ -73,6 +75,16 @@ class IDRegistry:
 
         self.level_map = LevelMap()
 
+        # Chronological, globally-interleaved record of every device/module *first creation*
+        # event (device_id/module_id are plain monotonic counters - see get_device/
+        # register_new_modules - so replaying these same creation calls, in this same order,
+        # against a fresh IDRegistry reproduces bit-identical ids deterministically). Persisted
+        # alongside cold storage (see Registry.stop()/configure_system()) so mounted cold-segment
+        # files - which only carry numeric device_id/module_id columns - can have their names
+        # restored on a later run without re-parsing/re-ingesting the original source. See
+        # dump_discovery_log/replay_discovery_log below.
+        self.discovery_log: List[tuple] = []
+
         self.modules_table = IndexedStringTable(initial_capacity=1024, use_hashes=False)
         self.devices_table = IndexedStringTable(initial_capacity=10, use_hashes=False)
         self.levels_table = IndexedStringTable(
@@ -80,6 +92,35 @@ class IDRegistry:
         )
 
         self._init_level_maps()
+
+        if replay_source_dir is not None:
+            self._rehydrate_from_persisted_cold_storage(replay_source_dir)
+
+    def _rehydrate_from_persisted_cold_storage(self, replay_source_dir) -> None:
+        """Self-contained rehydration at construction time - if `replay_source_dir` (the
+        original session being replayed) has a persisted id_registry.json next to its cold
+        storage (see Registry._dump_id_registry / CircularLogPool's
+        cold_storage_persist_on_close), replay it immediately so this registry's device/module
+        ids match whatever a remounted cold segment file's numeric columns expect, before
+        anything else ever calls get_device/get_module.
+
+        Assumes the fixed default cold-storage layout (`<replay_source_dir>/cold/`) -
+        CentralStorage._resolve_cold_storage_dir()'s user-overridden `cold_storage_dir` case
+        always gets a fresh, uniquely-named temp subdirectory per run, so there's nothing stable
+        at a predictable path to look up there; persist-and-resume only meaningfully applies to
+        the default location. Best-effort: a missing or unreadable dump is not an error, just
+        nothing to rehydrate from - a fresh session obviously has no prior discovery log yet."""
+        import json
+
+        dump_path = Path(replay_source_dir) / "cold" / "id_registry.json"
+        if not dump_path.exists():
+            return
+
+        try:
+            log = json.loads(dump_path.read_text())
+            self.replay_discovery_log(log)
+        except (OSError, ValueError) as e:
+            self.logger.warning(f"Failed to rehydrate id_registry from {dump_path}: {e}")
 
     def module_count(self):
         return self._module_id_counter
@@ -127,6 +168,7 @@ class IDRegistry:
                 # 1. Update Global List/Map
                 self.modules[module.id] = module
                 self.module_list.append(module)
+                self.discovery_log.append(("module", module.device.name, module.name))
 
                 # 2. Update Table (using the name string already on the module)
                 self.modules_table.register_name(module.id, module.name)
@@ -160,6 +202,7 @@ class IDRegistry:
             self._device_id_counter += 1
 
             new_device = DeviceIdentity(new_id, name, self, default_essential=essential)
+            self.discovery_log.append(("device", name))
 
             # Update Registries
             self.devices[new_id] = new_device
@@ -294,6 +337,28 @@ class IDRegistry:
 
     def set_module_essential(self, mod_id: int, is_essential: bool):
         self._essential_array[mod_id] = is_essential
+
+    def dump_discovery_log(self) -> List[list]:
+        """JSON-serializable form of discovery_log - see its own docstring in __init__. Each
+        entry is `["device", name]` or `["module", device_name, full_path]`."""
+        return [list(event) for event in self.discovery_log]
+
+    def replay_discovery_log(self, log: List[list]) -> None:
+        """Reconstructs device/module ids on a fresh IDRegistry by replaying a previously
+        dump_discovery_log()'d event list through the same public get_device/get_module API,
+        in the same order - see discovery_log's docstring for why this reproduces identical ids.
+        Root-module events (`path == ""`) are skipped: DeviceIdentity's own constructor always
+        creates its root module as a side effect of get_device(), so replaying it explicitly
+        would be redundant (get_module("") isn't even a valid call - "" doesn't match
+        DeviceIdentity._VALID_NAME_REGEX)."""
+        for event in log:
+            kind = event[0]
+            if kind == "device":
+                self.get_device(event[1])
+            elif kind == "module":
+                _kind, device_name, path = event
+                if path:
+                    self.get_device(device_name).get_module(path)
 
 
 def create_mock_modules(iterations=1_000):

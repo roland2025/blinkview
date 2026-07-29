@@ -344,3 +344,52 @@ class TestPlaybackFollow:
 
         assert late_viewer.history_anchor_ts_ns == new_ts
         assert late_viewer.is_paused is False
+
+
+class TestForceLive:
+    def test_live_button_hidden_until_replay(self, viewer):
+        viewer.prev_apply = 0
+        viewer.apply_updates()
+        assert viewer.action_force_live.isVisible() is False
+
+    def test_toggling_live_pins_tab_to_live_tail_during_replay(self, viewer, registry):
+        clock = registry.playback_clock
+        mid_ts = (clock.bounds_min_ns + clock.bounds_max_ns) // 2
+        clock.enter_replay(at_ts_ns=mid_ts)
+        clock.tick(registry.now_ns())
+        viewer.prev_apply = 0
+        viewer.apply_updates()
+        assert viewer._playback_anchored is True
+        assert viewer.action_force_live.isVisible() is True
+
+        viewer.action_force_live.setChecked(True)
+        assert viewer.view_mode == LogViewMode.LIVE
+        assert viewer._playback_anchored is False
+
+        # Further scrubbing must not pull this tab back into REPLAY while pinned.
+        clock.seek(mid_ts + 200_000_000)
+        clock.tick(registry.now_ns())
+        viewer.prev_apply = 0
+        viewer.apply_updates()
+        assert viewer.view_mode == LogViewMode.LIVE
+        assert viewer._playback_anchored is False
+
+        # Un-toggling resumes following the clock's current position.
+        viewer.action_force_live.setChecked(False)
+        viewer.prev_apply = 0
+        viewer.apply_updates()
+        assert viewer._playback_anchored is True
+        assert viewer.view_mode == LogViewMode.HISTORY
+
+    def test_force_live_state_survives_get_state_restore(self, qapp, qtbot, registry):
+        gui_context = make_real_gui_context(registry)
+        w = LogViewerWidget(gui_context)
+        qtbot.addWidget(w)
+        w.action_force_live.setChecked(True)
+
+        state = w.get_state()
+        w2 = LogViewerWidget(gui_context, state=state)
+        qtbot.addWidget(w2)
+
+        assert w2.force_live is True
+        assert w2.action_force_live.isChecked() is True

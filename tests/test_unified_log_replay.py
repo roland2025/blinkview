@@ -7,7 +7,7 @@ from blinkview.core import dtypes
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.id_registry import IDRegistry
 from blinkview.ops.formatting import nb_estimate_batch_capacity, nb_format_log_row_batch
-from blinkview.parsers.unified_log_replay import _LEVEL_BY_CHAR, _LINE_RE, UnifiedLogReplay, _parse_ts_ns
+from blinkview.parsers.unified_log_replay import UnifiedLogReplay
 from blinkview.utils.log_level import LogLevel
 from tests.fakes.log_bundle import make_log_bundle
 
@@ -56,22 +56,24 @@ def test_round_trip_single_device(id_registry):
     lines = format_bundle_to_lines(bundle, id_registry)
     assert len(lines) == 2
 
-    for i, line in enumerate(lines):
-        m = _LINE_RE.match(line)
-        assert m is not None, f"line did not match grammar: {line!r}"
+    subscriber = CapturingSubscriber()
+    replay = make_replay_from_lines(lines, id_registry, NumpyArrayPool(max_bytes=4 * 1024 * 1024))
+    replay.subscribe(subscriber)
+    replay.run()
 
-        assert _parse_ts_ns(m.group("ts")) == timestamps[i]
-        assert _LEVEL_BY_CHAR[m.group("level")] == levels[i]
-
-        resolved_device = id_registry.get_device(m.group("device"))
-        resolved_module = resolved_device.get_module(m.group("module"))
-        assert resolved_device.id == devices[i]
-        assert resolved_module.id == modules[i]
-        assert m.group("message") == messages[i]
+    assert len(subscriber.batches) == 1
+    rows = subscriber.batches[0]
+    for i, row in enumerate(rows):
+        assert row["ts_ns"] == timestamps[i]
+        assert row["level"] == levels[i]
+        assert row["device"] == devices[i]
+        assert row["module"] == modules[i]
+        assert row["message"] == messages[i]
 
 
 def make_line(ts_text: str, level_char: str, device: str, module: str, message: str) -> str:
-    """Builds one line in the fixed grammar _LINE_RE expects (see module docstring)."""
+    """Builds one line in the fixed grammar nb_scan_unified_log_lines expects (see
+    ops/unified_log_scan.py and parsers/unified_log_replay.py's module docstring)."""
     return f"{ts_text}Z {level_char} {device} {module}: {message}"
 
 
@@ -129,6 +131,17 @@ def make_replay(log_parts, id_registry, array_pool, logger=None):
     return replay
 
 
+def make_replay_from_lines(lines, id_registry, array_pool, logger=None, tmp_path=None):
+    import tempfile
+    from pathlib import Path
+
+    if tmp_path is None:
+        tmp_path = Path(tempfile.mkdtemp())
+    part = tmp_path / "session.0000.log"
+    part.write_text("\n".join(lines) + "\n" if lines else "")
+    return make_replay([part], id_registry, array_pool, logger=logger)
+
+
 class TestRun:
     """Exercises UnifiedLogReplay.run() directly (synchronously, no thread) - it's a one-shot
     read-then-distribute loop, so calling it in-process is equivalent to what start()/_run_wrapper
@@ -155,10 +168,10 @@ class TestRun:
         assert len(subscriber.batches) == 1
         rows = subscriber.batches[0]
         assert [r["message"] for r in rows] == ["hello world", "boom"]
-        assert rows[0]["ts_ns"] == _parse_ts_ns("2026-01-01T00:00:00.000000")
-        assert rows[1]["ts_ns"] == _parse_ts_ns("2026-01-01T00:00:01.500000")
-        assert rows[0]["level"] == _LEVEL_BY_CHAR["I"]
-        assert rows[1]["level"] == _LEVEL_BY_CHAR["E"]
+        assert rows[0]["ts_ns"] == 1_767_225_600_000_000_000
+        assert rows[1]["ts_ns"] == 1_767_225_601_500_000_000
+        assert rows[0]["level"] == LogLevel.INFO.value
+        assert rows[1]["level"] == LogLevel.ERROR.value
         assert rows[0]["device"] == rows[1]["device"] == device.id
         assert rows[0]["module"] == rows[1]["module"] == module.id
 
@@ -202,6 +215,23 @@ class TestRun:
         assert len(logger.warnings) == 1
         assert "unparseable line" in logger.warnings[0]
 
+    def test_many_malformed_lines_are_capped_with_a_rollup_warning(self, tmp_path, id_registry, array_pool):
+        part = tmp_path / "session.0000.log"
+        bad_lines = "\n".join(f"not valid {i}" for i in range(UnifiedLogReplay.MAX_MALFORMED + 5))
+        part.write_text(bad_lines + "\n")
+
+        subscriber = CapturingSubscriber()
+        logger = FakeLogger()
+        replay = make_replay([part], id_registry, array_pool, logger=logger)
+        replay.subscribe(subscriber)
+
+        replay.run()
+
+        assert subscriber.batches == []
+        # One warning per capped malformed line, plus one rollup warning for the overflow.
+        assert len(logger.warnings) == UnifiedLogReplay.MAX_MALFORMED + 1
+        assert "further unparseable" in logger.warnings[-1]
+
     def test_blank_lines_are_skipped(self, tmp_path, id_registry, array_pool):
         part = tmp_path / "session.0000.log"
         part.write_text("\n" + make_line("2026-01-01T00:00:00.000000", "I", "dev", "log", "only") + "\n" + "\n")
@@ -244,7 +274,7 @@ class TestRun:
         replay = make_replay([part], id_registry, array_pool)
         replay.subscribe(subscriber)
 
-        replay.run()  # must not raise even though the batch is never populated
+        replay.run()  # must not raise even though the file is empty (mmap can't map 0 bytes)
 
         assert subscriber.batches == []
 
@@ -261,10 +291,12 @@ class TestRun:
 
         assert subscriber.batches == []
 
-    def test_stop_event_set_mid_file_stops_processing_remaining_lines(self, tmp_path, id_registry, array_pool):
-        """Covers the per-line stop check (distinct from the per-part one checked above): a stop
-        requested while already partway through a file must not process the rest of that file's
-        lines either."""
+    def test_stop_event_set_mid_file_stops_processing_remaining_scan_batches(self, tmp_path, id_registry, array_pool):
+        """Stop-checking now happens once per scan-batch (up to MAX_BATCH_ROWS lines at a time,
+        parsed inside a single Numba call) rather than per individual line - checking per line
+        would mean re-entering Python between every row, defeating the point of batching the
+        parse loop into Numba. Forcing MAX_BATCH_ROWS=1 here makes each scan-batch cover exactly
+        one line, so stopping after the first batch is still observable."""
 
         class StopAfterNCalls:
             def __init__(self, n):
@@ -285,15 +317,16 @@ class TestRun:
 
         subscriber = CapturingSubscriber()
         replay = make_replay([part], id_registry, array_pool)
+        replay.MAX_BATCH_ROWS = 1
         replay.subscribe(subscriber)
-        # Calls: 1) outer per-part check (False), 2) first line's check (False, "seen" is
-        # processed), 3) second line's check (True, breaks before "never seen" is read).
+        # Calls: 1) outer per-part check (False), 2) first scan-batch's check (False, "seen" is
+        # scanned and pushed), 3) second scan-batch's check (True, stops before "never seen").
         replay._stop_event = StopAfterNCalls(n=2)
 
         replay.run()
 
-        assert len(subscriber.batches) == 1
-        assert [r["message"] for r in subscriber.batches[0]] == ["seen"]
+        all_messages = [r["message"] for batch in subscriber.batches for r in batch]
+        assert all_messages == ["seen"]
 
     def test_missing_log_part_is_caught_and_logged_without_raising(self, tmp_path, id_registry, array_pool):
         missing = tmp_path / "does_not_exist.log"
@@ -303,10 +336,42 @@ class TestRun:
         replay = make_replay([missing], id_registry, array_pool, logger=logger)
         replay.subscribe(subscriber)
 
-        replay.run()  # FileNotFoundError from open() must be caught, not propagated
+        replay.run()  # FileNotFoundError from os.path.getsize() must be caught, not propagated
 
         assert subscriber.batches == []
         assert len(logger.exceptions) == 1
+
+    def test_same_module_name_under_different_devices_resolves_to_different_ids(
+        self, tmp_path, id_registry, array_pool
+    ):
+        """Regression test for the Numba-backed device/module resolution (ops/id_resolution.py):
+        module names are only unique *within* a device, so two devices both logging through a
+        module literally named "log" must not collapse into one shared id, whether resolved via
+        the temp-tracker (first occurrence) or the permanent scoped table (repeats)."""
+        part = tmp_path / "session.0000.log"
+        part.write_text(
+            make_line("2026-01-01T00:00:00.000000", "I", "client", "log", "hello from client")
+            + "\n"
+            + make_line("2026-01-01T00:00:01.000000", "I", "server", "log", "hello from server")
+            + "\n"
+            + make_line("2026-01-01T00:00:02.000000", "I", "client", "log", "second from client")
+            + "\n"
+            + make_line("2026-01-01T00:00:03.000000", "I", "server", "log", "second from server")
+            + "\n"
+        )
+
+        subscriber = CapturingSubscriber()
+        replay = make_replay([part], id_registry, array_pool)
+        replay.subscribe(subscriber)
+
+        replay.run()
+
+        rows = {r["message"]: r for batch in subscriber.batches for r in batch}
+        client_log_id = rows["hello from client"]["module"]
+        server_log_id = rows["hello from server"]["module"]
+        assert client_log_id != server_log_id
+        assert rows["second from client"]["module"] == client_log_id
+        assert rows["second from server"]["module"] == server_log_id
 
 
 def test_round_trip_interleaved_devices(id_registry):
@@ -328,14 +393,15 @@ def test_round_trip_interleaved_devices(id_registry):
     lines = format_bundle_to_lines(bundle, id_registry)
     assert len(lines) == 3
 
-    for i, line in enumerate(lines):
-        m = _LINE_RE.match(line)
-        assert m is not None
+    subscriber = CapturingSubscriber()
+    replay = make_replay_from_lines(lines, id_registry, NumpyArrayPool(max_bytes=4 * 1024 * 1024))
+    replay.subscribe(subscriber)
+    replay.run()
 
-        resolved_device = id_registry.get_device(m.group("device"))
-        resolved_module = resolved_device.get_module(m.group("module"))
-
-        # Must resolve to the *same* device/module id as the row that was
-        # actually written for that line, not whichever device came first.
-        assert resolved_device.id == devices[i]
-        assert resolved_module.id == modules[i]
+    assert len(subscriber.batches) == 1
+    rows = subscriber.batches[0]
+    for i, row in enumerate(rows):
+        # Must resolve to the *same* device/module id as the row that was actually written for
+        # that line, not whichever device came first.
+        assert row["device"] == devices[i]
+        assert row["module"] == modules[i]

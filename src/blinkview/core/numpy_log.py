@@ -85,6 +85,7 @@ class CircularLogPool:
         final_buffer_bytes: int = 32 * 1024 * 1024,
         cold_max_pieces: int = 0,
         cold_storage_dir: Optional[str] = None,
+        persist_cold_storage: bool = False,
         logger=None,
     ):
         self._global_pool = global_pool
@@ -109,13 +110,79 @@ class CircularLogPool:
         self.cold_segments: deque[PooledLogBatch] = deque()
         self._logger = logger
         self._archiver: Optional["ColdStorageArchiver"] = None
+        # Paths that failed to delete on a previous eviction - typically because a concurrent
+        # GUI fetch still held a SegmentSnapshot retain() on that exact segment, so
+        # PooledLogBatch.release() didn't actually drop its ref-count to zero yet and the mmap
+        # (on Windows) still had the file locked. Retried opportunistically on every later
+        # eviction rather than given up on - the retaining reader eventually releases, at which
+        # point the file becomes deletable, but nothing else would ever come back for it.
+        self._pending_cold_deletions: list[str] = []
+
+        # True if any pre-existing cold segment files were found and remounted below (from a
+        # previous run with cold_storage_persist_on_close enabled) - callers that would otherwise
+        # re-parse/re-ingest an entire session from its original source (e.g.
+        # UnifiedLogReplay/MainWindow.start_replay) check this to skip doing so, since the data
+        # is already here.
+        self.resumed_from_existing_cold_storage = False
+        self._persist_cold_storage = persist_cold_storage
 
         if cold_max_pieces > 0 and cold_storage_dir:
+            self._mount_existing_cold_segments(cold_storage_dir)
+
             from blinkview.core.cold_storage_archiver import ColdStorageArchiver
 
-            self._archiver = ColdStorageArchiver(cold_storage_dir, on_archived=self._handle_archived, logger=logger)
+            self._archiver = ColdStorageArchiver(
+                cold_storage_dir, on_archived=self._handle_archived, logger=logger, persist=persist_cold_storage
+            )
 
         self._rotate_segment()
+
+    def _mount_existing_cold_segments(self, cold_storage_dir) -> None:
+        """Remounts any `.blkseg` files already sitting in cold_storage_dir (persisted by a
+        previous run's cold_storage_persist_on_close) directly as memmap-backed cold segments,
+        instead of starting with an empty cold tier and (for a replay) forcing a caller to
+        re-parse the entire original session from scratch. Sorted by filename - segment_*.blkseg
+        names are zero-padded and assigned in archive order, so lexical order is chronological
+        order.
+
+        Also advances self.sequence past the highest mounted segment's last_seq, so any new rows
+        ingested after this (live data, or a resumed replay continuing past what's cached) get
+        sequence numbers that continue this pool's existing monotonic numbering instead of
+        colliding with it. Trusts whatever's on disk completely - no validation against the
+        original source (e.g. a session's unified log) is attempted; if that source changed since
+        these files were written, the caller/user is expected to clear cold_storage_dir manually
+        to force a fresh re-parse instead."""
+        from blinkview.core.cold_segment import ColdSegmentMeta, read_cold_segment_header
+
+        cold_dir = Path(cold_storage_dir)
+        if not cold_dir.is_dir():
+            return
+
+        paths = sorted(cold_dir.glob("segment_*.blkseg"))
+        if not paths:
+            return
+
+        highest_seq = int(self.sequence)
+        for path in paths:
+            try:
+                header = read_cold_segment_header(path)
+            except (OSError, ValueError):
+                if self._logger:
+                    self._logger.warning(f"Skipping unreadable persisted cold segment file: {path}")
+                continue
+
+            meta = ColdSegmentMeta(str(path), header.earliest_ts, header.latest_ts, header.first_seq, header.last_seq)
+            self.cold_segments.append(PooledLogBatch.from_memmap(str(path), metadata=meta))
+            highest_seq = max(highest_seq, header.last_seq)
+
+        if self.cold_segments:
+            self.resumed_from_existing_cold_storage = True
+            self.sequence = dtypes.SEQ_TYPE(highest_seq)
+            if self._logger:
+                self._logger.info(
+                    f"Resumed {len(self.cold_segments)} persisted cold segment(s) from {cold_dir} "
+                    f"(sequence continues from {highest_seq})."
+                )
 
     def latest_sequence(self):
         return self.sequence
@@ -148,12 +215,35 @@ class CircularLogPool:
         meta = cold_segment.metadata
         path = meta.path if meta is not None else None
         cold_segment.release()
-        if path:
-            try:
-                Path(path).unlink(missing_ok=True)
-            except OSError:
-                if self._logger:
-                    self._logger.warning(f"Failed to delete evicted cold segment file: {path}")
+        if path and not self._try_delete_cold_file(path):
+            # Most likely a concurrent GUI fetch still holds a SegmentSnapshot retain() on this
+            # exact segment, so release() above didn't drop the ref-count to zero yet and the
+            # mmap (on Windows) still has the file locked - don't give up on it, just defer.
+            if self._logger:
+                self._logger.warning(f"Cold segment file locked, will retry deletion later: {path}")
+            self._pending_cold_deletions.append(path)
+        self._retry_pending_cold_deletions()
+
+    def _try_delete_cold_file(self, path: str) -> bool:
+        """Returns True if the file no longer exists afterward (deleted just now, or already
+        gone) - False if it's still there (e.g. still memory-mapped by a concurrent reader on
+        Windows), in which case the caller should keep it in _pending_cold_deletions."""
+        try:
+            Path(path).unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
+
+    def _retry_pending_cold_deletions(self):
+        if not self._pending_cold_deletions:
+            return
+        still_pending = [p for p in self._pending_cold_deletions if not self._try_delete_cold_file(p)]
+        if self._logger and len(still_pending) < len(self._pending_cold_deletions):
+            self._logger.info(
+                f"Deleted {len(self._pending_cold_deletions) - len(still_pending)} "
+                "previously-locked cold segment file(s) on retry."
+            )
+        self._pending_cold_deletions = still_pending
 
     def _rotate_segment(self):
         if not self._optimized and self.active_segment is not None:
@@ -188,7 +278,7 @@ class CircularLogPool:
 
             # Calculate capacity based on the target byte size
             potential_capacity = int(self.current_buffer_bytes / avg_bytes_per_msg)
-            self.segment_capacity = max(1000, min(potential_capacity, 500_000))
+            self.segment_capacity = max(1000, min(potential_capacity, 2_000_000))
             self._optimized = True
 
     # def insert(self, ts_ns: int, level: int, module: int, device: int, seq: int, msg_bytes: bytes):
@@ -207,6 +297,38 @@ class CircularLogPool:
         yielded first, then cold - each half individually newest-first."""
         with self._lock:
             return SegmentSnapshot(chain(reversed(self.segments), reversed(self.cold_segments)))
+
+    def get_reversed_snapshot_since(self, last_known_seq) -> SegmentSnapshot:
+        """Like get_reversed_snapshot(), but for incremental "what's new since last tick"
+        consumers (LatestModuleValueTracker.update(), LogSegmentScanner.scan_tail) - skips
+        retain()/release() entirely for any cold segment that can't possibly contain a row newer
+        than last_known_seq, instead of retaining every segment in both tiers unconditionally.
+
+        Cold segments are archived once and never written to again, so once a cold segment's
+        on-disk-derived last_seq (segment.metadata.last_seq - a ColdSegmentMeta field, immutable
+        for the life of the segment, unlike the PooledLogBatch.last_sequence_id cache property
+        which release()/clear() resets) is <= last_known_seq, it can never become relevant to
+        this query again either. cold_segments is oldest-to-newest, so scanning it newest-first
+        and stopping at the first segment that's already too old skips every older one too, in
+        one pass, with no per-segment lock acquisition at all for the skipped ones.
+
+        Reading segment.metadata here (rather than retaining first) is safe without a
+        retain()-then-check-for-races dance: this whole method runs inside self._lock, the same
+        lock every eviction path (_rotate_segment/_evict_hot_segment/_evict_cold_segment/
+        _handle_archived) already holds before mutating self.segments/self.cold_segments - no
+        segment this method is looking at can be evicted out from under it.
+
+        Hot segments are always retained regardless of relevance - there are only max_pieces of
+        them (small, bounded), so skipping them isn't worth the extra branch (see
+        plans/lazy-retain-skip-for-fetch-scans.md)."""
+        with self._lock:
+            relevant = list(reversed(self.segments))
+            for seg in reversed(self.cold_segments):
+                meta = seg.metadata
+                if meta is not None and meta.last_seq <= last_known_seq:
+                    break
+                relevant.append(seg)
+            return SegmentSnapshot(relevant)
 
     def get_snapshot(self) -> SegmentSnapshot:
         """Oldest-to-newest: cold segments (already oldest-to-newest) then hot segments."""
@@ -304,10 +426,26 @@ class CircularLogPool:
                 return first_ts
 
     def release_all(self):
-        # Stop the archiver (and let it drain whatever's already in its queue) *before* draining
-        # segments/cold_segments - otherwise a segment handed off just before shutdown could still
-        # land in cold_segments via _handle_archived() after we've already emptied it, orphaning
-        # both the PooledLogBatch reference and its on-disk file.
+        if self._archiver is not None and self._persist_cold_storage:
+            # Flush the hot tier to disk too, instead of just dropping it on release() below -
+            # the whole point of persisting is that reopening this session later finds the
+            # *complete* dataset, not just whatever had already been evicted to cold by the time
+            # the app closed. archive() takes ownership of the segment (its own documented
+            # contract) - it must not be touched again after this, including the release() loop
+            # further down, so it's removed from self.segments here rather than left for that
+            # loop to find.
+            with self._lock:
+                to_archive = [seg for seg in self.segments if seg.size > 0]
+                self.segments.clear()
+                self.active_segment = None
+            for seg in to_archive:
+                self._archiver.archive(seg)
+
+        # Stop the archiver (and let it drain whatever's already in its queue - including any
+        # hot segments just handed off above) *before* draining segments/cold_segments -
+        # otherwise a segment handed off just before shutdown could still land in cold_segments
+        # via _handle_archived() after we've already emptied it, orphaning both the
+        # PooledLogBatch reference and its on-disk file.
         if self._archiver is not None:
             self._archiver.stop()
 

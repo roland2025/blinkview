@@ -73,6 +73,36 @@ class TestFreshBootstrap:
             registry.stop()
 
 
+class TestReplayModeSkipsTempLogDump:
+    """_dump_temp_logs() (registry.py ~658) used to unconditionally flush PrintLogger messages
+    buffered before central storage existed into central.log_pool - real wall-clock "now"
+    timestamps. In replay_mode, start_replay() runs later (off a QTimer, once the main window is
+    up) and streams in a historical session's own timestamps, which can be arbitrarily far in the
+    past. Central storage's segment bounds (PooledLogBatch.start_ts/end_ts) assume rows arrive
+    ts-ordered; today's boot messages landing in the same hot segment ahead of yesterday's
+    replayed rows breaks that and corrupts get_time_bounds()/the playback scrubber's range. Fixed
+    by dropping the buffered startup messages entirely when replay_mode is True, rather than
+    flushing them into central storage."""
+
+    def test_temp_log_queue_dropped_without_reaching_central_storage(self, tmp_path):
+        registry = Registry(
+            session_name="replay_mode_temp_log_test",
+            log_dir=tmp_path,
+            config_path=tmp_path / "test_config.json",
+            replay_mode=True,
+        )
+        try:
+            registry.configure_system()
+            assert registry._temp_log_queue is None
+
+            with registry.central.log_pool.get_snapshot() as segments:
+                for seg in segments:
+                    for _ts, msg, *_rest in seg:
+                        pytest.fail(f"unexpected row in central storage before replay data loaded: {bytes(msg)!r}")
+        finally:
+            registry.stop()
+
+
 class TestExplicitlyEmptyConfigDict:
     """A config file that is literally '{}' - a distinct, worse case than "no file at all": every
     top-level get_by_path(..., "/x") lookup (plugins/reorder/central) resolves to None since

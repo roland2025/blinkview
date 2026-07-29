@@ -1,14 +1,22 @@
 ---
 name: blinkview-playback-wiring
-description: Use when wiring the global registry.playback_clock (LIVE/REPLAY scrubbing) into a new UI widget in blinkview - log/table/telemetry views, or anything else that needs to "follow" playback instead of live data. Covers the PlaybackClock/PlaybackControlWidget contract, the follow_playback local-override pattern, the is_paused/dirty-flag traps that silently break continuous following or crash mid-render, when a small "follow window" vs. a large "browse window" actually matters, how to add a timestamp-bounded backend fetch next to an existing sequence-watermark one, and why kernel/buffer-class unit tests alone are not enough to catch the real bugs here.
+description: Use when wiring the global registry.playback_clock (LIVE/REPLAY scrubbing) into a new UI widget in blinkview - log/table/telemetry views, or anything else that needs to "follow" playback instead of live data. Covers the PlaybackClock/PlaybackControlWidget contract, the shared PlaybackFollowMachine (core/playback_follow.py) that LogViewerWidget/LogTableViewerWidget/TelemetryTable drive, the dirty-flag/buffer-duck-typing traps the machine's transition table structurally prevents, when a small "follow window" vs. a large "browse window" actually matters, how to add a timestamp-bounded backend fetch next to an existing sequence-watermark one, and why kernel/buffer-class unit tests alone are not enough to catch the real bugs here.
 ---
 
 # Wiring registry.playback_clock into a new widget (blinkview)
 
-Lessons from wiring the global playback clock into `LogViewerWidget` (`ui/widgets/log_viewer.py`)
-and `TelemetryPlotter` (`ui/widgets/plotter.py`). Read this before adding REPLAY-scrubbing support
-to another widget (e.g. `LogTableViewerWidget`, `TelemetryTable`), or before touching either of the
-two implementations above.
+Lessons from wiring the global playback clock into `LogViewerWidget` (`ui/widgets/log_viewer.py`),
+`LogTableViewerWidget` (`ui/widgets/log_table_viewer.py`), `TelemetryTable`
+(`ui/widgets/telemetry_table.py`), and `TelemetryPlotter` (`ui/widgets/plotter.py`). Read this
+before adding REPLAY-scrubbing support to another widget, or before touching any of the four
+implementations above.
+
+The first three widgets share `core/playback_follow.py`'s `PlaybackFollowMachine` (see
+`plans/playback-follow-state-machine.md` for the design history) - a plain-Python state machine
+that replaced what used to be four independently-reimplemented booleans per widget
+(`follow_playback`/`is_paused`/`_playback_anchored`/`force_live`) with one `FollowState` enum
+(`LIVE`/`FOLLOWING`/`FROZEN`) plus an explicit transition table. `TelemetryPlotter` predates this
+and still uses the older raw-boolean pattern described in §2 below - it hasn't been migrated.
 
 ## 1. The clock contract - read-only, single ticker
 
@@ -27,45 +35,88 @@ def _clock(self):
     return registry.playback_clock if registry is not None else None
 ```
 
-## 2. `follow_playback` - a per-widget local override, not a global flag
+## 2. `PlaybackFollowMachine` - one state machine, shared, instead of four booleans per widget
 
-Every open widget follows REPLAY automatically by default (one global transport, matches its
-one-instance-per-session design) - but a widget the user manually interacts with (scrolls a log
-view, pans a plot) should detach *itself* from following without affecting the clock or any other
-open widget. Pattern: a per-widget `self.follow_playback = True` bool.
+`core/playback_follow.py` (plain Python, no Qt, mirrors `PlaybackClock`'s own read-only-consumer
+style). Each widget owns one instance and drives it entirely through `handle(event, clock_snapshot)`
+- never mutates the resulting `.state`/`.force_live` directly except in the widget's own
+`_redraw_history()`/`_go_live()` "make it live" mechanic (see below).
 
-- **Detach**: set `False` the moment the user manually navigates (scroll away from the tail, pan/
-  zoom a plot). Never let scrolling back to "wherever the clock currently is" implicitly re-attach
-  it - only two things may reset it to `True`:
-  1. The clock itself transitioning back to `LIVE` (do this once, e.g. right after computing
-     `clock = self._clock()` at the top of `apply_updates()`: `if clock is not None and clock.mode
-     is PlaybackMode.LIVE: self.follow_playback = True`).
-  2. An explicit user "Resume following" action, if the widget has one (`LogViewerWidget`'s Pause/
-     Resume button - see §3).
-- **Never** reset it merely because the user's manual pan happened to land back on the live edge/
-  current playhead position while the clock is still `REPLAY` - that's surprising and makes
-  "detach" feel unreliable.
+- **States**: `FollowState.LIVE` (showing the true live tail), `FOLLOWING` (ts-anchored to
+  `clock.current_ts_ns`, re-fetched every tick), `FROZEN` (anchored to a fixed window; only an
+  explicit resume/scroll-to-live-edge event exits it).
+- **Events** (`FollowEvent.*`): `Tick` (every `apply_updates()` heartbeat), `ScrolledAway`,
+  `ScrolledToLiveEdge`, `TogglePause(checked)`, `ToggleForceLive(checked)`, `ClogDetected`.
+- **`force_live` is a policy flag on the machine, not a fourth state.** It only redirects one
+  transition (`Tick` while `REPLAY` -> `LIVE` instead of `FOLLOWING`) and is checked again on
+  `TogglePause(False)` (resume) to decide `LIVE` vs. rejoining `FOLLOWING`. This is what collapses
+  what used to be a combinatorial flag space into three states.
+- **`handle()` returns a `FollowAction`** (`kind`: `NOOP`/`FETCH_LIVE`/`FETCH_FOLLOWING`/`FREEZE`,
+  plus `anchor_ts_ns`, `auto`, and `from_state`) telling the widget *what* to do - the machine
+  never touches Qt or fetch mechanics itself. `from_state` matters for `FREEZE`: transitioning from
+  `LIVE` means picking a fresh anchor from the live buffer (`_enter_history_mode`/
+  `_enter_history_at_top_row`); transitioning from `FOLLOWING` means the ts-anchored window already
+  on screen is kept in place, just marked frozen - no re-fetch.
+- **`supports_freeze=False`** (used by `TelemetryTable`, which has no scroll/pause concept) makes
+  `ScrolledAway`/`ClogDetected`/`TogglePause(True)` silent no-ops instead of needing to be
+  special-cased by the caller - the widget can wire up the full event set unconditionally.
+- **The "make it live" mechanic forces state directly, not via an event.** `LogViewerWidget.
+  _redraw_history()`/`LogTableViewerWidget._go_live()` set `self._playback.state = FollowState.LIVE`
+  unconditionally at the end, rather than trusting every caller to have already transitioned it
+  through `handle()`. This matters because several call sites (`_refresh_view()`'s already-live
+  shortcut, `_reanchor_history()`'s "caught up while paging forward" fallback) redraw live content
+  without themselves being a machine-event site - without the direct force, those paths would leave
+  `.state` stuck at `FROZEN` while the view has already gone live. Mirrors the pre-machine
+  behavior, where `_set_pause_ui(False)` unconditionally cleared `is_paused` regardless of caller.
+- **Read-only compat properties, not raw attributes.** Each widget exposes `is_paused`/
+  `follow_playback`/`_playback_anchored`/`force_live` as `@property`s derived from
+  `self._playback.state`/`.force_live` (plus, for `_playback_anchored`, the widget's own
+  `view_mode`/`model.mode` - see the next bullet) - kept for every existing call site/test that
+  reads the old names, deliberately not reintroducing them as independently-settable state.
+- **`_playback_anchored` needs one more condition than raw `state is FOLLOWING`.** A `Tick` can
+  transition `LIVE -> FOLLOWING` before its own fetch has found anything at that instant
+  (`_reanchor_history` no-ops, leaving `view_mode`/`model.mode` untouched) - the machine's `state`
+  becomes `FOLLOWING` optimistically regardless, since it's a "should we be attempting to follow"
+  signal, not a "did the last attempt succeed" one. The property therefore checks BOTH: `self.
+  _playback.state is FollowState.FOLLOWING and self.view_mode == LogViewMode.HISTORY` (
+  `LogTableViewerWidget` additionally checks `self.model.row_count > 0`). Branch code that decides
+  whether a manual scroll should freeze-in-place vs. anchor-from-the-live-buffer must use this
+  combined property, not raw `self._playback.state`, or a scroll during that no-data instant would
+  wrongly try to freeze a ts-anchored window that was never actually populated.
+- **Writing a new widget-level unit test?** Give the stub a real `PlaybackFollowMachine()` (it's
+  plain Python, trivially constructible) rather than plain booleans - `handle()` mutates it for
+  real, so assertions read `.state`/`.force_live` directly instead of trying to fake mutation of a
+  `SimpleNamespace` attribute. See `tests/test_log_viewer_scrub.py`/
+  `tests/test_log_table_viewer_scrub.py` for the pattern.
 
-## 3. The is_paused / dirty-flag traps - both caused real, shipped bugs
+## 3. The dirty-flag / buffer-duck-typing traps the machine's structure prevents
 
-Two related but distinct bugs, both only surfaced once the whole thing ran together (not caught by
-per-piece unit tests - see §6):
+These are the two bugs that motivated the design above - kept here as historical rationale for
+*why* the machine's structure looks the way it does, not as a live bug list (both are now
+structurally prevented, see the callouts below and Phase 0's transition-table tests in
+`tests/test_playback_follow_machine.py`). Neither was caught by per-piece unit tests - see §6.
 
-**Trap A - freezing your own following.** `LogViewerWidget`'s existing `_reanchor_history` called
-`_set_pause_ui(True)` on every LIVE→HISTORY transition (which sets `self.is_paused = True`, and
-the Pause button visually flips to "Resume"). The very first REPLAY-follow tick *is* a LIVE→
-HISTORY-shaped transition, so this fired for it too - which then blocked every subsequent follow
-tick, since the follow condition required `not self.is_paused`. Net effect: the widget followed
-exactly once per REPLAY session, then silently froze until the user manually clicked Resume. Fix:
-gate that specific pause-setting call so it only fires for the *manual/seq-anchored* transition
-path, never the ts-anchored/follow one (`if was_live and anchor_ts is None: ...`).
+**Trap A - freezing your own following.** `LogViewerWidget`'s original `_reanchor_history` called
+`_set_pause_ui(True)` on every LIVE→HISTORY transition (which set `self.is_paused = True`, and the
+Pause button visually flipped to "Resume"). The very first REPLAY-follow tick *is* a LIVE→HISTORY-
+shaped transition, so this fired for it too - which then blocked every subsequent follow tick,
+since the follow condition required `not self.is_paused`. Net effect: the widget followed exactly
+once per REPLAY session, then silently froze until the user manually clicked Resume. The original
+fix was a guard (`if was_live and anchor_ts is None: ...`); the machine now prevents this class of
+bug structurally - `FREEZE` is a distinct `FollowAction` kind from `FETCH_FOLLOWING`, and only ever
+fires from `ScrolledAway`/`ClogDetected`/`TogglePause(True)`, never from a plain `Tick` transition
+into `FOLLOWING` (see `tests/test_playback_follow_machine.py::TestLiveStateTicks::
+test_opening_while_replay_already_active_follows_without_a_pause`).
 
 The inverse bug shape: after a user *manually* detaches (scrolls/pans away from a followed view),
-if nothing marks the widget as "frozen" (e.g. never calls the equivalent of `_set_pause_ui(True)`),
-there is no way back in - a Pause/Resume-style button still shows "unpaused" and clicking it tries
-to *pause* an already-detached view instead of *resuming* following. Always pair a detach with
-whatever your widget's "I am frozen, here is how to un-freeze" state/affordance is, even if
-nothing else about the frozen behavior needs to change.
+if nothing marks the widget as "frozen", there is no way back in - a Pause/Resume-style button
+still shows "unpaused" and clicking it tries to *pause* an already-detached view instead of
+*resuming* following. The machine's `ScrolledAway` handling always transitions to `FROZEN`
+regardless of prior state (`LIVE` or `FOLLOWING`), so this pairing can't be forgotten per call site
+the way it could when each widget hand-rolled its own detach logic. If wiring a *new* widget that
+doesn't go through the shared machine (e.g. extending `TelemetryPlotter`), still apply this lesson
+manually: always pair a detach with whatever your widget's "I am frozen, here is how to un-freeze"
+state/affordance is.
 
 **Trap B - a new render buffer missing dirty-tracking fields an old one has.** When a widget's
 render path (`_update_plots`/`_update_overview` in `TelemetryPlotter`) reads `buf.is_dirty`/
@@ -159,6 +210,14 @@ also write **one real end-to-end test** that:
   (`clock.tick(...)` then `widget.apply_updates(force=True)`) → simulate the widget's manual-
   detach trigger directly (call the pan/scroll handler, don't try to synthesize real mouse events)
   → `clear()` while still in REPLAY → `clock.go_live()` → confirm `follow_playback` reset.
+
+For the three `PlaybackFollowMachine`-backed widgets, also add pure transition-table tests to
+`tests/test_playback_follow_machine.py` for any new state/event combination - these are fast (no
+Qt/Registry) and are what makes the end-to-end test's failures easy to localize, but they're
+**additive, not a replacement**: the machine's own tests can't catch a widget wiring the right
+`FollowAction.kind` to the wrong fetch call, or a fetch mechanic silently drifting out of sync with
+what `view_mode`/`model.mode` claims - only the real end-to-end test below catches that class of
+bug, same as it originally caught Trap B.
 
 This is the level that actually catches missing-attribute/wrong-buffer-selected bugs; kernel- and
 class-level tests should still exist (they're what make the end-to-end test's failures easy to

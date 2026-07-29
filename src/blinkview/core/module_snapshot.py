@@ -259,8 +259,12 @@ class LatestModuleValueTracker:
             # Use local 'lks' as the baseline for the new burst
             new_high_water = lks
 
-            # 4. Process logs into the newly acquired arrays
-            with self._log_pool.get_reversed_snapshot() as segments:
+            # 4. Process logs into the newly acquired arrays. get_reversed_snapshot_since (not
+            # get_reversed_snapshot) since this is an incremental "what's new since last tick"
+            # query - already-consumed cold segments can never contribute a row newer than lks
+            # again, so retaining them every 60Hz tick was pure overhead (see
+            # CircularLogPool.get_reversed_snapshot_since's docstring).
+            with self._log_pool.get_reversed_snapshot_since(lks) as segments:
                 for segment in segments:
                     if segment.size == 0:
                         continue

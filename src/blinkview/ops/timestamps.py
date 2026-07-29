@@ -51,6 +51,54 @@ def nb_parse_iso8601_to_ns(buffer, start, offset_sec):
 
 
 @app_njit(inline="always")
+def nb_parse_unified_log_ts_ns(buffer, start):
+    """
+    Parses 'YYYY-MM-DDTHH:MM:SS.uuuuuuZ' (UnifiedLogReplay's fixed grammar, see
+    parsers/unified_log_replay.py) starting at 'start'. Returns UTC nanoseconds as int64.
+
+    Same Y/M/D/H/M/S byte offsets and Julian-Day-Number epoch formula as
+    nb_parse_iso8601_to_ns above (the 'T' at index 10 is simply never read) - only the
+    fractional part differs: 6-digit microseconds at [20:26] instead of 3-digit
+    milliseconds at [20:23], so it's scaled by 1_000 instead of 1_000_000.
+    """
+    # 1. Extraction (Fixed offsets relative to YYYY)
+    y = (
+        (buffer[start + 0] - 48) * 1000
+        + (buffer[start + 1] - 48) * 100
+        + (buffer[start + 2] - 48) * 10
+        + (buffer[start + 3] - 48)
+    )
+    m = (buffer[start + 5] - 48) * 10 + (buffer[start + 6] - 48)
+    d = (buffer[start + 8] - 48) * 10 + (buffer[start + 9] - 48)
+
+    hh = (buffer[start + 11] - 48) * 10 + (buffer[start + 12] - 48)
+    mm = (buffer[start + 14] - 48) * 10 + (buffer[start + 15] - 48)
+    ss = (buffer[start + 17] - 48) * 10 + (buffer[start + 18] - 48)
+    us = (
+        (buffer[start + 20] - 48) * 100000
+        + (buffer[start + 21] - 48) * 10000
+        + (buffer[start + 22] - 48) * 1000
+        + (buffer[start + 23] - 48) * 100
+        + (buffer[start + 24] - 48) * 10
+        + (buffer[start + 25] - 48)
+    )
+
+    # 2. Julian Day Number Algorithm (identical to nb_parse_iso8601_to_ns)
+    temp_a = (14 - m) // 12
+    temp_y = y + 4800 - temp_a
+    temp_m = m + 12 * temp_a - 3
+
+    jdn = d + (153 * temp_m + 2) // 5 + 365 * temp_y + temp_y // 4 - temp_y // 100 + temp_y // 400 - 32045
+    days_since_1970 = jdn - 2440588
+
+    # 3. Epoch Math
+    res_ns = (days_since_1970 * 86400 + hh * 3600 + mm * 60 + ss) * 1_000_000_000
+    res_ns += us * 1000
+
+    return res_ns
+
+
+@app_njit(inline="always")
 def nb_parse_int_timestamp(
     buffer,
     start_cursor,

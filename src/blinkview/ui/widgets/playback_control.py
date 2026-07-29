@@ -87,7 +87,11 @@ class SeekBarWidget(QWidget):
         span = self.bounds_max_ns - self.bounds_min_ns
         if span <= 0:
             return 0
-        frac = (ts_ns - self.bounds_min_ns) / span
+        # Clamp to [0, 1] - a range/timestamp outside [bounds_min_ns, bounds_max_ns] (e.g. a
+        # named range saved under different bounds) must draw pinned at the track's edge, not
+        # at an arbitrarily large pixel offset: Qt's drawRect takes a C++ int (32-bit), and an
+        # unclamped frac (e.g. ts_ns=0 against a real epoch-ns bounds window) overflows it.
+        frac = max(0.0, min(1.0, (ts_ns - self.bounds_min_ns) / span))
         return int(frac * self.width())
 
     def _x_to_ts(self, x: int) -> int:
@@ -119,40 +123,41 @@ class SeekBarWidget(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
 
-        h = self.height()
-        w = self.width()
-        mid_y = h // 2
+            h = self.height()
+            w = self.width()
+            mid_y = h // 2
 
-        # Named range bands - drawn first so the track/playhead/hover marker paint on top.
-        if self._ranges:
-            band_color = QColor(80, 180, 255, 90)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(band_color)
-            for rng in self._ranges:
-                rng = rng.normalized()
-                x0 = self._ts_to_x(rng.start_ts_ns)
-                x1 = self._ts_to_x(rng.end_ts_ns)
-                painter.drawRect(x0, 2, max(1, x1 - x0), h - 4)
+            # Named range bands - drawn first so the track/playhead/hover marker paint on top.
+            if self._ranges:
+                band_color = QColor(80, 180, 255, 90)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(band_color)
+                for rng in self._ranges:
+                    rng = rng.normalized()
+                    x0 = self._ts_to_x(rng.start_ts_ns)
+                    x1 = self._ts_to_x(rng.end_ts_ns)
+                    painter.drawRect(x0, 2, max(1, x1 - x0), h - 4)
 
-        # Track
-        painter.setPen(QPen(Qt.gray, 3))
-        painter.drawLine(0, mid_y, w, mid_y)
+            # Track
+            painter.setPen(QPen(Qt.gray, 3))
+            painter.drawLine(0, mid_y, w, mid_y)
 
-        # Hover marker (faint)
-        if self._hover_x is not None:
-            painter.setPen(QPen(Qt.darkGray, 1))
-            painter.drawLine(self._hover_x, 0, self._hover_x, h)
+            # Hover marker (faint)
+            if self._hover_x is not None:
+                painter.setPen(QPen(Qt.darkGray, 1))
+                painter.drawLine(self._hover_x, 0, self._hover_x, h)
 
-        # Playhead
-        x = self._ts_to_x(self.current_ts_ns)
-        painter.setPen(QPen(Qt.cyan, 2))
-        painter.setBrush(Qt.cyan)
-        painter.drawLine(x, 0, x, h)
-        painter.drawEllipse(x - 5, mid_y - 5, 10, 10)
-
-        painter.end()
+            # Playhead
+            x = self._ts_to_x(self.current_ts_ns)
+            painter.setPen(QPen(Qt.cyan, 2))
+            painter.setBrush(Qt.cyan)
+            painter.drawLine(x, 0, x, h)
+            painter.drawEllipse(x - 5, mid_y - 5, 10, 10)
+        finally:
+            painter.end()
 
 
 class PlaybackControlWidget(QWidget):
@@ -265,6 +270,27 @@ class PlaybackControlWidget(QWidget):
         outer_layout.addWidget(self.zoom_row)
         self.zoom_row.setVisible(False)
 
+        # Third row: a persistent "live system logs" scrubber spanning program-start-to-now
+        # (registry.start_ts_ns to the clock's live edge), always visible regardless of mode or
+        # which replay session (if any) is loaded - the system's own self-logging keeps running
+        # live throughout a replay, so this stays a stable reference to "where is live right now"
+        # even while the main seek bar above is showing a fixed-length recorded session.
+        self.live_row = QWidget(self)
+        live_layout = QHBoxLayout(self.live_row)
+        live_layout.setContentsMargins(4, 0, 4, 2)
+
+        self.live_label = QLabel("Live", self.live_row)
+        self.live_label.setMinimumWidth(120)
+        live_layout.addWidget(self.live_label)
+
+        self.live_seek_bar = SeekBarWidget(self.live_row)
+        self.live_seek_bar.seekRequested.connect(self._on_seek_requested)
+        self.live_seek_bar.scrubStarted.connect(self._on_scrub_started)
+        self.live_seek_bar.scrubEnded.connect(self._on_scrub_ended)
+        live_layout.addWidget(self.live_seek_bar, stretch=1)
+
+        outer_layout.addWidget(self.live_row)
+
         self._sync_from_clock()
 
         self.gui_context.add_updatable(self)
@@ -303,7 +329,8 @@ class PlaybackControlWidget(QWidget):
         self.play_button.setText("⏸" if clock.is_playing else "⏵")
 
         self.seek_bar.setEnabled(not is_live)
-        self.seek_bar.set_state(clock.bounds_min_ns, clock.bounds_max_ns, clock.current_ts_ns)
+        seek_min_ns, seek_max_ns = self._seek_bar_bounds(clock)
+        self.seek_bar.set_state(seek_min_ns, seek_max_ns, clock.current_ts_ns)
 
         self.time_label.setText(self._time_formatter.format(clock.current_ts_ns))
 
@@ -316,6 +343,36 @@ class PlaybackControlWidget(QWidget):
             self._prev_was_live = False
             self._auto_select_full_recording_range()
         self._sync_zoom_bar()
+        self._sync_live_bar(clock)
+
+    def _seek_bar_bounds(self, clock):
+        """Bounds for the main seek bar: while replaying a loaded session with known metadata
+        (Registry.DEFAULT_REPLAY_RANGE_NAME's start/end, set from metadata.json created_at/
+        finished_at - see Registry.load_replay_session), use that session's own fixed length
+        instead of the raw clock bounds. Otherwise falls back to the clock's own bounds
+        unchanged - covers plain LIVE mode and a REPLAY entered by scrubbing back into the live
+        buffer with no loaded session (no metadata to fix a length to), same as before this
+        distinction existed. Without this, a session's seek bar would keep growing for as long as
+        the system's own self-logging keeps appending rows to the shared central pool during
+        replay, even though the recorded session itself has a fixed length."""
+        if clock.mode is PlaybackMode.REPLAY:
+            store = self._ranges_store()
+            if store is not None:
+                rng = next((r for r in store.ranges if r.name == Registry.DEFAULT_REPLAY_RANGE_NAME), None)
+                if rng is not None:
+                    rng = rng.normalized()
+                    return rng.start_ts_ns, rng.end_ts_ns
+        return clock.bounds_min_ns, clock.bounds_max_ns
+
+    def _sync_live_bar(self, clock):
+        """Always-visible second scrubber spanning registry.start_ts_ns (program start) to the
+        clock's live edge (bounds_max_ns) - independent of _seek_bar_bounds()'s session-length
+        window above, so the live system log stream stays scrubbable even while the main bar is
+        pinned to a fixed recorded session's length."""
+        registry = self.gui_context.registry
+        start_ts_ns = getattr(registry, "start_ts_ns", clock.bounds_min_ns) if registry is not None else 0
+        self.live_seek_bar.setEnabled(True)
+        self.live_seek_bar.set_state(start_ts_ns, clock.bounds_max_ns, clock.current_ts_ns)
 
     def _auto_select_full_recording_range(self):
         """Fires once on every LIVE->REPLAY edge (including a widget constructed while REPLAY is

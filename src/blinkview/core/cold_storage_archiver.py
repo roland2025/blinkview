@@ -28,13 +28,19 @@ class ColdStorageArchiver:
         on_archived: Callable[[PooledLogBatch], None],
         queue_depth: int = 4,
         logger=None,
+        persist: bool = False,
     ):
         self._dir = Path(storage_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._on_archived = on_archived
         self._logger = logger
+        self._persist = persist
         self._queue: "queue.Queue[PooledLogBatch]" = queue.Queue(maxsize=queue_depth)
-        self._counter = 0
+        # Continue numbering after whatever's already in storage_dir (e.g. persisted segment
+        # files from a previous run being resumed - see CircularLogPool's mount-existing-segments
+        # step) instead of always starting at 0, which would silently overwrite them the moment
+        # this run's first new segment gets archived.
+        self._counter = self._next_counter_after_existing_files()
         self._counter_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name="ColdStorageArchiver", daemon=True)
@@ -45,8 +51,19 @@ class ColdStorageArchiver:
         # docstring/plan doc - "stop" means "stop the ingestion thread," not "wipe scrollback"),
         # this still cleans up the session-scoped temp directory rather than leaking it forever.
         # cleanup() is idempotent (shutil.rmtree(ignore_errors=True)), so this is harmless if
-        # release_all() already ran it explicitly.
+        # release_all() already ran it explicitly. Skipped entirely when persist=True - the whole
+        # point of persisting is that this directory survives process exit.
         atexit.register(self.cleanup)
+
+    def _next_counter_after_existing_files(self) -> int:
+        highest = -1
+        for path in self._dir.glob("segment_*.blkseg"):
+            try:
+                index = int(path.stem.split("_", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            highest = max(highest, index)
+        return highest + 1
 
     def archive(self, segment: PooledLogBatch) -> bool:
         """Takes ownership of `segment`'s caller-held reference (the caller must not touch it
@@ -99,5 +116,11 @@ class ColdStorageArchiver:
     def cleanup(self) -> None:
         """Deletes the cold-store directory tree. Only safe to call after stop() and after every
         MmapArrayHandle/PooledLogBatch.from_memmap referencing a file under it has been
-        released - an open mapping will keep the file (and on Windows, the whole delete) blocked."""
+        released - an open mapping will keep the file (and on Windows, the whole delete) blocked.
+
+        No-op when persist=True (cold_storage_persist_on_close) - the files are left on disk so a
+        later run can remount them (see CircularLogPool's mount-existing-segments step) instead of
+        re-parsing/re-ingesting the session from scratch."""
+        if self._persist:
+            return
         shutil.rmtree(self._dir, ignore_errors=True)

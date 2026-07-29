@@ -122,3 +122,75 @@ class TestBackpressure:
             release_writer.set()
             archiver.stop()
             archiver.cleanup()
+
+
+class TestPersistAndResume:
+    def test_persist_true_skips_cleanup_rmtree(self, global_pool, tmp_path):
+        archiver = ColdStorageArchiver(tmp_path, on_archived=lambda seg: seg.release(), persist=True)
+        segment = make_segment(global_pool, b"payload")
+        archiver.archive(segment)
+        drain([], 0, timeout=0.3)  # let the background thread finish writing
+        archiver.stop()
+
+        archiver.cleanup()
+
+        assert list(tmp_path.glob("*.blkseg")) != [], "persist=True must not delete the directory's files"
+
+    def test_persist_false_still_wipes_directory_as_before(self, global_pool, tmp_path):
+        archiver = ColdStorageArchiver(tmp_path, on_archived=lambda seg: seg.release())
+        archiver.archive(make_segment(global_pool, b"payload"))
+        time.sleep(0.3)
+        archiver.stop()
+
+        archiver.cleanup()
+
+        assert not tmp_path.exists() or list(tmp_path.glob("*.blkseg")) == []
+
+    def test_counter_continues_past_existing_segment_files(self, tmp_path):
+        (tmp_path / "segment_0000000000.blkseg").write_bytes(b"")
+        (tmp_path / "segment_0000000005.blkseg").write_bytes(b"")
+        (tmp_path / "segment_0000000002.blkseg").write_bytes(b"")
+
+        archiver = ColdStorageArchiver(tmp_path, on_archived=lambda seg: seg.release())
+        try:
+            assert archiver._counter == 6
+            assert archiver._next_path().name == "segment_0000000006.blkseg"
+        finally:
+            archiver.stop()
+            archiver.cleanup()
+
+    def test_counter_starts_at_zero_for_an_empty_directory(self, tmp_path):
+        archiver = ColdStorageArchiver(tmp_path, on_archived=lambda seg: seg.release())
+        try:
+            assert archiver._counter == 0
+        finally:
+            archiver.stop()
+            archiver.cleanup()
+
+    def test_resuming_archiver_does_not_overwrite_existing_files(self, global_pool, tmp_path):
+        """End-to-end: archive one segment, stop (persist=True so the file survives), then start
+        a *new* archiver pointed at the same directory and archive another - the original file's
+        content must be untouched."""
+        first = ColdStorageArchiver(tmp_path, on_archived=lambda seg: seg.release(), persist=True)
+        first.archive(make_segment(global_pool, b"first-payload"))
+        time.sleep(0.3)
+        first.stop()
+        first.cleanup()  # no-op, persist=True
+
+        existing = list(tmp_path.glob("*.blkseg"))
+        assert len(existing) == 1
+        original_bytes = existing[0].read_bytes()
+
+        second_archived = []
+        second = ColdStorageArchiver(tmp_path, on_archived=second_archived.append, persist=True)
+        try:
+            second.archive(make_segment(global_pool, b"second-payload"))
+            drain(second_archived, 1)
+
+            assert len(list(tmp_path.glob("*.blkseg"))) == 2
+            assert existing[0].read_bytes() == original_bytes, "resumed archiver overwrote the original file"
+
+            second_archived[0].release()
+        finally:
+            second.stop()
+            second.cleanup()

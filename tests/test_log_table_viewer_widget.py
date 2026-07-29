@@ -13,6 +13,8 @@ control-flow logic."""
 
 from types import SimpleNamespace
 
+from blinkview.core.playback_clock import PlaybackMode
+from blinkview.core.playback_follow import ClockSnapshot, FollowState, PlaybackFollowMachine
 from blinkview.ui.widgets.log_table_viewer import LogTableCol, LogTableViewerWidget
 from blinkview.ui.widgets.log_view_mode import LogViewMode
 from blinkview.utils.log_level import LogLevel
@@ -33,6 +35,7 @@ class TestRestoreAndGetState:
             ts_precision=3,
             kv_filter_text="",
             search_text="",
+            force_live=False,
             filter_sidebar_state=None,
             gui_context=SimpleNamespace(
                 id_registry=SimpleNamespace(
@@ -94,6 +97,7 @@ class TestRestoreAndGetState:
             show_rx_ts=False,
             show_process_thread=True,
             ts_precision=6,
+            force_live=False,
             log_filter=SimpleNamespace(kv_filter_text="k=v", text_filter_text="needle", log_level=LogLevel.WARN),
             filter_sidebar=SimpleNamespace(
                 get_state=lambda: {"x": 1}, action_show_non_essential=SimpleNamespace(isChecked=lambda: True)
@@ -328,6 +332,8 @@ class TestHistoryHelpers:
 class TestGoLive:
     def test_go_live_resets_state_and_updates_view(self):
         calls = []
+        machine = PlaybackFollowMachine()
+        machine.state = FollowState.FROZEN
         stub = SimpleNamespace(
             model=SimpleNamespace(enter_live_mode=lambda: calls.append("enter_live")),
             view=SimpleNamespace(
@@ -336,7 +342,7 @@ class TestGoLive:
             _set_live_ui_state=lambda: calls.append("live_ui"),
             _set_pause_ui=lambda paused, auto=False: calls.append(("pause", paused)),
             _is_catching_up=False,
-            _playback_anchored=True,
+            _playback=machine,
             _programmatic_scroll=False,
         )
 
@@ -344,7 +350,7 @@ class TestGoLive:
 
         assert calls == ["enter_live", "repaint", "autosize", "live_ui", ("pause", False)]
         assert stub._is_catching_up is True
-        assert stub._playback_anchored is False
+        assert machine.state is FollowState.LIVE
         assert stub._programmatic_scroll is False  # restored after the try/finally
 
 
@@ -392,7 +398,8 @@ class TestSetPauseUi:
 
         LogTableViewerWidget._set_pause_ui(stub, True, auto=False)
 
-        assert stub.is_paused is True
+        # is_paused is a read-only property derived from self._playback.state now - _set_pause_ui
+        # only syncs the button's own text/checked/style, tested via action_state/fake_button below.
         assert stub.auto_paused is False
         assert action_state["text"] == "▶ Resume"
         assert fake_button.props["manualPaused"] is True
@@ -493,6 +500,8 @@ class TestReanchorHistory:
 
 class TestOnScrollValueChangedOrdinaryPaging:
     def _base_stub(self, calls, value, maximum=100, minimum=0, row_count=5, at_live_edge=False):
+        machine = PlaybackFollowMachine()
+        machine.state = FollowState.FROZEN  # already browsing history, mirrors mode=HISTORY below
         return SimpleNamespace(
             _programmatic_scroll=False,
             model=SimpleNamespace(
@@ -506,7 +515,10 @@ class TestOnScrollValueChangedOrdinaryPaging:
                     value=lambda: value, maximum=lambda: maximum, minimum=lambda: minimum
                 )
             ),
+            _playback=machine,
             _playback_anchored=False,
+            _clock=lambda: None,
+            _clock_snapshot=lambda clock: ClockSnapshot(mode=PlaybackMode.LIVE, current_ts_ns=0),
             _at_live_edge=lambda: at_live_edge,
             _go_live=lambda: calls.append(("go_live",)),
             _history_newest_ref_seq=lambda: 88,

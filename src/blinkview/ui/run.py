@@ -148,6 +148,11 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
 
         from blinkview.core.registry import Registry
 
+        # Passed straight into the constructor (not set on registry.file_manager afterward) so
+        # both FileManager (get_config_path/get_session_path's replay/ scratch redirect - see
+        # FileManager._redirect_to_replay_scratch) and IDRegistry (rehydrating itself from any
+        # persisted cold storage under this same session - see IDRegistry.__init__) see it from
+        # their own construction, not as a later side effect.
         registry = Registry(
             session_name=args.session,
             profile_name=args.profile,
@@ -155,14 +160,8 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
             config_path=args.config,
             settings=settings,
             replay_mode=replay_mode,
+            replay_source_dir=Path(replay_session_info.path) if replay_session_info is not None else None,
         )
-
-        if replay_session_info is not None:
-            # Set before BlinkMainWindow is constructed below, so every ConfigManager it builds
-            # (watchlist, gui state, ...) resolves its file paths through the replay/ scratch
-            # redirect from the start, rather than baking in the live workspace paths first -
-            # see Registry.load_replay_session / FileManager._redirect_to_replay_scratch.
-            registry.file_manager.replay_source_dir = Path(replay_session_info.path)
 
         from blinkview.ui.main_window import BlinkMainWindow
 

@@ -86,6 +86,18 @@ class CentralFactory(BaseFactory[BaseCentralStorage]):
     "Empty = use this session's own log folder (<session_dir>/cold/).",
     ui_order=15,
 )
+@configuration_property(
+    "cold_storage_persist_on_close",
+    type="boolean",
+    default=True,
+    description="Keep cold-storage segment files on disk when the app closes, instead of deleting "
+    "them, and flush the hot (RAM) tier to disk too so the whole session is archived - not just "
+    "what already got evicted. Reopening the same session (live or replay) later remounts these "
+    "files directly instead of re-parsing/re-ingesting from scratch. Only applies to the default "
+    "cold_storage_dir (a fixed <session>/cold/ folder) - an overridden cold_storage_dir always "
+    "gets a fresh uniquely-named subdirectory per run, so there's nothing stable to reopen.",
+    ui_order=16,
+)
 @override_property(
     "logging", hidden=False, required=True, default={"enabled": True, "processor": {"type": "log_row"}}, ui_order=20
 )
@@ -96,6 +108,7 @@ class CentralStorage(BaseCentralStorage):
     cold_storage_enabled: bool
     cold_max_pieces: int
     cold_storage_dir: str
+    cold_storage_persist_on_close: bool
 
     def __init__(self):
         super().__init__()
@@ -111,16 +124,25 @@ class CentralStorage(BaseCentralStorage):
         wholesale on cleanup (see ColdStorageArchiver.cleanup) without risking files unrelated to
         this session.
 
-        Default (cold_storage_dir unset): a `cold/` subfolder directly under this session's own
-        log folder (`FileManager.session_dir`) - it lives and dies with the session, next to
-        `metadata.json`/`gui/`/etc., and gets cleared out at program shutdown via the archiver's
-        atexit hook. `cold_storage_dir`, if the user sets it (e.g. to point at a faster NVMe mount
-        than wherever `logs/` lives), is instead used as *where* to create a uniquely-named temp
+        Default (cold_storage_dir unset): a `cold/` subfolder under the session whose data is
+        actually being ingested right now - `FileManager.replay_source_dir` (the *original*
+        session being replayed) if this run was launched straight into replay
+        (ui/run.py's replay_mode/replay_session_info path - see Registry.__init__), otherwise
+        this run's own `FileManager.session_dir`. Using `session_dir` unconditionally here used
+        to materialize a brand-new (otherwise lazily-created, see FileManager.__init__'s
+        `create=not replay_mode`) live session folder purely as a `mkdir(parents=True)` side
+        effect of resolving the cold dir - exactly the "phantom session folder" a replay-only
+        launch is supposed to avoid creating at all. It lives and dies with whichever session
+        owns it, and gets cleared out at program shutdown via the archiver's atexit hook.
+        `cold_storage_dir`, if the user sets it (e.g. to point at a faster NVMe mount than
+        wherever `logs/` lives), is instead used as *where* to create a uniquely-named temp
         subdirectory - it must not be reused as-is since it may already contain unrelated files."""
         if self.cold_storage_dir:
             base = resolve_config_path(self.cold_storage_dir)
             return Path(tempfile.mkdtemp(prefix="blinkview_coldstore_", dir=base))
-        cold_dir = self.shared.registry.file_manager.session_dir / "cold"
+        file_manager = self.shared.registry.file_manager
+        owner_dir = file_manager.replay_source_dir or file_manager.session_dir
+        cold_dir = owner_dir / "cold"
         cold_dir.mkdir(parents=True, exist_ok=True)
         return cold_dir
 
@@ -138,6 +160,7 @@ class CentralStorage(BaseCentralStorage):
                 final_buffer_bytes=buffer_bytes,
                 cold_max_pieces=cold_max_pieces,
                 cold_storage_dir=cold_storage_dir,
+                persist_cold_storage=self.cold_storage_persist_on_close,
                 logger=self.logger,
             )
         else:

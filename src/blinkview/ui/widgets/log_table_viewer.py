@@ -31,6 +31,13 @@ from blinkview.core.log_fetch import LogSegmentScanner
 from blinkview.core.module_snapshot import MAX_MSG_BYTES
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.playback_clock import PlaybackMode
+from blinkview.core.playback_follow import (
+    ClockSnapshot,
+    FollowActionKind,
+    FollowEvent,
+    FollowState,
+    PlaybackFollowMachine,
+)
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.formatting import nb_format_local_timestamp
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
@@ -1074,6 +1081,12 @@ QToolButton[manualPaused="true"] {
         self.kv_filter_text = ""
         self.search_text = ""
 
+        # Playback-follow state machine (see plans/playback-follow-state-machine.md) - replaces
+        # what used to be four loose booleans (follow_playback/is_paused/_playback_anchored/
+        # force_live) with one FollowState enum + explicit transition table. Constructed before
+        # _set_defaults()/restore() below since restore() seeds force_live through it.
+        self._playback = PlaybackFollowMachine(supports_freeze=True)
+
         self._set_defaults()
 
         if state:
@@ -1173,18 +1186,9 @@ QToolButton[manualPaused="true"] {
         self.action_clear.triggered.connect(self.clear_logs)
         self.toolbar.addAction(self.action_clear)
 
-        self.is_paused = False
         self.auto_paused = False
         self._is_catching_up = True
 
-        # Playback-clock following state - mirrors LogViewerWidget's follow_playback wiring
-        # (see the blinkview-playback-wiring skill). follow_playback controls whether
-        # apply_updates() keeps re-anchoring to the clock every tick; a manual scroll within a
-        # playback-anchored window clears it (see _on_scroll_value_changed). _playback_anchored
-        # just tracks "is the window on screen right now clock-anchored", for the REPLAY->LIVE
-        # exit check in apply_updates().
-        self.follow_playback = True
-        self._playback_anchored = False
         # Last clock.current_ts_ns this tab actually re-fetched under while following - lets
         # apply_updates() skip a redundant kernel scan every ~100ms when REPLAY is paused and
         # sitting still.
@@ -1203,6 +1207,17 @@ QToolButton[manualPaused="true"] {
         self.action_pause.setCheckable(True)
         self.action_pause.toggled.connect(self._toggle_pause)
         self.toolbar.insertAction(self.action_clear, self.action_pause)
+
+        # "Live" override - mirrors LogViewerWidget.action_force_live: pins this tab to the live
+        # tail while the global transport is scrubbing REPLAY. Only shown while REPLAY is
+        # actually active (see apply_updates/_sync_force_live_visibility).
+        self.action_force_live = QAction("Live", self)
+        self.action_force_live.setCheckable(True)
+        self.action_force_live.setChecked(self.force_live)
+        self.action_force_live.setToolTip("Keep this tab on live data while the global transport is scrubbing REPLAY")
+        self.action_force_live.toggled.connect(self._toggle_force_live)
+        self.toolbar.insertAction(self.action_clear, self.action_force_live)
+        self._sync_force_live_visibility(self._clock())
 
         self.splitter = QSplitter(Qt.Horizontal, self)
         self.layout.addWidget(self.splitter)
@@ -1234,7 +1249,7 @@ QToolButton[manualPaused="true"] {
 
         self.view = LogTableCanvas(self.model)
         self.view.setMinimumWidth(300)
-        self.view.on_wheel_up_while_live = self._enter_history_at_top_row
+        self.view.on_wheel_up_while_live = self._on_scrolled_away_from_live
         self.view.set_column_visible(LogTableCol.RX_TIMESTAMP, self.show_rx_ts)
         self.view.set_column_visible(LogTableCol.PROCESS, self.show_process_thread)
         self.view.set_column_visible(LogTableCol.THREAD, self.show_process_thread)
@@ -1283,6 +1298,11 @@ QToolButton[manualPaused="true"] {
 
         view_state = state.get("view_state", {})
         self.show_module_filter = view_state.get("show_module_filter", self.show_module_filter)
+        # Checked in both places: get_state()'s own round-trip nests it under view_state, but a
+        # freshly-opened tab spawned from TelemetryTable (see _trigger_module_action) passes it
+        # as a top-level param instead - top-level wins so a fresh spawn isn't shadowed by a
+        # (nonexistent) view_state default.
+        self.force_live = state.get("force_live", view_state.get("force_live", self.force_live))
         self.show_rx_ts = view_state.get("show_rx_ts", self.show_rx_ts)
         self.show_process_thread = view_state.get("show_process_thread", self.show_process_thread)
         self.ts_precision = view_state.get("ts_precision", self.ts_precision)
@@ -1298,6 +1318,7 @@ QToolButton[manualPaused="true"] {
             "filtered_module_children": self.filtered_module_children,
             "view_state": {
                 "show_module_filter": self.show_module_filter,
+                "force_live": self.force_live,
                 "show_rx_ts": self.show_rx_ts,
                 "show_process_thread": self.show_process_thread,
                 "ts_precision": self.ts_precision,
@@ -1317,44 +1338,88 @@ QToolButton[manualPaused="true"] {
         registry = self.gui_context.registry
         return registry.playback_clock if registry is not None else None
 
+    def _clock_snapshot(self, clock) -> ClockSnapshot:
+        if clock is None:
+            return ClockSnapshot(mode=PlaybackMode.LIVE, current_ts_ns=0)
+        return ClockSnapshot(mode=clock.mode, current_ts_ns=clock.current_ts_ns, is_playing=clock.is_playing)
+
+    @property
+    def is_paused(self) -> bool:
+        return self._playback.state is FollowState.FROZEN
+
+    @property
+    def follow_playback(self) -> bool:
+        return self._playback.state is not FollowState.FROZEN
+
+    @property
+    def _playback_anchored(self) -> bool:
+        # A fetch that found nothing at this instant leaves mode/row_count showing whatever was
+        # there before - only claim "clock-anchored" once a real ts-anchored window with actual
+        # rows is on screen, same invariant the old raw _playback_anchored flag preserved by only
+        # ever being set True after a successful fetch.
+        return (
+            self._playback.state is FollowState.FOLLOWING
+            and self.model.mode == LogViewMode.HISTORY
+            and self.model.row_count > 0
+        )
+
+    @property
+    def force_live(self) -> bool:
+        return self._playback.force_live
+
+    @force_live.setter
+    def force_live(self, value: bool):
+        self._playback.force_live = value
+
+    def _apply_freeze(self, action):
+        """Executes a FollowActionKind.FREEZE action - mirrors LogViewerWidget._apply_freeze.
+        from_state LIVE -> anchor off the top-of-viewport live row (_enter_history_at_top_row);
+        FOLLOWING -> the ts-anchored window already on screen is kept in place, just frozen."""
+        if action.from_state is FollowState.LIVE:
+            self._enter_history_at_top_row(auto=action.auto)
+            if self.model.mode != LogViewMode.HISTORY:
+                # No live rows yet to build a window from - still honor the freeze request.
+                self._set_pause_ui(True, auto=action.auto)
+        elif action.from_state is FollowState.FOLLOWING:
+            self._set_pause_ui(True, auto=action.auto)
+
+    def _on_scrolled_away_from_live(self):
+        """Wired to LogTableCanvas.on_wheel_up_while_live - LIVE mode has ScrollBarAlwaysOff, so
+        there's no scrollbar valueChanged to detect a manual scroll-away the way
+        _on_scroll_value_changed does for HISTORY; the canvas's own wheel handling calls this
+        directly instead."""
+        action = self._playback.handle(FollowEvent.ScrolledAway(), self._clock_snapshot(self._clock()))
+        self._apply_freeze(action)
+
     def apply_updates(self):
         now_ns = self.gui_context.registry.now_ns
         t_start = now_ns()
 
         clock = self._clock()
 
-        # REPLAY -> LIVE exit (edge-triggered, one-shot): the clock just returned to live and
-        # this tab was following it - resume the ordinary live tail the same way unpausing does.
-        # is_paused always wins: a manually-paused tab stays frozen through a clock mode change
-        # and only unfreezes on its own Resume click (see _toggle_pause).
-        if clock is not None and clock.mode is PlaybackMode.LIVE and self._playback_anchored and not self.is_paused:
-            self._playback_anchored = False
+        self._sync_force_live_visibility(clock)
+
+        # Drive the shared playback-follow state machine (see
+        # plans/playback-follow-state-machine.md) with this heartbeat's clock snapshot.
+        action = self._playback.handle(FollowEvent.Tick(), self._clock_snapshot(clock))
+
+        if action.kind is FollowActionKind.FETCH_LIVE and action.from_state is not FollowState.LIVE:
+            # Edge-triggered transition into LIVE (REPLAY -> LIVE, or force_live catching a
+            # FOLLOWING tab): resume the ordinary live tail the same way unpausing does.
             self._last_followed_ts_ns = None
-            # The clock itself just returned to LIVE - this is the one place a local
-            # scroll-override (_on_scroll_value_changed) gets cleared, so a fresh REPLAY session
-            # always starts this tab following again.
-            self.follow_playback = True
             self._go_live()
             return
 
-        # Follow (level-triggered, every tick): re-anchor to the clock's virtual time whenever
-        # it's playing back, throttled on the same cadence as the live tail fetch. This is level-
-        # not edge-triggered so a tab opened after REPLAY already started still picks it up on
-        # its next tick, rather than only reacting to a LIVE->REPLAY transition it missed.
-        following = (
-            clock is not None and clock.mode is PlaybackMode.REPLAY and self.follow_playback and not self.is_paused
-        )
-        if following:
+        if action.kind is FollowActionKind.FETCH_FOLLOWING:
+            # Re-anchor to the clock's virtual time whenever it's playing back, throttled on the
+            # same cadence as the live tail fetch.
             if t_start - self.prev_apply < 100_000_000:
                 return
             self.prev_apply = t_start
             # Skip the refetch once REPLAY is paused and the clock hasn't moved since the last
             # follow - avoids a full kernel scan every ~100ms per open tab for no visual change.
             if clock.is_playing or clock.current_ts_ns != self._last_followed_ts_ns:
-                self._reanchor_history(anchor_ts=clock.current_ts_ns)
-                # A fetch that found nothing at this instant leaves mode/row_count showing
-                # whatever was there before - only claim "clock-anchored" once it actually is.
-                self._playback_anchored = self.model.mode == LogViewMode.HISTORY and self.model.row_count > 0
+                self._reanchor_history(anchor_ts=action.anchor_ts_ns)
                 self._last_followed_ts_ns = clock.current_ts_ns
             return
 
@@ -1376,7 +1441,8 @@ QToolButton[manualPaused="true"] {
                     # as a sustained clog - same carve-out as LogViewerWidget.
                     self.velocity_tracker.reset()
                 elif self.velocity_tracker.update_and_check(self.model.last_fetch_new_rows):
-                    self._enter_history_at_top_row(auto=True)
+                    clog_action = self._playback.handle(FollowEvent.ClogDetected(), self._clock_snapshot(clock))
+                    self._apply_freeze(clog_action)
                     return
 
         if self.model.last_fetch_changed:
@@ -1575,12 +1641,13 @@ QToolButton[manualPaused="true"] {
         self._set_live_ui_state()
         self._set_pause_ui(False)
         self._is_catching_up = True
-        # This tab's window is no longer clock-anchored (whether or not it ever was) -
-        # follow_playback itself is deliberately left untouched here: a local scroll-override
-        # (_on_scroll_value_changed) should only be un-done by the clock's own next LIVE
-        # transition (apply_updates' REPLAY->LIVE exit branch) or an explicit Resume click
-        # (_toggle_pause), not by every path that lands back in live mode.
-        self._playback_anchored = False
+        # This is the single authoritative "make it live" mechanic - force the machine to LIVE
+        # directly (not via .handle(), there's no dedicated event for "someone decided we're live
+        # now") rather than trusting every caller to have already transitioned it - mirrors
+        # LogViewerWidget._redraw_history. Covers _reanchor_history's/_poll_history_tail's own
+        # internal "caught up while paging forward" _at_live_edge() fallbacks too, which never
+        # went through a transition of their own.
+        self._playback.state = FollowState.LIVE
 
     def _set_live_ui_state(self):
         self.view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1591,41 +1658,43 @@ QToolButton[manualPaused="true"] {
     def _toggle_pause(self, checked):
         """Pause and history mode are the same state from the user's perspective: pausing means
         freezing on a browsable window, and scrolling away from the tail already does that.
-        Fires from the user clicking the Pause button (checked=Qt's new state). Mirrors
-        LogViewerWidget._toggle_pause exactly."""
-        if checked:
-            if self._playback_anchored:
-                # Already showing a clock-anchored window - _enter_history_at_top_row() would
-                # anchor off whatever's currently visible in the ts-anchored window itself, not
-                # the LIVE buffer, so it's unnecessary here. The window already shows the right
-                # content; just freeze it in place, same as a local scroll-override
-                # (_on_scroll_value_changed).
-                self.follow_playback = False
-                self._set_pause_ui(True)
-            elif self.model.mode == LogViewMode.LIVE:
-                self._enter_history_at_top_row(auto=False)
-                if self.model.mode != LogViewMode.HISTORY:
-                    # No live rows yet to build a window from - still honor the pause request.
-                    self._set_pause_ui(True)
-            # else: already in history (e.g. from a prior scroll-away) - the button just
-            # catches up to that; _set_pause_ui was already applied on that transition.
-        else:
-            clock = self._clock()
-            if clock is not None and clock.mode is PlaybackMode.REPLAY:
-                # The clock is still playing back - resuming here means rejoining it, not
-                # jumping to the pool's live tail. Just clear the freeze; the next
-                # apply_updates() tick's follow branch re-anchors to wherever the clock has
-                # moved to since, which may be far from where this tab was paused.
-                self._set_pause_ui(False)
-                self.follow_playback = True
-            else:
-                self._go_live()
+        Fires from the user clicking the Pause button (checked=Qt's new state). Routes entirely
+        through the shared playback-follow machine - mirrors LogViewerWidget._toggle_pause."""
+        clock = self._clock()
+        action = self._playback.handle(FollowEvent.TogglePause(checked), self._clock_snapshot(clock))
+
+        if action.kind is FollowActionKind.FREEZE:
+            self._apply_freeze(action)
+        elif action.kind is FollowActionKind.FETCH_LIVE:
+            self._go_live()
+        elif not checked and self._playback.state is FollowState.FOLLOWING:
+            # Rejoining REPLAY-follow: no immediate fetch (the next apply_updates() tick's
+            # FOLLOWING branch re-anchors to wherever the clock has moved to since) - just clear
+            # the freeze UI.
+            self._set_pause_ui(False)
+
+    def _toggle_force_live(self, checked: bool):
+        """Pins this tab to the live tail regardless of the global clock's REPLAY scrubbing.
+        Mirrors LogViewerWidget._toggle_force_live - is_paused always wins (a manually-paused
+        tab only jumps to live once the user clicks Resume, see _toggle_pause) - the machine's
+        own ToggleForceLive handling already encodes that (a no-op while FROZEN)."""
+        clock = self._clock()
+        action = self._playback.handle(FollowEvent.ToggleForceLive(checked), self._clock_snapshot(clock))
+        if action.kind is FollowActionKind.FETCH_LIVE:
+            self._go_live()
+
+    def _sync_force_live_visibility(self, clock):
+        """The Live override only means something while the global transport is actually
+        scrubbing REPLAY - hidden the rest of the time. force_live itself is untouched by this,
+        so re-entering REPLAY later remembers whatever this tab had it set to."""
+        self.action_force_live.setVisible(clock is not None and clock.mode is PlaybackMode.REPLAY)
 
     def _set_pause_ui(self, paused: bool, auto: bool = False):
         """Syncs self.is_paused/self.auto_paused and the Pause button's text/checked/style to
         match. Mirrors LogViewerWidget._set_pause_ui exactly (including the button text scheme)
         so both viewers present pausing identically."""
-        self.is_paused = paused
+        # self.is_paused is a read-only property derived from self._playback.state - this only
+        # syncs the button's own text/checked/style, never the underlying state itself.
         self.auto_paused = paused and auto
 
         self.action_pause.blockSignals(True)
@@ -1665,18 +1734,12 @@ QToolButton[manualPaused="true"] {
                 return
 
             # A manual scroll within a playback-following window locally overrides it for this
-            # tab only - the global clock and every other tab keep going. follow_playback resets
-            # to True either when the clock itself goes back to LIVE (apply_updates' REPLAY->LIVE
-            # exit branch) or when the user explicitly clicks Resume while the clock is still
+            # tab only - the global clock and every other tab keep going. The machine resets back
+            # to FOLLOWING either when the clock itself goes back to LIVE (apply_updates'
+            # FETCH_LIVE edge) or when the user explicitly clicks Resume while the clock is still
             # REPLAY (_toggle_pause) - not merely by scrolling back to the pool's current edge.
-            self.follow_playback = False
-            self._playback_anchored = False
-
-            # Mark this as a paused/frozen state (same as every other freeze path in this class -
-            # manual pause, clog protection, scrolling away from LIVE) so the Pause button
-            # actually shows "Resume" instead of silently leaving this tab detached from both
-            # live-tail and playback-follow with no visible way back in.
-            self._set_pause_ui(True)
+            action = self._playback.handle(FollowEvent.ScrolledAway(), self._clock_snapshot(clock))
+            self._apply_freeze(action)
             return
 
         scrollbar = self.view.verticalScrollBar()
@@ -1689,7 +1752,11 @@ QToolButton[manualPaused="true"] {
             # catch-up, which doesn't gate on any matched-row count either).
             if self._at_live_edge():
                 # Caught all the way up to the live edge - resume tailing.
-                self._go_live()
+                live_action = self._playback.handle(
+                    FollowEvent.ScrolledToLiveEdge(), self._clock_snapshot(self._clock())
+                )
+                if live_action.kind is FollowActionKind.FETCH_LIVE:
+                    self._go_live()
                 return
 
             last_seq = self._history_newest_ref_seq()

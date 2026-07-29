@@ -342,6 +342,28 @@ class TestStartReplay:
         assert created["started"] is True
         assert load_calls == [tmp_path]
 
+    def test_skips_unified_log_replay_when_already_resumed_from_cold_storage(self, main_window, monkeypatch, tmp_path):
+        """A previous run with cold_storage_persist_on_close enabled may have already archived
+        this exact session (CircularLogPool._mount_existing_cold_segments remounts it at
+        construction time, before start_replay ever runs) - re-parsing the unified log on top
+        would silently duplicate every row, so this must be skipped entirely."""
+        session = make_session_info(path=tmp_path)
+        main_window.gui_context.registry.central.log_pool.resumed_from_existing_cold_storage = True
+
+        constructed = []
+        monkeypatch.setattr(
+            "blinkview.parsers.unified_log_replay.UnifiedLogReplay",
+            lambda parts: constructed.append(parts),
+        )
+
+        load_calls = []
+        monkeypatch.setattr(main_window.gui_context.registry, "load_replay_session", lambda d: load_calls.append(d))
+
+        main_window.start_replay(session)
+
+        assert constructed == []
+        assert load_calls == [tmp_path]
+
 
 class TestRelaunchAsReplay:
     def test_spawns_blink_replay_subprocess_with_the_session_id(self, main_window, monkeypatch):

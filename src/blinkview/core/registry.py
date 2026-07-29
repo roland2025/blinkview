@@ -89,6 +89,7 @@ class Registry:
         log_dir: str | Path = None,
         settings=None,
         replay_mode: bool = False,
+        replay_source_dir: Optional[Path] = None,
     ):
         # ==========================================
         # LAYER 1: Core Services
@@ -110,6 +111,12 @@ class Registry:
         self.now = self.time_utils.now
         self.now_ns = self.time_utils.now_ns
 
+        # Wall-clock epoch ns at process start - lower bound for the "live system logs" seek bar
+        # (PlaybackControlWidget), which always spans program-start-to-now regardless of what
+        # replay session (if any) is loaded, since the system's own self-logging keeps running
+        # live throughout a replay.
+        self.start_ts_ns = self.now_ns()
+
         self.logger = self.logger_creator("registry")()
 
         factories = build_system_factory_registry()
@@ -121,6 +128,14 @@ class Registry:
             config_path=config_path,
             replay_mode=replay_mode,
         )
+        if replay_source_dir is not None:
+            # Set here (constructor time), before self.id_registry is built below, rather than
+            # as a post-construction assignment (ui/run.py used to do
+            # `registry.file_manager.replay_source_dir = ...` after Registry() already
+            # returned) - IDRegistry rehydrates itself from persisted cold storage as part of
+            # its own construction (see IDRegistry.__init__), which only works if this is
+            # already set by the time that happens.
+            self.file_manager.replay_source_dir = Path(replay_source_dir)
 
         default_config = {
             "version": "0.2",
@@ -168,7 +183,7 @@ class Registry:
         # Snapshot the logic immediately
         # self.file_manager.save_snapshot(["src/", "configs/"])
 
-        self.id_registry = IDRegistry(np_pool)
+        self.id_registry = IDRegistry(np_pool, replay_source_dir=self.file_manager.replay_source_dir)
         self.pid_history = IdHistory()
 
         self.system_ctx = SystemContext(
@@ -488,7 +503,19 @@ class Registry:
                 # deleted, and without this, every cold segment's mmap was still open (release_all()
                 # was otherwise only ever called by warmup.py's throwaway dummy pool).
                 if self.central.log_pool is not None:
-                    self.central.log_pool.release_all()
+                    log_pool = self.central.log_pool
+                    # Capture before release_all() clears _archiver - cold segment rows only
+                    # carry numeric device_id/module_id columns, so a later run remounting these
+                    # persisted files (see CircularLogPool._mount_existing_cold_segments) needs
+                    # the name<->id mapping dumped alongside them, or every row would render with
+                    # unknown/blank device and module names.
+                    persist = getattr(log_pool, "_persist_cold_storage", False)
+                    cold_dir = log_pool._archiver._dir if persist and log_pool._archiver is not None else None
+
+                    log_pool.release_all()
+
+                    if cold_dir is not None:
+                        self._dump_id_registry(cold_dir)
 
             self.file_manager.stop()
 
@@ -505,6 +532,22 @@ class Registry:
         # of start()/_is_running, so it must always be shut down here - even if start() was
         # never called - or it leaks as a zombie thread that races interpreter shutdown.
         self.system_ctx.tasks.shutdown()
+
+    def _id_registry_dump_path(self, cold_dir) -> Path:
+        return Path(cold_dir) / "id_registry.json"
+
+    def _dump_id_registry(self, cold_dir) -> None:
+        """Persists id_registry.discovery_log alongside cold-storage files that survived close
+        (cold_storage_persist_on_close) - see IDRegistry.dump_discovery_log's docstring for why
+        this is needed at all: cold segment rows only carry numeric device_id/module_id columns,
+        with the name mapping living only in this in-memory registry."""
+        import json
+
+        try:
+            path = self._id_registry_dump_path(cold_dir)
+            path.write_text(json.dumps(self.id_registry.dump_discovery_log()))
+        except OSError as e:
+            self.logger.warning(f"Failed to persist id_registry alongside cold storage: {e}")
 
     def configure_system(self):
         try:
@@ -619,6 +662,21 @@ class Registry:
             self.logger.error("Error during system configuration", e)
 
     def _dump_temp_logs(self):
+        """Flushes PrintLogger messages buffered before central storage existed (see
+        logger_creator) into it now that log_append is available.
+
+        In replay_mode, these carry real wall-clock "now" timestamps from this process's own
+        startup - unrelated to whatever historical timeline UnifiedLogReplay is about to stream
+        in (start_replay() runs later, off a QTimer, once the main window is up). Central
+        storage's segment bounds (PooledLogBatch.start_ts/end_ts, see numpy_batch_manager.py)
+        assume rows arrive in non-decreasing ts order; interleaving today's boot messages ahead
+        of yesterday's replayed rows in the same hot segment breaks that assumption and corrupts
+        get_time_bounds()/the playback scrubber's range. Dropped rather than deferred - there's
+        no timestamp for a startup message that belongs on a replayed device's timeline."""
+        if self.replay_mode:
+            self._temp_log_queue = None
+            return
+
         get_module = self.system_device.get_module
         log_append = self.log_append
         get_nowait = self._temp_log_queue.get_nowait

@@ -39,6 +39,7 @@ from blinkview.core import dtypes
 from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
 from blinkview.core.module_snapshot import MAX_MSG_BYTES, LatestModuleValueTracker
 from blinkview.core.playback_clock import PlaybackMode
+from blinkview.core.playback_follow import ClockSnapshot, FollowActionKind, FollowEvent, PlaybackFollowMachine
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.telemetry_table import nb_initialize_new_modules, nb_update_visible_state
 from blinkview.ui.constants import WidgetName
@@ -99,6 +100,10 @@ class TelemetryTableModel(QAbstractTableModel):
 
         self.hide_empty = False
         self.show_non_essential = False
+        # No scroll/pause concept here (unlike LogViewerWidget/LogTableViewerWidget) - this table
+        # always follows, so it only ever occupies LIVE or FOLLOWING (see
+        # plans/playback-follow-state-machine.md).
+        self._playback = PlaybackFollowMachine(supports_freeze=False)
 
         # Sort settings
         self.sort_column = TelemetryCol.DEVICE
@@ -109,6 +114,16 @@ class TelemetryTableModel(QAbstractTableModel):
     def _clock(self):
         registry = self.context.registry
         return registry.playback_clock if registry is not None else None
+
+    @property
+    def force_live(self) -> bool:
+        return self._playback.force_live
+
+    def _clock_snapshot(self) -> ClockSnapshot:
+        clock = self._clock()
+        if clock is None:
+            return ClockSnapshot(mode=PlaybackMode.LIVE, current_ts_ns=0)
+        return ClockSnapshot(mode=clock.mode, current_ts_ns=clock.current_ts_ns, is_playing=clock.is_playing)
 
     @staticmethod
     @register_warmup
@@ -206,6 +221,15 @@ class TelemetryTableModel(QAbstractTableModel):
 
     def set_show_non_essential(self, show: bool):
         self.show_non_essential = show
+        self.refresh_layout()
+
+    def set_force_live(self, force: bool):
+        self._playback.handle(FollowEvent.ToggleForceLive(force), self._clock_snapshot())
+        # Filters like hide_empty read seqs_mv, which just changed data source -
+        # re-derive visible rows before the next apply_updates paints values. Mirrors
+        # set_hide_empty/set_show_non_essential: doesn't force an immediate apply_updates()
+        # itself (the tracker may not even exist yet during construction/restore), the next
+        # regular tick picks up the new data source.
         self.refresh_layout()
 
     def _passes_filters(self, mod_id: int) -> bool:
@@ -498,12 +522,14 @@ class TelemetryTableModel(QAbstractTableModel):
         newly_active_ids = np.zeros(len(self.modules), dtype=np.int32)
 
         # While the global playback clock is scrubbing REPLAY, show the latest-per-module
-        # message as of the playhead instead of the tracker's "latest ever" snapshot - there's
-        # no manual browse/detach state to track here (unlike LogViewerWidget/TelemetryPlotter),
-        # since this table has no per-widget time navigation of its own; it always follows.
-        clock = self._clock()
-        if clock is not None and clock.mode is PlaybackMode.REPLAY:
-            snapshot_ctx = tracker.build_snapshot_as_of(clock.current_ts_ns)
+        # message as of the playhead instead of the tracker's "latest ever" snapshot - unless
+        # force_live pins this table to live data while other windows scrub. Routed through
+        # PlaybackFollowMachine (LIVE/FOLLOWING only - see plans/playback-follow-state-machine.md)
+        # rather than reading clock.mode directly, so this table's follow logic stays structurally
+        # identical to LogViewerWidget/LogTableViewerWidget's.
+        action = self._playback.handle(FollowEvent.Tick(), self._clock_snapshot())
+        if action.kind is FollowActionKind.FETCH_FOLLOWING:
+            snapshot_ctx = tracker.build_snapshot_as_of(action.anchor_ts_ns)
         else:
             snapshot_ctx = tracker.get_snapshot()
 
@@ -671,6 +697,7 @@ class TelemetryTable(QWidget):
 
         self.hide_empty = True
         self.show_non_essential = False
+        self.force_live = False
 
         self._set_defaults()
 
@@ -697,6 +724,15 @@ class TelemetryTable(QWidget):
         self.action_toggle_module.setChecked(True)
         self.action_toggle_module.triggered.connect(self._toggle_device_column)
         self.toolbar.addAction(self.action_toggle_module)
+
+        self.action_force_live = QAction("Live", self)
+        self.action_force_live.setCheckable(True)
+        self.action_force_live.setChecked(self.force_live)
+        self.action_force_live.setToolTip(
+            "Always show live values in this table, even while other windows are scrubbing REPLAY"
+        )
+        self.action_force_live.triggered.connect(self._toggle_force_live)
+        self.toolbar.addAction(self.action_force_live)
 
         self.options_button = QToolButton()
         self.options_button.setText("⚙ Options")
@@ -797,13 +833,23 @@ class TelemetryTable(QWidget):
         else:
             self.auto_size_columns_delayed()
 
+        self._sync_force_live_visibility()
+
     def closeEvent(self, event):
         self.gui_context.remove_updatable(self)
         super().closeEvent(event)
 
     def apply_updates(self, force: bool = False):
         """Pass update execution to our isolated table model."""
+        self._sync_force_live_visibility()
         self.model.apply_updates(force=force)
+
+    def _sync_force_live_visibility(self):
+        """The Live override only means something while the global transport is actually
+        scrubbing REPLAY - hidden the rest of the time. force_live itself is untouched by this,
+        so re-entering REPLAY later remembers whatever this table had it set to."""
+        clock = self.model._clock()
+        self.action_force_live.setVisible(clock is not None and clock.mode is PlaybackMode.REPLAY)
 
     def _set_defaults(self):
         self.tab_name = self.__class__.__name__
@@ -816,6 +862,7 @@ class TelemetryTable(QWidget):
         self.sort_column = TelemetryCol.DEVICE
         self.hide_empty = True
         self.show_non_essential = False
+        self.force_live = False
 
     def restore(self, state: dict):
         self.tab_name = state.get("tab_name", self.tab_name)
@@ -851,6 +898,10 @@ class TelemetryTable(QWidget):
         self.action_show_non_essential.setChecked(self.show_non_essential)
         self.model.set_show_non_essential(self.show_non_essential)
 
+        self.force_live = state.get("force_live", self.force_live)
+        self.action_force_live.setChecked(self.force_live)
+        self.model.set_force_live(self.force_live)
+
         self.action_toggle_module.setChecked(self.show_device_column)
         self._toggle_device_column(self.show_device_column)
 
@@ -877,6 +928,7 @@ class TelemetryTable(QWidget):
             "sort_order": self.sort_order,
             "hide_empty": self.hide_empty,
             "show_non_essential": self.show_non_essential,
+            "force_live": self.force_live,
         }
 
     def auto_size_columns_delayed(self):
@@ -967,7 +1019,7 @@ class TelemetryTable(QWidget):
             WidgetName.LOG_VIEWER,
             title,
             as_window=True,
-            params={"filtered_module": module, "include_children": include_children},
+            params={"filtered_module": module, "include_children": include_children, "force_live": self.force_live},
         )
 
     def sort_by_device(self):
@@ -1008,6 +1060,7 @@ class TelemetryTable(QWidget):
                         "filtered_module": module,
                         "filtered_module_children": with_children,
                         "show_hidden": show_hidden,
+                        "force_live": self.force_live,
                     },
                 )
 
@@ -1156,3 +1209,7 @@ class TelemetryTable(QWidget):
         self.show_non_essential = checked
         self.model.set_show_non_essential(checked)
         self.auto_size_columns_delayed()
+
+    def _toggle_force_live(self, checked: bool):
+        self.force_live = checked
+        self.model.set_force_live(checked)

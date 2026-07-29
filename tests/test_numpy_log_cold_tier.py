@@ -5,6 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -64,6 +65,22 @@ def _permissive_sidebar():
     return False, np.zeros(0, dtype=np.uint8)
 
 
+def _force_one_row_segment_capacity(pool):
+    """Like `pool.segment_capacity = 1; pool._optimized = True; pool.clear()`, but without
+    clear()'s side effect of also wiping cold_segments/sequence back to empty/zero - for use on
+    a pool that already has real remounted state (from _mount_existing_cold_segments) worth
+    keeping. Swaps out just the initial, default-capacity active segment for a fresh one built
+    with the new capacity."""
+    pool.segment_capacity = 1
+    pool._optimized = True
+    with pool._lock:
+        old_active = pool.segments.popleft() if pool.segments else None
+        pool.active_segment = None
+    if old_active is not None:
+        old_active.release()
+    pool._rotate_segment()
+
+
 @pytest.fixture
 def global_pool():
     # min_bytes=8 gives an exact 1-row-capacity segment for segment_capacity=1 (int64 timestamps
@@ -110,6 +127,36 @@ class TestHotToColdEviction:
         cold_dir_files = list(cold_log_pool._archiver._dir.glob("*.blkseg"))
         # Exactly the still-referenced cold segments' files should remain - evicted ones deleted.
         assert len(cold_dir_files) == len(cold_log_pool.cold_segments)
+
+    def test_locked_cold_segment_file_is_retried_and_eventually_deleted(self, cold_log_pool, global_pool):
+        """Regression test: a concurrent reader (e.g. a GUI fetch's SegmentSnapshot) holding its
+        own retain() on a cold segment at the exact moment it's evicted must not permanently
+        leak that segment's file - PooledLogBatch.release() only actually closes the underlying
+        mmap once the ref-count hits zero, and on Windows an open mapping blocks deletion."""
+        push_rows(cold_log_pool, global_pool, 4, ts_start=100)
+        assert wait_for(lambda: len(cold_log_pool.cold_segments) >= 1)
+
+        # Simulate a concurrent GUI fetch holding a retain() on the oldest cold segment right as
+        # it's about to fall out of the cold tier.
+        held = cold_log_pool.cold_segments[0].retain()
+        held_path = held.metadata.path
+
+        # Push enough more rows to evict this exact segment out of the cold tier entirely.
+        push_rows(cold_log_pool, global_pool, 6, ts_start=200)
+        assert wait_for(lambda: held_path not in [s.metadata.path for s in cold_log_pool.cold_segments])
+
+        # The file must still exist - eviction's own release() didn't drop the ref-count to zero
+        # (held's retain() is still outstanding), so the unlink attempt should have failed and
+        # been deferred rather than silently leaked.
+        assert Path(held_path).exists()
+        assert held_path in cold_log_pool._pending_cold_deletions
+
+        # Once the concurrent "reader" finishes and releases its own reference, the file becomes
+        # deletable - the *next* eviction (for a different segment) should retry and succeed.
+        held.release()
+        push_rows(cold_log_pool, global_pool, 2, ts_start=300)
+        assert wait_for(lambda: not Path(held_path).exists())
+        assert held_path not in cold_log_pool._pending_cold_deletions
 
     def test_get_time_bounds_spans_cold_and_hot(self, cold_log_pool, global_pool):
         push_rows(cold_log_pool, global_pool, 6, ts_start=1000)
@@ -181,3 +228,127 @@ class TestRealKernelFetchThroughColdTier:
         assert sorted(collected) == [3, 4, 5, 6]
         assert result.reached_live_edge is True
         assert result.total_new_rows == 4
+
+
+class TestPersistColdStorageOnClose:
+    """cold_storage_persist_on_close: keep cold segment files on disk instead of wiping them at
+    release_all(), and flush the hot tier to disk too so the whole session is archived - not
+    just what had already been evicted. A later CircularLogPool pointed at the same directory
+    should remount everything directly (CircularLogPool._mount_existing_cold_segments) instead
+    of starting empty."""
+
+    def test_release_all_flushes_hot_tier_and_keeps_files_on_disk(self, global_pool, tmp_path):
+        pool = CircularLogPool(
+            global_pool,
+            max_pieces=2,
+            cold_max_pieces=4,
+            cold_storage_dir=str(tmp_path),
+            final_buffer_bytes=1024,
+            persist_cold_storage=True,
+        )
+        pool.segment_capacity = 1
+        pool._optimized = True
+        pool.clear()
+
+        # 4 rows, 2 hot slots + 2 cold slots -> seq 1,2 archived to cold already, seq 3,4 still
+        # in the hot tier (never evicted, so never archived by the ordinary eviction path).
+        push_rows(pool, global_pool, 4, ts_start=100)
+        assert wait_for(lambda: len(pool.cold_segments) >= 2)
+
+        pool.release_all()
+
+        # Nothing deleted - persist=True.
+        blkseg_files = sorted(tmp_path.glob("segment_*.blkseg"))
+        assert len(blkseg_files) == 4  # all 4 rows, one per one-row segment, now all on disk
+
+        # Confirm the hot rows (seq 3, 4) actually made it to disk, not just the already-cold ones.
+        from blinkview.core.cold_segment import read_cold_segment_header
+
+        last_seqs = sorted(read_cold_segment_header(p).last_seq for p in blkseg_files)
+        assert last_seqs == [1, 2, 3, 4]
+
+    def test_reopening_the_same_directory_remounts_and_continues_sequence(self, global_pool, tmp_path):
+        pool = CircularLogPool(
+            global_pool,
+            max_pieces=2,
+            cold_max_pieces=4,
+            cold_storage_dir=str(tmp_path),
+            final_buffer_bytes=1024,
+            persist_cold_storage=True,
+        )
+        pool.segment_capacity = 1
+        pool._optimized = True
+        pool.clear()
+        push_rows(pool, global_pool, 4, ts_start=100)
+        assert wait_for(lambda: len(pool.cold_segments) >= 2)
+        pool.release_all()
+
+        reopened = CircularLogPool(
+            NumpyArrayPool(min_bytes=8, max_bytes=1024 * 1024),
+            max_pieces=2,
+            cold_max_pieces=4,
+            cold_storage_dir=str(tmp_path),
+            final_buffer_bytes=1024,
+            persist_cold_storage=True,
+        )
+        try:
+            assert reopened.resumed_from_existing_cold_storage is True
+            assert len(reopened.cold_segments) == 4
+            assert sorted(int(s.last_sequence_id) for s in reopened.cold_segments) == [1, 2, 3, 4]
+            # New inserts must continue the sequence, not restart at 1 and collide with what
+            # was just remounted.
+            assert int(reopened.sequence) == 4
+
+            _force_one_row_segment_capacity(reopened)
+            push_rows(reopened, NumpyArrayPool(min_bytes=8, max_bytes=1024 * 1024), 1, ts_start=500)
+            assert wait_for(lambda: int(reopened.sequence) == 5)
+        finally:
+            reopened.release_all()
+
+    def test_archiving_after_reopen_does_not_overwrite_remounted_files(self, global_pool, tmp_path):
+        """Regression test for ColdStorageArchiver's counter - without continuing numbering past
+        what's already on disk, a freshly-reopened archiver would start back at
+        segment_0000000000.blkseg and silently clobber the very file it just remounted from."""
+        pool = CircularLogPool(
+            global_pool,
+            max_pieces=1,
+            cold_max_pieces=4,  # generous cap so nothing gets evicted/deleted mid-test
+            cold_storage_dir=str(tmp_path),
+            final_buffer_bytes=1024,
+            persist_cold_storage=True,
+        )
+        pool.segment_capacity = 1
+        pool._optimized = True
+        pool.clear()
+        push_rows(pool, global_pool, 2, ts_start=100)
+        assert wait_for(lambda: len(pool.cold_segments) >= 1)
+        pool.release_all()
+
+        first_run_files = {p.name for p in tmp_path.glob("segment_*.blkseg")}
+        assert len(first_run_files) >= 1
+
+        reopened_pool = NumpyArrayPool(min_bytes=8, max_bytes=1024 * 1024)
+        reopened = CircularLogPool(
+            reopened_pool,
+            max_pieces=1,
+            cold_max_pieces=4,  # generous cap so the remounted segment isn't immediately evicted
+            cold_storage_dir=str(tmp_path),
+            final_buffer_bytes=1024,
+            persist_cold_storage=True,
+        )
+        _force_one_row_segment_capacity(reopened)
+        push_rows(reopened, reopened_pool, 2, ts_start=200)
+        assert wait_for(lambda: len(reopened.cold_segments) >= len(first_run_files) + 1)
+        # release_all() (persist=True) flushes the still-hot 2nd row (seq 4) too - only the
+        # first of the two new rows gets rotated/archived by push_rows' own pacing alone.
+        reopened.release_all()
+
+        # The original file(s) must still exist, byte-identical in content (same header), not
+        # silently overwritten by the resumed archiver's first new write.
+        from blinkview.core.cold_segment import read_cold_segment_header
+
+        for name in first_run_files:
+            assert (tmp_path / name).exists()
+        all_last_seqs = sorted(read_cold_segment_header(p).last_seq for p in tmp_path.glob("segment_*.blkseg"))
+        # Original seq 1,2 preserved untouched, plus new seq 3,4 from the resumed session.
+        assert all_last_seqs == [1, 2, 3, 4]

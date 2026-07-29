@@ -18,17 +18,17 @@ from blinkview.core.logger import PrintLogger
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 
 
-def make_storage(**config_overrides):
+def make_storage(replay_source_dir=None, **config_overrides):
     storage = CentralStorage()
     storage.logger = PrintLogger("test.central_storage")
     # Cold storage is enabled by default now, and its default directory (when cold_storage_dir
     # isn't overridden) is resolved from the session's own FileManager.session_dir - fake one up
     # so tests that don't care about cold storage specifically don't have to plumb it through.
+    # replay_source_dir=None matches a real (non-replay) FileManager's default; pass a Path to
+    # simulate a run launched straight into replay (see CentralStorage._resolve_cold_storage_dir).
     session_dir = Path(tempfile.mkdtemp(prefix="test_central_storage_session_"))
-    file_manager = SimpleNamespace(session_dir=session_dir)
-    storage.shared = SimpleNamespace(
-        array_pool=NumpyArrayPool(), registry=SimpleNamespace(file_manager=file_manager)
-    )
+    file_manager = SimpleNamespace(session_dir=session_dir, replay_source_dir=replay_source_dir)
+    storage.shared = SimpleNamespace(array_pool=NumpyArrayPool(), registry=SimpleNamespace(file_manager=file_manager))
     storage.apply_config(config_overrides)
     return storage
 
@@ -117,6 +117,29 @@ class TestApplyConfig:
             assert len(created_dirs) == 1
             assert created_dirs[0].is_dir()
             assert storage.log_pool._archiver._dir == created_dirs[0]
+        finally:
+            storage.log_pool.release_all()
+
+    def test_cold_storage_uses_replay_source_dir_when_launched_into_replay(self, tmp_path):
+        """Regression test: a run launched straight into replay (ui/run.py's replay_mode/
+        replay_session_info path) sets FileManager.replay_source_dir before Registry.
+        configure_system() builds CentralStorage - cold storage must land under that *original*
+        session's folder, not this run's own (lazily-created, otherwise-never-materialized -
+        see FileManager.__init__'s `create=not replay_mode`) session_dir. Resolving against
+        session_dir here used to `mkdir(parents=True)` that folder into existence purely as a
+        side effect, which is exactly the "phantom session folder" a replay-only launch must
+        avoid creating."""
+        old_session_dir = tmp_path / "old_session"
+        old_session_dir.mkdir()
+
+        storage = make_storage(replay_source_dir=old_session_dir)
+        try:
+            assert storage.log_pool._archiver._dir == old_session_dir / "cold"
+            # Nothing should have been created under this run's own live session_dir (the
+            # fixture pre-creates session_dir itself via tempfile.mkdtemp as a stand-in for a
+            # real FileManager's path - the regression is specifically about not creating a
+            # "cold" subfolder under it, which is what used to happen unconditionally).
+            assert not (storage.shared.registry.file_manager.session_dir / "cold").exists()
         finally:
             storage.log_pool.release_all()
 

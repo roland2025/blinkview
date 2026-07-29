@@ -19,6 +19,7 @@ from blinkview.ops.timestamps import (
     nb_auto_sync_fallback,
     nb_auto_sync_fallback_2,
     nb_parse_int_timestamp,
+    nb_parse_unified_log_ts_ns,
     nb_project_synced_ns,
 )
 
@@ -197,3 +198,38 @@ class TestProjectSyncedNs:
         result = nb_project_synced_ns(raw_ns=1_000_000_000, rx_ns=0, sync=sync)
 
         assert int(result) == 9_000_000_000
+
+
+class TestParseUnifiedLogTsNs:
+    """Cross-checks nb_parse_unified_log_ts_ns's manual integer date math against the
+    datetime.strptime-based formula it replaced in parsers/unified_log_replay.py (see
+    plans/unifiedlogreplay-is-too-slow-rippling-hummingbird.md) - both must agree exactly
+    before the old implementation is considered safe to have deleted."""
+
+    @staticmethod
+    def _strptime_ts_ns(ts_text: str) -> int:
+        from calendar import timegm
+        from datetime import datetime
+
+        dt = datetime.strptime(ts_text[:19], "%Y-%m-%dT%H:%M:%S")
+        us = int(ts_text[20:])
+        return timegm(dt.timetuple()) * 1_000_000_000 + us * 1000
+
+    @staticmethod
+    def _parse(ts_text: str) -> int:
+        buf = np.frombuffer((ts_text + "Z").encode("ascii"), dtype=np.uint8)
+        return int(nb_parse_unified_log_ts_ns(buf, 0))
+
+    def test_matches_strptime_for_sample_timestamps(self):
+        samples = [
+            "2026-01-01T00:00:00.000000",
+            "2026-07-28T13:41:55.822509",
+            "2024-02-29T12:00:00.500000",  # leap day
+            "2023-02-28T23:59:59.999999",  # non-leap year, day before Mar 1
+            "2025-12-31T23:59:59.999999",  # year boundary
+            "2026-01-01T00:00:00.000001",  # just after a year boundary
+            "2000-02-29T00:00:00.000000",  # century leap year (divisible by 400)
+            "1970-01-01T00:00:00.000000",  # epoch
+        ]
+        for ts_text in samples:
+            assert self._parse(ts_text) == self._strptime_ts_ns(ts_text), ts_text

@@ -603,15 +603,33 @@ class BlinkMainWindow(QMainWindow):
         from blinkview.utils.session_lister import unified_log_parts
 
         registry = self.gui_context.registry
-        parts = unified_log_parts(session_info)
-        if not parts:
-            self.logger.warn(f"start_replay: no unified log found in session '{session_info.session_id}'")
-            return
 
-        replay_reader = UnifiedLogReplay(parts)
-        replay_reader.bind_system(registry.system_ctx, SimpleNamespace(get_logger=registry.logger_creator("replay")))
-        replay_reader.subscribe(registry.central)
-        replay_reader.start()
+        # A previous run with cold_storage_persist_on_close enabled may have already archived
+        # this exact session's data (CentralStorage resolves cold_storage_dir to
+        # replay_source_dir/cold while replaying - see CentralStorage._resolve_cold_storage_dir),
+        # and CircularLogPool.__init__ remounts it directly (see
+        # CircularLogPool._mount_existing_cold_segments) before this method ever runs. In that
+        # case, re-parsing the unified log here would silently duplicate every row (fresh
+        # sequence numbers layered on top of the already-mounted ones) - skip it entirely and
+        # trust what's already mounted.
+        log_pool = registry.central.log_pool if registry.central is not None else None
+        if log_pool is not None and log_pool.resumed_from_existing_cold_storage:
+            self.logger.info(
+                f"start_replay: '{session_info.session_id}' already resumed from persisted cold "
+                "storage - skipping unified log parse."
+            )
+        else:
+            parts = unified_log_parts(session_info)
+            if not parts:
+                self.logger.warn(f"start_replay: no unified log found in session '{session_info.session_id}'")
+                return
+
+            replay_reader = UnifiedLogReplay(parts)
+            replay_reader.bind_system(
+                registry.system_ctx, SimpleNamespace(get_logger=registry.logger_creator("replay"))
+            )
+            replay_reader.subscribe(registry.central)
+            replay_reader.start()
 
         registry.load_replay_session(session_info.path)
 

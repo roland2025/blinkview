@@ -181,6 +181,7 @@ class TestNormalLaunch:
             "config_path": "/cfg.json",
             "settings": reg.kwargs["settings"],
             "replay_mode": False,
+            "replay_source_dir": None,
         }
 
     def test_does_not_set_replay_source_dir_when_not_replaying(self):
@@ -189,7 +190,7 @@ class TestNormalLaunch:
         with pytest.raises(SystemExit):
             run_module.run(args)
 
-        assert FakeRegistry.instances[0].file_manager.replay_source_dir is None
+        assert FakeRegistry.instances[0].kwargs["replay_source_dir"] is None
 
     def test_shows_the_window_and_restores_ui_state_but_does_not_start_replay(self):
         args = make_args()
@@ -213,14 +214,17 @@ class TestNormalLaunch:
 
 
 class TestReplayLaunch:
-    def test_sets_replay_source_dir_before_main_window_is_constructed(self, tmp_path):
+    def test_passes_replay_source_dir_into_the_registry_constructor(self, tmp_path):
+        """Passed as a constructor kwarg (not set on registry.file_manager afterward) so both
+        FileManager and IDRegistry see it from their own construction - see
+        IDRegistry.__init__'s self-rehydration and Registry.__init__'s own comment on this."""
         args = make_args()
         session_info = SimpleNamespace(path=tmp_path / "some_session", session_id="sess1")
 
         with pytest.raises(SystemExit):
             run_module.run(args, replay_mode=True, replay_session_info=session_info)
 
-        assert FakeRegistry.instances[0].file_manager.replay_source_dir == session_info.path
+        assert FakeRegistry.instances[0].kwargs["replay_source_dir"] == session_info.path
         assert FakeRegistry.instances[0].kwargs["replay_mode"] is True
 
     def test_calls_start_replay_after_load_ui_state(self, tmp_path):
