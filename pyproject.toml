@@ -58,7 +58,9 @@ gui-core = [
     "pyqtdarktheme",
     "pyqtgraph",
     "numpy",
-    "numba"
+    "numba",
+    "psutil>=6.0.0",
+    "zstandard>=0.22.0"
 ]
 
 pyside6 = ["PySide6>=6.6.0", "blinkview[gui-core]"]
@@ -75,7 +77,6 @@ blink = "blinkview.__main__:main"
 [dependency-groups]
 dev = [
     "ruff>=0.15.8",
-    "psutil>=6.0.0",
     "blinkview[all]",
     { include-group = "test" },
 ]

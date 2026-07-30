@@ -19,3 +19,19 @@ CENTRAL_STORAGE_BUFFER_SIZE_MB = 128
 # skip checks - see plans/fetch-telemetry-window-cold-segment-perf.md) by roughly the same factor.
 CENTRAL_STORAGE_COLD_STORAGE_ENABLED = True
 CENTRAL_STORAGE_COLD_MAX_PIECES = 32
+
+# HotTierMemoryGovernor - auto-sizing the hot tier off system free memory instead of a static
+# max_pieces knob. See plans/auto-hot-cold-memory-management.md. Opt-in (off by default) and only
+# takes effect when cold storage is enabled (see CentralStorage._apply_memory_governor_config) -
+# otherwise "shrink hot tier under memory pressure" would silently become "delete scrollback".
+CENTRAL_STORAGE_AUTO_MEMORY_MANAGEMENT_ENABLED = False
+CENTRAL_STORAGE_MIN_HOT_PIECES = CENTRAL_STORAGE_MAX_PIECES
+CENTRAL_STORAGE_MAX_HOT_PIECES = 0  # 0 = unbounded except by memory pressure itself
+CENTRAL_STORAGE_TARGET_FREE_MEMORY_MB = 4096
+CENTRAL_STORAGE_MEMORY_POLL_INTERVAL_SEC = 3.0
+
+# Caps a single HotTierMemoryGovernor poll tick's shrink step, bounding worst-case
+# CircularLogPool._lock hold time predictably regardless of how large a sudden memory spike is - a
+# persistent spike beyond this many segments' worth just takes a few extra poll ticks to fully
+# react to. Not a benchmarked value, a starting guess (see plan doc's "Rate limiting" section).
+MAX_SEGMENTS_EVICTED_PER_TICK = 4

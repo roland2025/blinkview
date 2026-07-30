@@ -150,24 +150,33 @@ def write_cold_segment_file(path: Union[str, Path], bundle) -> ColdSegmentHeader
     return ColdSegmentHeader(row_count, buffer_len, first_seq, last_seq, earliest_ts, latest_ts, tuple(table))
 
 
+def parse_cold_segment_header(header_bytes: bytes, table_bytes: bytes) -> ColdSegmentHeader:
+    """Struct-unpack logic shared by read_cold_segment_header (an on-disk file) and
+    open_cold_segment_arrays_from_buffer (an already-decompressed in-memory buffer - see
+    core/cold_archive.py) - the two differ only in where these bytes come from."""
+    magic, version, row_count, buffer_len, first_seq, last_seq, earliest_ts, latest_ts = struct.unpack(
+        _FIXED_HEADER_FMT, header_bytes
+    )
+    if magic != MAGIC:
+        raise ValueError("Not a cold segment (bad magic)")
+    if version != VERSION:
+        raise ValueError(f"Unsupported cold segment version {version}")
+
+    table = tuple(
+        struct.unpack(_TABLE_ENTRY_FMT, table_bytes[i * _TABLE_ENTRY_SIZE : (i + 1) * _TABLE_ENTRY_SIZE])
+        for i in range(len(COLUMN_SPECS))
+    )
+    return ColdSegmentHeader(row_count, buffer_len, first_seq, last_seq, earliest_ts, latest_ts, table)
+
+
 def read_cold_segment_header(path: Union[str, Path]) -> ColdSegmentHeader:
     with open(path, "rb") as f:
         header_bytes = f.read(_FIXED_HEADER_SIZE)
-        magic, version, row_count, buffer_len, first_seq, last_seq, earliest_ts, latest_ts = struct.unpack(
-            _FIXED_HEADER_FMT, header_bytes
-        )
-        if magic != MAGIC:
-            raise ValueError(f"Not a cold segment file (bad magic): {path}")
-        if version != VERSION:
-            raise ValueError(f"Unsupported cold segment version {version} in {path}")
-
         table_bytes = f.read(_TABLE_SIZE)
-        table = tuple(
-            struct.unpack(_TABLE_ENTRY_FMT, table_bytes[i * _TABLE_ENTRY_SIZE : (i + 1) * _TABLE_ENTRY_SIZE])
-            for i in range(len(COLUMN_SPECS))
-        )
-
-    return ColdSegmentHeader(row_count, buffer_len, first_seq, last_seq, earliest_ts, latest_ts, table)
+    try:
+        return parse_cold_segment_header(header_bytes, table_bytes)
+    except ValueError as e:
+        raise ValueError(f"{e}: {path}") from e
 
 
 class _MmapFileRef:
@@ -244,5 +253,85 @@ def open_cold_segment_arrays(path: Union[str, Path]) -> Tuple[ColdSegmentHeader,
     for (name, dt), (offset, length_bytes) in zip(COLUMN_SPECS, header.table):
         arr = file_ref.view(dt, offset, length_bytes)
         handles[name] = MmapArrayHandle(arr, file_ref)
+
+    return header, handles
+
+
+class _BufferRef:
+    """Refcounted holder of one shared decompressed segment buffer - the in-memory counterpart to
+    _MmapFileRef, for a cold segment materialized straight from a zstd archive
+    (core/cold_archive.py) instead of a memory-mapped file (see
+    PooledLogBatch.from_compressed_archive / plans/cold-storage-compression.md). Every column is a
+    np.frombuffer view into this one owned buffer, same "one shared mapping, refcounted per
+    column, closed once all handles release" shape as _MmapFileRef - just with a plain buffer to
+    drop instead of an mmap/file to close.
+
+    `buffer` must be writable (a uint8 ndarray - decompress_cold_segment_archive's normal case,
+    decompressed straight into a preallocated buffer via readinto() - or a bytearray, its
+    unknown-content-size fallback) - np.frombuffer's writeable flag mirrors the underlying
+    buffer's, and an immutable bytes object would produce read-only arrays, forcing a second
+    compiled Numba specialization the first time a kernel touches one (see _MmapFileRef's
+    docstring - same reasoning, same fix: writable-but-never-written-through)."""
+
+    def __init__(self, buffer: Union[bytearray, np.ndarray]):
+        self._buffer = buffer
+        self._refcount = 0
+        self._lock = threading.Lock()
+
+    def retain(self) -> "_BufferRef":
+        with self._lock:
+            self._refcount += 1
+        return self
+
+    def release(self) -> None:
+        with self._lock:
+            self._refcount -= 1
+            if self._refcount > 0:
+                return
+        self._buffer = None  # nothing to close - just drop the reference for GC
+
+    def view(self, dtype, offset: int, length_bytes: int) -> np.ndarray:
+        if length_bytes == 0:
+            return np.empty(0, dtype=dtype)
+        count = length_bytes // np.dtype(dtype).itemsize
+        return np.frombuffer(self._buffer, dtype=dtype, count=count, offset=offset)
+
+
+class BufferArrayHandle:
+    """Drop-in stand-in for MmapArrayHandle/PooledArrayHandle (same `.array`/`.release()`
+    surface), backing a decompressed-to-RAM cold segment instead of a memory-mapped file - see
+    PooledLogBatch.from_compressed_archive."""
+
+    __slots__ = ("array", "_buffer_ref")
+
+    def __init__(self, array: np.ndarray, buffer_ref: _BufferRef):
+        self.array = array
+        self._buffer_ref = buffer_ref
+        buffer_ref.retain()
+
+    def release(self) -> None:
+        self.array = None
+        if self._buffer_ref is not None:
+            self._buffer_ref.release()
+            self._buffer_ref = None
+
+
+def open_cold_segment_arrays_from_buffer(
+    buffer: Union[bytearray, np.ndarray],
+) -> Tuple[ColdSegmentHeader, Dict[str, BufferArrayHandle]]:
+    """Buffer-backed counterpart to open_cold_segment_arrays - `buffer` must already be a cold
+    segment's full decompressed content (core/cold_archive.py's decompress_cold_segment_archive)
+    and this takes ownership of it; nothing else should hold a separate reference to it
+    afterward. Returns its header and one BufferArrayHandle per COLUMN_SPECS column, all sharing a
+    single retained _BufferRef."""
+    header = parse_cold_segment_header(
+        bytes(buffer[:_FIXED_HEADER_SIZE]), bytes(buffer[_FIXED_HEADER_SIZE : _FIXED_HEADER_SIZE + _TABLE_SIZE])
+    )
+    buffer_ref = _BufferRef(buffer)
+
+    handles: Dict[str, BufferArrayHandle] = {}
+    for (name, dt), (offset, length_bytes) in zip(COLUMN_SPECS, header.table):
+        arr = buffer_ref.view(dt, offset, length_bytes)
+        handles[name] = BufferArrayHandle(arr, buffer_ref)
 
     return header, handles

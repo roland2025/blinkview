@@ -14,12 +14,18 @@ from blinkview.core.configurable import configuration_factory, configuration_pro
 from blinkview.core.constants import FactoryCategory
 from blinkview.core.factory import BaseFactory
 from blinkview.core.factory_category_registry import register_factory_category
+from blinkview.core.hot_tier_memory_governor import HotTierMemoryGovernor, get_available_memory_bytes
 from blinkview.core.limits import (
+    CENTRAL_STORAGE_AUTO_MEMORY_MANAGEMENT_ENABLED,
     CENTRAL_STORAGE_BUFFER_SIZE_MB,
     CENTRAL_STORAGE_COLD_MAX_PIECES,
     CENTRAL_STORAGE_COLD_STORAGE_ENABLED,
+    CENTRAL_STORAGE_MAX_HOT_PIECES,
     CENTRAL_STORAGE_MAX_PIECES,
     CENTRAL_STORAGE_MAXLEN,
+    CENTRAL_STORAGE_MEMORY_POLL_INTERVAL_SEC,
+    CENTRAL_STORAGE_MIN_HOT_PIECES,
+    CENTRAL_STORAGE_TARGET_FREE_MEMORY_MB,
 )
 from blinkview.core.numpy_log import (
     CircularLogPool,
@@ -98,8 +104,50 @@ class CentralFactory(BaseFactory[BaseCentralStorage]):
     "gets a fresh uniquely-named subdirectory per run, so there's nothing stable to reopen.",
     ui_order=16,
 )
+@configuration_property(
+    "auto_memory_management_enabled",
+    type="boolean",
+    default=CENTRAL_STORAGE_AUTO_MEMORY_MANAGEMENT_ENABLED,
+    description="Let the hot tier grow to use most of whatever system RAM is free, and shrink "
+    "(evicting oldest segments to cold storage) the moment free memory gets tight, instead of a "
+    "static max_pieces ceiling. Requires cold_storage_enabled - otherwise shrinking would delete "
+    "data instead of archiving it, so this stays off in that case regardless of this setting. See "
+    "plans/auto-hot-cold-memory-management.md.",
+    ui_order=17,
+)
+@configuration_property(
+    "min_hot_pieces",
+    type="integer",
+    default=CENTRAL_STORAGE_MIN_HOT_PIECES,
+    description="Floor on the hot tier's piece count when auto_memory_management_enabled - recent "
+    "scrollback never becomes disk-latency-bound no matter how much memory pressure there is.",
+    ui_order=18,
+)
+@configuration_property(
+    "max_hot_pieces",
+    type="integer",
+    default=CENTRAL_STORAGE_MAX_HOT_PIECES,
+    description="Optional ceiling on the hot tier's piece count when auto_memory_management_enabled, "
+    "even under abundant free memory. 0 = unbounded except by memory pressure itself.",
+    ui_order=19,
+)
+@configuration_property(
+    "target_free_memory_mb",
+    type="integer",
+    default=CENTRAL_STORAGE_TARGET_FREE_MEMORY_MB,
+    description="System free-memory floor (MB) auto_memory_management_enabled tries to maintain - "
+    "the hot tier shrinks once available memory drops below this.",
+    ui_order=20,
+)
+@configuration_property(
+    "memory_poll_interval_sec",
+    type="number",
+    default=CENTRAL_STORAGE_MEMORY_POLL_INTERVAL_SEC,
+    description="How often (seconds) auto_memory_management_enabled re-checks system free memory.",
+    ui_order=21,
+)
 @override_property(
-    "logging", hidden=False, required=True, default={"enabled": True, "processor": {"type": "log_row"}}, ui_order=20
+    "logging", hidden=False, required=True, default={"enabled": True, "processor": {"type": "log_row"}}, ui_order=30
 )
 class CentralStorage(BaseCentralStorage):
     maxlen: int
@@ -109,6 +157,11 @@ class CentralStorage(BaseCentralStorage):
     cold_max_pieces: int
     cold_storage_dir: str
     cold_storage_persist_on_close: bool
+    auto_memory_management_enabled: bool
+    min_hot_pieces: int
+    max_hot_pieces: int
+    target_free_memory_mb: int
+    memory_poll_interval_sec: float
 
     def __init__(self):
         super().__init__()
@@ -118,6 +171,7 @@ class CentralStorage(BaseCentralStorage):
         self.put = self.input_queue.put
 
         self.log_pool: Optional[CircularLogPool] = None
+        self.memory_governor: Optional[HotTierMemoryGovernor] = None
 
     def _resolve_cold_storage_dir(self) -> Path:
         """Always creates and returns a fresh directory the cold-storage archiver can rmtree
@@ -144,6 +198,12 @@ class CentralStorage(BaseCentralStorage):
         owner_dir = file_manager.replay_source_dir or file_manager.session_dir
         cold_dir = owner_dir / "cold"
         cold_dir.mkdir(parents=True, exist_ok=True)
+        # A previous run of this same session may have shrunk this dir's footprint by moving
+        # segments into a sibling cold-archive/ directory as zstd-compressed files (see
+        # _compress_persisted_cold_storage in Registry.stop()) - CircularLogPool's
+        # _mount_existing_cold_segments (below, via the constructor) mounts straight from those
+        # archives directly into memory when a raw copy isn't present here, so nothing further
+        # needs to happen at this point - see core/cold_archive.py.
         return cold_dir
 
     def apply_config(self, config: dict):
@@ -175,7 +235,55 @@ class CentralStorage(BaseCentralStorage):
             if self.cold_storage_enabled:
                 self.log_pool.update_cold_max_pieces(self.cold_max_pieces)
 
+        self._apply_memory_governor_config()
+
         return changed
+
+    def _apply_memory_governor_config(self):
+        """Starts/stops/reconfigures HotTierMemoryGovernor to match current config. Refuses to run
+        without cold storage enabled - see plans/auto-hot-cold-memory-management.md's
+        "Precondition" section: update_max_pieces' shrink path only archives to cold storage when
+        an archiver is configured, otherwise it silently drops the evicted data, which would turn
+        "evict under memory pressure" into "delete data under memory pressure"."""
+        if not self.auto_memory_management_enabled or not self.cold_storage_enabled:
+            if self.auto_memory_management_enabled and not self.cold_storage_enabled and self.logger:
+                self.logger.warning(
+                    "auto_memory_management_enabled requires cold_storage_enabled - leaving hot-tier "
+                    "auto-sizing off so shrinking the hot tier can't silently delete data."
+                )
+            if self.memory_governor is not None:
+                self.memory_governor.stop()
+                self.memory_governor = None
+            return
+
+        target_free_bytes = self.target_free_memory_mb * 1024 * 1024
+        max_hot_pieces = self.max_hot_pieces or None
+
+        if self.memory_governor is None:
+            self.memory_governor = HotTierMemoryGovernor(
+                log_pool=self.log_pool,
+                task_manager=self.shared.tasks,
+                get_available_bytes=get_available_memory_bytes,
+                min_hot_pieces=self.min_hot_pieces,
+                max_hot_pieces=max_hot_pieces,
+                target_free_bytes=target_free_bytes,
+                poll_interval_sec=self.memory_poll_interval_sec,
+                logger=self.logger,
+            )
+            self.memory_governor.start()
+        else:
+            self.memory_governor.update_policy(
+                min_hot_pieces=self.min_hot_pieces,
+                max_hot_pieces=max_hot_pieces,
+                target_free_bytes=target_free_bytes,
+                poll_interval_sec=self.memory_poll_interval_sec,
+            )
+
+    def stop(self, timeout: float = 5.0) -> None:
+        super().stop(timeout)
+        if self.memory_governor is not None:
+            self.memory_governor.stop()
+            self.memory_governor = None
 
     def run(self):
         # Localize method lookups

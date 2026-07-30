@@ -516,6 +516,7 @@ class Registry:
 
                     if cold_dir is not None:
                         self._dump_id_registry(cold_dir)
+                        self._compress_persisted_cold_storage(cold_dir)
 
             self.file_manager.stop()
 
@@ -548,6 +549,17 @@ class Registry:
             path.write_text(json.dumps(self.id_registry.dump_discovery_log()))
         except OSError as e:
             self.logger.warning(f"Failed to persist id_registry alongside cold storage: {e}")
+
+    def _compress_persisted_cold_storage(self, cold_dir) -> None:
+        """Shrinks a persisted session's on-disk footprint: every raw segment file left in
+        cold_dir gets zstd-compressed into a sibling cold-archive/ directory and deleted - see
+        core/cold_archive.py. Safe to call here specifically because log_pool.release_all() (the
+        caller's preceding step) has already closed every mmap over these files. A later replay of
+        this session unpacks them back on demand (CentralStorage._resolve_cold_storage_dir) before
+        CircularLogPool mounts them, so nothing about mounting itself needs to change."""
+        from blinkview.core.cold_archive import compress_cold_storage_dir
+
+        compress_cold_storage_dir(Path(cold_dir), logger=self.logger)
 
     def configure_system(self):
         try:

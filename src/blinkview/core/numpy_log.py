@@ -138,12 +138,24 @@ class CircularLogPool:
         self._rotate_segment()
 
     def _mount_existing_cold_segments(self, cold_storage_dir) -> None:
-        """Remounts any `.blkseg` files already sitting in cold_storage_dir (persisted by a
-        previous run's cold_storage_persist_on_close) directly as memmap-backed cold segments,
-        instead of starting with an empty cold tier and (for a replay) forcing a caller to
-        re-parse the entire original session from scratch. Sorted by filename - segment_*.blkseg
-        names are zero-padded and assigned in archive order, so lexical order is chronological
-        order.
+        """Remounts any cold segments already sitting in cold_storage_dir (persisted by a
+        previous run's cold_storage_persist_on_close) instead of starting with an empty cold tier
+        and (for a replay) forcing a caller to re-parse the entire original session from scratch.
+        Two possible sources per segment, preferring whichever is cheaper:
+
+        - A raw `segment_*.blkseg` file directly in cold_storage_dir - memory-mapped as-is
+          (PooledLogBatch.from_memmap), same as always.
+        - A zstd-compressed `segment_*.blkseg.zst` archive in the sibling `cold-archive/`
+          directory (core/cold_archive.py, see plans/cold-storage-compression.md), for a segment
+          that was compressed at the end of a previous session and never re-materialized as a raw
+          file since - decompressed straight into an owned in-memory buffer
+          (PooledLogBatch.from_compressed_archive), never touching disk for the decompressed
+          bytes. Skipped if a raw copy already exists (no reason to redundantly re-decompress
+          something a previous mount already materialized).
+
+        Sorted by filename across both sources together - segment_*.blkseg names are zero-padded
+        and assigned in archive order, so lexical order is chronological order regardless of which
+        source a given segment came from.
 
         Also advances self.sequence past the highest mounted segment's last_seq, so any new rows
         ingested after this (live data, or a resumed replay continuing past what's cached) get
@@ -158,22 +170,39 @@ class CircularLogPool:
         if not cold_dir.is_dir():
             return
 
-        paths = sorted(cold_dir.glob("segment_*.blkseg"))
-        if not paths:
+        raw_paths = {p.name: p for p in cold_dir.glob("segment_*.blkseg")}
+
+        archive_dir = cold_dir.parent / "cold-archive"
+        archive_paths = {}
+        if archive_dir.is_dir():
+            for p in archive_dir.glob("segment_*.blkseg.zst"):
+                raw_name = p.name[: -len(".zst")]
+                if raw_name not in raw_paths:
+                    archive_paths[raw_name] = p
+
+        names = sorted(raw_paths.keys() | archive_paths.keys())
+        if not names:
             return
 
         highest_seq = int(self.sequence)
-        for path in paths:
+        for name in names:
             try:
-                header = read_cold_segment_header(path)
-            except (OSError, ValueError):
+                if name in raw_paths:
+                    path = raw_paths[name]
+                    header = read_cold_segment_header(path)
+                    meta = ColdSegmentMeta(
+                        str(path), header.earliest_ts, header.latest_ts, header.first_seq, header.last_seq
+                    )
+                    segment = PooledLogBatch.from_memmap(str(path), metadata=meta)
+                else:
+                    segment = PooledLogBatch.from_compressed_archive(archive_paths[name])
+            except (OSError, ValueError) as e:
                 if self._logger:
-                    self._logger.warning(f"Skipping unreadable persisted cold segment file: {path}")
+                    self._logger.warning(f"Skipping unreadable persisted cold segment '{name}': {e}")
                 continue
 
-            meta = ColdSegmentMeta(str(path), header.earliest_ts, header.latest_ts, header.first_seq, header.last_seq)
-            self.cold_segments.append(PooledLogBatch.from_memmap(str(path), metadata=meta))
-            highest_seq = max(highest_seq, header.last_seq)
+            self.cold_segments.append(segment)
+            highest_seq = max(highest_seq, int(segment.last_sequence_id))
 
         if self.cold_segments:
             self.resumed_from_existing_cold_storage = True

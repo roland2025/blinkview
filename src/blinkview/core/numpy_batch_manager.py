@@ -232,14 +232,45 @@ class PooledLogBatch:
         insert()/append() on the result will raise rather than silently corrupt anything."""
         from blinkview.core.cold_segment import open_cold_segment_arrays
 
+        header, handles = open_cold_segment_arrays(path)
+        return cls._from_cold_handles(header, handles, metadata)
+
+    @classmethod
+    def from_compressed_archive(cls, archive_path: Any, metadata: Any = None) -> "PooledLogBatch":
+        """Alternate constructor: builds a frozen PooledLogBatch by fully decompressing a
+        zstd-compressed cold segment archive (core/cold_archive.py) straight into an owned
+        in-memory buffer, instead of writing the decompressed bytes back to disk and mmap'ing them
+        back in (see plans/cold-storage-compression.md) - skips that write-then-read-back round
+        trip entirely. Otherwise identical to from_memmap: same frozen/read-only contract, same
+        methods all work unmodified against the result.
+
+        `metadata` defaults to a ColdSegmentMeta built from the archive's own header (pointing at
+        `archive_path` - the actual on-disk artifact to delete on eviction, since a
+        buffer-materialized segment never gets a raw file on disk) - unlike from_memmap, nothing
+        else needs to separately read the header first to build one, since decompression already
+        parses it as a side effect."""
+        from blinkview.core.cold_archive import decompress_cold_segment_archive
+        from blinkview.core.cold_segment import ColdSegmentMeta, open_cold_segment_arrays_from_buffer
+
+        buffer = decompress_cold_segment_archive(archive_path)
+        header, handles = open_cold_segment_arrays_from_buffer(buffer)
+        if metadata is None:
+            metadata = ColdSegmentMeta(
+                str(archive_path), header.earliest_ts, header.latest_ts, header.first_seq, header.last_seq
+            )
+        return cls._from_cold_handles(header, handles, metadata)
+
+    @classmethod
+    def _from_cold_handles(cls, header: Any, handles: dict, metadata: Any) -> "PooledLogBatch":
+        """Shared by from_memmap/from_compressed_archive - both produce the same header +
+        column-handle shape (core/cold_segment.py's COLUMN_SPECS), just backed by a memory-mapped
+        file vs. an in-memory decompressed buffer respectively."""
         self = object.__new__(cls)
         self._pool = None
         self.metadata = metadata
         self._ref_count = 1
         self._lock = Lock()
         self.in_use = True
-
-        header, handles = open_cold_segment_arrays(path)
 
         self._ts_h = handles["timestamps"]
         self._rx_ts_h = handles["rx_timestamps"]
@@ -254,9 +285,9 @@ class PooledLogBatch:
         self._tid_h = handles["tids"]
         self._ext_u32_1_h = self._ext_u32_2_h = self._ext_u64_1_h = None
 
-        # Populated once, up front, straight from the on-disk header - a cold segment never
-        # changes again, so unlike a hot segment there's no later insert()/note_appended_rows()
-        # call to keep this in sync with; it's simply set correctly from the start.
+        # Populated once, up front, straight from the header - a cold segment never changes again,
+        # so unlike a hot segment there's no later insert()/note_appended_rows() call to keep this
+        # in sync with; it's simply set correctly from the start.
         if header.row_count > 0:
             self._cached_first_seq = header.first_seq
             self._cached_first_ts = header.earliest_ts

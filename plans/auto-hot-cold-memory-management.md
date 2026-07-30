@@ -1,6 +1,30 @@
 # Automatic hot/cold storage sizing based on system free memory
 
-**Status**: proposed, not yet implemented. This doc is the plan to review before any code changes.
+**Status**: implemented. `psutil` wheel-coverage verification (see "Decisions made" below)
+confirmed a `cp36-abi3` wheel covers every `gui-core` platform target, so `psutil` was promoted to
+a real dependency and the hand-rolled fallback was not needed.
+
+## Decisions made with the user before implementing
+
+- **`psutil` dependency**: conditional. Promote it to a real dependency (`gui-core` extras, see
+  "Memory query" below) *only if* it ships prebuilt wheels (no client-side compilation) for every
+  Python version/platform combo this app actually targets. If any target lacks a wheel and would
+  fall back to building from source on the end user's machine, hand-roll the platform queries
+  instead. **This needs a one-time verification step at implementation start** (check PyPI's
+  `psutil` file listing against blinkview's supported Python versions/platforms) before writing any
+  code against it - see "Memory query" below for what that check needs to confirm and the
+  hand-rolled fallback shape if it fails.
+- **Hysteresis margin**: one segment's worth of bytes (`log_pool.final_buffer_bytes`) - ties the
+  grow/shrink gap to the same unit the governor actually moves in, no separate config knob needed.
+- **Shrink rate limit**: a small fixed cap, `MAX_SEGMENTS_EVICTED_PER_TICK = 4` - bounds worst-case
+  `log_pool._lock` hold time predictably regardless of how large a sudden memory spike is. A
+  persistent spike beyond 4 segments' worth just takes a few extra poll ticks to fully react to
+  (ticks are seconds apart, so still fast in absolute terms - see "Poll interval").
+- **Governor ownership**: `CentralStorage`. Constructed in `apply_config()` right next to where
+  `CircularLogPool`/`ColdStorageArchiver` already get wired up (same method already has the
+  "runtime dynamic updates" branch that calls `update_max_pieces()` by hand today); stopped in
+  `CentralStorage.stop()`, not `Registry.stop()` - keeps all hot/cold tier lifecycle in one place
+  and avoids adding another step to `Registry.stop()`'s already-delicate teardown ordering.
 
 ## Goal
 
@@ -41,9 +65,14 @@ refuse to enable auto-memory-management (log a warning, leave it off) if
 
 ## New component: `HotTierMemoryGovernor`
 
-A new plain-Python class in `core/`, modeled on `ColdStorageArchiver`'s shape (own
-`threading.Thread`, no `BaseDaemon`/factory machinery - this isn't a batch-subscriber, just a
-periodic policy loop) rather than a full daemon:
+A new plain-Python class in `core/`. **Correction after initial implementation**: rather than
+owning its own `threading.Thread` (the shape originally sketched here, modeled on
+`ColdStorageArchiver`), it schedules itself on the registry's existing `TaskManager`
+(`shared.tasks.run_periodic`/`stop_periodic`) - the same periodic-task infrastructure already used
+by `io/adb_reader.py`, `io/uart.py`, and `io/source_handshake.py`. This is exactly the "periodic
+small task" case that machinery exists for; a dedicated OS thread per periodic policy loop was
+unnecessary duplication. No `BaseDaemon`/factory machinery either way - this isn't a
+batch-subscriber, just a scheduled callback:
 
 ```python
 class HotTierMemoryGovernor:
@@ -87,9 +116,9 @@ class HotTierMemoryGovernor:
 Grow and shrink must not share the same trigger line, or a workload sitting exactly at the
 threshold would flap every poll tick (evict a segment, immediately allowed to grow it back, evict
 again...). Use a band: shrink triggers below `target_free_bytes`, grow triggers only once
-`available >= target_free_bytes + hysteresis_margin` (e.g. `hysteresis_margin = one segment's
-worth of bytes`, or a configurable fraction of `target_free_bytes` - needs a decision, see Open
-Questions).
+`available >= target_free_bytes + segment_bytes` (**one segment's worth of bytes** - decided
+above) - `hysteresis_margin` is therefore not a separate config knob, just
+`log_pool.final_buffer_bytes` read at policy-evaluation time.
 
 ### Rate limiting
 
@@ -97,9 +126,17 @@ Questions).
 `batch_append()` (ingestion) takes the same lock. A pathological reading (e.g. another process
 suddenly allocating tens of GB in one shot) could otherwise ask the governor to shrink by hundreds
 of segments in a single `update_max_pieces()` call, holding the lock long enough to visibly stall
-ingestion. Cap how much a single poll tick's shrink step can request (e.g. at most N segments per
-tick, continuing to shrink further on the *next* tick if pressure persists) rather than always
-jumping straight to the fully-computed target in one call.
+ingestion. **Decided above**: cap a single poll tick's shrink step at
+`MAX_SEGMENTS_EVICTED_PER_TICK = 4` segments, continuing to shrink further on the *next* tick if
+pressure persists, rather than always jumping straight to the fully-computed target in one call -
+i.e. step 3's shrink branch becomes `new_target = max(min_hot_pieces, current_pieces - min(ceil(-slack
+/ segment_bytes), MAX_SEGMENTS_EVICTED_PER_TICK))`. This constant is a starting guess, not a
+benchmarked value - worth a quick sanity check against a realistic `buffer_size_mb` early in
+implementation (measure `update_max_pieces()`'s wall time evicting 4 segments at the default
+128MB size) and adjusted if the lock-hold time is either surprisingly cheap (cap could be looser)
+or still too expensive (cap needs to shrink further, or eviction needs to move the actual
+archiving hand-off outside the lock - it already is async via `ColdStorageArchiver`'s queue, so
+this is more likely to be fine than not).
 
 ### Memory query - `available`, not `free`, and a dependency decision
 
@@ -110,12 +147,31 @@ per-OS distinction (Windows `GlobalMemoryStatusEx`'s `ullAvailPhys`, Linux
 `MemAvailable`/`meminfo`, macOS `vm_stat`).
 
 **`psutil` is currently only a `dev`-group dependency** (`pyproject.toml`), not shipped to end
-users - this feature would need to promote it to a real runtime dependency (or the `gui-core`
-optional-extras group, alongside `numpy`/`numba`). Alternative: hand-roll the three platform
-queries via `ctypes`/`/proc/meminfo` parsing to avoid the new dependency - meaningfully more code
-and platform-testing surface for something `psutil` already solves correctly. Leaning towards
-adding `psutil` as a real dependency; flagged as an open question below since it's a footprint
-change, not a pure implementation detail.
+users. **Decided above**: promote it to the `gui-core` optional-extras group (alongside
+`numpy`/`numba` - this feature is desktop-app-only, so core headless/CLI installs never need it)
+*conditionally on it not requiring client-side compilation* for blinkview's supported Python
+version/platform matrix.
+
+**Verification step required before writing any governor code**: check PyPI's file listing for the
+`psutil` version pyproject.toml would pin against every `(python_version, platform)` combination
+`gui-core` is expected to run on (at minimum: the Windows/CPython version this dev environment
+targets, plus whatever other platforms/Python versions the project currently claims support for -
+check existing `pyproject.toml` `requires-python`/classifiers) - confirm each has a `.whl` (not
+just an `.sdist`) on PyPI. `pip download psutil --no-deps -d /tmp/x --python-version X --platform Y
+--only-binary=:all:` against each target is a fast way to confirm without actually installing
+anything.
+
+- **If every target has a wheel**: add `psutil` to `gui-core`, use
+  `psutil.virtual_memory().available` directly.
+- **If any target is missing a wheel** (e.g. an experimental/free-threaded Python build, or an
+  unusual architecture): hand-roll `get_available_bytes()` instead - three small platform branches
+  behind one function (Windows: `ctypes.windll.kernel32.GlobalMemoryStatusEx`'s `ullAvailPhys`
+  field; Linux: parse `MemAvailable:` out of `/proc/meminfo`; macOS: `vm_stat` output or the
+  `host_statistics64` Mach API via `ctypes`) - no new dependency, more code/platform-testing
+  surface, but avoids forcing a source build onto any user. Either implementation sits behind the
+  same `get_available_bytes: Callable[[], int]` constructor parameter below, so this choice is
+  fully isolated from the rest of the governor's design - nothing else in this plan changes based
+  on which path is taken.
 
 Either way, `get_available_bytes` is **constructor-injected as a plain callable**, matching this
 codebase's existing pattern for testable environment queries (`Registry.now_ns`/`TimeUtils`) - so
@@ -170,8 +226,10 @@ who decides when to shrink/grow.
 
 - **Policy unit tests** (no threading, no real `CircularLogPool`): a pure function
   `compute_target_pieces(available_bytes, current_pieces, segment_bytes, min_hot_pieces,
-  max_hot_pieces, target_free_bytes, hysteresis_margin) -> int`, extracted from the governor so the
-  shrink/grow/hysteresis/clamping logic is directly testable against a table of
+  max_hot_pieces, target_free_bytes) -> int` (hysteresis margin and the per-tick shrink cap are
+  both derived from `segment_bytes`/`MAX_SEGMENTS_EVICTED_PER_TICK` internally, not separate
+  params), extracted from the governor so the shrink/grow/hysteresis/clamping logic is directly
+  testable against a table of
   (reading, expected target) cases - mirrors this project's preference for testing pure decision
   logic separately from its I/O/threading wrapper (see e.g. `PlaybackFollowMachine`'s split of
   `handle()` from Qt-level dispatch).
@@ -187,26 +245,14 @@ who decides when to shrink/grow.
 
 ## Open questions to resolve before implementing
 
-1. **Add `psutil` as a real runtime dependency, or hand-roll the platform queries?** Leaning
-   `psutil` (correctness/maintenance cost of hand-rolled `MemAvailable` parsing isn't worth it) -
-   needs your sign-off since it's a footprint/dependency-policy decision, not just an implementation
-   detail. If added, where: `gui-core` extras (feature is really only meaningful for the desktop
-   app) or unconditionally in core `dependencies`?
-2. **Hysteresis margin**: fixed byte amount, one-segment's-worth, or a percentage of
-   `target_free_memory_mb`? Affects how "twitchy" growth feels once the system settles near the
-   threshold.
-3. **Shrink rate limit**: how many segments per poll tick is safe to evict in one
-   `update_max_pieces()` call before the lock-hold time becomes noticeable? Needs a quick
-   benchmark against a realistic `buffer_size_mb`, not just a guessed constant.
-4. **Where does `HotTierMemoryGovernor` get owned/started/stopped?** Natural fit is
-   `CentralStorage` (constructs it in `apply_config()` alongside `self.log_pool`, right next to
-   where `ColdStorageArchiver` already gets wired up; stops it in `CentralStorage.stop()` or
-   `Registry.stop()` alongside the existing `log_pool.release_all()` teardown) - confirm before
-   implementing since `Registry.stop()`'s teardown ordering there is already delicate (see the
-   `_dump_id_registry`/cold-dir-capture comments in `Registry.stop()`).
-5. **Any GUI surface wanted?** e.g. a toolbar readout of "hot tier: N segments (X MB), system free:
+All four load-bearing design questions were resolved with the user (see "Decisions made with the
+user before implementing" above) except:
+
+1. **Any GUI surface wanted?** e.g. a toolbar readout of "hot tier: N segments (X MB), system free:
    Y MB" so the user can see the governor reacting, or is this meant to be fully invisible/
-   automatic with just a log line per resize? Not required for a first pass either way.
+   automatic with just a log line per resize? Not required for a first pass either way - default
+   plan is log-line-only (matches `ColdStorageArchiver`'s own logging-not-UI precedent), a GUI
+   surface can be added later without changing anything about the governor itself.
 
 ## Non-goals
 
