@@ -11,6 +11,7 @@ from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.cold_archive import (
     compress_cold_segment_file,
     compress_cold_storage_dir,
+    count_cold_segments,
     decompress_cold_segment_archive,
 )
 from blinkview.core.cold_segment import open_cold_segment_arrays_from_buffer, write_cold_segment_file
@@ -214,6 +215,70 @@ class TestCompressColdStorageDir:
         assert (tmp_path / "session" / "cold-archive" / "segment_0000000001.blkseg.zst").exists()
         assert len(logger.warnings) == 1
 
+    def test_on_progress_fires_once_per_segment_with_the_filename(self, global_pool, tmp_path):
+        cold_dir = tmp_path / "session" / "cold"
+        cold_dir.mkdir(parents=True)
+        make_real_segment_file(global_pool, cold_dir / "segment_0000000000.blkseg")
+        make_real_segment_file(global_pool, cold_dir / "segment_0000000001.blkseg")
+
+        calls = []
+        compress_cold_storage_dir(cold_dir, on_progress=calls.append)
+
+        assert calls == ["segment_0000000000.blkseg", "segment_0000000001.blkseg"]
+
+    def test_on_progress_still_fires_for_a_segment_that_fails_to_compress(self, global_pool, tmp_path, monkeypatch):
+        """A failed/skipped file must still advance progress - Registry.stop's aggregated "i of
+        N" count would otherwise stall short of N if a file errors out."""
+        cold_dir = tmp_path / "session" / "cold"
+        cold_dir.mkdir(parents=True)
+        make_real_segment_file(global_pool, cold_dir / "segment_0000000000.blkseg")
+        make_real_segment_file(global_pool, cold_dir / "segment_0000000001.blkseg")
+
+        import blinkview.core.cold_archive as cold_archive_module
+
+        real_compress = cold_archive_module.compress_cold_segment_file
+
+        def flaky_compress(path, archive_dir):
+            if path.name == "segment_0000000000.blkseg":
+                raise OSError("simulated failure")
+            return real_compress(path, archive_dir)
+
+        monkeypatch.setattr(cold_archive_module, "compress_cold_segment_file", flaky_compress)
+
+        calls = []
+        compress_cold_storage_dir(cold_dir, on_progress=calls.append)
+
+        assert calls == ["segment_0000000000.blkseg", "segment_0000000001.blkseg"]
+
+    def test_empty_cold_dir_reports_no_progress(self, tmp_path):
+        cold_dir = tmp_path / "session" / "cold"
+        cold_dir.mkdir(parents=True)
+
+        calls = []
+        compress_cold_storage_dir(cold_dir, on_progress=calls.append)
+
+        assert calls == []
+
+
+class TestCountColdSegments:
+    def test_counts_only_segment_files(self, global_pool, tmp_path):
+        cold_dir = tmp_path / "cold"
+        cold_dir.mkdir()
+        make_real_segment_file(global_pool, cold_dir / "segment_0000000000.blkseg")
+        make_real_segment_file(global_pool, cold_dir / "segment_0000000001.blkseg")
+        (cold_dir / "id_registry.json").write_text("{}")
+
+        assert count_cold_segments(cold_dir) == 2
+
+    def test_missing_dir_counts_as_zero(self, tmp_path):
+        assert count_cold_segments(tmp_path / "does-not-exist") == 0
+
+    def test_empty_dir_counts_as_zero(self, tmp_path):
+        cold_dir = tmp_path / "cold"
+        cold_dir.mkdir()
+
+        assert count_cold_segments(cold_dir) == 0
+
 
 class TestPooledLogBatchFromCompressedArchive:
     def test_row_content_matches_the_original_uncompressed_segment(self, global_pool, tmp_path):
@@ -273,5 +338,3 @@ class TestPooledLogBatchFromCompressedArchive:
             assert segment.last_sequence_id == 4
         finally:
             segment.release()
-
-

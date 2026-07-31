@@ -167,3 +167,89 @@ def test_build_snapshot_as_of_with_zero_registered_modules_returns_empty(id_regi
 
     with tracker.build_snapshot_as_of(0) as snap:
         assert list(snap) == []
+
+
+def test_module_that_never_logs_resolves_instantly_with_no_prior_scrub_cache(registry):
+    """update() populates the persistent first-occurrence table as a byproduct - a module that
+    never receives any data should be resolvable by build_snapshot_as_of's very first-ever call
+    on this tracker (no _scrub_cache yet at all), not just on a later call that benefits from a
+    previously-built cache."""
+    tracker = registry.module_value_tracker
+    logging_module = _insert(registry, "dev", "chatty", 1000, 1, "hello")
+    silent_device = registry.id_registry.get_device("dev")
+    silent_module = silent_device.get_module("silent")  # registered, but never logs anything
+    tracker.update()
+
+    assert tracker._scrub_cache is None  # this is genuinely the first-ever call below
+
+    with tracker.build_snapshot_as_of(5000) as snap:
+        assert snap.get_message(logging_module.id) == "hello"
+        assert snap.get_message(silent_module.id) == ""
+        assert snap.get_sequence(silent_module.id) == 0
+
+
+def test_module_registered_after_first_seen_coverage_but_never_logs_still_resolves_correctly(registry):
+    """A module registered after update() already ran isn't yet represented in the
+    first-occurrence table (array not grown, coverage doesn't vouch for it) - must still resolve
+    correctly (falls through to an actual scan, finds nothing), not crash or return stale data."""
+    tracker = registry.module_value_tracker
+    tracker.update()  # establishes first-occurrence coverage before the module below exists
+
+    device = registry.id_registry.get_device("dev")
+    late_silent_module = device.get_module("late_silent")  # registered after the update() above
+
+    with tracker.build_snapshot_as_of(5000) as snap:
+        assert snap.get_message(late_silent_module.id) == ""
+        assert snap.get_sequence(late_silent_module.id) == 0
+
+
+def test_module_resolves_via_live_snapshot_with_no_prior_cache_or_first_seen_confirmation(registry):
+    """A module WITH data: build_snapshot_as_of's very first-ever call, anchored at/after that
+    module's live latest-ever message, should resolve correctly using _current_snapshot directly
+    - no _scrub_cache exists yet, and the module obviously isn't in the confirmed-absent table
+    either (it has data)."""
+    tracker = registry.module_value_tracker
+    module = _insert(registry, "dev", "temp", 1000, 1, "hello")
+    tracker.update()
+
+    assert tracker._scrub_cache is None
+
+    with tracker.build_snapshot_as_of(2000) as snap:  # after the message, before any scrub cache
+        assert snap.get_message(module.id) == "hello"
+        assert snap.get_sequence(module.id) > 0
+
+
+def test_get_replay_snapshot_falls_back_to_get_snapshot_before_any_update_replay_call(registry):
+    """Before update_replay() has ever run (e.g. REPLAY just entered, the background task -
+    Registry._tick_replay_snapshot in production - hasn't ticked yet), get_replay_snapshot()
+    should return the LIVE "latest ever" state as a reasonable placeholder rather than blocking
+    or computing inline."""
+    tracker = registry.module_value_tracker
+    module = _insert(registry, "dev", "temp", 1000, 1, "hello")
+    tracker.update()
+
+    with tracker.get_replay_snapshot() as snap:
+        assert snap.get_message(module.id) == "hello"
+
+
+def test_update_replay_then_get_replay_snapshot_matches_build_snapshot_as_of(registry):
+    """update_replay()/get_replay_snapshot() are thin wrappers around the same build_snapshot_as_of
+    state (_scrub_cache) - after update_replay(ts_ns), get_replay_snapshot() should read back
+    exactly what a direct build_snapshot_as_of(ts_ns) call would have returned."""
+    tracker = registry.module_value_tracker
+    module = _insert(registry, "dev", "temp", 1000, 1, "old")
+    _insert(registry, "dev", "temp", 5000, 2, "new")
+
+    tracker.update_replay(2000)
+    with tracker.get_replay_snapshot() as snap:
+        assert snap.get_message(module.id) == "old"
+
+    tracker.update_replay(6000)
+    with tracker.get_replay_snapshot() as snap:
+        assert snap.get_message(module.id) == "new"
+
+    # Interchangeable with build_snapshot_as_of - both read/write the same _scrub_cache, so a
+    # direct call after update_replay (or vice versa) still follows the forward/backward cache
+    # rules rather than being some separate, disconnected piece of state.
+    with tracker.build_snapshot_as_of(2000) as snap:
+        assert snap.get_message(module.id) == "old"

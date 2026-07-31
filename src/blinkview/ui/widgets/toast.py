@@ -75,6 +75,7 @@ class ToastWidget(QWidget):
         action_callback=None,
         click_callback=None,
         parent=None,
+        persistent=False,
     ):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.ToolTip | Qt.WindowStaysOnTopHint)
@@ -176,7 +177,13 @@ class ToastWidget(QWidget):
         self.prog_anim.setEndValue(0.0)
         self.prog_anim.setDuration(int((duration * 1000)))
         self.prog_anim.valueChanged.connect(self.icon_widget.set_progress)
-        self.prog_anim.finished.connect(self.hide_toast)
+        self.persistent = persistent
+        if not persistent:
+            # A persistent toast (e.g. shutdown-compression progress) keeps the visual ring
+            # animation as a cosmetic cue but must not auto-dismiss just because its nominal
+            # duration elapsed - the underlying work it represents might not be done yet. Only
+            # explicit dismiss()/hide_toast() or the close button should hide it.
+            self.prog_anim.finished.connect(self.hide_toast)
 
         # Fade In/Out
         self.opacity_effect = QGraphicsOpacityEffect(self)
@@ -236,6 +243,20 @@ class ToastWidget(QWidget):
         self.fade_anim.finished.connect(self.deleteLater)
         self.fade_anim.start()
 
+    def set_message(self, text):
+        """Updates this toast's text in place - lets a caller (e.g. shutdown-compression
+        progress) reuse the same toast across many updates instead of closing and reopening a
+        new one for each, which would flicker and re-trigger _reposition_toasts churn every
+        time."""
+        self.msg_label.setText(text)
+        self.adjustSize()
+        ToastManager._reposition_toasts()
+
+    def dismiss(self):
+        """Clearer-named alias for hide_toast(), for external callers (e.g. once the work a
+        persistent toast represents has actually finished)."""
+        self.hide_toast()
+
 
 class ToastManager:
     _toasts = []
@@ -252,15 +273,40 @@ class ToastManager:
         parent=None,
     ):
         print(f"[ToastManager]: show: {message}")
+        cls._show(message, toast_type, duration, action_text, action_callback, click_callback, parent, False)
+
+    @classmethod
+    def show_persistent(cls, message, toast_type=ToastType.INFO, duration=60.0, parent=None):
+        """Like show(), but the returned ToastWidget stays visible once its progress-ring
+        animation finishes (rather than auto-hiding) and is handed back to the caller so it can
+        be updated in place via set_message()/dismiss() - e.g. shutdown-compression progress,
+        where a caller wants one toast that ticks through "compressing N of M" rather than a new
+        toast per file. Only safe to call from the main/UI thread (unlike notify()/
+        ToastDispatcher, there's no cross-thread signal marshalling here - the returned widget
+        must be usable synchronously by the caller)."""
+        print(f"[ToastManager]: show_persistent: {message}")
+        return cls._show(message, toast_type, duration, None, None, None, parent, True)
+
+    @classmethod
+    def _show(cls, message, toast_type, duration, action_text, action_callback, click_callback, parent, persistent):
         # Resolve Parent: Use provided, or fallback to active, or abort
         target_parent = parent or QApplication.activeWindow()
         if not target_parent:
-            return
+            return None
 
         # Ensure we anchor to the top-level window if a child widget was passed
         target_window = target_parent.window()
 
-        toast = ToastWidget(message, toast_type, duration, action_text, action_callback, click_callback, target_window)
+        toast = ToastWidget(
+            message,
+            toast_type,
+            duration,
+            action_text,
+            action_callback,
+            click_callback,
+            target_window,
+            persistent=persistent,
+        )
 
         cls._toasts.append(toast)
 
@@ -270,6 +316,7 @@ class ToastManager:
 
         cls._reposition_toasts()
         toast.show_toast()
+        return toast
 
     @classmethod
     def _reposition_toasts(cls):

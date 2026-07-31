@@ -59,10 +59,19 @@ def nb_update_master_arrays_reverse(
     module_count: int,
     last_known_seq: int,
     is_initialized: bool,
+    first_seen_ts: np.ndarray,  # dtypes.TS_TYPE, len >= module_count, in/out
+    first_seen_seq: np.ndarray,  # dtypes.SEQ_TYPE, len >= module_count, in/out - 0 = unconfirmed
 ) -> bool:
     """
     Scans a segment from back-to-front.
     Returns True if we hit the 'last_known_seq' (time to stop everything).
+
+    Also maintains first_seen_ts/first_seen_seq - each module's earliest-ever-observed
+    occurrence, persistent across calls (see LatestModuleValueTracker's docstring on why this
+    doubles as a "confirmed absent" table: this method's calls always cover a contiguous,
+    monotonically-advancing seq range with no gaps or re-visits, so unconditionally keeping the
+    smallest seq seen so far per module - across this call and all previous ones - converges to
+    each module's true first-ever occurrence, without a separate prescan.
     """
     row_count = seg_b.size[0]
     seg_b_modules = seg_b.modules
@@ -111,7 +120,73 @@ def nb_update_master_arrays_reverse(
             # Always 0-terminate the string, regardless of original length
             snap_b_buffer[m_off + m_len] = 0
 
+        if first_seen_seq[mod_id] == 0 or seq < first_seen_seq[mod_id]:
+            first_seen_seq[mod_id] = seq
+            first_seen_ts[mod_id] = seg_b_timestamps[i]
+
     return False
+
+
+@app_njit()
+def nb_copy_live_valid_modules(
+    current_b: ModuleSnapshotParams,
+    snap_b: ModuleSnapshotParams,
+    module_count: int,
+    max_ts_ns: int,
+    found_mask: np.ndarray,  # bool_, len module_count, in/out
+    remaining: int,
+) -> int:
+    """
+    Playback-scrub pre-seeding helper: for every not-yet-found module whose live "latest ever"
+    occurrence (current_b, LatestModuleValueTracker's continuously-maintained _current_snapshot)
+    is non-empty and already at or before max_ts_ns, that occurrence is *by definition* also the
+    correct "latest at or before max_ts_ns" answer - nothing newer than it exists anywhere, live
+    or otherwise. Copies it straight into snap_b and marks the module found, without touching a
+    single log segment. Returns the updated remaining count.
+    """
+    current_count = current_b.count
+    limit = module_count if module_count < current_count else current_count
+
+    current_timestamps = current_b.timestamps
+    current_sequence_ids = current_b.sequence_ids
+    current_levels = current_b.levels
+    current_lengths = current_b.lengths
+    current_buffer = current_b.buffer
+
+    snap_b_timestamps = snap_b.timestamps
+    snap_b_sequence_ids = snap_b.sequence_ids
+    snap_b_levels = snap_b.levels
+    snap_b_lengths = snap_b.lengths
+    snap_b_buffer = snap_b.buffer
+
+    for mod_id in range(limit):
+        if remaining <= 0:
+            break
+        if found_mask[mod_id]:
+            continue
+
+        seq = current_sequence_ids[mod_id]
+        if seq == 0:
+            continue
+
+        ts = current_timestamps[mod_id]
+        if ts > max_ts_ns:
+            continue
+
+        snap_b_timestamps[mod_id] = ts
+        snap_b_sequence_ids[mod_id] = seq
+        snap_b_levels[mod_id] = current_levels[mod_id]
+
+        m_len = current_lengths[mod_id]
+        m_off = mod_id * MAX_MSG_BYTES
+        snap_b_buffer[m_off : m_off + m_len] = current_buffer[m_off : m_off + m_len]
+        snap_b_lengths[mod_id] = m_len
+        snap_b_buffer[m_off + m_len] = 0
+
+        found_mask[mod_id] = True
+        remaining -= 1
+
+    return remaining
 
 
 @app_njit()
@@ -120,6 +195,7 @@ def nb_build_snapshot_as_of(
     snap_b: ModuleSnapshotParams,
     module_count: int,
     max_ts_ns: int,
+    min_ts_ns_exclusive: int,  # =dtypes.TS_UNSPECIFIED (-1) for "no lower bound"
     found_mask: np.ndarray,  # bool_, len module_count, in/out
     remaining: int,
 ) -> Tuple[bool, int]:
@@ -131,6 +207,13 @@ def nb_build_snapshot_as_of(
     filling in the first (i.e. latest-before-max_ts_ns) row seen per not-yet-found module.
     `found_mask`/`remaining` carry state across segments so a caller can stop early once
     every module has been resolved instead of always scanning back to the start of the log.
+
+    `min_ts_ns_exclusive` additionally skips rows with `ts <= min_ts_ns_exclusive` - used by
+    LatestModuleValueTracker's forward-incremental cache (build_snapshot_as_of) to bound a scan
+    to only the window of rows newer than a previously-cached ts_ns, instead of rescanning
+    everything below it that the cache already accounts for. Pass dtypes.TS_UNSPECIFIED (-1) for
+    a full (unbounded-below) scan - real epoch-ns timestamps are always > -1, so this never trips.
+
     Returns (all_found, remaining).
     """
     row_count = seg_b.size[0]
@@ -153,7 +236,7 @@ def nb_build_snapshot_as_of(
             return True, remaining
 
         ts = seg_b_timestamps[i]
-        if ts > max_ts_ns:
+        if ts > max_ts_ns or ts <= min_ts_ns_exclusive:
             continue
 
         mod_id = seg_b_modules[i]

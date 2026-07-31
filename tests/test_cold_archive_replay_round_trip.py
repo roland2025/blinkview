@@ -133,8 +133,13 @@ class TestCompressThenRemountFromArchive:
 
         def make_batch(seq):
             batch = global_pool.create(
-                PooledLogBatch, req_capacity=1, buffer_bytes=1, has_levels=True, has_modules=True,
-                has_devices=True, has_sequences=True,
+                PooledLogBatch,
+                req_capacity=1,
+                buffer_bytes=1,
+                has_levels=True,
+                has_modules=True,
+                has_devices=True,
+                has_sequences=True,
             )
             batch.insert(100 + seq, 100 + seq, b"x", LogLevel.INFO.value, 0, 0, seq)
             return batch

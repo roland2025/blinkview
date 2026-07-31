@@ -76,11 +76,6 @@ _import_registerable_modules()
 
 
 class Registry:
-    # Name of the auto-created "whole recording" range (see _enter_replay_mode_if_detected) -
-    # matched by name (not id) to avoid re-adding a duplicate on every subsequent replay-of-a-
-    # replay generation, since a fresh add() always mints a new uuid.
-    DEFAULT_REPLAY_RANGE_NAME = "Full recording"
-
     def __init__(
         self,
         session_name: str = None,
@@ -214,6 +209,30 @@ class Registry:
         self.reorder = None
         self.playback_clock: Optional["PlaybackClock"] = None
         self.playback_ranges: Optional["PlaybackRangeStore"] = None
+
+        # Mirrors _dump_temp_logs's reasoning, extended past the pre-init PrintLogger queue: every
+        # SystemLogger call made anywhere in this process (registry.logger.info/warn/..., routed
+        # through log_append -> central storage) carries this process's own real wall-clock "now"
+        # - unrelated to whatever historical timeline a loaded replay session is about to stream
+        # in. configure_system() alone emits a couple dozen of these (reorder/central config,
+        # "Configuring sources", pipeline setup, ...) before MainWindow.start_replay() ever runs -
+        # if those land in central storage first, they become the first row(s) of a brand new hot
+        # segment with a timestamp far ahead of the historical rows that arrive after them,
+        # inverting that segment's start_ts/end_ts and corrupting get_time_bounds() (which then
+        # freezes PlaybackClock._clamp() - see playback_control.py's SeekBarWidget). Closed by
+        # default whenever replay_mode is set; load_replay_session() opens it once historical data
+        # is either already resident (resumed_from_existing_cold_storage) or already being streamed
+        # in (the caller always starts that before calling load_replay_session - see
+        # MainWindow.start_replay), so nothing but this process's own future self-logging ever
+        # gets dropped.
+        self._system_log_to_central_enabled = not replay_mode
+
+        # Set by load_replay_session from a loaded session's metadata.json created_at/
+        # finished_at - the recorded session's actual fixed length, independent of any named
+        # PlaybackRange (not itself a selectable range - see playback_control.py's
+        # _seek_bar_bounds, the only reader). None outside REPLAY-of-a-loaded-session, or when
+        # the session's metadata.json is missing/incomplete.
+        self.replay_session_bounds_ns: Optional[tuple[int, int]] = None
 
         self.module_value_tracker: LatestModuleValueTracker = None
 
@@ -397,9 +416,12 @@ class Registry:
     def load_replay_session(self, session_dir):
         """Wires this registry's DVR playback mode and named ranges to a previously-recorded
         session living at `session_dir`: merges in that session's own saved
-        playback_ranges.json (if any), adds a DEFAULT_REPLAY_RANGE_NAME range spanning the whole
-        recording from its metadata.json created_at/finished_at (if a cleanly-finished one
-        exists - without waiting for the replay to actually stream all the way back in), and
+        playback_ranges.json (if any), records the whole recording's fixed length from its
+        metadata.json created_at/finished_at into replay_session_bounds_ns (if a cleanly-finished
+        one exists - without waiting for the replay to actually stream all the way back in) so
+        the main seek bar can pin to it (see playback_control.py's _seek_bar_bounds) rather than
+        growing unbounded from the app's own background self-logging - not added as a selectable
+        named range, since the seek bar already covers "the whole recording" by default, and
         switches PlaybackClock into REPLAY (deferred via enter_replay_when_ready() until real
         data exists).
 
@@ -414,6 +436,14 @@ class Registry:
         """
         if self.playback_clock is None:
             return
+
+        # Opens the log_append gate (see __init__'s _system_log_to_central_enabled) - by this
+        # point historical data is either already resident (resumed_from_existing_cold_storage)
+        # or already being streamed in on its own thread (MainWindow.start_replay always starts
+        # its UnifiedLogReplay before calling this), so this process's own system logging from
+        # here on is safe to interleave: it can only ever be timestamped later than what's already
+        # arrived/arriving, never earlier.
+        self._system_log_to_central_enabled = True
 
         session_dir = Path(session_dir)
 
@@ -449,9 +479,7 @@ class Registry:
                 end_ts_ns = self._parse_iso_utc_to_epoch_ns(metadata.get("finished_at"))
                 if start_ts_ns is not None and end_ts_ns is not None and end_ts_ns > start_ts_ns:
                     default_start_ts_ns = start_ts_ns
-                    already_present = any(r.name == self.DEFAULT_REPLAY_RANGE_NAME for r in self.playback_ranges.ranges)
-                    if not already_present:
-                        self.playback_ranges.add(self.DEFAULT_REPLAY_RANGE_NAME, start_ts_ns, end_ts_ns)
+                    self.replay_session_bounds_ns = (start_ts_ns, end_ts_ns)
 
         self.playback_clock.enter_replay_when_ready(default_start_ts_ns)
 
@@ -478,10 +506,25 @@ class Registry:
         if session_dir is not None:
             self.load_replay_session(session_dir)
         else:
+            # No sidecar metadata to key a historical bulk-load off of - this is a bare dev-replay
+            # source (BinaryFileReader/FileTailReader) which streams its file through the normal
+            # source/reorder/central pipeline like a live source, not a single synchronous
+            # historical dump the way UnifiedLogReplay is - so there's no equivalent moment to defer
+            # the gate to. Open it now rather than leaving it permanently closed (load_replay_session
+            # is the only other place that opens it), which would otherwise silently drop every
+            # SystemLogger message for the rest of this process's life.
+            self._system_log_to_central_enabled = True
             self.playback_clock.enter_replay_when_ready()
 
-    def stop(self):
-        """Cleanly tear down the session."""
+    def stop(self, on_progress: Optional[Callable[[int, int, str], None]] = None):
+        """Cleanly tear down the session.
+
+        `on_progress(i, total, label)`, if given, is called once per file as shutdown-time
+        compression works through cold-storage segments and each file logger's final part -
+        `total` is computed upfront (see below) so a caller (BlinkMainWindow's shutdown toast)
+        can show real "compressing i of N" progress. Both compression stages only report what
+        they directly know (one file just finished) via their own `on_progress(label)`
+        callbacks - this method is what turns those into a single running count across both."""
         if self._is_running:
             if self.sources is not None:
                 self.sources.stop()
@@ -491,6 +534,8 @@ class Registry:
 
             if self.reorder is not None:
                 self.reorder.stop()
+
+            cold_dir = None
             if self.central is not None:
                 self.central.stop()
                 # CentralStorage.stop() only stops the ingestion thread - log data (and any cold-
@@ -516,9 +561,26 @@ class Registry:
 
                     if cold_dir is not None:
                         self._dump_id_registry(cold_dir)
-                        self._compress_persisted_cold_storage(cold_dir)
 
-            self.file_manager.stop()
+            # Upfront total across both compression stages, so progress starts at "1 of N" rather
+            # than growing as work is discovered.
+            wrapped_on_progress = None
+            if on_progress is not None:
+                from blinkview.core.cold_archive import count_cold_segments
+
+                total = (
+                    count_cold_segments(cold_dir) if cold_dir is not None else 0
+                ) + self.file_manager.file_logger_count
+                counter = {"i": 0}
+
+                def wrapped_on_progress(label):
+                    counter["i"] += 1
+                    on_progress(counter["i"], total, label)
+
+            if cold_dir is not None:
+                self._compress_persisted_cold_storage(cold_dir, on_progress=wrapped_on_progress)
+
+            self.file_manager.stop(on_progress=wrapped_on_progress)
 
             for sub in self._subscribers.copy():
                 stop_fn = getattr(sub, "stop", None)
@@ -550,7 +612,7 @@ class Registry:
         except OSError as e:
             self.logger.warning(f"Failed to persist id_registry alongside cold storage: {e}")
 
-    def _compress_persisted_cold_storage(self, cold_dir) -> None:
+    def _compress_persisted_cold_storage(self, cold_dir, on_progress=None) -> None:
         """Shrinks a persisted session's on-disk footprint: every raw segment file left in
         cold_dir gets zstd-compressed into a sibling cold-archive/ directory and deleted - see
         core/cold_archive.py. Safe to call here specifically because log_pool.release_all() (the
@@ -559,7 +621,7 @@ class Registry:
         CircularLogPool mounts them, so nothing about mounting itself needs to change."""
         from blinkview.core.cold_archive import compress_cold_storage_dir
 
-        compress_cold_storage_dir(Path(cold_dir), logger=self.logger)
+        compress_cold_storage_dir(Path(cold_dir), logger=self.logger, on_progress=on_progress)
 
     def configure_system(self):
         try:
@@ -769,9 +831,23 @@ class Registry:
             )
 
         tasks.run_periodic(1.0 / 60, self.module_value_tracker.update_and_print)
+        tasks.run_periodic(0.1, self._tick_replay_snapshot)
 
         self._is_running = True
         self.logger.warn("BlinkView is now live.")
+
+    def _tick_replay_snapshot(self):
+        """Background-thread counterpart to the REPLAY-scrub fetch path, mirroring
+        module_value_tracker.update_and_print's role for LIVE: keeps
+        LatestModuleValueTracker's replay scrub cache fresh off the UI thread, so
+        TelemetryWatch/TelemetryTableModel's apply_updates only ever needs the cheap
+        get_replay_snapshot() read, never build_snapshot_as_of directly. No-op outside REPLAY."""
+        from blinkview.core.playback_clock import PlaybackMode
+
+        clock, tracker = self.playback_clock, self.module_value_tracker
+        if clock is None or tracker is None or clock.mode is not PlaybackMode.REPLAY:
+            return
+        tracker.update_replay(clock.current_ts_ns)
 
     #
     # def add_parser_consumer(self, consumer):
@@ -1001,6 +1077,9 @@ class Registry:
         return batch
 
     def log_append(self, timestamp, level_id, module_id, msg):
+        if not self._system_log_to_central_enabled:
+            return
+
         with self.log_lock:
             batch = self.log_batch
             if batch is None:

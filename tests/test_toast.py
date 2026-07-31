@@ -111,6 +111,94 @@ class TestToastWidgetInteraction:
         assert toast.fade_anim.startValue() == start_value_after_first
 
 
+class TestPersistentToast:
+    """A persistent toast (e.g. shutdown-compression progress) must not auto-dismiss just
+    because its visual countdown-ring animation finished - only an explicit dismiss()/
+    hide_toast() (or the close button) should hide it. See plans/expressive-sauteeing-sun.md."""
+
+    def test_non_persistent_toast_hides_when_its_animation_finishes(self, qapp, qtbot):
+        toast = ToastWidget("msg", duration=0.05, persistent=False)
+        qtbot.addWidget(toast)
+        toast.show_toast()
+
+        toast.prog_anim.finished.emit()  # simulate the ring animation completing naturally
+
+        assert toast.fade_anim.endValue() == 0  # hide_toast was triggered
+
+    def test_persistent_toast_does_not_hide_when_its_animation_finishes(self, qapp, qtbot):
+        toast = ToastWidget("msg", duration=0.05, persistent=True)
+        qtbot.addWidget(toast)
+        toast.show_toast()
+
+        toast.prog_anim.finished.emit()  # ring finished, but the represented work might not be
+
+        assert toast.fade_anim.state() != toast.fade_anim.State.Running or toast.fade_anim.endValue() != 0
+
+    def test_persistent_toast_still_hides_via_explicit_dismiss(self, qapp, qtbot):
+        toast = ToastWidget("msg", persistent=True)
+        qtbot.addWidget(toast)
+        toast.show_toast()
+
+        toast.dismiss()
+
+        assert toast.fade_anim.endValue() == 0
+
+    def test_set_message_updates_the_label_text(self, qapp, qtbot):
+        toast = ToastWidget("initial", persistent=True)
+        qtbot.addWidget(toast)
+
+        toast.set_message("updated text")
+
+        assert toast.msg_label.text() == "updated text"
+
+    def test_set_message_triggers_a_reposition(self, qapp, qtbot, monkeypatch):
+        toast = ToastWidget("short", persistent=True)
+        qtbot.addWidget(toast)
+
+        calls = []
+        monkeypatch.setattr(ToastManager, "_reposition_toasts", classmethod(lambda cls: calls.append(True)))
+
+        toast.set_message("a much longer message that changes the widget's size")
+
+        assert calls == [True]
+
+
+class TestShowPersistent:
+    def test_returns_the_toast_widget(self, qapp, qtbot):
+        from qtpy.QtWidgets import QWidget
+
+        parent = QWidget()
+        qtbot.addWidget(parent)
+        parent.resize(400, 300)
+
+        toast = ToastManager.show_persistent("compressing...", parent=parent)
+
+        assert isinstance(toast, ToastWidget)
+        assert toast.msg_label.text() == "compressing..."
+        assert toast.persistent is True
+
+    def test_returned_toast_can_be_updated_and_dismissed(self, qapp, qtbot):
+        from qtpy.QtWidgets import QWidget
+
+        parent = QWidget()
+        qtbot.addWidget(parent)
+        parent.resize(400, 300)
+
+        toast = ToastManager.show_persistent("compressing...", parent=parent)
+        toast.set_message("compressing... 2 of 5")
+        assert toast.msg_label.text() == "compressing... 2 of 5"
+
+        toast.dismiss()
+        assert toast.fade_anim.endValue() == 0
+
+    def test_returns_none_without_a_resolvable_parent(self, qapp, monkeypatch):
+        from qtpy.QtWidgets import QApplication
+
+        monkeypatch.setattr(QApplication, "activeWindow", staticmethod(lambda: None))
+
+        assert ToastManager.show_persistent("no parent available") is None
+
+
 def _fake_enter_event():
     from qtpy.QtCore import QPointF
     from qtpy.QtGui import QEnterEvent

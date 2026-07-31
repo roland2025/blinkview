@@ -119,51 +119,6 @@ class TestNamedRangesRoundTripThroughRealSession:
         assert clock.current_ts_ns == 1_000_000_003
         assert clock.mode is PlaybackMode.REPLAY
 
-    def test_entering_replay_auto_selects_the_full_recording_range(self, widget, registry):
-        registry.playback_ranges.add(registry.DEFAULT_REPLAY_RANGE_NAME, 1_000_000_000, 1_000_000_009)
-
-        ts_before_select = registry.playback_clock.current_ts_ns
-        widget._on_status_clicked(True)
-
-        rng = registry.playback_ranges.ranges[0]
-        assert widget._active_range_id == rng.id
-        assert widget.ranges_combo.currentData() == rng.id
-        # Selecting the range must not move the playhead - the auto-select only changes which
-        # range is shown zoomed, it never itself calls clock.seek().
-        assert registry.playback_clock.current_ts_ns == ts_before_select
-
-    def test_widget_constructed_while_replay_already_active_auto_selects_immediately(self, qapp, qtbot, registry):
-        registry.playback_ranges.add(registry.DEFAULT_REPLAY_RANGE_NAME, 1_000_000_000, 1_000_000_009)
-        registry.playback_clock.enter_replay()
-
-        gui_context = make_real_gui_context(registry)
-        late_widget = PlaybackControlWidget(gui_context)
-        qtbot.addWidget(late_widget)
-
-        rng = registry.playback_ranges.ranges[0]
-        assert late_widget._active_range_id == rng.id
-
-    def test_no_full_recording_range_is_a_noop(self, widget, registry):
-        widget._on_status_clicked(True)
-
-        assert widget._active_range_id is None
-
-    def test_manual_range_pick_after_auto_select_is_not_overridden_by_a_later_tick(self, widget, registry):
-        registry.playback_ranges.add(registry.DEFAULT_REPLAY_RANGE_NAME, 1_000_000_000, 1_000_000_009)
-        registry.playback_ranges.add("crash window", 1_000_000_003, 1_000_000_006)
-        widget._sync_ranges()
-
-        widget._on_status_clicked(True)
-        full_rng_id = widget._active_range_id
-
-        crash_rng = next(r for r in registry.playback_ranges.ranges if r.name == "crash window")
-        widget._on_range_selected(widget.ranges_combo.findData(crash_rng.id))
-        assert widget._active_range_id == crash_rng.id
-        assert widget._active_range_id != full_rng_id
-
-        widget.apply_updates()  # another tick while still REPLAY must not re-fire the auto-select
-        assert widget._active_range_id == crash_rng.id
-
     def test_seek_bar_paints_the_range_band(self, widget, registry):
         registry.playback_ranges.add("crash window", 1_000_000_003, 1_000_000_006)
         widget._sync_ranges()
@@ -178,12 +133,13 @@ class TestNamedRangesRoundTripThroughRealSession:
 
 
 class TestSeekBarBoundsPinnedToReplaySession:
-    def test_main_seek_bar_pins_to_the_full_recording_range_while_replaying(self, widget, registry):
-        """A loaded session's own known length (the DEFAULT_REPLAY_RANGE_NAME range, set from
+    def test_main_seek_bar_pins_to_the_session_bounds_while_replaying(self, widget, registry):
+        """A loaded session's own known length (registry.replay_session_bounds_ns, set from
         metadata.json - see Registry.load_replay_session) must drive the main bar's bounds
         instead of the raw clock bounds, so the bar doesn't keep growing for as long as the
-        system's own self-logging keeps appending rows to the shared central pool."""
-        registry.playback_ranges.add(registry.DEFAULT_REPLAY_RANGE_NAME, 1_000_000_002, 1_000_000_007)
+        system's own self-logging keeps appending rows to the shared central pool. Not a
+        selectable named range - see playback_control.py's _seek_bar_bounds."""
+        registry.replay_session_bounds_ns = (1_000_000_002, 1_000_000_007)
 
         widget._on_status_clicked(True)  # enter REPLAY
 
@@ -197,17 +153,17 @@ class TestSeekBarBoundsPinnedToReplaySession:
         assert (clock.bounds_min_ns, clock.bounds_max_ns) != (1_000_000_002, 1_000_000_007)
 
     def test_main_seek_bar_falls_back_to_clock_bounds_with_no_loaded_session(self, widget, registry):
-        """REPLAY entered by scrubbing back into the live buffer (no Full recording range, i.e.
-        no loaded session with metadata) must behave exactly as before this distinction existed -
-        the main bar spans the raw clock bounds."""
-        widget._on_status_clicked(True)  # enter REPLAY, no ranges added
+        """REPLAY entered by scrubbing back into the live buffer (no replay_session_bounds_ns,
+        i.e. no loaded session with metadata) must behave exactly as before this distinction
+        existed - the main bar spans the raw clock bounds."""
+        widget._on_status_clicked(True)  # enter REPLAY, no session bounds set
 
         clock = registry.playback_clock
         assert widget.seek_bar.bounds_min_ns == clock.bounds_min_ns
         assert widget.seek_bar.bounds_max_ns == clock.bounds_max_ns
 
     def test_main_seek_bar_uses_raw_clock_bounds_while_live(self, widget, registry):
-        registry.playback_ranges.add(registry.DEFAULT_REPLAY_RANGE_NAME, 1_000_000_002, 1_000_000_007)
+        registry.replay_session_bounds_ns = (1_000_000_002, 1_000_000_007)
 
         clock = registry.playback_clock
         assert widget.seek_bar.bounds_min_ns == clock.bounds_min_ns
@@ -223,7 +179,7 @@ class TestLiveSeekBar:
     def test_stays_span_program_start_to_now_even_while_replaying_a_fixed_session(self, widget, registry):
         """The live bar must keep tracking the real live edge even while the main bar above is
         pinned to a fixed-length recorded session - the two are independent."""
-        registry.playback_ranges.add(registry.DEFAULT_REPLAY_RANGE_NAME, 1_000_000_002, 1_000_000_007)
+        registry.replay_session_bounds_ns = (1_000_000_002, 1_000_000_007)
         widget._on_status_clicked(True)  # enter REPLAY
 
         clock = registry.playback_clock

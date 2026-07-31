@@ -529,7 +529,10 @@ class TelemetryTableModel(QAbstractTableModel):
         # identical to LogViewerWidget/LogTableViewerWidget's.
         action = self._playback.handle(FollowEvent.Tick(), self._clock_snapshot())
         if action.kind is FollowActionKind.FETCH_FOLLOWING:
-            snapshot_ctx = tracker.build_snapshot_as_of(action.anchor_ts_ns)
+            # Cheap read of whatever Registry._tick_replay_snapshot last computed on a
+            # background thread for clock.current_ts_ns (== action.anchor_ts_ns here) - never
+            # computes on this (UI) thread.
+            snapshot_ctx = tracker.get_replay_snapshot()
         else:
             snapshot_ctx = tracker.get_snapshot()
 

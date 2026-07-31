@@ -6,6 +6,7 @@
 
 import mmap
 import os
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Iterable, List
 
@@ -19,6 +20,7 @@ from blinkview.core.types.modules import MODULE_ID_FULL, MODULE_TEMP_ID_BASE, Mo
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.id_resolution import nb_resolve_names_batch, nb_resolve_scoped_names_batch
 from blinkview.ops.unified_log_scan import nb_push_unified_log_rows, nb_scan_unified_log_lines
+from blinkview.storage.log_file_archive import ARCHIVE_SUFFIX, decompress_log_part_to_buffer
 
 # Fixed grammar written by ops/formatting.py's nb_format_log_row_batch:
 #   YYYY-MM-DDTHH:MM:SS.uuuuuuZ <LEVEL> <DEVICE> <MODULE>: <MESSAGE>\n
@@ -230,8 +232,18 @@ class UnifiedLogReplay(BaseDaemon):
                 if os.path.getsize(part) == 0:
                     continue
 
-                with open(part, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY) as mm:
-                    buf = np.frombuffer(mm, dtype=np.uint8)
+                with ExitStack() as stack:
+                    part_str = str(part)
+                    if part_str.endswith(ARCHIVE_SUFFIX):
+                        # Compressed (rotated-away or cleanly-closed) part - see
+                        # storage/log_file_archive.py. Already an owned buffer, nothing to close.
+                        buf = decompress_log_part_to_buffer(part)
+                    else:
+                        # Uncompressed - today's behavior, and any part that never got
+                        # compressed (e.g. the process was killed before a clean shutdown).
+                        f = stack.enter_context(open(part, "rb"))
+                        mm = stack.enter_context(mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_COPY))
+                        buf = np.frombuffer(mm, dtype=np.uint8)
                     buf_len = buf.shape[0]
                     cursor = 0
                     # tracker.name_bytes must be the exact array Numba is comparing candidate

@@ -186,7 +186,12 @@ class TestApplyConfig:
         raw_dir.mkdir()
         pool = NumpyArrayPool()
         batch = pool.create(
-            PooledLogBatch, req_capacity=1, buffer_bytes=32, has_levels=True, has_modules=True, has_devices=True,
+            PooledLogBatch,
+            req_capacity=1,
+            buffer_bytes=32,
+            has_levels=True,
+            has_modules=True,
+            has_devices=True,
             has_sequences=True,
         )
         assert batch.insert(100, 100, b"hello", LogLevel.INFO.value, 0, 0, 0)

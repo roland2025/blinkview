@@ -70,24 +70,34 @@ def test_replay_scrub_backward_and_forward_updates_the_row(watch):
     watch.apply_updates(force=True)  # establish LIVE baseline
 
     clock = watch.gui_context.registry.playback_clock
+    tracker = watch.gui_context.registry.module_value_tracker
 
+    # get_replay_snapshot() only reads whatever update_replay() last computed - in production
+    # this runs on a background task (Registry._tick_replay_snapshot), but tests never call
+    # Registry.start() (see the `registry` fixture above), so it's driven manually here, exactly
+    # like update() already is for the LIVE case.
     clock.enter_replay(clock.bounds_min_ns)
+    tracker.update_replay(clock.current_ts_ns)
     watch.apply_updates(force=True)
     assert watch.entry.value_label.text() == "state-0"
     assert watch.entry.last_painted_msg == "state-0"
 
     clock.seek(clock.bounds_max_ns)
+    tracker.update_replay(clock.current_ts_ns)
     watch.apply_updates(force=True)
     assert watch.entry.value_label.text() == "state-4"
 
     clock.seek(clock.bounds_min_ns)
+    tracker.update_replay(clock.current_ts_ns)
     watch.apply_updates(force=True)
     assert watch.entry.value_label.text() == "state-0"
 
 
 def test_returning_to_live_shows_the_latest_message_again(watch):
     clock = watch.gui_context.registry.playback_clock
+    tracker = watch.gui_context.registry.module_value_tracker
     clock.enter_replay(clock.bounds_min_ns)
+    tracker.update_replay(clock.current_ts_ns)
     watch.apply_updates(force=True)
     assert watch.entry.value_label.text() == "state-0"
 

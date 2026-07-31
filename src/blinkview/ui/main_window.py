@@ -10,7 +10,7 @@ from time import perf_counter, time
 from types import SimpleNamespace
 from typing import Optional
 
-from qtpy.QtCore import QCoreApplication, Qt, QTimer, Signal, Slot
+from qtpy.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
 from qtpy.QtGui import QAction, QFont
 from qtpy.QtWidgets import (
     QApplication,
@@ -76,6 +76,30 @@ from blinkview.utils.used_modules import print_used_modules
 #
 #
 # gc.callbacks.append(gc_callback)
+
+
+class _ShutdownWorker(QObject):
+    """Runs Registry.stop() on a background QThread so shutdown-time compression (cold storage
+    segments + each file logger's final part - see core/registry.py's stop(on_progress=...))
+    doesn't freeze the UI thread. Not run via SystemContext.tasks.run_task: Registry.stop()
+    itself calls self.system_ctx.tasks.shutdown(), which joins that same executor's threads -
+    running stop() *through* the executor it shuts down would deadlock.
+
+    finished/progress are ordinary Qt signals - since a BlinkMainWindow instance (the connected
+    receiver) lives on the main thread while this worker runs on the background QThread, Qt
+    auto-marshals these as queued connections, so the receiving slots always run safely on the
+    main thread with no manual locking needed."""
+
+    finished = Signal()
+    progress = Signal(int, int, str)
+
+    def __init__(self, registry):
+        super().__init__()
+        self.registry = registry
+
+    def run(self):
+        self.registry.stop(on_progress=lambda i, total, label: self.progress.emit(i, total, label))
+        self.finished.emit()
 
 
 class BlinkMainWindow(QMainWindow):
@@ -338,6 +362,13 @@ class BlinkMainWindow(QMainWindow):
         self.sources_node.on_update(self.sync_device_toolbars)
 
         self.watches_node = None
+
+        # Shutdown-time compression progress state (see closeEvent) - kept as instance attrs so
+        # the toast/thread/worker aren't garbage-collected mid-flight.
+        self._shutdown_ready_to_close = False
+        self._shutdown_toast = None
+        self._shutdown_thread: Optional[QThread] = None
+        self._shutdown_worker: Optional[_ShutdownWorker] = None
 
         print("[BlinkMainWindow] Initialization complete.")
 
@@ -785,19 +816,70 @@ class BlinkMainWindow(QMainWindow):
         self.close()
 
     def closeEvent(self, event):
-        """Clean up all resources when the Main Window closes."""
+        """Clean up all resources when the Main Window closes.
+
+        Registry.stop() now does real work at shutdown (cold-storage + file-logger zstd
+        compression - see core/registry.py's stop(on_progress=...)) that can take a while, so
+        this defers the actual close instead of blocking the UI thread on it:
+        - First call: ignore the close, show a progress toast, and run Registry.stop() on a
+          background thread (see _ShutdownWorker above).
+        - While that's running: further close attempts (e.g. the user clicks the close button
+          again) are simply ignored - no-op, nothing to restart.
+        - Once the worker's finished signal arrives (_on_shutdown_compression_done): do the rest
+          of what this method used to do synchronously after registry.stop() returned, then call
+          self.close() again to re-enter this method.
+        - Final call (_shutdown_ready_to_close): accept immediately - compression has genuinely
+          finished by this point, never before, no matter how long it took.
+        """
+        if self._shutdown_ready_to_close:
+            event.accept()
+            return
+
+        if self.gui_context.is_shutting_down:
+            # Shutdown already in progress on the background thread - nothing to do yet.
+            event.ignore()
+            return
+
         print("Closing BlinkView...")
         self.gui_context.is_shutting_down = True
+        event.ignore()
 
         self.gui_context.registry.file_manager.save_gui()
 
-        self.gui_context.registry.stop()
+        self._start_shutdown_compression()
+
+    def _start_shutdown_compression(self):
+        from blinkview.ui.widgets.toast import ToastManager
+
+        self._shutdown_toast = ToastManager.show_persistent("Compressing files...", parent=self)
+
+        self._shutdown_thread = QThread(self)
+        self._shutdown_worker = _ShutdownWorker(self.gui_context.registry)
+        self._shutdown_worker.moveToThread(self._shutdown_thread)
+        self._shutdown_thread.started.connect(self._shutdown_worker.run)
+        self._shutdown_worker.progress.connect(self._on_shutdown_progress)
+        self._shutdown_worker.finished.connect(self._on_shutdown_compression_done)
+        self._shutdown_worker.finished.connect(self._shutdown_thread.quit)
+        self._shutdown_thread.start()
+
+    @Slot(int, int, str)
+    def _on_shutdown_progress(self, current: int, total: int, label: str):
+        if self._shutdown_toast is not None:
+            self._shutdown_toast.set_message(f"Compressing files... {current} of {total} ({label})")
+
+    @Slot()
+    def _on_shutdown_compression_done(self):
+        if self._shutdown_toast is not None:
+            self._shutdown_toast.dismiss()
+            self._shutdown_toast = None
+
         self.timer_fast.stop()
         self.timer_slow.stop()
 
         self.window_manager.close_all()
 
-        event.accept()
+        self._shutdown_ready_to_close = True
+        self.close()
 
     @Slot(int)
     def close_tab(self, index: int):

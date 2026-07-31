@@ -82,43 +82,57 @@ def test_replay_scrub_backward_shows_the_message_as_of_the_playhead(table):
     table.apply_updates(force=True)  # establish LIVE baseline
 
     clock = table.gui_context.registry.playback_clock
+    tracker = table.gui_context.registry.module_value_tracker
 
+    # get_replay_snapshot() only reads whatever update_replay() last computed - in production
+    # this runs on a background task (Registry._tick_replay_snapshot), but tests never call
+    # Registry.start() (see the `registry` fixture above), so it's driven manually here, exactly
+    # like update() already is for the LIVE case.
     clock.enter_replay(clock.bounds_min_ns)
+    tracker.update_replay(clock.current_ts_ns)
     table.apply_updates(force=True)
     assert _msg_for_module(table, table.early) == "state-0"
 
     clock.seek(clock.bounds_max_ns)
+    tracker.update_replay(clock.current_ts_ns)
     table.apply_updates(force=True)
     assert _msg_for_module(table, table.early) == "state-4"
 
     clock.seek(clock.bounds_min_ns)
+    tracker.update_replay(clock.current_ts_ns)
     table.apply_updates(force=True)
     assert _msg_for_module(table, table.early) == "state-0"
 
 
 def test_replay_before_a_late_arriving_modules_first_message_shows_empty_placeholder(table):
     clock = table.gui_context.registry.playback_clock
+    tracker = table.gui_context.registry.module_value_tracker
 
     # 1s in: 'early' has a message, 'late' (first message at 3.5s) does not yet.
     clock.enter_replay(clock.bounds_min_ns + 1_000_000_000)
+    tracker.update_replay(clock.current_ts_ns)
     table.apply_updates(force=True)
     assert _msg_for_module(table, table.early) == "state-1"
     assert _msg_for_module(table, table.late) == "---"
 
     # Scrub forward past 'late's first message.
     clock.seek(clock.bounds_min_ns + 3_600_000_000)
+    tracker.update_replay(clock.current_ts_ns)
     table.apply_updates(force=True)
     assert _msg_for_module(table, table.late) == "late-msg"
 
     # Scrub back again - 'late' must drop back to empty, not stay stuck at "late-msg".
     clock.seek(clock.bounds_min_ns + 1_000_000_000)
+    tracker.update_replay(clock.current_ts_ns)
     table.apply_updates(force=True)
     assert _msg_for_module(table, table.late) == "---"
 
 
 def test_returning_to_live_shows_the_latest_message_again(table):
     clock = table.gui_context.registry.playback_clock
+    tracker = table.gui_context.registry.module_value_tracker
     clock.enter_replay(clock.bounds_min_ns)
+    tracker.update_replay(clock.current_ts_ns)
     table.apply_updates(force=True)
     assert _msg_for_module(table, table.early) == "state-0"
 
@@ -129,7 +143,9 @@ def test_returning_to_live_shows_the_latest_message_again(table):
 
 def test_force_live_pins_this_table_to_live_while_clock_is_in_replay(table):
     clock = table.gui_context.registry.playback_clock
+    tracker = table.gui_context.registry.module_value_tracker
     clock.enter_replay(clock.bounds_min_ns)
+    tracker.update_replay(clock.current_ts_ns)
     table.apply_updates(force=True)
     assert _msg_for_module(table, table.early) == "state-0"  # still following REPLAY
 
@@ -140,6 +156,7 @@ def test_force_live_pins_this_table_to_live_while_clock_is_in_replay(table):
 
     # Scrubbing further must not pull this table back into REPLAY.
     clock.seek(clock.bounds_min_ns + 1_000_000_000)
+    tracker.update_replay(clock.current_ts_ns)
     table.apply_updates(force=True)
     assert _msg_for_module(table, table.early) == "state-4"
 

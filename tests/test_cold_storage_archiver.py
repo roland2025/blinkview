@@ -167,6 +167,31 @@ class TestPersistAndResume:
             archiver.stop()
             archiver.cleanup()
 
+    def test_counter_continues_past_compressed_archive_files(self, tmp_path):
+        """Regression: once every raw segment in storage_dir has been zstd-compressed into the
+        sibling cold-archive/ directory and deleted (core/cold_archive.py), storage_dir itself
+        looks empty - the counter must still continue past those compressed indices, not reset to
+        0. Missing this reuses an already-taken index for a brand-new (chronologically latest)
+        segment, which then sorts first by filename and silently clobbers the real earliest
+        segment's archive on the next compression pass - and even short of an outright collision,
+        breaks CircularLogPool._mount_existing_cold_segments's lexical-order-is-chronological-
+        order assumption, producing an inverted (earliest, latest) bounds pair that pins
+        PlaybackClock's scrubber in place (see playback_control.py's SeekBarWidget)."""
+        cold_dir = tmp_path / "cold"
+        cold_dir.mkdir()
+        archive_dir = tmp_path / "cold-archive"
+        archive_dir.mkdir()
+        for i in range(31):
+            (archive_dir / f"segment_{i:010d}.blkseg.zst").write_bytes(b"")
+
+        archiver = ColdStorageArchiver(cold_dir, on_archived=lambda seg: seg.release())
+        try:
+            assert archiver._counter == 31
+            assert archiver._next_path().name == "segment_0000000031.blkseg"
+        finally:
+            archiver.stop()
+            archiver.cleanup()
+
     def test_resuming_archiver_does_not_overwrite_existing_files(self, global_pool, tmp_path):
         """End-to-end: archive one segment, stop (persist=True so the file survives), then start
         a *new* archiver pointed at the same directory and archive another - the original file's

@@ -11,7 +11,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from blinkview import __version__ as blinkview_version
 from blinkview.core.settings_manager import SettingsManager
@@ -322,8 +322,22 @@ class FileManager:
         self._ensure_session_dir()
         return self.session_dir / filename
 
-    def stop(self):
-        """The 'Closer' - Saves final state and stops loggers."""
+    @property
+    def file_logger_count(self) -> int:
+        """Number of currently-registered file loggers - lets a caller (Registry.stop's
+        shutdown-compression progress reporting) know the total upfront."""
+        return len(self._file_loggers)
+
+    def stop(self, on_progress: Optional[Callable[[str], None]] = None):
+        """The 'Closer' - Saves final state and stops loggers.
+
+        `on_progress(logging_id)`, if given, is called once per file logger right after its
+        `.stop()` returns - that call is what actually triggers that logger's final-part
+        compression synchronously (BaseDaemon.stop() joins the logger thread, whose run() loop
+        compresses its last part on exit - see FileLogger._close_and_compress_final_part). This
+        function only reports what it directly knows (one logger just finished stopping);
+        aggregating that into an overall "i of N" count alongside cold storage compression is
+        Registry.stop()'s job, not this module's."""
         # Save Final Daemon Config
         if self.system_context:
             # Save final snapshots using the central path logic
@@ -335,6 +349,8 @@ class FileManager:
         # Stop Threaded Loggers
         for logger in self._file_loggers:
             logger.stop()
+            if on_progress:
+                on_progress(logger.local.logging_id)
 
         # Finalize Manifest
         finished_time = datetime.now(timezone.utc)

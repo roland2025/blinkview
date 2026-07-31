@@ -471,3 +471,57 @@ class TestStop:
         fm.stop()
 
         assert saved_paths == [fm.get_session_path("final")]
+
+    def test_stop_reports_on_progress_once_per_file_logger_with_its_logging_id(self, tmp_path):
+        fm = make_manager(tmp_path)
+        logger_a = FakeFileLogger(logging_id="session")
+        logger_b = FakeFileLogger(logging_id="src_abcd1234")
+        fm.add_file_logger(logger_a)
+        fm.add_file_logger(logger_b)
+
+        calls = []
+        fm.stop(on_progress=calls.append)
+
+        assert calls == ["session", "src_abcd1234"]
+
+    def test_stop_with_no_progress_callback_still_stops_loggers(self, tmp_path):
+        """The default on_progress=None must not be treated as truthy/called."""
+        fm = make_manager(tmp_path)
+        logger = FakeFileLogger()
+        fm.add_file_logger(logger)
+
+        fm.stop()  # must not raise
+
+        assert logger.stopped is True
+
+    def test_on_progress_fires_after_stop_not_before(self, tmp_path):
+        """Progress for a logger must be reported only once its .stop() (which triggers that
+        logger's final-part compression) has actually returned, not before."""
+        fm = make_manager(tmp_path)
+
+        class OrderTrackingLogger(FakeFileLogger):
+            def stop(self):
+                order.append("stop")
+                super().stop()
+
+        order = []
+        fm.add_file_logger(OrderTrackingLogger())
+
+        fm.stop(on_progress=lambda label: order.append("progress"))
+
+        assert order == ["stop", "progress"]
+
+
+class TestFileLoggerCount:
+    def test_reflects_the_number_of_registered_file_loggers(self, tmp_path):
+        fm = make_manager(tmp_path)
+        assert fm.file_logger_count == 0
+
+        fm.add_file_logger(FakeFileLogger(logging_id="a"))
+        assert fm.file_logger_count == 1
+
+        fm.add_file_logger(FakeFileLogger(logging_id="b"))
+        assert fm.file_logger_count == 2
+
+        fm.remove_file_logger(fm._file_loggers[0])
+        assert fm.file_logger_count == 1

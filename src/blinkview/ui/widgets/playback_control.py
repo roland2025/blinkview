@@ -18,7 +18,6 @@ from qtpy.QtWidgets import (
 )
 
 from blinkview.core.playback_clock import PlaybackMode
-from blinkview.core.registry import Registry
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.jog_wheel_button import JogWheelButton
 from blinkview.utils.time_utils import ConsoleTimestampFormatter
@@ -179,11 +178,6 @@ class PlaybackControlWidget(QWidget):
         self._ranges_combo_ids = []  # tracks what's currently populated, to avoid rebuilding
         # (and losing the user's current selection) on every heartbeat when nothing changed
         self._active_range_id = None  # range currently shown zoomed-in on the second row, if any
-        # Edge-detector for _auto_select_full_recording_range: True whenever the clock was last
-        # seen in LIVE, so a REPLAY entry (whether via a fresh construction that's already in
-        # REPLAY, or a live->replay transition mid-session) is only auto-selected once per entry,
-        # never overriding a range the user picks afterwards while still in that same REPLAY run.
-        self._prev_was_live = True
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -337,31 +331,26 @@ class PlaybackControlWidget(QWidget):
         self.mark_out_button.setEnabled(self._pending_mark_in_ts is not None)
 
         self._sync_ranges()
-        if is_live:
-            self._prev_was_live = True
-        elif self._prev_was_live:
-            self._prev_was_live = False
-            self._auto_select_full_recording_range()
         self._sync_zoom_bar()
         self._sync_live_bar(clock)
 
     def _seek_bar_bounds(self, clock):
         """Bounds for the main seek bar: while replaying a loaded session with known metadata
-        (Registry.DEFAULT_REPLAY_RANGE_NAME's start/end, set from metadata.json created_at/
-        finished_at - see Registry.load_replay_session), use that session's own fixed length
-        instead of the raw clock bounds. Otherwise falls back to the clock's own bounds
-        unchanged - covers plain LIVE mode and a REPLAY entered by scrubbing back into the live
-        buffer with no loaded session (no metadata to fix a length to), same as before this
-        distinction existed. Without this, a session's seek bar would keep growing for as long as
-        the system's own self-logging keeps appending rows to the shared central pool during
-        replay, even though the recorded session itself has a fixed length."""
+        (registry.replay_session_bounds_ns, set from metadata.json created_at/finished_at - see
+        Registry.load_replay_session), use that session's own fixed length instead of the raw
+        clock bounds. Otherwise falls back to the clock's own bounds unchanged - covers plain
+        LIVE mode and a REPLAY entered by scrubbing back into the live buffer with no loaded
+        session (no metadata to fix a length to), same as before this distinction existed.
+        Without this, a session's seek bar would keep growing for as long as the system's own
+        self-logging keeps appending rows to the shared central pool during replay, even though
+        the recorded session itself has a fixed length. Deliberately not a selectable named
+        PlaybackRange (it used to be one) - the seek bar already shows "the whole recording" by
+        default, so a dedicated dropdown entry for the same thing would be redundant."""
         if clock.mode is PlaybackMode.REPLAY:
-            store = self._ranges_store()
-            if store is not None:
-                rng = next((r for r in store.ranges if r.name == Registry.DEFAULT_REPLAY_RANGE_NAME), None)
-                if rng is not None:
-                    rng = rng.normalized()
-                    return rng.start_ts_ns, rng.end_ts_ns
+            registry = self.gui_context.registry
+            bounds = getattr(registry, "replay_session_bounds_ns", None) if registry is not None else None
+            if bounds is not None:
+                return bounds
         return clock.bounds_min_ns, clock.bounds_max_ns
 
     def _sync_live_bar(self, clock):
@@ -373,29 +362,6 @@ class PlaybackControlWidget(QWidget):
         start_ts_ns = getattr(registry, "start_ts_ns", clock.bounds_min_ns) if registry is not None else 0
         self.live_seek_bar.setEnabled(True)
         self.live_seek_bar.set_state(start_ts_ns, clock.bounds_max_ns, clock.current_ts_ns)
-
-    def _auto_select_full_recording_range(self):
-        """Fires once on every LIVE->REPLAY edge (including a widget constructed while REPLAY is
-        already active - see _prev_was_live's initial value): auto-selects the auto-created
-        "whole recording" named range (Registry.DEFAULT_REPLAY_RANGE_NAME, added by
-        Registry.load_replay_session) in the ranges combo/zoom bar, if one exists for this
-        session, so the user sees the full-session zoom view immediately on entering REPLAY
-        instead of having to manually pick it from the combo. Does not seek the clock - only
-        changes which range is shown selected/zoomed, never the playhead position."""
-        store = self._ranges_store()
-        if store is None:
-            return
-
-        rng = next((r for r in store.ranges if r.name == Registry.DEFAULT_REPLAY_RANGE_NAME), None)
-        if rng is None:
-            return
-
-        self._active_range_id = rng.id
-        idx = self.ranges_combo.findData(rng.id)
-        if idx != -1:
-            self.ranges_combo.blockSignals(True)
-            self.ranges_combo.setCurrentIndex(idx)
-            self.ranges_combo.blockSignals(False)
 
     def _sync_ranges(self):
         store = self._ranges_store()

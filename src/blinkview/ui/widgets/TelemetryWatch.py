@@ -1429,7 +1429,9 @@ class TelemetryWatch(QWidget):
         # follows the clock while in REPLAY.
         clock = self._clock()
         if clock is not None and clock.mode is PlaybackMode.REPLAY:
-            snapshot_ctx = tracker.build_snapshot_as_of(clock.current_ts_ns)
+            # Cheap read of whatever Registry._tick_replay_snapshot last computed on a
+            # background thread - never computes on this (UI) thread.
+            snapshot_ctx = tracker.get_replay_snapshot()
         else:
             snapshot_ctx = tracker.get_snapshot()
 

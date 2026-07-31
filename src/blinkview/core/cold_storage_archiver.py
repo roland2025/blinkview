@@ -56,6 +56,17 @@ class ColdStorageArchiver:
         atexit.register(self.cleanup)
 
     def _next_counter_after_existing_files(self) -> int:
+        """Scans both possible on-disk forms of a previously-persisted segment - raw
+        `segment_*.blkseg` files here in storage_dir, and zstd-compressed
+        `segment_*.blkseg.zst` archives in the sibling `cold-archive/` directory
+        (core/cold_archive.py) - since CircularLogPool._mount_existing_cold_segments prefers the
+        compressed form once a raw file has been compressed-and-deleted. Missing the archive
+        directory here would reset the counter to 0 the moment every raw segment from a previous
+        run has been fully compressed (storage_dir then looks empty), reusing already-taken
+        segment indices - which breaks _mount_existing_cold_segments's lexical-filename-order-is-
+        chronological-order assumption the next time this session is resumed, since the reused,
+        freshly-written index now sorts before (but is timestamped after) the real segments that
+        index used to belong to."""
         highest = -1
         for path in self._dir.glob("segment_*.blkseg"):
             try:
@@ -63,6 +74,16 @@ class ColdStorageArchiver:
             except (IndexError, ValueError):
                 continue
             highest = max(highest, index)
+
+        archive_dir = self._dir.parent / "cold-archive"
+        if archive_dir.is_dir():
+            for path in archive_dir.glob("segment_*.blkseg.zst"):
+                try:
+                    index = int(path.name.split("_", 1)[1].split(".", 1)[0])
+                except (IndexError, ValueError):
+                    continue
+                highest = max(highest, index)
+
         return highest + 1
 
     def archive(self, segment: PooledLogBatch) -> bool:

@@ -23,7 +23,26 @@ from blinkview.ops.formatting import (
     nb_format_binary_batch,
     nb_format_log_row_batch,
 )
+from blinkview.storage.log_file_archive import compress_log_part_file
 from blinkview.subscribers.subscriber import BaseSubscriber
+
+
+def _compress_and_delete_log_part(path: Path, logger=None) -> bool:
+    """Compresses an already-closed log part file and deletes the original - best-effort: a
+    failure is logged and skipped (returns False) rather than raised, since a part left
+    uncompressed is still fully valid (just not space-saved), never lost. Shared by FileLogger's
+    rotation (background task) and shutdown (synchronous) compression call sites. Returns True on
+    success - callers that reuse `path`'s part index afterward (see run()'s finally block) must
+    only do so once the original is confirmed gone, or a later reopen-and-rewrite at the same
+    path would silently clobber this compressed archive on its next compression pass."""
+    try:
+        compress_log_part_file(path)
+        path.unlink()
+        return True
+    except OSError as e:
+        if logger:
+            logger.warning(f"Failed to compress log part {path}: {e}")
+        return False
 
 
 class BaseFileLogger(BaseSubscriber):
@@ -90,6 +109,11 @@ class FileLogger(BaseFileLogger):
         return changed
 
     def open_file(self, increment_part_index=False):
+        # The part being rotated away from is now immutable (closed, never appended to again) -
+        # compress it off-thread so a large completed part doesn't block this logger thread from
+        # writing the new one. Captured before self.file_path gets reassigned below.
+        rotated_away_path = self.file_path if increment_part_index else None
+
         if increment_part_index:
             self.part_index += 1
             # Sync the increment back to metadata immediately during rotation
@@ -100,6 +124,9 @@ class FileLogger(BaseFileLogger):
         if self.file_handle is not None:
             self.file_handle.close()
             self.file_handle = None
+
+        if rotated_away_path is not None:
+            self.shared.tasks.run_task(_compress_and_delete_log_part, rotated_away_path, self.logger)
 
         self.file_handle = self.file_path.open("ab")
 
@@ -179,8 +206,34 @@ class FileLogger(BaseFileLogger):
                             bytes_total = self.open_file(increment_part_index=True)
         finally:
             self._flush()
-            if self.file_handle:
-                self.file_handle.close()
+            self._close_and_compress_final_part()
+
+    def _close_and_compress_final_part(self):
+        """Closes the current file handle and compresses the final part synchronously (not via
+        run_task, unlike rotation) - called from run()'s finally block, i.e. on this logger
+        thread itself right before it exits. BaseDaemon.stop() joins this thread before
+        returning, so a background task here could easily lose the race against process/Registry
+        shutdown. This is also what guarantees every session ends up compressed even one that
+        never rotates, not just ones that happen to."""
+        if self.file_handle:
+            self.file_handle.close()
+            self.file_handle = None
+
+        if self.file_path is not None and self.file_path.exists() and self.file_path.stat().st_size > 0:
+            if _compress_and_delete_log_part(self.file_path, self.logger):
+                # A restart() (config change -> BaseDaemon.restart, or any future start()) must
+                # never reopen this now-deleted, now-archived path - open_file() would just
+                # recreate an empty file there and a later compression pass would silently
+                # overwrite this archive with only the new stint's content, losing what's already
+                # safely compressed. Bumping part_index (only on confirmed success - a failed
+                # compression leaves the original file intact and safely reappendable)
+                # guarantees the next open_file() always starts a fresh, never-before-used part,
+                # same as a real rotation would.
+                self.part_index += 1
+                self.shared.registry.file_manager.metadata["loggers"][self.local.logging_id]["last_part"] = (
+                    self.part_index
+                )
+                self.shared.registry.file_manager.write_metadata()
 
     process_batch: Callable[[list], bytearray | str]
     put: Callable[[list], None]

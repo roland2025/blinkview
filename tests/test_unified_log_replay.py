@@ -1,3 +1,9 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
+# Copyright (c) 2026 Roland Uuesoo
+
 from types import SimpleNamespace
 
 import numpy as np
@@ -186,6 +192,61 @@ class TestRun:
 
         subscriber = CapturingSubscriber()
         replay = make_replay([part1, part2], id_registry, array_pool)
+        replay.subscribe(subscriber)
+
+        replay.run()
+
+        assert len(subscriber.batches) == 1
+        assert [r["message"] for r in subscriber.batches[0]] == ["first", "second"]
+
+    def test_reads_a_compressed_part_identically_to_an_uncompressed_one(self, tmp_path, id_registry, array_pool):
+        """A .log.zst part (rotated-away or cleanly-closed - see storage/log_file_archive.py)
+        must decode identically to the same content read uncompressed."""
+        from blinkview.storage.log_file_archive import compress_log_part_file
+
+        device = id_registry.get_device("dev")
+        device.get_module("log")
+
+        raw_part = tmp_path / "session.0000.log"
+        raw_part.write_text(
+            make_line("2026-01-01T00:00:00.000000", "I", "dev", "log", "hello world")
+            + "\n"
+            + make_line("2026-01-01T00:00:01.500000", "E", "dev", "log", "boom")
+            + "\n"
+        )
+        compressed_part = compress_log_part_file(raw_part)
+        raw_part.unlink()  # only the .log.zst sibling remains, matching production after rotation
+
+        subscriber = CapturingSubscriber()
+        replay = make_replay([compressed_part], id_registry, array_pool)
+        replay.subscribe(subscriber)
+
+        replay.run()
+
+        assert len(subscriber.batches) == 1
+        assert [r["message"] for r in subscriber.batches[0]] == ["hello world", "boom"]
+
+    def test_reads_a_mixed_session_of_compressed_and_uncompressed_parts_in_order(
+        self, tmp_path, id_registry, array_pool
+    ):
+        """A session where earlier parts got rotated (and compressed) but the process was killed
+        before the final part's shutdown-time compression ran - must still parse everything, in
+        the right order, regardless of which parts are compressed."""
+        from blinkview.storage.log_file_archive import compress_log_part_file
+
+        device = id_registry.get_device("dev")
+        device.get_module("log")
+
+        part0 = tmp_path / "session.0000.log"
+        part0.write_text(make_line("2026-01-01T00:00:00.000000", "I", "dev", "log", "first") + "\n")
+        compressed_part0 = compress_log_part_file(part0)
+        part0.unlink()
+
+        part1 = tmp_path / "session.0001.log"  # never compressed - simulates a crash mid-session
+        part1.write_text(make_line("2026-01-01T00:00:01.000000", "I", "dev", "log", "second") + "\n")
+
+        subscriber = CapturingSubscriber()
+        replay = make_replay(sorted([compressed_part0, part1]), id_registry, array_pool)
         replay.subscribe(subscriber)
 
         replay.run()

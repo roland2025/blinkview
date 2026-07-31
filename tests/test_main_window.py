@@ -435,6 +435,87 @@ class TestPollQueue:
         main_window.poll_queue()  # must not raise - caught and logged internally
 
 
+class TestCloseEvent:
+    """Registry.stop() now does real shutdown-time compression work (cold storage + file logger
+    parts - see core/registry.py's stop(on_progress=...)), so closeEvent defers the actual close
+    instead of blocking the UI thread on it - see plans/expressive-sauteeing-sun.md. These tests
+    cover the two Qt-signal-connected slots directly (fast, deterministic) and the full threaded
+    flow end-to-end (via qtbot.waitUntil, since real work happens on a background QThread)."""
+
+    def test_on_shutdown_progress_updates_toast_text(self, main_window):
+        messages = []
+        main_window._shutdown_toast = SimpleNamespace(set_message=messages.append)
+
+        main_window._on_shutdown_progress(2, 5, "segment_0000000001.blkseg")
+
+        assert messages == ["Compressing files... 2 of 5 (segment_0000000001.blkseg)"]
+
+    def test_on_shutdown_progress_is_a_noop_without_a_toast(self, main_window):
+        main_window._shutdown_toast = None
+
+        main_window._on_shutdown_progress(1, 1, "session")  # must not raise
+
+    def test_on_shutdown_compression_done_dismisses_toast_and_finishes_close(self, main_window, monkeypatch):
+        dismissed = []
+        main_window._shutdown_toast = SimpleNamespace(dismiss=lambda: dismissed.append(True))
+        monkeypatch.setattr(main_window.timer_fast, "stop", lambda: None)
+        monkeypatch.setattr(main_window.timer_slow, "stop", lambda: None)
+        monkeypatch.setattr(main_window.window_manager, "close_all", lambda: None)
+        close_calls = []
+        monkeypatch.setattr(main_window, "close", lambda: close_calls.append(True))
+
+        main_window._on_shutdown_compression_done()
+
+        assert dismissed == [True]
+        assert main_window._shutdown_toast is None
+        assert main_window._shutdown_ready_to_close is True
+        assert close_calls == [True]
+
+    def test_first_close_defers_and_the_worker_eventually_completes(self, main_window, qtbot):
+        main_window.close()
+
+        # Deferred, not actually closed yet - a toast is up and the background worker is running.
+        assert main_window._shutdown_ready_to_close is False
+        assert main_window._shutdown_toast is not None
+        assert main_window.gui_context.is_shutting_down is True
+
+        qtbot.waitUntil(lambda: main_window._shutdown_ready_to_close, timeout=5000)
+
+        assert main_window._shutdown_toast is None  # dismissed once compression finished
+
+    def test_repeated_close_attempts_while_worker_running_are_ignored(self, main_window, qtbot):
+        main_window.close()
+        worker = main_window._shutdown_worker
+        thread = main_window._shutdown_thread
+
+        main_window.close()  # second attempt while the worker is still running - must be a no-op
+
+        assert main_window._shutdown_worker is worker
+        assert main_window._shutdown_thread is thread
+
+        qtbot.waitUntil(lambda: main_window._shutdown_ready_to_close, timeout=5000)
+
+    def test_final_close_accepts_immediately(self, main_window):
+        main_window._shutdown_ready_to_close = True
+
+        class FakeEvent:
+            def __init__(self):
+                self.accepted = False
+                self.ignored = False
+
+            def accept(self):
+                self.accepted = True
+
+            def ignore(self):
+                self.ignored = True
+
+        event = FakeEvent()
+        main_window.closeEvent(event)
+
+        assert event.accepted is True
+        assert event.ignored is False
+
+
 class TestSignalHandler:
     def test_closes_the_window(self, main_window, monkeypatch):
         import signal
