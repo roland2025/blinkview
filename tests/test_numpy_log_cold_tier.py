@@ -230,6 +230,64 @@ class TestRealKernelFetchThroughColdTier:
         assert result.total_new_rows == 4
 
 
+class TestFrozenColdStorage:
+    """freeze_cold_storage_from_now() marks a point in the sequence beyond which rows are never
+    archived to cold storage - see load_replay_session's use case: this process's own live
+    system-log messages generated while a replay session is loaded shouldn't get mixed into that
+    session's cold storage."""
+
+    def test_rows_appended_before_freeze_still_archive_normally(self, cold_log_pool, global_pool):
+        push_rows(cold_log_pool, global_pool, 4, ts_start=100)
+        assert wait_for(lambda: len(cold_log_pool.cold_segments) >= 1)
+
+        cold_log_pool.freeze_cold_storage_from_now()
+
+        # Nothing pushed after the freeze yet - segments already evicted before it stay archived.
+        assert len(cold_log_pool.cold_segments) >= 1
+
+    def test_rows_appended_after_freeze_are_dropped_instead_of_archived(self, cold_log_pool, global_pool):
+        push_rows(cold_log_pool, global_pool, 2, ts_start=100)
+        cold_log_pool.freeze_cold_storage_from_now()
+        frozen_at = cold_log_pool.frozen_since_sequence_id
+
+        # Push enough post-freeze rows to force real hot-tier eviction (max_pieces=2).
+        push_rows(cold_log_pool, global_pool, 6, ts_start=200)
+
+        # Give the archiver a moment to have processed anything it was going to - then confirm
+        # none of the cold segments contain a row at/after the freeze point.
+        time.sleep(0.2)
+        for seg in cold_log_pool.cold_segments:
+            assert int(seg.first_sequence_id) < frozen_at
+
+    def test_release_all_drops_frozen_hot_segments_instead_of_persisting_them(self, global_pool, tmp_path):
+        pool = CircularLogPool(
+            global_pool,
+            max_pieces=2,
+            cold_max_pieces=4,
+            cold_storage_dir=str(tmp_path),
+            final_buffer_bytes=1024,
+            persist_cold_storage=True,
+        )
+        pool.segment_capacity = 1
+        pool._optimized = True
+        pool.clear()
+
+        push_rows(pool, global_pool, 2, ts_start=100)
+        pool.freeze_cold_storage_from_now()
+        frozen_at = pool.frozen_since_sequence_id
+        push_rows(pool, global_pool, 2, ts_start=200)  # stays in the hot tier, never evicted
+
+        pool.release_all()
+
+        from blinkview.core.cold_segment import read_cold_segment_header
+
+        blkseg_files = list(tmp_path.glob("segment_*.blkseg"))
+        last_seqs = sorted(read_cold_segment_header(p).last_seq for p in blkseg_files)
+        # The 2 post-freeze rows must not have been flushed to disk alongside the pre-freeze ones.
+        assert all(seq < frozen_at for seq in last_seqs)
+        assert len(last_seqs) < 4
+
+
 class TestPersistColdStorageOnClose:
     """cold_storage_persist_on_close: keep cold segment files on disk instead of wiping them at
     release_all(), and flush the hot tier to disk too so the whole session is archived - not

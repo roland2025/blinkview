@@ -8,7 +8,7 @@ import mmap
 import os
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Iterable, List
+from typing import TYPE_CHECKING, Callable, Iterable, List, Optional
 
 import numpy as np
 
@@ -22,6 +22,9 @@ from blinkview.ops.id_resolution import nb_resolve_names_batch, nb_resolve_scope
 from blinkview.ops.unified_log_scan import nb_push_unified_log_rows, nb_scan_unified_log_lines
 from blinkview.storage.log_file_archive import ARCHIVE_SUFFIX, decompress_log_part_to_buffer
 
+if TYPE_CHECKING:
+    from blinkview.core.central_storage import CentralStorage
+
 # Fixed grammar written by ops/formatting.py's nb_format_log_row_batch:
 #   YYYY-MM-DDTHH:MM:SS.uuuuuuZ <LEVEL> <DEVICE> <MODULE>: <MESSAGE>\n
 # Level/device/module are single tokens (device/module names are restricted to
@@ -33,9 +36,11 @@ from blinkview.storage.log_file_archive import ARCHIVE_SUFFIX, decompress_log_pa
 
 class UnifiedLogReplay(BaseDaemon):
     """One-shot reader that loads a previously-written unified log (FileLogger/log_row
-    output) back into Central Storage. Not a live source/parser - constructed and
-    subscribed directly to registry.central, bypassing Reorder since a single unified
-    log file is already chronologically ordered.
+    output) back into Central Storage. Not a live source/parser - pushes straight into
+    `central.log_pool`/`central.distribute()` itself, bypassing both Reorder (a single unified
+    log file is already chronologically ordered) and central's own input_queue/run() loop, so a
+    caller can pause() central's queue draining (see CentralStorage.pause_ingest) for the
+    duration of this bulk load without also blocking this reader.
     """
 
     # 10MiB/256 bytes-per-row -> ~30 batches for the 1.2M-row demo session instead of ~299 -
@@ -45,13 +50,29 @@ class UnifiedLogReplay(BaseDaemon):
     BUFFER_BYTES = MAX_BATCH_ROWS * 256
     MAX_MALFORMED = 256
 
-    def __init__(self, log_parts: Iterable[Path]):
+    def __init__(
+        self,
+        log_parts: Iterable[Path],
+        central: "CentralStorage",
+        on_part_progress: Optional[Callable[[int, int, str], None]] = None,
+        on_finished: Optional[Callable[[], None]] = None,
+    ):
         super().__init__()
         self.log_parts: List[Path] = list(log_parts)
+        self.central = central
+        self.on_part_progress = on_part_progress
+        self.on_finished = on_finished
         self.enabled = True
 
+    def _push(self, batch: PooledLogBatch):
+        """Feeds a finished batch straight into central's log_pool/subscribers, in place of the
+        subscribe()/distribute()-into-input_queue path a live source would use - see the class
+        docstring for why this reader bypasses that queue instead."""
+        self.central.log_pool.batch_append(batch)
+        self.central.distribute(batch)
+
     @staticmethod
-    @register_warmup
+    # @register_warmup
     def warmup(helper: "NumbaWarmupHelper"):
         """Compiles nb_scan_unified_log_lines, nb_push_unified_log_rows (and, transitively,
         nb_parse_unified_log_ts_ns/nb_bundle_push_len), and the id-resolution kernels
@@ -225,9 +246,13 @@ class UnifiedLogReplay(BaseDaemon):
             return identity.id
 
         try:
-            for part in self.log_parts:
+            total_parts = len(self.log_parts)
+            for part_index, part in enumerate(self.log_parts, start=1):
                 if stop_is_set():
                     break
+
+                if self.on_part_progress:
+                    self.on_part_progress(part_index, total_parts, part.name)
 
                 if os.path.getsize(part) == 0:
                     continue
@@ -349,7 +374,7 @@ class UnifiedLogReplay(BaseDaemon):
                                 continue
 
                             with batch:
-                                self.distribute(batch)
+                                self._push(batch)
                             batch = batch_acquire()
 
                     # Drop every reference to the mmap'd view before the `with` block below
@@ -360,7 +385,7 @@ class UnifiedLogReplay(BaseDaemon):
 
             if batch.size > 0:
                 with batch:
-                    self.distribute(batch)
+                    self._push(batch)
                 batch = None
             else:
                 batch.release()
@@ -374,3 +399,6 @@ class UnifiedLogReplay(BaseDaemon):
 
             if self.logger:
                 self.logger.info(f"UnifiedLogReplay: finished replaying {len(self.log_parts)} part(s).")
+
+            if self.on_finished:
+                self.on_finished()

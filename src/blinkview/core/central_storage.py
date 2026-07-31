@@ -6,6 +6,7 @@
 
 import tempfile
 from pathlib import Path
+from threading import Event
 from typing import Optional
 
 from blinkview.core.base_daemon import BaseDaemon
@@ -173,6 +174,20 @@ class CentralStorage(BaseCentralStorage):
         self.log_pool: Optional[CircularLogPool] = None
         self.memory_governor: Optional[HotTierMemoryGovernor] = None
 
+        # Set (open) by default - cleared while a replay session's historical backfill is being
+        # bulk-loaded directly into log_pool (see UnifiedLogReplay), so anything already queued
+        # here (typically this process's own live SystemLogger messages) waits rather than
+        # interleaving with - and potentially getting lower sequence numbers than - historical
+        # rows still being loaded. See CircularLogPool.freeze_cold_storage_from_now.
+        self._ingest_gate = Event()
+        self._ingest_gate.set()
+
+    def pause_ingest(self):
+        self._ingest_gate.clear()
+
+    def resume_ingest(self):
+        self._ingest_gate.set()
+
     def _resolve_cold_storage_dir(self) -> Path:
         """Always creates and returns a fresh directory the cold-storage archiver can rmtree
         wholesale on cleanup (see ColdStorageArchiver.cleanup) without risking files unrelated to
@@ -280,6 +295,9 @@ class CentralStorage(BaseCentralStorage):
             )
 
     def stop(self, timeout: float = 5.0) -> None:
+        # Make sure run()'s loop can wake up and observe _stop_event even if it's currently
+        # parked waiting on a paused ingest gate.
+        self._ingest_gate.set()
         super().stop(timeout)
         if self.memory_governor is not None:
             self.memory_governor.stop()
@@ -294,6 +312,12 @@ class CentralStorage(BaseCentralStorage):
 
         while not stop_is_set():
             # we need to push messages to subscribers here, but for now we just keep them in the log
+
+            # Blocks here (not while a batch is mid-flight below) while a replay session's
+            # historical backfill is being loaded directly into log_pool - see pause_ingest.
+            self._ingest_gate.wait()
+            if stop_is_set():
+                break
 
             try:
                 batch = get(timeout=120)

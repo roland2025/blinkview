@@ -314,17 +314,16 @@ class TestStartReplay:
         created = {}
 
         class FakeUnifiedLogReplay:
-            def __init__(self, parts):
+            def __init__(self, parts, central, on_part_progress=None, on_finished=None):
                 created["parts"] = parts
+                created["central"] = central
+                created["on_part_progress"] = on_part_progress
+                created["on_finished"] = on_finished
                 created["bound"] = False
-                created["subscribed_to"] = None
                 created["started"] = False
 
             def bind_system(self, shared, local):
                 created["bound"] = True
-
-            def subscribe(self, target):
-                created["subscribed_to"] = target
 
             def start(self):
                 created["started"] = True
@@ -334,26 +333,50 @@ class TestStartReplay:
         load_calls = []
         monkeypatch.setattr(main_window.gui_context.registry, "load_replay_session", lambda d: load_calls.append(d))
 
+        registry = main_window.gui_context.registry
+        pause_calls = []
+        resume_calls = []
+        freeze_calls = []
+        monkeypatch.setattr(registry.central, "pause_ingest", lambda: pause_calls.append(True))
+        monkeypatch.setattr(registry.central, "resume_ingest", lambda: resume_calls.append(True))
+        monkeypatch.setattr(
+            registry.central.log_pool, "freeze_cold_storage_from_now", lambda: freeze_calls.append(True)
+        )
+
         main_window.start_replay(session)
 
         assert created["parts"] == [part]
+        assert created["central"] is registry.central
         assert created["bound"] is True
-        assert created["subscribed_to"] is main_window.gui_context.registry.central
         assert created["started"] is True
         assert load_calls == [tmp_path]
+
+        # Ingest must be paused before the reader starts, and neither resumed nor frozen until
+        # the reader itself reports completion (on_finished) - not just because start_replay
+        # returned.
+        assert pause_calls == [True]
+        assert resume_calls == []
+        assert freeze_calls == []
+
+        created["on_finished"]()
+
+        assert resume_calls == [True]
+        assert freeze_calls == [True]
 
     def test_skips_unified_log_replay_when_already_resumed_from_cold_storage(self, main_window, monkeypatch, tmp_path):
         """A previous run with cold_storage_persist_on_close enabled may have already archived
         this exact session (CircularLogPool._mount_existing_cold_segments remounts it at
         construction time, before start_replay ever runs) - re-parsing the unified log on top
-        would silently duplicate every row, so this must be skipped entirely."""
+        would silently duplicate every row, so this must be skipped entirely. Nothing more is
+        coming for this session either way, so cold storage is frozen immediately instead of
+        waiting on a reader that never runs."""
         session = make_session_info(path=tmp_path)
         main_window.gui_context.registry.central.log_pool.resumed_from_existing_cold_storage = True
 
         constructed = []
         monkeypatch.setattr(
             "blinkview.parsers.unified_log_replay.UnifiedLogReplay",
-            lambda parts: constructed.append(parts),
+            lambda parts, central, on_part_progress=None, on_finished=None: constructed.append(parts),
         )
 
         load_calls = []
@@ -363,6 +386,7 @@ class TestStartReplay:
 
         assert constructed == []
         assert load_calls == [tmp_path]
+        assert main_window.gui_context.registry.central.log_pool.frozen_since_sequence_id is not None
 
 
 class TestRelaunchAsReplay:

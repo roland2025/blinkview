@@ -11,11 +11,24 @@ import pytest
 
 from blinkview.core import dtypes
 from blinkview.core.array_pool import NumpyArrayPool
+from blinkview.core.base_daemon import BaseDaemon
 from blinkview.core.id_registry import IDRegistry
 from blinkview.ops.formatting import nb_estimate_batch_capacity, nb_format_log_row_batch
 from blinkview.parsers.unified_log_replay import UnifiedLogReplay
 from blinkview.utils.log_level import LogLevel
 from tests.fakes.log_bundle import make_log_bundle
+
+
+class FakeCentral(BaseDaemon):
+    """Stand-in for CentralStorage: UnifiedLogReplay now pushes straight into
+    `central.log_pool.batch_append()` + `central.distribute()` instead of going through
+    subscribe()/distribute() on itself (see UnifiedLogReplay's class docstring) - real
+    subscribers (CapturingSubscriber below) subscribe to this fake instead of to the replay
+    reader directly."""
+
+    def __init__(self):
+        super().__init__()
+        self.log_pool = SimpleNamespace(batch_append=lambda batch: None)
 
 
 def make_bundle(timestamps, devices, levels, modules, messages):
@@ -64,7 +77,7 @@ def test_round_trip_single_device(id_registry):
 
     subscriber = CapturingSubscriber()
     replay = make_replay_from_lines(lines, id_registry, NumpyArrayPool(max_bytes=4 * 1024 * 1024))
-    replay.subscribe(subscriber)
+    replay.central.subscribe(subscriber)
     replay.run()
 
     assert len(subscriber.batches) == 1
@@ -131,7 +144,7 @@ def array_pool():
 
 
 def make_replay(log_parts, id_registry, array_pool, logger=None):
-    replay = UnifiedLogReplay(log_parts)
+    replay = UnifiedLogReplay(log_parts, central=FakeCentral())
     replay.shared = SimpleNamespace(id_registry=id_registry, array_pool=array_pool)
     replay.logger = logger
     return replay
@@ -167,7 +180,7 @@ class TestRun:
 
         subscriber = CapturingSubscriber()
         replay = make_replay([part], id_registry, array_pool)
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
 
         replay.run()
 
@@ -192,7 +205,7 @@ class TestRun:
 
         subscriber = CapturingSubscriber()
         replay = make_replay([part1, part2], id_registry, array_pool)
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
 
         replay.run()
 
@@ -219,7 +232,7 @@ class TestRun:
 
         subscriber = CapturingSubscriber()
         replay = make_replay([compressed_part], id_registry, array_pool)
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
 
         replay.run()
 
@@ -247,7 +260,7 @@ class TestRun:
 
         subscriber = CapturingSubscriber()
         replay = make_replay(sorted([compressed_part0, part1]), id_registry, array_pool)
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
 
         replay.run()
 
@@ -267,7 +280,7 @@ class TestRun:
         subscriber = CapturingSubscriber()
         logger = FakeLogger()
         replay = make_replay([part], id_registry, array_pool, logger=logger)
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
 
         replay.run()
 
@@ -284,7 +297,7 @@ class TestRun:
         subscriber = CapturingSubscriber()
         logger = FakeLogger()
         replay = make_replay([part], id_registry, array_pool, logger=logger)
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
 
         replay.run()
 
@@ -299,7 +312,7 @@ class TestRun:
 
         subscriber = CapturingSubscriber()
         replay = make_replay([part], id_registry, array_pool)
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
 
         replay.run()
 
@@ -319,7 +332,7 @@ class TestRun:
         subscriber = CapturingSubscriber()
         replay = make_replay([part], id_registry, tiny_pool)
         replay.MAX_BATCH_ROWS = 2  # force a split well before the real 4096-row default
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
 
         replay.run()
 
@@ -333,7 +346,7 @@ class TestRun:
 
         subscriber = CapturingSubscriber()
         replay = make_replay([part], id_registry, array_pool)
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
 
         replay.run()  # must not raise even though the file is empty (mmap can't map 0 bytes)
 
@@ -345,7 +358,7 @@ class TestRun:
 
         subscriber = CapturingSubscriber()
         replay = make_replay([part], id_registry, array_pool)
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
         replay._stop_event.set()
 
         replay.run()
@@ -379,7 +392,7 @@ class TestRun:
         subscriber = CapturingSubscriber()
         replay = make_replay([part], id_registry, array_pool)
         replay.MAX_BATCH_ROWS = 1
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
         # Calls: 1) outer per-part check (False), 2) first scan-batch's check (False, "seen" is
         # scanned and pushed), 3) second scan-batch's check (True, stops before "never seen").
         replay._stop_event = StopAfterNCalls(n=2)
@@ -395,12 +408,80 @@ class TestRun:
         subscriber = CapturingSubscriber()
         logger = FakeLogger()
         replay = make_replay([missing], id_registry, array_pool, logger=logger)
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
 
         replay.run()  # FileNotFoundError from os.path.getsize() must be caught, not propagated
 
         assert subscriber.batches == []
         assert len(logger.exceptions) == 1
+
+    def test_pushes_batches_straight_into_central_log_pool(self, tmp_path, id_registry, array_pool):
+        """Regression test: this reader no longer feeds central via subscribe()/distribute() on
+        itself - it must call central.log_pool.batch_append() directly (see UnifiedLogReplay._push
+        and the class docstring), so central's own sequence numbers actually advance."""
+        part = tmp_path / "session.0000.log"
+        part.write_text(
+            make_line("2026-01-01T00:00:00.000000", "I", "dev", "log", "first")
+            + "\n"
+            + make_line("2026-01-01T00:00:01.000000", "I", "dev", "log", "second")
+            + "\n"
+        )
+
+        replay = make_replay([part], id_registry, array_pool)
+        appended = []
+        replay.central.log_pool = SimpleNamespace(batch_append=lambda batch: appended.append(batch.size))
+
+        replay.run()
+
+        assert appended == [2]
+
+    def test_on_part_progress_is_called_once_per_part_with_1_based_index_and_total(
+        self, tmp_path, id_registry, array_pool
+    ):
+        part1 = tmp_path / "session.0000.log"
+        part1.write_text(make_line("2026-01-01T00:00:00.000000", "I", "dev", "log", "first") + "\n")
+        part2 = tmp_path / "session.0001.log"
+        part2.write_text(make_line("2026-01-01T00:00:01.000000", "I", "dev", "log", "second") + "\n")
+
+        calls = []
+        replay = UnifiedLogReplay(
+            [part1, part2],
+            central=FakeCentral(),
+            on_part_progress=lambda i, total, label: calls.append((i, total, label)),
+        )
+        replay.shared = SimpleNamespace(id_registry=id_registry, array_pool=array_pool)
+
+        replay.run()
+
+        assert calls == [(1, 2, part1.name), (2, 2, part2.name)]
+
+    def test_on_finished_is_called_exactly_once_after_all_parts_processed(self, tmp_path, id_registry, array_pool):
+        part = tmp_path / "session.0000.log"
+        part.write_text(make_line("2026-01-01T00:00:00.000000", "I", "dev", "log", "only") + "\n")
+
+        calls = []
+        replay = UnifiedLogReplay([part], central=FakeCentral(), on_finished=lambda: calls.append(True))
+        replay.shared = SimpleNamespace(id_registry=id_registry, array_pool=array_pool)
+
+        replay.run()
+
+        assert calls == [True]
+
+    def test_on_finished_is_called_even_when_a_log_part_is_missing(self, tmp_path, id_registry, array_pool):
+        """on_finished lives in the run() method's `finally` block, so a caller relying on it to
+        e.g. resume paused ingest (see main_window.start_replay) isn't left hanging just because
+        one part raised."""
+        missing = tmp_path / "does_not_exist.log"
+
+        calls = []
+        logger = FakeLogger()
+        replay = UnifiedLogReplay([missing], central=FakeCentral(), on_finished=lambda: calls.append(True))
+        replay.shared = SimpleNamespace(id_registry=id_registry, array_pool=array_pool)
+        replay.logger = logger
+
+        replay.run()
+
+        assert calls == [True]
 
     def test_same_module_name_under_different_devices_resolves_to_different_ids(
         self, tmp_path, id_registry, array_pool
@@ -423,7 +504,7 @@ class TestRun:
 
         subscriber = CapturingSubscriber()
         replay = make_replay([part], id_registry, array_pool)
-        replay.subscribe(subscriber)
+        replay.central.subscribe(subscriber)
 
         replay.run()
 
@@ -456,7 +537,7 @@ def test_round_trip_interleaved_devices(id_registry):
 
     subscriber = CapturingSubscriber()
     replay = make_replay_from_lines(lines, id_registry, NumpyArrayPool(max_bytes=4 * 1024 * 1024))
-    replay.subscribe(subscriber)
+    replay.central.subscribe(subscriber)
     replay.run()
 
     assert len(subscriber.batches) == 1

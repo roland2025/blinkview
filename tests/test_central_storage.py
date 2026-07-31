@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.central_storage import BaseCentralStorage, CentralFactory, CentralStorage
 from blinkview.core.factory import BaseFactory
@@ -321,3 +323,67 @@ class TestRun:
 
         total, _max_total, _seq = storage.log_pool.get_counts()
         assert total >= 1
+
+
+class TestIngestGate:
+    """pause_ingest()/resume_ingest() - used while a replay session's historical backfill is
+    being pushed straight into log_pool (see UnifiedLogReplay), so anything already queued here
+    waits instead of interleaving with (and getting lower sequence numbers than) the historical
+    rows still being loaded."""
+
+    def test_queued_batch_is_not_processed_while_paused(self):
+        storage = make_storage(maxlen=100, max_pieces=4, buffer_size_mb=1)
+        storage.enabled = True
+
+        subscriber = QueueParser()
+        storage.subscribe(subscriber)
+
+        storage.pause_ingest()
+        batch = make_batch(storage.shared.array_pool, msg=b"payload")
+        storage.put(batch)
+
+        storage.start()
+        try:
+            # Nothing should show up while paused - give run() a real chance to have processed
+            # it if the gate were (incorrectly) not blocking.
+            with pytest.raises(queue.Empty):
+                subscriber.queue.get(timeout=0.3)
+
+            total, _max_total, _seq = storage.log_pool.get_counts()
+            assert total == 0
+        finally:
+            storage.stop()
+
+    def test_queued_batch_is_processed_once_resumed(self):
+        storage = make_storage(maxlen=100, max_pieces=4, buffer_size_mb=1)
+        storage.enabled = True
+
+        subscriber = QueueParser()
+        storage.subscribe(subscriber)
+
+        storage.pause_ingest()
+        batch = make_batch(storage.shared.array_pool, msg=b"payload")
+        storage.put(batch)
+
+        storage.start()
+        try:
+            storage.resume_ingest()
+            received = subscriber.queue.get(timeout=5.0)
+            assert received == b"payload"
+        finally:
+            storage.stop()
+
+    def test_stop_while_paused_does_not_hang(self):
+        """Regression: run()'s loop must be able to observe _stop_event even while parked on a
+        paused ingest gate - see CentralStorage.stop()'s _ingest_gate.set() before super().stop()."""
+        storage = make_storage(maxlen=100, max_pieces=4, buffer_size_mb=1)
+        storage.enabled = True
+
+        storage.pause_ingest()
+        storage.start()
+        try:
+            time.sleep(0.1)  # let run() actually enter and park on the gate
+        finally:
+            storage.stop(timeout=2.0)  # would hang/timeout-fail if the gate weren't opened first
+
+        assert not storage.is_running

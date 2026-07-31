@@ -379,6 +379,32 @@ class TelemetryPlotter(QWidget):
             return
 
         self.view_duration = seconds
+
+        # REPLAY: is_auto_scroll is a LIVE-only concept (see follow_playback's class-level
+        # comment) - anchor on the playhead while following, or the current browsed center
+        # otherwise, then actually re-fetch the wider/narrower window. Without the refetch here,
+        # _update_plots() below would just re-slice whatever _refetch_replay_window last fetched
+        # for the OLD duration, so widening the window would show nothing new at the edges.
+        clock = self._clock()
+        if clock is not None and clock.mode is PlaybackMode.REPLAY:
+            if self.follow_playback:
+                center = clock.current_ts_ns / 1_000_000_000.0
+            elif self.region:
+                cur_min, cur_max = self.region.getRegion()
+                center = (cur_min + cur_max) / 2.0
+            elif self.series_list and self.series_list[0].plot_item:
+                cur_min, cur_max = self.series_list[0].plot_item.viewRange()[0]
+                center = (cur_min + cur_max) / 2.0
+            else:
+                center = clock.current_ts_ns / 1_000_000_000.0
+
+            half = self.view_duration / 2.0
+            start_time, end_time = center - half, center + half
+            self._apply_view_range(start_time, end_time)
+            self._refetch_replay_window(start_time, end_time)
+            self._update_plots()
+            return
+
         latest_now = self._get_latest_timestamp()
 
         if latest_now > 0:

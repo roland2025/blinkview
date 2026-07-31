@@ -1107,9 +1107,14 @@ QToolButton[filterEnabled="true"] {
         elif action.kind is FollowActionKind.FETCH_LIVE:
             self._redraw_history()
         elif not checked and self._playback.state is FollowState.FOLLOWING:
-            # Rejoining REPLAY-follow: no immediate fetch (the next apply_updates() tick's
-            # FOLLOWING branch re-anchors to wherever the clock has moved to since) - just clear
-            # the freeze UI.
+            # Rejoining REPLAY-follow: no immediate fetch here (the next apply_updates() tick's
+            # FOLLOWING branch re-anchors to wherever the clock has moved to since) - but DO clear
+            # _last_followed_ts_ns first. That tick's dedup check skips the refetch when the clock
+            # is paused and current_ts_ns hasn't moved since the last follow - which, left
+            # unreset, is exactly the ts this tab was still following before the user scrolled
+            # away and froze it. Without this the view would stay stuck on the stale scrolled-to
+            # window forever whenever Resume is clicked while REPLAY is paused.
+            self._last_followed_ts_ns = None
             self._set_pause_ui(False)
 
     def _toggle_force_live(self, checked: bool):

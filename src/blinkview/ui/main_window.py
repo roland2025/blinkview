@@ -102,6 +102,17 @@ class _ShutdownWorker(QObject):
         self.finished.emit()
 
 
+class _ReplayLoadBridge(QObject):
+    """Marshals UnifiedLogReplay's on_part_progress/on_finished callbacks (invoked on its own
+    background thread - see UnifiedLogReplay.start()) onto the main/UI thread, the same reasoning
+    as _ShutdownWorker above: Qt auto-marshals signal emission across threads to a queued call on
+    whatever thread the connected slot's receiver lives on, as long as that receiver (here, the
+    BlinkMainWindow instance connecting to these signals) was created on the main thread."""
+
+    progress = Signal(int, int, str)
+    finished = Signal()
+
+
 class BlinkMainWindow(QMainWindow):
     def __init__(self, registry, set_update_version=None):
         super().__init__()
@@ -370,6 +381,11 @@ class BlinkMainWindow(QMainWindow):
         self._shutdown_thread: Optional[QThread] = None
         self._shutdown_worker: Optional[_ShutdownWorker] = None
 
+        # Replay-load progress state (see start_replay) - same "keep it alive / dismissable"
+        # reasoning as the shutdown-toast state above.
+        self._replay_load_toast = None
+        self._replay_load_bridge: Optional[_ReplayLoadBridge] = None
+
         print("[BlinkMainWindow] Initialization complete.")
 
     def load_ui_state(self):
@@ -625,11 +641,19 @@ class BlinkMainWindow(QMainWindow):
         """Loads a previously-recorded session's unified log into Central Storage.
         Only meaningful when this window's registry was launched with replay_mode=True.
 
-        This path never touches registry.sources (UnifiedLogReplay subscribes straight to
+        This path never touches registry.sources (UnifiedLogReplay pushes straight into
         registry.central), so it can't be picked up by Registry._enter_replay_mode_if_detected's
         source-duck-typing the way the dev-replay (BinaryFileReader/FileTailReader) workflow is -
         load_replay_session must be called explicitly here instead, now that we already know the
-        session's own folder (session_info.path)."""
+        session's own folder (session_info.path).
+
+        While UnifiedLogReplay is streaming this session's historical rows in, central's normal
+        input_queue draining is paused (registry.central.pause_ingest()) so nothing else -
+        typically this process's own live SystemLogger messages - can interleave with (and get
+        lower sequence numbers than) the historical backfill still in progress. Once the reader
+        finishes, CircularLogPool.freeze_cold_storage_from_now() marks that point so everything
+        from here on is excluded from this session's cold storage (see
+        CircularLogPool._should_archive_to_cold), then ingest resumes."""
         from blinkview.parsers.unified_log_replay import UnifiedLogReplay
         from blinkview.utils.session_lister import unified_log_parts
 
@@ -642,27 +666,61 @@ class BlinkMainWindow(QMainWindow):
         # CircularLogPool._mount_existing_cold_segments) before this method ever runs. In that
         # case, re-parsing the unified log here would silently duplicate every row (fresh
         # sequence numbers layered on top of the already-mounted ones) - skip it entirely and
-        # trust what's already mounted.
+        # trust what's already mounted. Nothing more is coming for this session either way, so
+        # freeze cold storage right away.
         log_pool = registry.central.log_pool if registry.central is not None else None
         if log_pool is not None and log_pool.resumed_from_existing_cold_storage:
             self.logger.info(
                 f"start_replay: '{session_info.session_id}' already resumed from persisted cold "
                 "storage - skipping unified log parse."
             )
+            log_pool.freeze_cold_storage_from_now()
         else:
             parts = unified_log_parts(session_info)
             if not parts:
                 self.logger.warn(f"start_replay: no unified log found in session '{session_info.session_id}'")
                 return
 
-            replay_reader = UnifiedLogReplay(parts)
+            bridge = _ReplayLoadBridge(self)
+            self._replay_load_bridge = bridge  # keep alive for the duration of the load
+            self._replay_load_toast = ToastManager.show_persistent(f"Loading file 0 of {len(parts)}...", parent=self)
+            bridge.progress.connect(self._on_replay_load_progress)
+            bridge.finished.connect(self._on_replay_load_finished)
+
+            registry.central.pause_ingest()
+
+            def on_finished():
+                # Runs on the replay reader's own background thread - freezing/resuming ingest
+                # is plain Python/threading state, not a Qt call, so it's safe to do directly
+                # here rather than marshaling it through the bridge too.
+                registry.central.log_pool.freeze_cold_storage_from_now()
+                registry.central.resume_ingest()
+                bridge.finished.emit()
+
+            replay_reader = UnifiedLogReplay(
+                parts,
+                central=registry.central,
+                on_part_progress=lambda i, total, label: bridge.progress.emit(i, total, label),
+                on_finished=on_finished,
+            )
             replay_reader.bind_system(
                 registry.system_ctx, SimpleNamespace(get_logger=registry.logger_creator("replay"))
             )
-            replay_reader.subscribe(registry.central)
             replay_reader.start()
 
         registry.load_replay_session(session_info.path)
+
+    @Slot(int, int, str)
+    def _on_replay_load_progress(self, current: int, total: int, label: str):
+        if self._replay_load_toast is not None:
+            self._replay_load_toast.set_message(f"Loading file {current} of {total} ({label})")
+
+    @Slot()
+    def _on_replay_load_finished(self):
+        if self._replay_load_toast is not None:
+            self._replay_load_toast.dismiss()
+            self._replay_load_toast = None
+        self._replay_load_bridge = None
 
     def _relaunch_as_replay(self, session_info):
         """Spawns `blink replay <session_id>` as a new process. Called from a normal (non-replay)

@@ -105,6 +105,12 @@ class CircularLogPool:
         self._lock = Lock()
         self._optimized = False
 
+        # Set by freeze_cold_storage_from_now() once a replay session's historical backfill
+        # finishes - rows appended from that sequence onward (this process's own live
+        # system-log messages layered on top of the loaded replay, most typically) are never
+        # archived to cold storage, see _should_archive_to_cold.
+        self.frozen_since_sequence_id: Optional[int] = None
+
         # --- Cold (disk-backed) tier - see plans/mmap-coldstore.md ---
         self.cold_max_pieces = cold_max_pieces
         self.cold_segments: deque[PooledLogBatch] = deque()
@@ -216,6 +222,24 @@ class CircularLogPool:
     def latest_sequence(self):
         return self.sequence
 
+    def freeze_cold_storage_from_now(self):
+        """Marks every row appended from this point on as ineligible for cold-storage archival.
+        Called once a replay session's historical backfill has fully landed in log_pool (either
+        immediately, if resumed_from_existing_cold_storage, or once UnifiedLogReplay finishes
+        streaming it in) - anything appended after that is this process's own live activity
+        (e.g. SystemLogger messages) layered on top of the loaded replay, which shouldn't get
+        mixed into that replay's own cold storage."""
+        with self._lock:
+            self.frozen_since_sequence_id = int(self.sequence)
+
+    def _should_archive_to_cold(self, segment: PooledLogBatch) -> bool:
+        """False once frozen_since_sequence_id is set and this segment's rows were all appended
+        at or after that point - see freeze_cold_storage_from_now."""
+        if self.frozen_since_sequence_id is None:
+            return True
+        first_seq = segment.first_sequence_id
+        return first_seq == SEQ_NONE or int(first_seq) < self.frozen_since_sequence_id
+
     def _handle_archived(self, cold_segment: PooledLogBatch):
         """Called from the archiver's background thread once a segment has been written to disk
         and reopened as a memmap-backed PooledLogBatch. Appends it to the cold tier and, if that
@@ -232,10 +256,12 @@ class CircularLogPool:
 
     def _evict_hot_segment(self, hot_segment: PooledLogBatch):
         """Hands a segment falling out of the hot (RAM) tier off to the cold-storage archiver if
-        one is configured, otherwise releases it outright - the pre-existing, cold-storage-off
-        behavior. Shared by _rotate_segment's normal path and update_max_pieces' immediate-shrink
-        path so both go through the same archive-or-drop decision."""
-        if self._archiver is not None:
+        one is configured and the segment isn't past frozen_since_sequence_id, otherwise releases
+        it outright - the pre-existing, cold-storage-off behavior, also applied to frozen
+        segments so they're dropped rather than archived. Shared by _rotate_segment's normal path
+        and update_max_pieces' immediate-shrink path so both go through the same archive-or-drop
+        decision."""
+        if self._archiver is not None and self._should_archive_to_cold(hot_segment):
             self._archiver.archive(hot_segment)
         else:
             hot_segment.release()
@@ -464,9 +490,13 @@ class CircularLogPool:
             # further down, so it's removed from self.segments here rather than left for that
             # loop to find.
             with self._lock:
-                to_archive = [seg for seg in self.segments if seg.size > 0]
+                live = [seg for seg in self.segments if seg.size > 0]
+                to_archive = [seg for seg in live if self._should_archive_to_cold(seg)]
+                to_drop = [seg for seg in live if not self._should_archive_to_cold(seg)]
                 self.segments.clear()
                 self.active_segment = None
+            for seg in to_drop:
+                seg.release()
             for seg in to_archive:
                 self._archiver.archive(seg)
 
