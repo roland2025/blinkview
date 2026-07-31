@@ -642,9 +642,8 @@ class BlinkMainWindow(QMainWindow):
         Only meaningful when this window's registry was launched with replay_mode=True.
 
         This path never touches registry.sources (UnifiedLogReplay pushes straight into
-        registry.central), so it can't be picked up by Registry._enter_replay_mode_if_detected's
-        source-duck-typing the way the dev-replay (BinaryFileReader/FileTailReader) workflow is -
-        load_replay_session must be called explicitly here instead, now that we already know the
+        registry.central) - replay mode is never auto-detected from configured sources, so
+        load_replay_session must be called explicitly here, now that we already know the
         session's own folder (session_info.path).
 
         While UnifiedLogReplay is streaming this session's historical rows in, central's normal

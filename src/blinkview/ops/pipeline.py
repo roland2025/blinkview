@@ -93,7 +93,7 @@ def nb_process_bundle(buffer, cursor, end_cursor, out_b, out_idx, bundle):
     return -1
 
 
-@app_njit()
+@app_njit(inline="always")
 def nb_execute_parser_pipeline(buffer, start_cursor, end_cursor, out_b, out_idx, parser_bundles):
     # parser_bundles is now a standard homogeneous List or Tuple
     if len(parser_bundles) == 0:

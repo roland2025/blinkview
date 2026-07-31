@@ -18,7 +18,7 @@ CENTRAL_STORAGE_BUFFER_SIZE_MB = 128
 # cutting the per-fetch segment-count-scaling overhead (SegmentSnapshot retain/release, per-segment
 # skip checks - see plans/fetch-telemetry-window-cold-segment-perf.md) by roughly the same factor.
 CENTRAL_STORAGE_COLD_STORAGE_ENABLED = True
-CENTRAL_STORAGE_COLD_MAX_PIECES = 32
+CENTRAL_STORAGE_COLD_MAX_PIECES = 128
 
 # HotTierMemoryGovernor - auto-sizing the hot tier off system free memory instead of a static
 # max_pieces knob. See plans/auto-hot-cold-memory-management.md. Opt-in (off by default) and only

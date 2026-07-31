@@ -365,11 +365,6 @@ class Registry:
             except Exception:
                 continue
 
-    def _is_replay_session(self) -> bool:
-        """True if any configured source reads from a file rather than a live device - the
-        trigger for auto-entering DVR playback mode (see _enter_replay_mode_if_detected)."""
-        return next(self._iter_replay_source_dirs(), None) is not None
-
     def _discover_replay_ranges_path(self) -> Optional[Path]:
         """Best-effort: if any configured source is replaying a file that lives inside a
         previous blinkview session's folder, returns that folder's playback_ranges.json if one
@@ -425,14 +420,11 @@ class Registry:
         switches PlaybackClock into REPLAY (deferred via enter_replay_when_ready() until real
         data exists).
 
-        Two callers, because this app has two distinct replay mechanisms:
-        - _enter_replay_mode_if_detected() - auto-triggered at configure_system() time for the
-          dev-replay workflow: a configured BinaryFileReader/FileTailReader source whose
-          file_path happens to live inside a previous session's folder.
-        - MainWindow.start_replay() - the production "Load Session..." menu path, which starts a
-          UnifiedLogReplay directly against registry.central and never touches self.sources at
-          all, so it can't be auto-detected the same way and must call this explicitly once it
-          already knows the session's folder (session_info.path from utils/session_lister.py).
+        Only called explicitly by MainWindow.start_replay() - the production "Load Session..."
+        menu / `blink replay` CLI path - once it already knows the session's folder
+        (session_info.path from utils/session_lister.py). Replay mode is never auto-detected from
+        configured sources; a configured file-based source (BinaryFileReader/FileTailReader) does
+        not, on its own, put the registry into REPLAY.
         """
         if self.playback_clock is None:
             return
@@ -482,39 +474,6 @@ class Registry:
                     self.replay_session_bounds_ns = (start_ts_ns, end_ts_ns)
 
         self.playback_clock.enter_replay_when_ready(default_start_ts_ns)
-
-    def _enter_replay_mode_if_detected(self):
-        """Auto-activates DVR playback mode (see load_replay_session) the moment the dev-replay
-        workflow is detected: any configured source reading from a file rather than a live
-        device - the user shouldn't have to notice they loaded a replay and manually click into
-        REPLAY mode. Searches every candidate source directory (not just the first) for one with
-        metadata.json/playback_ranges.json to load_replay_session with, same as
-        _discover_replay_ranges_path used to; falls back to a bare enter_replay_when_ready() (DVR
-        mode with no session-specific data) if a file-based source is configured but neither
-        sidecar file is found anywhere."""
-        if self.playback_clock is None:
-            return
-
-        candidate_dirs = list(self._iter_replay_source_dirs())
-        if not candidate_dirs:
-            return
-
-        session_dir = next(
-            (d for d in candidate_dirs if (d / "metadata.json").exists() or (d / "playback_ranges.json").exists()),
-            None,
-        )
-        if session_dir is not None:
-            self.load_replay_session(session_dir)
-        else:
-            # No sidecar metadata to key a historical bulk-load off of - this is a bare dev-replay
-            # source (BinaryFileReader/FileTailReader) which streams its file through the normal
-            # source/reorder/central pipeline like a live source, not a single synchronous
-            # historical dump the way UnifiedLogReplay is - so there's no equivalent moment to defer
-            # the gate to. Open it now rather than leaving it permanently closed (load_replay_session
-            # is the only other place that opens it), which would otherwise silently drop every
-            # SystemLogger message for the rest of this process's life.
-            self._system_log_to_central_enabled = True
-            self.playback_clock.enter_replay_when_ready()
 
     def stop(self, on_progress: Optional[Callable[[int, int, str], None]] = None):
         """Cleanly tear down the session.
@@ -707,10 +666,6 @@ class Registry:
                 print(f"[Registry] Error during sources configuration: {e}")
                 self.logger.error("Error during sources configuration", exc=e)
 
-            # load_replay_session (called by this) already covers what _load_replay_playback_
-            # ranges() alone used to - that standalone method is kept as its own tested unit,
-            # not called separately here to avoid loading the same ranges file twice.
-            self._enter_replay_mode_if_detected()
             try:
                 from blinkview.core.pipeline_manager import PipelineManager
 

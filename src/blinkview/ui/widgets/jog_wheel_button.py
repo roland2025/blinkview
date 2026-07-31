@@ -35,7 +35,7 @@ class JogWheelButton(QToolButton):
     REFERENCE_PX_S = 60.0
     # Exponent controlling how aggressively speed above REFERENCE_PX_S accelerates into a coarse
     # shuttle - 1.0 would be linear; >1 gives a jog-wheel-like superlinear ramp.
-    ACCELERATION_EXPONENT = 1.0
+    ACCELERATION_EXPONENT = 1.5
 
     def __init__(self, parent=None):
         super().__init__(parent)
