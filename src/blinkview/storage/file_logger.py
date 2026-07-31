@@ -41,7 +41,7 @@ def _compress_and_delete_log_part(path: Path, logger=None) -> bool:
         return True
     except OSError as e:
         if logger:
-            logger.warning(f"Failed to compress log part {path}: {e}")
+            logger.warning("Failed to compress log part %s: %s", path, e)
         return False
 
 
@@ -132,7 +132,7 @@ class FileLogger(BaseFileLogger):
 
         current_file_size = self.file_path.stat().st_size
         self.shared.registry.file_manager.update_logger_stats(self, current_file_size, absolute=True)
-        self.logger.info(f"FileLogger '{self.name}' will log to: {self.file_path}")
+        self.logger.info("FileLogger '%s' will log to: %s", self.name, self.file_path)
         return current_file_size
 
     def set_batch_processor(self, batch_processor):

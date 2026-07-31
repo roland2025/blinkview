@@ -671,14 +671,14 @@ class BlinkMainWindow(QMainWindow):
         log_pool = registry.central.log_pool if registry.central is not None else None
         if log_pool is not None and log_pool.resumed_from_existing_cold_storage:
             self.logger.info(
-                f"start_replay: '{session_info.session_id}' already resumed from persisted cold "
-                "storage - skipping unified log parse."
+                "start_replay: '%s' already resumed from persisted cold storage - skipping unified log parse.",
+                session_info.session_id,
             )
             log_pool.freeze_cold_storage_from_now()
         else:
             parts = unified_log_parts(session_info)
             if not parts:
-                self.logger.warn(f"start_replay: no unified log found in session '{session_info.session_id}'")
+                self.logger.warn("start_replay: no unified log found in session '%s'", session_info.session_id)
                 return
 
             bridge = _ReplayLoadBridge(self)
@@ -730,7 +730,7 @@ class BlinkMainWindow(QMainWindow):
         import subprocess
         import sys
 
-        self.logger.info(f"Relaunching in replay mode for session '{session_info.session_id}'")
+        self.logger.info("Relaunching in replay mode for session '%s'", session_info.session_id)
         subprocess.Popen([sys.executable, "-m", "blinkview", "replay", session_info.session_id])
 
     def create_widget(self, cls_name, name, as_window=False, show=True, params=None, reattach_on_close=False):
@@ -804,7 +804,7 @@ class BlinkMainWindow(QMainWindow):
                 if (logger_lag := self.logger_lag) is None:
                     logger_lag = self.logger_lag = self.logger.child("lag")
 
-                logger_lag.warn(f"{drift_ns / 1_000_000:.1f} ms")
+                logger_lag.warn("%.1f ms", drift_ns / 1_000_000)
 
             time_budget = (
                 self.timeout_fast * 0.8 / 1000
@@ -866,7 +866,7 @@ class BlinkMainWindow(QMainWindow):
             self.gui_context.on_update()
 
         except Exception as e:
-            self.logger.exception("Error while polling queue", e)
+            self.logger.exception("Error while polling queue", exc=e)
             print(f"[BlinkMainWindow] Error while polling queue: {e}")
 
     def _signal_handler(self, signum, frame):

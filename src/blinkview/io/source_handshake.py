@@ -81,7 +81,7 @@ class SourceHandshakeManager:
                 self.logger.info("Stopping flash handshake periodic task.")
                 self.shared.tasks.stop_periodic(self._task_id)
             except Exception as e:
-                self.logger.error(f"Failed to cleanly stop flash handshake task: {e}")
+                self.logger.error("Failed to cleanly stop flash handshake task: %s", e)
             finally:
                 self._task_id = None
         self.clear_files()
@@ -108,10 +108,10 @@ class SourceHandshakeManager:
         for file_path in paths:
             if file_path.exists():
                 try:
-                    self.logger.info(f"Removing handshake file: {file_path}")
+                    self.logger.info("Removing handshake file: %s", file_path)
                     file_path.unlink()
                 except Exception as e:
-                    self.logger.error(f"Failed to remove handshake file '{file_path}': {e}")
+                    self.logger.error("Failed to remove handshake file '%s': %s", file_path, e)
 
     def _check_loop(self):
         """The core periodic loop monitoring the file system."""
@@ -125,7 +125,7 @@ class SourceHandshakeManager:
                 return
 
         if lock_exists and not self.is_active:
-            self.logger.warning(f"Flash lock '{self._lock_path}' detected! Requesting serial loop release...")
+            self.logger.warning("Flash lock '%s' detected! Requesting serial loop release...", self._lock_path)
             self.is_active = True
             self._lock_ts = current_time_ns
 
@@ -136,7 +136,7 @@ class SourceHandshakeManager:
             try:
                 self._closed_path.write_text("closed")
             except Exception as e:
-                self.logger.error(f"Failed to create handshake file {self._closed_path}: {e}")
+                self.logger.error("Failed to create handshake file %s: %s", self._closed_path, e)
 
         elif not lock_exists and self.is_active:
             self.logger.info("Flash lock removed. Restoring serial connection availability.")

@@ -89,7 +89,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         factory_build = self.shared.factories.build
 
         frame_decoder = getattr(self, "frame_decoder", None)
-        self.logger.debug(f"frame_decoder config: {frame_decoder}")
+        self.logger.debug("frame_decoder config: %s", frame_decoder)
         if frame_decoder is not None:
             frame_ctx = SimpleNamespace(
                 get_logger=self.logger.child_creator("decoder"),
@@ -100,7 +100,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             )
 
         frame_parser = getattr(self, "frame_parser", None)
-        self.logger.debug(f"frame_parser config: {frame_parser}")
+        self.logger.debug("frame_parser config: %s", frame_parser)
         if frame_parser is not None:
             parser_ctx = SimpleNamespace(
                 get_logger=self.logger.child_creator("parser"),
@@ -116,7 +116,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
     @on_config_change("name")
     def name_changed(self, name, old):
-        self.logger.info(f"Device name changed from '{old}' to '{name}'")
+        self.logger.info("Device name changed from '%s' to '%s'", old, name)
         # If the device name changes, we may want to update the device identity in the assembler
         dev_id: "DeviceIdentity" = self.local.device_id
         dev_id.name = name
@@ -245,13 +245,13 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
                         end_time = time_ns()
 
-                        self.logger_batch.debug(f"{(end_time - start_time) / 1_000_000:.6f}")
+                        self.logger_batch.debug("%.6f", (end_time - start_time) / 1_000_000)
                         start_time = time_ns()
                         if parser.post_process(batch_out):
                             parser_bundle = parser.bundle()
                         end_time = time_ns()
 
-                        self.logger_post.debug(f"{(end_time - start_time) / 1_000_000:.6f}")
+                        self.logger_post.debug("%.6f", (end_time - start_time) / 1_000_000)
 
                         if out_is_full:
                             flush()
@@ -262,7 +262,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
             flush()
         except Exception as e:
-            self.logger.exception("run failure", e)
+            self.logger.exception("run failure", exc=e)
         # Flush any remaining batch on exit
 
     @staticmethod

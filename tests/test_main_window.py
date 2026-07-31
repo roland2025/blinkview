@@ -298,7 +298,9 @@ class TestStartReplay:
         monkeypatch.setattr("blinkview.utils.session_lister.unified_log_parts", lambda s: [])
 
         warnings = []
-        monkeypatch.setattr(type(main_window.logger), "warn", lambda self, msg: warnings.append(msg))
+        monkeypatch.setattr(
+            type(main_window.logger), "warn", lambda self, msg, *args: warnings.append(msg % args if args else msg)
+        )
 
         main_window.start_replay(session)
 

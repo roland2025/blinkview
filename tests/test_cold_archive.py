@@ -203,8 +203,8 @@ class TestCompressColdStorageDir:
             def __init__(self):
                 self.warnings = []
 
-            def warning(self, msg):
-                self.warnings.append(msg)
+            def warning(self, msg, *args):
+                self.warnings.append(msg % args if args else msg)
 
         logger = RecordingLogger()
         compress_cold_storage_dir(cold_dir, logger=logger)

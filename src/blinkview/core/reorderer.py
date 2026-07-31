@@ -221,7 +221,7 @@ class Reorder(BaseReorder):
                                 h_sort.release()
 
                 except Exception as e:
-                    self.logger.exception("Error during reorder merge", e)
+                    self.logger.exception("Error during reorder merge", exc=e)
 
                 finally:
                     # Guaranteed memory return for incoming batches
@@ -229,7 +229,7 @@ class Reorder(BaseReorder):
                         b.release()
 
         except Exception as e:
-            self.logger.exception("run failure", e)
+            self.logger.exception("run failure", exc=e)
         finally:
             # Prevent active batch_out from leaking on shutdown/thread crash
             if batch_out is not None:

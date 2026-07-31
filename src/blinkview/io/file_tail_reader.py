@@ -79,10 +79,12 @@ class FileTailReader(BaseReader):
         delay_ns = self.delay * 1_000_000
         chunk_size = self.chunk_size
 
-        logger.info(f"Starting File Tail Reader: {path} (poll {self.poll_interval}ms, from_start={self.from_start})")
+        logger.info(
+            "Starting File Tail Reader: %s (poll %sms, from_start=%s)", path, self.poll_interval, self.from_start
+        )
 
         while not stop_is_set() and not path.exists():
-            logger.warning(f"Tail target does not exist yet, waiting: {path}")
+            logger.warning("Tail target does not exist yet, waiting: %s", path)
             sleep(poll_interval_s)
 
         if stop_is_set():
@@ -114,7 +116,7 @@ class FileTailReader(BaseReader):
                     continue
 
                 if st.st_ino != current_ino or st.st_size < f.tell():
-                    logger.info(f"Detected log rotation, reopening: {path}")
+                    logger.info("Detected log rotation, reopening: %s", path)
                     f.close()
                     f = path.open("rb")
                     current_ino = os.fstat(f.fileno()).st_ino
@@ -149,7 +151,7 @@ class FileTailReader(BaseReader):
                     batch = None
 
         except Exception as e:
-            logger.exception(f"Error in FileTailReader for {path.name}", e)
+            logger.exception("Error in FileTailReader for %s", path.name, exc=e)
         finally:
             if batch is not None:
                 if len(batch) > 0:
@@ -158,4 +160,4 @@ class FileTailReader(BaseReader):
                 else:
                     batch.release()
             f.close()
-            logger.info(f"File tail closed: {path.name}")
+            logger.info("File tail closed: %s", path.name)

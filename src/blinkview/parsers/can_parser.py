@@ -71,13 +71,13 @@ class CantoolsParser(BaseParser):
 
         if getattr(self, "dbc_file", None):
             try:
-                self.logger.info(f"Loading DBC file: {self.dbc_file}")
+                self.logger.info("Loading DBC file: %s", self.dbc_file)
                 # noinspection PyPackageRequirements
                 from cantools import database
 
                 self.db = database.load_file(resolve_config_path(self.dbc_file))
             except Exception as e:
-                self.logger.error(f"Failed to load DBC file: {self.dbc_file}", e)
+                self.logger.error("Failed to load DBC file: %s", self.dbc_file, exc=e)
                 self.db = None
 
         # --- Pre-bake Logic ---
@@ -229,7 +229,7 @@ class CantoolsParser(BaseParser):
                                                 module_unknown_id_int,
                                                 device_id_int,
                                             )
-                                        self.logger.exception("Failure", e)
+                                        self.logger.exception("Failure", exc=e)
 
                                 else:
                                     # --- Unmapped ID Handling ---
@@ -266,9 +266,9 @@ class CantoolsParser(BaseParser):
                         flush()
                 except Exception as e:
                     # Catch batch-level errors, log them, and KEEP GOING
-                    self.logger.exception("Batch processing error (thread continuing)", e)
+                    self.logger.exception("Batch processing error (thread continuing)", exc=e)
             # Final flush on exit
             flush()
 
         except Exception as e:
-            self.logger.exception("run failure", e)
+            self.logger.exception("run failure", exc=e)

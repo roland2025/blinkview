@@ -159,7 +159,7 @@ class CANReader(BaseReader):
         delay_s = self.delay / 1000.0
         delay_ns = int(self.delay * 1_000_000)
 
-        logger.info(f"Starting CAN Reader Thread ({self.interface}:{self.channel} @ {self.bitrate}bps)")
+        logger.info("Starting CAN Reader Thread (%s:%s @ %sbps)", self.interface, self.channel, self.bitrate)
 
         _ts_offset_ns = None
 
@@ -184,7 +184,7 @@ class CANReader(BaseReader):
                         bus = Bus(interface=self.interface, channel=self.channel, bitrate=self.bitrate)
                         logger.info("CAN bus connected successfully.")
                     except Exception as e:
-                        logger.error(f"Failed to open CAN bus '{self.channel}'.", e)
+                        logger.error("Failed to open CAN bus '%s'.", self.channel, exc=e)
                         sleep(1.0)
                         continue
 
@@ -236,21 +236,21 @@ class CANReader(BaseReader):
                         batch = None
 
                 except CanError as e:
-                    logger.exception("CAN Bus Error detected.", e)
+                    logger.exception("CAN Bus Error detected.", exc=e)
                     if bus:
                         bus.shutdown()
                     bus = None
                     sleep(1.0)
 
                 except Exception as e:
-                    logger.exception("Unexpected error in CAN read loop.", e)
+                    logger.exception("Unexpected error in CAN read loop.", exc=e)
                     if bus:
                         bus.shutdown()
                     bus = None
                     sleep(1.0)
 
         except Exception as e:
-            logger.exception("Fatal error in CAN Reader loop", e)
+            logger.exception("Fatal error in CAN Reader loop", exc=e)
         finally:
             # Final Cleanup
             if batch is not None:

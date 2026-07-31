@@ -43,7 +43,7 @@ class PipelineManager:
         new_ids = set(config.keys())
 
         for item_id in current_ids - new_ids:
-            self.logger.info(f"Removing deleted pipeline: '{item_id}'")
+            self.logger.info("Removing deleted pipeline: '%s'", item_id)
             item = self.pipelines.pop(item_id)
 
             # Stop the thread and sever all pub/sub links
@@ -64,7 +64,7 @@ class PipelineManager:
                 enabled = item_config.get("enabled", False)
                 if item is None:
                     # Logic for creating a brand new pipeline
-                    self.logger.info(f"Creating new pipeline: '{name}' ({item_id})")
+                    self.logger.info("Creating new pipeline: '%s' (%s)", name, item_id)
 
                     device_id = self.shared.id_registry.get_device(name)
                     local_ctx = SimpleNamespace(
@@ -96,7 +96,7 @@ class PipelineManager:
                         new_sources = self._get_link_set(item, "sources_")
                         new_targets = self._get_link_set(item, "targets_")
 
-                        self.logger.info(f"Pipeline '{item_id}' config changed; rebuilding topology.")
+                        self.logger.info("Pipeline '%s' config changed; rebuilding topology.", item_id)
 
                         # Sever old links so we don't double-subscribe or leak data
                         # Re-bind the source/target links based on the updated config
@@ -133,7 +133,7 @@ class PipelineManager:
                             item.restart()
 
             except Exception as e:
-                self.logger.exception(f"Failed to process pipeline '{item_id}'", e)
+                self.logger.exception("Failed to process pipeline '%s'", item_id, exc=e)
 
         # ---FINALIZATION ---
         if not self.needs_delayed_init:
@@ -162,20 +162,20 @@ class PipelineManager:
         if hasattr(item, "sources_"):
             print(f"Pipeline '{item_id}' has sources: {item.sources_}")
             # check if its a list or a single string
-            self.logger.warn(f"Source '{item_id}' has sources: {item.sources_}")
+            self.logger.warn("Source '%s' has sources: %s", item_id, item.sources_)
             sources = [item.sources_] if isinstance(item.sources_, str) else item.sources_
             for source in sources:
                 print(f"Source '{item_id}' has source: {source}")
-                self.logger.debug(f"Source '{item_id}' has source: {source}")
+                self.logger.debug("Source '%s' has source: %s", item_id, source)
                 self.shared.registry.get_reference_target(source).subscribe(item)
 
         if hasattr(item, "targets_"):
-            self.logger.warn(f"Applying targets for source '{item_id}': {item.targets_}")
+            self.logger.warn("Applying targets for source '%s': %s", item_id, item.targets_)
             targets = [item.targets_] if isinstance(item.targets_, str) else item.targets_
 
             for target in targets:
                 target_ref = self.shared.registry.get_reference_target(target)
-                self.logger.debug(f"Source '{item_id}' has target: {target}")
+                self.logger.debug("Source '%s' has target: %s", item_id, target)
                 item.subscribe(target_ref)
 
     def subscribe(self, name_debug, ref, pipeline=None):
@@ -218,7 +218,14 @@ class PipelineManager:
                     ref.subscribe(target_obj)
                     # Otherwise, if it's a raw queue-like object, we might need a different link
                     self.logger.debug(
-                        f"[{name_debug}] Linked '{ref.__class__.__name__}' -> '{target_obj.__class__.__name__}' [{ref.__class__.__module__}.{ref.__class__.__name__} -> {target_obj.__class__.__module__}.{target_obj.__class__.__name__}]"
+                        "[%s] Linked '%s' -> '%s' [%s.%s -> %s.%s]",
+                        name_debug,
+                        ref.__class__.__name__,
+                        target_obj.__class__.__name__,
+                        ref.__class__.__module__,
+                        ref.__class__.__name__,
+                        target_obj.__class__.__module__,
+                        target_obj.__class__.__name__,
                     )
                     break
 
@@ -230,7 +237,14 @@ class PipelineManager:
             if source_obj and hasattr(source_obj, "subscribe"):
                 source_obj.subscribe(ref)
                 self.logger.debug(
-                    f"[{name_debug}] Linked '{source_obj.__class__.__name__}' -> '{ref.__class__.__name__}' [{source_obj.__class__.__module__}.{source_obj.__class__.__name__} -> {ref.__class__.__module__}.{ref.__class__.__name__}]"
+                    "[%s] Linked '%s' -> '%s' [%s.%s -> %s.%s]",
+                    name_debug,
+                    source_obj.__class__.__name__,
+                    ref.__class__.__name__,
+                    source_obj.__class__.__module__,
+                    source_obj.__class__.__name__,
+                    ref.__class__.__module__,
+                    ref.__class__.__name__,
                 )
                 break
 

@@ -50,7 +50,7 @@ class AdbTimeSyncerParser(BaseParser):
 
         # 1. Quick check using walrus operator
         if pid := target.get_pid_from_name(pkg):
-            self.logger.info(f"Blinksync already active (PID: {pid})")
+            self.logger.info("Blinksync already active (PID: %s)", pid)
             return True
 
         # 2. Trigger the launch
@@ -65,12 +65,12 @@ class AdbTimeSyncerParser(BaseParser):
         while time_ns() < deadline_ns:
             if new_pid := target.get_pid_from_name(pkg):
                 elapsed_ms = (time_ns() - start_time_ns) / 1_000_000.0
-                self.logger.info(f"Blinksync started in {elapsed_ms:.0f}ms (PID: {new_pid})")
+                self.logger.info("Blinksync started in %.0fms (PID: %s)", elapsed_ms, new_pid)
                 return True
 
             sleep(interval_s)
 
-        self.logger.error(f"Blinksync failed to spawn after {timeout_s}s. Check device state.")
+        self.logger.error("Blinksync failed to spawn after %ss. Check device state.", timeout_s)
         return False
 
     def run(self):
@@ -92,7 +92,7 @@ class AdbTimeSyncerParser(BaseParser):
 
         try:
             time_source_boot = getattr(self, "time_source_boot", False)
-            logger.debug(f"time_source_boot={time_source_boot}")
+            logger.debug("time_source_boot=%s", time_source_boot)
 
             with self._subscribers_lock:
                 source = self._subscriptions[0]
@@ -109,7 +109,7 @@ class AdbTimeSyncerParser(BaseParser):
                 self.logger.info("Warm-starting existing TimeSyncEngine")
                 self._syncer_engine.soft_reset()
 
-            logger.debug(f"sync_state={sync_state}")
+            logger.debug("sync_state=%s", sync_state)
 
             module_pong = source.local.device_id.get_module("blinksync.pong")
             if not module_pong:
@@ -117,7 +117,7 @@ class AdbTimeSyncerParser(BaseParser):
                 return
 
             module_pong_id = module_pong.id
-            logger.debug(f"module_pong={module_pong} id={module_pong_id}")
+            logger.debug("module_pong=%s id=%s", module_pong, module_pong_id)
 
             # Simplified Ping-Pong State Machine
             seq_num = 0
@@ -166,7 +166,7 @@ class AdbTimeSyncerParser(BaseParser):
                         else:
                             next_ping_due_ns = last_ping_ns + PONG_TIMEOUT_NS
                             if now >= next_ping_due_ns:
-                                logger.warning(f"Sequence {pending_seq} timed out. Retrying...")
+                                logger.warning("Sequence %s timed out. Retrying...", pending_seq)
                                 pending_seq = -1  # Clear the stalled sequence
                                 blinksync_verified = False  # Force a health check on the next loop
                                 send_ping = True
@@ -184,7 +184,7 @@ class AdbTimeSyncerParser(BaseParser):
                             try:
                                 command_target.send_data(cmd)
                             except Exception as e:
-                                logger.exception("Failed to send ping data over ADB", e)
+                                logger.exception("Failed to send ping data over ADB", exc=e)
                                 pending_seq = -1  # Abort flight immediately if send fails
                                 blinksync_verified = False
 
@@ -243,7 +243,7 @@ class AdbTimeSyncerParser(BaseParser):
                         cursor = idx + 1
 
         except Exception as e:
-            logger.exception("Failure in AdbTimeSyncerParser run loop", e)
+            logger.exception("Failure in AdbTimeSyncerParser run loop", exc=e)
 
 
 @TimeSyncerFactory.register("adb_time_syncer")
@@ -288,7 +288,7 @@ class AdbTimeSyncerSubscriber(BaseSubscriber):
 
         # 1. Quick check using walrus operator
         if pid := target.get_pid_from_name(pkg):
-            self.logger.info(f"Blinksync already active (PID: {pid})")
+            self.logger.info("Blinksync already active (PID: %s)", pid)
             return True
 
         # 2. Trigger the launch
@@ -303,12 +303,12 @@ class AdbTimeSyncerSubscriber(BaseSubscriber):
         while time_ns() < deadline_ns:
             if new_pid := target.get_pid_from_name(pkg):
                 elapsed_ms = (time_ns() - start_time_ns) / 1_000_000.0
-                self.logger.info(f"Blinksync started in {elapsed_ms:.0f}ms (PID: {new_pid})")
+                self.logger.info("Blinksync started in %.0fms (PID: %s)", elapsed_ms, new_pid)
                 return True
 
             sleep(interval_s)
 
-        self.logger.error(f"Blinksync failed to spawn after {timeout_s}s. Check device state.")
+        self.logger.error("Blinksync failed to spawn after %ss. Check device state.", timeout_s)
         return False
 
     def run(self):
@@ -330,7 +330,7 @@ class AdbTimeSyncerSubscriber(BaseSubscriber):
 
         try:
             time_source_boot = getattr(self, "time_source_boot", False)
-            logger.debug(f"time_source_boot={time_source_boot}")
+            logger.debug("time_source_boot=%s", time_source_boot)
 
             source = self.local.parser
             sync_state = source.sync_state
@@ -346,7 +346,7 @@ class AdbTimeSyncerSubscriber(BaseSubscriber):
                 self.logger.info("Warm-starting existing TimeSyncEngine")
                 self._syncer_engine.soft_reset()
 
-            logger.debug(f"sync_state={sync_state}")
+            logger.debug("sync_state=%s", sync_state)
 
             module_pong = source.local.device_id.get_module("blinksync.pong")
             if not module_pong:
@@ -354,7 +354,7 @@ class AdbTimeSyncerSubscriber(BaseSubscriber):
                 return
 
             module_pong_id = module_pong.id
-            logger.debug(f"module_pong={module_pong} id={module_pong_id}")
+            logger.debug("module_pong=%s id=%s", module_pong, module_pong_id)
 
             # Simplified Ping-Pong State Machine
             seq_num = 0
@@ -403,7 +403,7 @@ class AdbTimeSyncerSubscriber(BaseSubscriber):
                         else:
                             next_ping_due_ns = last_ping_ns + PONG_TIMEOUT_NS
                             if now >= next_ping_due_ns:
-                                logger.warning(f"Sequence {pending_seq} timed out. Retrying...")
+                                logger.warning("Sequence %s timed out. Retrying...", pending_seq)
                                 pending_seq = -1  # Clear the stalled sequence
                                 blinksync_verified = False  # Force a health check on the next loop
                                 send_ping = True
@@ -421,7 +421,7 @@ class AdbTimeSyncerSubscriber(BaseSubscriber):
                             try:
                                 command_target.send_data(cmd)
                             except Exception as e:
-                                logger.exception("Failed to send ping data over ADB", e)
+                                logger.exception("Failed to send ping data over ADB", exc=e)
                                 pending_seq = -1  # Abort flight immediately if send fails
                                 blinksync_verified = False
 
@@ -480,4 +480,4 @@ class AdbTimeSyncerSubscriber(BaseSubscriber):
                         cursor = idx + 1
 
         except Exception as e:
-            logger.exception("Failure in AdbTimeSyncerParser run loop", e)
+            logger.exception("Failure in AdbTimeSyncerParser run loop", exc=e)

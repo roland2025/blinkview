@@ -104,7 +104,7 @@ def compress_cold_storage_dir(cold_dir: Path, logger=None, on_progress: Optional
             path.unlink()
         except OSError as e:
             if logger:
-                logger.warning(f"Failed to compress cold segment {path}: {e}")
+                logger.warning("Failed to compress cold segment %s: %s", path, e)
         finally:
             if on_progress:
                 on_progress(path.name)

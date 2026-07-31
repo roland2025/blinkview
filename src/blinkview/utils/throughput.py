@@ -67,7 +67,10 @@ class Speedometer:
 
             if logger := self.logger:
                 logger.debug(
-                    f"mb_s={bytes_per_sec / 1024 / 1024:.0f} bytes_s={bytes_per_sec:.0f} msg_s={msgs_per_sec:.0f}"  # total_bytes={self.total_bytes} total_msgs={self.total_msgs}"
+                    "mb_s=%.0f bytes_s=%.0f msg_s=%.0f",  # total_bytes={self.total_bytes} total_msgs={self.total_msgs}"
+                    bytes_per_sec / 1024 / 1024,
+                    bytes_per_sec,
+                    msgs_per_sec,
                 )
             return True
         return False
@@ -131,7 +134,7 @@ class ThroughputAutoTuner:
             if logger := self.logger:
                 # Log state specifically; we can format to KB here for readability
                 kb = estimated_buffer_bytes / 1024
-                logger.debug(f"size_kb={kb:.1f} rows={estimated_capacity}")
+                logger.debug("size_kb=%.1f rows=%s", kb, estimated_capacity)
             return True
         return False
 
@@ -144,7 +147,7 @@ class ThroughputAutoTuner:
 
             if self.logger:
                 kb = self.estimated_buffer_bytes / 1024
-                self.logger.warning(f"Burst detected! Force-resized buffer projection to {kb:.1f} KB")
+                self.logger.warning("Burst detected! Force-resized buffer projection to %.1f KB", kb)
 
     def __str__(self) -> str:
         kb = self.estimated_buffer_bytes / 1024

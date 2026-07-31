@@ -98,7 +98,7 @@ class GUIContext(QObject):
                 try:
                     updatable.apply_updates()
                 except Exception as e:
-                    self.logger.exception("Error updatable", e)
+                    self.logger.exception("Error updatable", exc=e)
 
     def add_updatable(self, updatable):
         """Registers a view/component to receive update signals."""

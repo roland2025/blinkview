@@ -342,7 +342,7 @@ class TelemetryTableModel(QAbstractTableModel):
 
         end_time = perf_counter_ns()
 
-        self.logger_filter.debug(f"{(end_time - start_time) / 1_000_000:.6f}")
+        self.logger_filter.debug("%.6f", (end_time - start_time) / 1_000_000)
 
     def set_filter_text(self, text: str):
         clean_text = text.lower().strip()
@@ -612,8 +612,8 @@ class TelemetryTableModel(QAbstractTableModel):
 
         end_time = perf_counter_ns()
 
-        self.logger_total.debug(f"{(end_time - start_time) / 1_000_000:.6f}")
-        self.logger_count.debug(f"{len(self.modules)}")
+        self.logger_total.debug("%.6f", (end_time - start_time) / 1_000_000)
+        self.logger_count.debug("%s", len(self.modules))
 
     def rowCount(self, parent=None):
         # Table models must return 0 for child nodes, or Qt gets confused

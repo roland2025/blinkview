@@ -303,11 +303,11 @@ class UnifiedLogReplay(BaseDaemon):
                             for i in range(malformed_found):
                                 off, ln = int(malformed_off[i]), int(malformed_len[i])
                                 line = bytes(buf[off : off + ln])
-                                self.logger.warn(f"UnifiedLogReplay: unparseable line skipped: {line[:80]!r}")
+                                self.logger.warn("UnifiedLogReplay: unparseable line skipped: %r", line[:80])
                             if malformed_overflow:
                                 self.logger.warn(
-                                    f"UnifiedLogReplay: {malformed_overflow} further unparseable "
-                                    "line(s) skipped in this batch"
+                                    "UnifiedLogReplay: %s further unparseable line(s) skipped in this batch",
+                                    malformed_overflow,
                                 )
 
                         if rows_found == 0:
@@ -368,7 +368,8 @@ class UnifiedLogReplay(BaseDaemon):
                                 if self.logger:
                                     self.logger.warn(
                                         "UnifiedLogReplay: message too large for batch buffer, "
-                                        f"row skipped (msg_len={int(msg_len[row_start])})"
+                                        "row skipped (msg_len=%s)",
+                                        int(msg_len[row_start]),
                                     )
                                 row_start += 1
                                 continue
@@ -392,13 +393,13 @@ class UnifiedLogReplay(BaseDaemon):
                 batch = None
         except Exception as e:
             if self.logger:
-                self.logger.exception("UnifiedLogReplay: error during replay", e)
+                self.logger.exception("UnifiedLogReplay: error during replay", exc=e)
         finally:
             if batch is not None:
                 batch.release()
 
             if self.logger:
-                self.logger.info(f"UnifiedLogReplay: finished replaying {len(self.log_parts)} part(s).")
+                self.logger.info("UnifiedLogReplay: finished replaying %s part(s).", len(self.log_parts))
 
             if self.on_finished:
                 self.on_finished()

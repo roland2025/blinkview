@@ -74,7 +74,7 @@ class TCPReader(BaseReader):
     def open(self):
         """Initializes the listening TCP Master Server Socket."""
         try:
-            self.logger_link.info(f"Binding TCP server socket to {self.host}:{self.port}")
+            self.logger_link.info("Binding TCP server socket to %s:%s", self.host, self.port)
 
             # Initialize an IPv4 TCP Streaming Socket
             server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -98,7 +98,7 @@ class TCPReader(BaseReader):
             return server_sock
 
         except Exception as e:
-            self.logger_link.error("Failed to bind TCP server socket.", e)
+            self.logger_link.error("Failed to bind TCP server socket.", exc=e)
             return None
 
     def run(self):
@@ -155,14 +155,14 @@ class TCPReader(BaseReader):
 
                         recv_into = self.client_sock.recv_into
 
-                        self.logger_link.info(f"{client_addr[0]}:{client_addr[1]} connected")
+                        self.logger_link.info("%s:%s connected", client_addr[0], client_addr[1])
                         self.logger_state_open.info("1")
 
                         waiting_logged = False
                     except socket.timeout:
                         continue  # Let the loop poll stop_is_set()
                     except Exception as e:
-                        self.logger_link.error("Error accepting incoming client connection", e)
+                        self.logger_link.error("Error accepting incoming client connection", exc=e)
                         waiting_logged = False
                         sleep(1.0)
                         continue
@@ -191,7 +191,7 @@ class TCPReader(BaseReader):
                     # Expected. Allows timed evaluation of batch flushing windows
                     pass
                 except Exception as e:
-                    self.logger_link.error("Stream receive error occurred", e)
+                    self.logger_link.error("Stream receive error occurred", exc=e)
                     self._close_client()
                     sleep(0.5)
                     continue
@@ -205,7 +205,7 @@ class TCPReader(BaseReader):
                     batch = None
 
         except Exception as e:
-            logger.exception("Fatal error in TCP Reader execution loop", e)
+            logger.exception("Fatal error in TCP Reader execution loop", exc=e)
         finally:
             # 6. Final Cleanup
             if batch is not None:
@@ -248,5 +248,5 @@ class TCPReader(BaseReader):
         try:
             self.client_sock.sendall(data.encode())
         except Exception as e:
-            self.logger.exception("Failed to transmit data across active client TCP socket", e)
+            self.logger.exception("Failed to transmit data across active client TCP socket", exc=e)
             self._close_client()

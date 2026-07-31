@@ -128,14 +128,14 @@ class FakeLogger:
         self.exceptions = []
         self.infos = []
 
-    def warn(self, msg):
-        self.warnings.append(msg)
+    def warn(self, msg, *args):
+        self.warnings.append(msg % args if args else msg)
 
-    def exception(self, msg, exc=None):
-        self.exceptions.append((msg, exc))
+    def exception(self, msg, *args, exc=None):
+        self.exceptions.append((msg % args if args else msg, exc))
 
-    def info(self, msg):
-        self.infos.append(msg)
+    def info(self, msg, *args):
+        self.infos.append(msg % args if args else msg)
 
 
 @pytest.fixture

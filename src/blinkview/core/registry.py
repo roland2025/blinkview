@@ -342,7 +342,7 @@ class Registry:
         try:
             self.playback_ranges.save_to_file(self.file_manager.get_playback_ranges_path())
         except OSError as e:
-            self.logger.warning(f"Failed to save playback ranges: {e}")
+            self.logger.warning("Failed to save playback ranges: %s", e)
 
     def _iter_replay_source_dirs(self):
         """Yields the resolved parent directory of every configured source's `file_path` (duck-
@@ -610,7 +610,7 @@ class Registry:
             path = self._id_registry_dump_path(cold_dir)
             path.write_text(json.dumps(self.id_registry.dump_discovery_log()))
         except OSError as e:
-            self.logger.warning(f"Failed to persist id_registry alongside cold storage: {e}")
+            self.logger.warning("Failed to persist id_registry alongside cold storage: %s", e)
 
     def _compress_persisted_cold_storage(self, cold_dir, on_progress=None) -> None:
         """Shrinks a persisted session's on-disk footprint: every raw segment file left in
@@ -640,7 +640,7 @@ class Registry:
             try:
                 reorder_config = self.config.get_by_path("/reorder")
                 if reorder_config:  # is not None and reorder_config.get("enabled", True):
-                    self.logger.info(f"[System] reorder_config: {reorder_config}")
+                    self.logger.info("[System] reorder_config: %s", reorder_config)
                     if reorder_config.get("type") is None:
                         reorder_config["type"] = "default"
 
@@ -653,12 +653,12 @@ class Registry:
                     self.reorder.reference_id = "reorder"
             except Exception as e:
                 print(f"[Registry] Error configuring reorder buffer: {e}")
-                self.logger.error("Error configuring reorder buffer:", e)
+                self.logger.error("Error configuring reorder buffer:", exc=e)
 
             try:
                 central_storage_config = self.config.get_by_path("/central")
                 if central_storage_config:  # is not None and central_storage_config.get("enabled", True):
-                    self.logger.info(f"[System] central_storage_config: {central_storage_config}")
+                    self.logger.info("[System] central_storage_config: %s", central_storage_config)
                     if central_storage_config.get("type") is None:
                         central_storage_config["type"] = "default"
 
@@ -684,13 +684,13 @@ class Registry:
                     self.playback_ranges = PlaybackRangeStore(on_change=self._save_playback_ranges)
             except Exception as e:
                 # print(f"[Registry] Error configuring central storage: {e}")
-                self.logger.exception("Error configuring central storage", e)
+                self.logger.exception("Error configuring central storage", exc=e)
 
             self.initialized = True
 
             self._dump_temp_logs()
 
-            self.logger.info(f"[System] System initialized with session name: {self.session_name}")
+            self.logger.info("[System] System initialized with session name: %s", self.session_name)
 
             self.reinit_logger(self)
             self.logger.info("[System] Registry logger initialized.")
@@ -705,7 +705,7 @@ class Registry:
                 self.config.subscribe("/sources", self.sources)
             except Exception as e:
                 print(f"[Registry] Error during sources configuration: {e}")
-                self.logger.error("Error during sources configuration", e)
+                self.logger.error("Error during sources configuration", exc=e)
 
             # load_replay_session (called by this) already covers what _load_replay_playback_
             # ranges() alone used to - that standalone method is kept as its own tested unit,
@@ -722,18 +722,18 @@ class Registry:
                 self.pipelines.apply_targets()
             except Exception as e:
                 print(f"[Registry] Error during pipelines configuration: {e}")
-                self.logger.error("Error during pipelines configuration", e)
+                self.logger.error("Error during pipelines configuration", exc=e)
 
             try:
                 if self.sources is not None:
                     self.sources.apply_targets()
             except Exception as e:
                 print(f"[Registry] Error during applying source targets: {e}")
-                self.logger.error("Error during applying source targets", e)
+                self.logger.error("Error during applying source targets", exc=e)
 
         except Exception as e:
             print(f"[Registry] Error during system configuration: {e}")
-            self.logger.error("Error during system configuration", e)
+            self.logger.error("Error during system configuration", exc=e)
 
     def _dump_temp_logs(self):
         """Flushes PrintLogger messages buffered before central storage existed (see
@@ -781,7 +781,7 @@ class Registry:
         except Exception as e:
             self.warmup_error = str(e)
             self.warmup_success = False
-            self.logger.exception("Error during compiling kernels", e)
+            self.logger.exception("Error during compiling kernels", exc=e)
         finally:
             self.warmup_helper = None
             self._warmup_done = True
@@ -792,7 +792,7 @@ class Registry:
 
         self.warmup()
 
-        self.logger.warn(f"--- Starting Session: {self.session_name} ---")
+        self.logger.warn("--- Starting Session: %s ---", self.session_name)
 
         if configure:
             self.configure_system()
@@ -1051,7 +1051,7 @@ class Registry:
             print("\n[BUFFER_STATS]\n" + "\n".join(lines) + "\n")
 
         except Exception as e:
-            self.logger.exception(f"buffer_stats failed: {e}")
+            self.logger.exception("buffer_stats failed: %s", e)
 
     def flush_log_queue(self):
         with self.log_lock:

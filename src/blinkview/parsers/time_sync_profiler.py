@@ -75,7 +75,7 @@ class TimeSyncProfiler(BaseParser):
         server_device_id = pipeline_server.local.device_id
         server_device_id_int = server_device_id.id
 
-        logger.info(f"server: {server_device_id} ({server_device_id_int})")
+        logger.info("server: %s (%s)", server_device_id, server_device_id_int)
 
         pipeline_sources = [registry.get_reference_target(src) for src in self.sources_]
 
@@ -84,7 +84,7 @@ class TimeSyncProfiler(BaseParser):
         source_devices = [src.local.device_id for src in pipeline_sources]
 
         source_device_ids = {dev.id for dev in source_devices}
-        logger.info(f"sources: {source_devices}")
+        logger.info("sources: %s", source_devices)
 
         consumer_loggers = {dev.id: logger.child(str(dev.name)) for dev in source_devices}
 
@@ -94,7 +94,7 @@ class TimeSyncProfiler(BaseParser):
             try:
                 main_module_ids[dev.id] = dev.get_module("main").id
             except Exception as e:
-                logger.warning(f"Could not cache 'main' module for device {dev.id}: {e}")
+                logger.warning("Could not cache 'main' module for device %s: %s", dev.id, e)
 
         local_device_id_int = self.local.device_id.id
 
@@ -105,7 +105,7 @@ class TimeSyncProfiler(BaseParser):
             try:
                 out_module_ids[dev.id] = self.local.device_id.get_module(consumer_name).id
             except Exception as e:
-                logger.warning(f"Could not cache output module '{consumer_name}' on local device: {e}")
+                logger.warning("Could not cache output module '%s' on local device: %s", consumer_name, e)
 
         def get_pipeline_source(_pipe):
             try:
@@ -168,9 +168,9 @@ class TimeSyncProfiler(BaseParser):
                 pipe_src = get_pipeline_source(pipeline)
                 if pipe_src is not None:
                     pipe_src.send_data(f"{cmd_str}\n")
-                    logger.debug(f"Sent command to {pipeline.local.device_id}: {cmd_str}  (({pipe_src}))")
+                    logger.debug("Sent command to %s: %s  ((%s))", pipeline.local.device_id, cmd_str, pipe_src)
             except Exception as e:
-                logger.error(f"Failed to send command '{cmd_str}' to {pipeline.local.device_id}: {e}")
+                logger.error("Failed to send command '%s' to %s: %s", cmd_str, pipeline.local.device_id, e)
 
         # --- 1. Initialization Commands ---
         send_cmd(pipeline_server, "sync source")
@@ -296,7 +296,11 @@ class TimeSyncProfiler(BaseParser):
                                         # Desync Check: Ensure the target state matches the pin state
                                         if stored_target_val != stored_pin_val:
                                             logger.warning(
-                                                f"Desync detected on device {dev_id} at seq {seq}! Expected target state {stored_target_val}, got pin state {stored_pin_val}."
+                                                "Desync detected on device %s at seq %s! Expected target state %s, got pin state %s.",
+                                                dev_id,
+                                                seq,
+                                                stored_target_val,
+                                                stored_pin_val,
                                             )
                                             continue
 
@@ -336,7 +340,11 @@ class TimeSyncProfiler(BaseParser):
                                     # Desync Check: Ensure the target state matches the pin state
                                     if stored_target_val != stored_pin_val:
                                         logger.warning(
-                                            f"Desync detected on device {device_id_int} at seq {seq}! Expected target state {stored_target_val}, got pin state {stored_pin_val}."
+                                            "Desync detected on device %s at seq %s! Expected target state %s, got pin state %s.",
+                                            device_id_int,
+                                            seq,
+                                            stored_target_val,
+                                            stored_pin_val,
                                         )
                                         continue
 

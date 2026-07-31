@@ -94,7 +94,7 @@ class BaseParser(BaseDaemon):
 
         try:
             time_sync_conf = getattr(self, "time_sync", None)
-            self.logger.debug(f"time_sync config: {time_sync_conf}")
+            self.logger.debug("time_sync config: %s", time_sync_conf)
             if time_sync_conf is not None:
                 if self.sync_state is None:
                     self.sync_state: SyncState = create_default_sync(self.shared.time_ns())
@@ -117,7 +117,7 @@ class BaseParser(BaseDaemon):
                 self.subscribe(self.time_syncer)
                 self.register_child(self.time_syncer)
         except Exception as e:
-            self.logger.exception("failed to init timesync.", e)
+            self.logger.exception("failed to init timesync.", exc=e)
         return changed
 
 

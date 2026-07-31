@@ -73,7 +73,7 @@ class UDPReader(BaseReader):
 
     def open(self):
         try:
-            self.logger_link.info(f"Binding UDP socket to {self.host}:{self.port}")
+            self.logger_link.info("Binding UDP socket to %s:%s", self.host, self.port)
 
             # Initialize an IPv4 UDP Socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -94,7 +94,7 @@ class UDPReader(BaseReader):
             return sock
 
         except Exception as e:
-            self.logger_link.error("Failed to bind UDP socket.", e)
+            self.logger_link.error("Failed to bind UDP socket.", exc=e)
             return None
 
     def run(self):
@@ -176,7 +176,7 @@ class UDPReader(BaseReader):
                     # and gives us a chance to flush the current batch if it's sitting idle.
                     pass
                 except Exception as e:
-                    self.logger_link.error("Receive error", e)
+                    self.logger_link.error("Receive error", exc=e)
                     sock = None
                     if self.sock:
                         self.sock.close()
@@ -195,7 +195,7 @@ class UDPReader(BaseReader):
                     batch = None
 
         except Exception as e:
-            logger.exception("Fatal error in UDP Reader loop", e)
+            logger.exception("Fatal error in UDP Reader loop", exc=e)
         finally:
             # 8. Final Cleanup
             if batch is not None:
@@ -229,4 +229,4 @@ class UDPReader(BaseReader):
             try:
                 self.sock.sendto(data.encode(), target)
             except Exception as e:
-                self.logger.exception(f"Failed to send UDP datagram to {target}", e)
+                self.logger.exception("Failed to send UDP datagram to %s", target, exc=e)

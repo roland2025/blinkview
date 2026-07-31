@@ -75,11 +75,15 @@ class BinaryFileReader(BaseReader):
         delay_s = self.delay / 1000.0
 
         logger.info(
-            f"Starting Binary Reader: {path} (@{self.frequency}Hz, {self.delay}ms batching, mode: {self.read_mode})"
+            "Starting Binary Reader: %s (@%sHz, %sms batching, mode: %s)",
+            path,
+            self.frequency,
+            self.delay,
+            self.read_mode,
         )
 
         if not path.exists():
-            logger.error(f"Binary file not found: {path}")
+            logger.error("Binary file not found: %s", path)
             return
 
         buffer_bytes = self.frequency * chunk_size * (self.delay + 30) // 1000
@@ -96,14 +100,14 @@ class BinaryFileReader(BaseReader):
         # Setup reader abstractions based on read_mode
         if self.read_mode.lower() == "memory":
             try:
-                logger.debug(f"Preloading entire file to memory: {path.name}")
+                logger.debug("Preloading entire file to memory: %s", path.name)
                 with path.open("rb") as mem_f:
                     # Wrap the loaded bytes in a memoryview for zero-copy slicing
                     in_memory_data = memoryview(mem_f.read())
                 memory_length = len(in_memory_data)
                 memory_offset = 0
             except Exception as e:
-                logger.error(f"Failed to load file to memory: {e}")
+                logger.error("Failed to load file to memory: %s", e)
                 return
 
             def _read_chunk(size: int):
@@ -126,7 +130,7 @@ class BinaryFileReader(BaseReader):
                 nonlocal in_memory_data
                 # Explicitly release the memoryview buffer
                 in_memory_data.release()
-                logger.debug(f"Released memory buffer for: {path.name}")
+                logger.debug("Released memory buffer for: %s", path.name)
 
         else:  # stream mode
             f = path.open("rb")
@@ -142,7 +146,7 @@ class BinaryFileReader(BaseReader):
             def _cleanup():
                 if f:
                     f.close()
-                    logger.info(f"Binary file closed: {path.name}")
+                    logger.info("Binary file closed: %s", path.name)
 
         stats = Speedometer(logger=self.logger.child("stats"))
 
@@ -160,7 +164,7 @@ class BinaryFileReader(BaseReader):
                 if not data:
                     if self.loop:
                         _reset_source()
-                        logger.debug(f"Replay loop: Resetting {path.name}")
+                        logger.debug("Replay loop: Resetting %s", path.name)
                         continue
                     else:
                         # Flush remaining data in current batch before exiting
@@ -172,7 +176,7 @@ class BinaryFileReader(BaseReader):
                             batch.release()  # Manually return empty batch to pool
 
                         batch = None
-                        logger.info(f"Binary replay finished: {path.name}")
+                        logger.info("Binary replay finished: %s", path.name)
                         break
 
                 # 4. Add data to the current batch
@@ -202,7 +206,7 @@ class BinaryFileReader(BaseReader):
                 sleep(interval_s)
 
         except Exception as e:
-            logger.exception(f"Error in BinaryFileReader for {path.name}", e)
+            logger.exception("Error in BinaryFileReader for %s", path.name, exc=e)
         finally:
             # Guarantee we don't leak the batch on unexpected errors
             if batch is not None:

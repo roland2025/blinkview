@@ -391,11 +391,11 @@ log rows into synthetic submodules, via a single Numba-JIT kernel call per input
         rules = NumbaList.empty_list(_kv_rule_tuple_type)
         for rule in self._instantiated_rules:
             if not getattr(rule, "enabled", True):
-                self.logger.info(f"Skipping disabled rule: '{getattr(rule, 'module_name', 'unknown')}'")
+                self.logger.info("Skipping disabled rule: '%s'", getattr(rule, "module_name", "unknown"))
                 continue
 
             base_mod_id, rule_id, cfg = rule.bundle()
-            self.logger.debug(f"Compiled rule for module_id={base_mod_id}: {rule.__class__.__name__}")
+            self.logger.debug("Compiled rule for module_id=%s: %s", base_mod_id, rule.__class__.__name__)
             rules.append((base_mod_id, rule_id, cfg))
 
         return rules
@@ -429,7 +429,7 @@ log rows into synthetic submodules, via a single Numba-JIT kernel call per input
             try:
                 mod_id = get_module(module_name_str).id
             except Exception:
-                self.logger.exception(f"Failed to register discovered KV module '{module_name_str}'")
+                self.logger.exception("Failed to register discovered KV module '%s'", module_name_str)
                 mod_id = get_module("unknown").id
 
             temp_id = MODULE_TEMP_ID_BASE + i
@@ -545,7 +545,7 @@ log rows into synthetic submodules, via a single Numba-JIT kernel call per input
                             break
 
                 except Exception as e:
-                    logger.exception("Poison batch encountered, skipping remainder.", e)
+                    logger.exception("Poison batch encountered, skipping remainder.", exc=e)
 
             if batch_out.size > 0 and (_time_ns() - batch_out_time >= max_timeout_ns):
                 flush()

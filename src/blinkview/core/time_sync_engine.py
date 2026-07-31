@@ -67,7 +67,12 @@ class TimeSyncEngine:
                 drift = sync.drift_m[idx] / sync.drift_d[idx]
 
                 log_s.debug(
-                    f"rtt={rtt_ms:.3f}ms drift={drift:.9f} q={quality:.3f} mean={mean_ms:.3f}ms, std={stddev_ms:.3f}ms"
+                    "rtt=%.3fms drift=%.9f q=%.3f mean=%.3fms, std=%.3fms",
+                    rtt_ms,
+                    drift,
+                    quality,
+                    mean_ms,
+                    stddev_ms,
                 )
 
                 # ref_time = sync.ref_time[idx]
@@ -76,7 +81,11 @@ class TimeSyncEngine:
         else:
             if log := self.logger:
                 log.debug(
-                    f"Skipped jittery pong. rtt={(pc_rx - pc_tx) / 1e6} q={quality:.3f} (mean={mean_ms:.3f}ms, std={stddev_ms:.3f}ms)"
+                    "Skipped jittery pong. rtt=%s q=%.3f (mean=%.3fms, std=%.3fms)",
+                    (pc_rx - pc_tx) / 1e6,
+                    quality,
+                    mean_ms,
+                    stddev_ms,
                 )
 
         return success

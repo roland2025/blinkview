@@ -623,7 +623,7 @@ class LogTableStore:
         result = self._scanner.scan_tail(start_seq=SEQ_NONE, max_rows=self.viewport_rows, consume=_consume)
         total_new = result.total_new_rows
 
-        self.logger_fetch.debug(f"live full {(time_ns() - t_start) / 1_000_000:.3f} ms | rows={total_new}")
+        self.logger_fetch.debug("live full %.3f ms | rows=%s", (time_ns() - t_start) / 1_000_000, total_new)
 
         self._buf_valid_start[inactive_idx] = write_cursor
         self._buf_row_count[inactive_idx] = total_new
@@ -711,7 +711,10 @@ class LogTableStore:
             new_cache[valid_start : valid_start + carry_count] = old_cache[src_lo : src_lo + carry_count]
 
         self.logger_fetch.debug(
-            f"live incr {(time_ns() - t_start) / 1_000_000:.3f} ms | new={total_new} carried={carry_count}"
+            "live incr %.3f ms | new=%s carried=%s",
+            (time_ns() - t_start) / 1_000_000,
+            total_new,
+            carry_count,
         )
 
         self._active = inactive_idx
@@ -761,7 +764,10 @@ class LogTableStore:
         after_count = result.after_count
 
         self.logger_fetch.debug(
-            f"history {(time_ns() - t_start) / 1_000_000:.3f} ms | before={before_count} after={after_count}"
+            "history %.3f ms | before=%s after=%s",
+            (time_ns() - t_start) / 1_000_000,
+            before_count,
+            after_count,
         )
 
         self._valid_start = boundary - before_count

@@ -5,47 +5,53 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from traceback import format_exc
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol
 
 from blinkview.utils.log_level import LevelIdentity, LogLevel
+
+
+class LogCallable(Protocol):
+    def __call__(self, level: LevelIdentity, fmt: str, *args: object) -> None: ...
 
 
 class BaseLogger:
     __slots__ = ("log",)
 
-    def trace(self, msg: str):
-        self.log(msg, LogLevel.TRACE)
+    def trace(self, fmt: str, *args):
+        self.log(LogLevel.TRACE, fmt, *args)
 
-    def debug(self, msg: str):
-        self.log(msg, LogLevel.DEBUG)
+    def debug(self, fmt: str, *args):
+        self.log(LogLevel.DEBUG, fmt, *args)
 
-    def info(self, msg: str):
-        self.log(msg, LogLevel.INFO)
+    def info(self, fmt: str, *args):
+        self.log(LogLevel.INFO, fmt, *args)
 
-    def warn(self, msg: str):
-        self.log(msg, LogLevel.WARN)
+    def warn(self, fmt: str, *args):
+        self.log(LogLevel.WARN, fmt, *args)
 
     warning = warn  # Alias for convenience
 
-    def error(self, msg: str, exc=None):
-        if exc:
+    def error(self, fmt: str, *args, exc=None):
+        if exc is not None:
             # Provide the type and message of the exception for quick triage
-            msg = f"{msg} | {type(exc).__name__}: {exc}"
-        self.log(msg, LogLevel.ERROR)
+            fmt = f"{fmt} | %s: %s"
+            args = (*args, type(exc).__name__, exc)
+        self.log(LogLevel.ERROR, fmt, *args)
 
-    def exception(self, msg: str, exc=None):
+    def exception(self, fmt: str, *args, exc=None):
+        """Helper to catch the current sys.exc_info() automatically."""
         exc_text = format_exc()
-        if exc:
+        if exc is not None:
             print(exc_text)
             # Provide the type and message of the exception for quick triage
-            msg = f"{msg} | {type(exc).__name__}: {exc}"
+            fmt = f"{fmt} | %s: %s"
+            args = (*args, type(exc).__name__, exc)
 
-        """Helper to catch the current sys.exc_info() automatically."""
         exc_str = exc_text.splitlines()[-1]  # Just the last line
 
-        self.log(f"{msg} | {exc_str}", LogLevel.ERROR)
+        self.log(LogLevel.ERROR, f"{fmt} | %s", *args, exc_str)
 
-    log: Callable[[str, LevelIdentity], None]
+    log: LogCallable
 
     def child(self, name: str, enabled: Optional[bool] = None, essential: Optional[bool] = None) -> "BaseLogger":
         """
@@ -107,7 +113,7 @@ class SystemLogger(BaseLogger):
             # Revert to lazy initialization so resources are fetched on the next log call
             self.log = self._lazy_log
 
-    def _lazy_log(self, msg: str, level: LevelIdentity):
+    def _lazy_log(self, level: LevelIdentity, fmt: str, *args):
         """
         Invoked only on the first log call. Resolves dependencies and overwrites
         itself with the highly optimized fast_log closure.
@@ -122,16 +128,17 @@ class SystemLogger(BaseLogger):
         time_ns = registry.now_ns
 
         # The fast_log closure remains optimized for speed
-        def fast_log(message: str, lvl: LevelIdentity):
+        def fast_log(lvl: LevelIdentity, fmt: str, *args):
+            message = fmt % args if args else fmt
             system_log_append(time_ns(), lvl.value, mod_id, message)
 
         # Overwrite self.log so future calls skip the initialization
         self.log = fast_log
 
         # Process the current log request
-        fast_log(msg, level)
+        fast_log(level, fmt, *args)
 
-    def _noop_log(self, msg: str, level: LevelIdentity):
+    def _noop_log(self, level: LevelIdentity, fmt: str, *args):
         """A zero-overhead discard function used when the logger is disabled."""
         pass
 
@@ -209,8 +216,9 @@ class PrintLogger(BaseLogger):
         q_put = self.queue_put
         t_ns = self.time_ns
 
-        def fast_log(msg: str, level_name: LevelIdentity):
+        def fast_log(level_name: LevelIdentity, fmt: str, *args):
             # Format: [TIME] LEVEL SYSTEM [CONTEXT] MESSAGE
+            msg = fmt % args if args else fmt
             t = strftime_("%H:%M:%S", localtime_())
             print_(f"{t} {level_name} SYSTEM {ctx_} \t{msg}")
 

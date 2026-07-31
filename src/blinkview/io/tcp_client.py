@@ -81,7 +81,7 @@ class TCPClientReader(BaseReader):
     def open(self):
         """Initializes the outbound connection to the remote TCP server."""
         try:
-            self.logger_link.info(f"Connecting to: {self.host}:{self.port}")
+            self.logger_link.info("Connecting to: %s:%s", self.host, self.port)
 
             # Initialize an IPv4 TCP Streaming Socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -98,12 +98,12 @@ class TCPClientReader(BaseReader):
             sock.settimeout(self.delay / 1000.0 / 2)
 
             self.client_sock = sock
-            self.logger_link.info(f"Connected to: {self.host}:{self.port}")
+            self.logger_link.info("Connected to: %s:%s", self.host, self.port)
             self.logger_state_open.info("1")
             return sock
 
         except Exception as e:
-            self.logger_link.error(f"Connection failed to: {self.host}:{self.port}", e)
+            self.logger_link.error("Connection failed to: %s:%s", self.host, self.port, exc=e)
             self._close_client()
             return None
 
@@ -171,7 +171,7 @@ class TCPClientReader(BaseReader):
                     # Expected. Allows timed evaluation of batch flushing windows
                     pass
                 except Exception as e:
-                    self.logger_link.error("Stream receive error occurred on client connection", e)
+                    self.logger_link.error("Stream receive error occurred on client connection", exc=e)
                     self._close_client()
                     sleep(0.5)
                     continue
@@ -185,7 +185,7 @@ class TCPClientReader(BaseReader):
                     batch = None
 
         except Exception as e:
-            logger.exception("Fatal error in TCP Client Reader execution loop", e)
+            logger.exception("Fatal error in TCP Client Reader execution loop", exc=e)
         finally:
             # 5. Final Cleanup
             if batch is not None:
@@ -217,5 +217,5 @@ class TCPClientReader(BaseReader):
         try:
             self.client_sock.sendall(data.encode())
         except Exception as e:
-            self.logger.exception("Failed to transmit data across client TCP socket", e)
+            self.logger.exception("Failed to transmit data across client TCP socket", exc=e)
             self._close_client()

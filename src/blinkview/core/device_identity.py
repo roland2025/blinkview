@@ -187,7 +187,11 @@ class DeviceIdentity:
                 end_time = perf_counter_ns()
                 for _node, _id in new_registrations:
                     self.logger.info(
-                        f"id={_id} tm_ms={(end_time - start_time) / 1_000_000:.4f} len={len(new_registrations)} name={_node.name}"
+                        "id=%s tm_ms=%.4f len=%s name=%s",
+                        _id,
+                        (end_time - start_time) / 1_000_000,
+                        len(new_registrations),
+                        _node.name,
                     )
 
         return target_node

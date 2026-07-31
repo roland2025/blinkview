@@ -60,13 +60,13 @@ class PluginManager:
 
         try:
             # This is the magic line that executes the external file
-            self.logger.info(f"Loading plugin module: '{module_path}'...")
+            self.logger.info("Loading plugin module: '%s'...", module_path)
             importlib.import_module(module_path)
 
-            self.logger.info(f"Successfully loaded plugin: '{module_path}'")
+            self.logger.info("Successfully loaded plugin: '%s'", module_path)
 
         except ImportError as e:
-            self.logger.error("Plugin Load Error.", e)
+            self.logger.error("Plugin Load Error.", exc=e)
 
         except Exception as e:
-            self.logger.error(f"Unexpected error while loading plugin '{module_path}'.", e)
+            self.logger.error("Unexpected error while loading plugin '%s'.", module_path, exc=e)

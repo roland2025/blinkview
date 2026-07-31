@@ -111,7 +111,7 @@ class Benchmark(BaseReader):
                         _ = nb_blast_benchmark_cache(dummy_batch.bundle, time_ns(), 1, c_buf, c_offs, c_lens, c_items)
                     logger.info("Benchmark kernels warmed up.")
                 except Exception as e:
-                    logger.exception("Failed to warm up benchmark kernels", e)
+                    logger.exception("Failed to warm up benchmark kernels", exc=e)
                 self.numba_needs_compile = False
             # --- [END] NUMBA WARMUP ---
 
@@ -179,11 +179,12 @@ class Benchmark(BaseReader):
                     session_avg_mb_s = (session_total_bytes / 1_048_576) / session_elapsed_sec
 
                     log_fn(
-                        f"rate={interval_msg_rate:.0f} "
-                        f"throughput_mb_s={interval_mb_s:.2f} "
-                        f"step_pct={current_step * 100:.1f} "
-                        f"backlog={int(ema_backlog)} "
-                        f"state={state}"
+                        "rate=%.0f throughput_mb_s=%.2f step_pct=%.1f backlog=%s state=%s",
+                        interval_msg_rate,
+                        interval_mb_s,
+                        current_step * 100,
+                        int(ema_backlog),
+                        state,
                     )
 
                     last_adjustment_time = current_time
@@ -216,4 +217,4 @@ class Benchmark(BaseReader):
                     next_send_tick = time_ns()
 
         except Exception as e:
-            self.logger.exception("Exception in benchmark reader", e)
+            self.logger.exception("Exception in benchmark reader", exc=e)

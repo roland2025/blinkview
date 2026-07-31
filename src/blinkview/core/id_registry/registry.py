@@ -120,7 +120,7 @@ class IDRegistry:
             log = json.loads(dump_path.read_text())
             self.replay_discovery_log(log)
         except (OSError, ValueError) as e:
-            self.logger.warning(f"Failed to rehydrate id_registry from {dump_path}: {e}")
+            self.logger.warning("Failed to rehydrate id_registry from %s: %s", dump_path, e)
 
     def module_count(self):
         return self._module_id_counter
@@ -215,7 +215,7 @@ class IDRegistry:
 
             end_time = perf_counter_ns()
 
-            self.logger_device.info(f"id={new_id} tm_ms={(end_time - start_time) / 1_000_000:.4f} name={name}")
+            self.logger_device.info("id=%s tm_ms=%.4f name=%s", new_id, (end_time - start_time) / 1_000_000, name)
 
             return new_device
 

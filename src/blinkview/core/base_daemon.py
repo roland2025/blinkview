@@ -75,7 +75,7 @@ class BaseDaemon:
 
     def apply_config(self, config: dict):
         if self.logger:
-            self.logger.info(f"{self.__class__.__name__}: Applying config: {config}")
+            self.logger.info("%s: Applying config: %s", self.__class__.__name__, config)
 
         changed = self.apply_base_config(config)
 
@@ -86,7 +86,7 @@ class BaseDaemon:
                 logging_cfg["name"] = self.name
 
                 if self.logger:
-                    self.logger.info(f"Logging conf: {logging_cfg}")
+                    self.logger.info("Logging conf: %s", logging_cfg)
                 replay_mode = getattr(self.shared.registry, "replay_mode", False)
                 if logging_cfg.get("enabled") and not replay_mode:
                     if self.file_logger is None:
@@ -107,7 +107,7 @@ class BaseDaemon:
                         self.file_logger = None
         except Exception as e:
             if self.logger:
-                self.logger.exception(f"{self.__class__.__name__}: Failed to apply logging.", e)
+                self.logger.exception("%s: Failed to apply logging.", self.__class__.__name__, exc=e)
 
         if changed and self._configured:
             self.thread_needs_restart = True
@@ -179,7 +179,7 @@ class BaseDaemon:
             self._thread.join(timeout)
             if self._thread.is_alive():
                 if self.logger:
-                    self.logger.warn(f"Did not stop within {timeout} seconds.")
+                    self.logger.warn("Did not stop within %s seconds.", timeout)
             else:
                 if self.logger:
                     self.logger.info("Stopped cleanly.")
@@ -201,7 +201,7 @@ class BaseDaemon:
             self.run()
         except Exception as e:
             if self.logger:
-                self.logger.exception("Crashed during run.", e)
+                self.logger.exception("Crashed during run.", exc=e)
 
     def run(self):
         """Override this in subclasses. Use `while not self._stop_event.is_set():`"""
@@ -212,7 +212,7 @@ class BaseDaemon:
             if subscriber not in self.subscribers:
                 reference_id = getattr(subscriber, "reference_id", subscriber.__class__.__name__)
                 if self.logger:
-                    self.logger.info(f"Subscriber: '{reference_id}' added")
+                    self.logger.info("Subscriber: '%s' added", reference_id)
                 self.subscribers.append(subscriber)
                 if hasattr(subscriber, "track_subscription"):
                     subscriber.track_subscription(self)  # Track the source for cleanup
@@ -222,7 +222,7 @@ class BaseDaemon:
             if subscriber in self.subscribers:
                 reference_id = getattr(subscriber, "reference_id", subscriber.__class__.__name__)
                 if self.logger:
-                    self.logger.info(f"Subscriber: '{reference_id}' removed")
+                    self.logger.info("Subscriber: '%s' removed", reference_id)
                 self.subscribers.remove(subscriber)
 
     def distribute(self, batch: PooledLogBatch):
@@ -288,7 +288,7 @@ class BaseDaemon:
         with self._children_lock:
             if child_obj not in self._children:
                 if self.logger:
-                    self.logger.info(f"Registering child thread object: {child_obj}")
+                    self.logger.info("Registering child thread object: %s", child_obj)
                 self._children.append(child_obj)
 
                 # If parent is already actively running, start the child immediately

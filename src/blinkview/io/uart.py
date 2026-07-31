@@ -150,7 +150,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 # Assuming your framework's task manager supports cancel/stop/remove
                 self.shared.tasks.stop_periodic(self._handshake_task_id)
             except Exception as e:
-                self.logger.error(f"Failed to cleanly stop flash handshake task: {e}")
+                self.logger.error("Failed to cleanly stop flash handshake task: %s", e)
             finally:
                 self._handshake_task_id = None
 
@@ -260,14 +260,14 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                         batch = None
 
                 except Exception as e:
-                    self.logger_link.error("Closed, read error", e)
+                    self.logger_link.error("Closed, read error", exc=e)
                     ser = None
                     self.serial = None
                     self.logger_state_open.warning("0")
                     sleep(1.0)
 
         except Exception as e:
-            logger.exception("Fatal error in Serial Reader loop", e)
+            logger.exception("Fatal error in Serial Reader loop", exc=e)
         finally:
             # 8. Final Cleanup
             if batch is not None:
@@ -300,7 +300,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
             BUF_SIZE = 64 * 1024  # 64KB buffer for incoming serial data
 
-            self.logger_link.info(f"Opening '{self.url}' at {self.baudrate} baud")
+            self.logger_link.info("Opening '%s' at %s baud", self.url, self.baudrate)
 
             from serial import serial_for_url
 
@@ -322,7 +322,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             try:
                 ser.set_buffer_size(rx_size=BUF_SIZE)
             except Exception as e:
-                self.logger.error("Failed to set buffer size. This may not be supported on all platforms.", e)
+                self.logger.error("Failed to set buffer size. This may not be supported on all platforms.", exc=e)
                 pass
 
             self.logger_link.info("Connected")
@@ -330,7 +330,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
             return ser
         except Exception as e:
-            self.logger_link.error("Failed to open serial port.", e)
+            self.logger_link.error("Failed to open serial port.", exc=e)
 
     def send_data(self, data: str):
         with self._serial_lock:
@@ -340,7 +340,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                     self.logger_send.debug(str(encoded))
                     self.serial.write(encoded)
                 except Exception as e:
-                    self.logger_link.exception("Failed to send data", e)
+                    self.logger_link.exception("Failed to send data", exc=e)
                     self.serial_broken = True
 
     def reset_device(self):
@@ -369,7 +369,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
                 self.logger.info("Reset signal sent.")
             except Exception as e:
-                self.logger.error("Failed to perform hardware reset", e)
+                self.logger.error("Failed to perform hardware reset", exc=e)
                 self.serial_broken = True
 
     def is_connected(self):
@@ -377,7 +377,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             try:
                 return self.serial is not None and self.serial.is_open
             except Exception as e:
-                self.logger.error("Failed to check serial connection", e)
+                self.logger.error("Failed to check serial connection", exc=e)
                 self.serial_broken = True
 
     def _check_flash_handshake(self):
@@ -399,7 +399,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
         # 2. Existing lock detection block
         if lock_exists and not self._flash_active:
-            self.logger.warning(f"Flash lock '{lock_file}' detected! Requesting serial loop release...")
+            self.logger.warning("Flash lock '%s' detected! Requesting serial loop release...", lock_file)
 
             self._flash_active = True
             self._flash_lock_ts = current_time_ns
@@ -414,7 +414,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 with open(closed_file, "w") as f:
                     f.write("closed")
             except Exception as e:
-                self.logger.error(f"Failed to create handshake file {closed_file}: {e}")
+                self.logger.error("Failed to create handshake file %s: %s", closed_file, e)
 
         # 3. Existing natural cleanup block (when external tool finishes cleanly)
         elif not lock_exists and self._flash_active:
@@ -441,10 +441,10 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         for file_path in (lock_file, closed_file):
             if os.path.exists(file_path):
                 try:
-                    self.logger.info(f"Removing handshake file: {file_path}")
+                    self.logger.info("Removing handshake file: %s", file_path)
                     os.remove(file_path)
                 except Exception as e:
-                    self.logger.error(f"Failed to remove handshake file '{file_path}': {e}")
+                    self.logger.error("Failed to remove handshake file '%s': %s", file_path, e)
 
         self._flash_active = False
 
@@ -458,7 +458,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         """Processes incoming command strings routed from the UI/CLI layers."""
         command = command.strip()
 
-        self.logger.debug(f"send_command: {command}")
+        self.logger.debug("send_command: %s", command)
 
         match command:
             case "reset":

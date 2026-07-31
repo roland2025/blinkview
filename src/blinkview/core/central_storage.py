@@ -338,4 +338,4 @@ class CentralStorage(BaseCentralStorage):
                     self.distribute(batch)
 
             except Exception as e:
-                self.logger.exception("fcked", e)
+                self.logger.exception("fcked", exc=e)

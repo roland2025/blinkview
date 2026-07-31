@@ -145,7 +145,7 @@ ensuring high throughput without pipeline stalls."""
                             if current_backoff_ns == max_backoff_ns:
                                 logger.debug("Device not found. Polling at max frequency...")
                             else:
-                                logger.info(f"Device not found. Retrying in {current_backoff_ns / 1e9:.1f}s...")
+                                logger.info("Device not found. Retrying in %.1fs...", current_backoff_ns / 1e9)
 
                             # Stay responsive to stop_is_set while waiting for next attempt
                             sleep(0.2)
@@ -211,12 +211,12 @@ ensuring high throughput without pipeline stalls."""
                         next_reconnect_ns = time_ns() + current_backoff_ns
 
                 except Exception as e:
-                    logger.error(f"ADB read error: {e}")
+                    logger.error("ADB read error: %s", e)
                     self._cleanup_process()
                     next_reconnect_ns = time_ns() + current_backoff_ns
 
         except Exception as e:
-            logger.exception("Fatal error in ADB Reader loop", e)
+            logger.exception("Fatal error in ADB Reader loop", exc=e)
         finally:
             # 7. Final Cleanup
             if batch is not None:
@@ -270,7 +270,7 @@ ensuring high throughput without pipeline stalls."""
             if self.filters:
                 cmd.extend(self.filters.split())
 
-            self.logger.debug(f"Opening Monotonic ADB stream: {' '.join(cmd)}")
+            self.logger.debug("Opening Monotonic ADB stream: %s", " ".join(cmd))
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -291,11 +291,11 @@ ensuring high throughput without pipeline stalls."""
             # --- SUPPRESSION LOGIC ---
             # We only show the ERROR level every 30 seconds
             if (now_ns - self._last_error_log_ns) > 30_000_000_000:
-                self.logger.error(f"ADB Connection failed: {e}")
+                self.logger.error("ADB Connection failed: %s", e)
                 self._last_error_log_ns = now_ns
             else:
                 # Keep it quiet in the meantime
-                self.logger.debug(f"Retrying ADB... ({e})")
+                self.logger.debug("Retrying ADB... (%s)", e)
 
             self._cleanup_process()
             return None
@@ -342,10 +342,10 @@ ensuring high throughput without pipeline stalls."""
             try:
                 proc.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
-                self.logger.warning(f"Process {proc.pid} didn't stop in time. Killing...")
+                self.logger.warning("Process %s didn't stop in time. Killing...", proc.pid)
                 proc.kill()
         except Exception as e:
-            self.logger.error(f"Error while finalizing process {proc.pid}: {e}")
+            self.logger.error("Error while finalizing process %s: %s", proc.pid, e)
 
     def reset_device(self):
         """
@@ -361,7 +361,7 @@ ensuring high throughput without pipeline stalls."""
             subprocess.run(cmd, check=True)
             self.logger.info("Reboot command sent.")
         except Exception as e:
-            self.logger.error(f"Failed to reboot device: {e}")
+            self.logger.error("Failed to reboot device: %s", e)
 
     def send_data(self, data: str):
         """
@@ -420,12 +420,12 @@ ensuring high throughput without pipeline stalls."""
                     # The PID is usually the second column
                     pid = int(parts[1])
                     pids[name] = pid
-                    logger.debug(f"pid={pid} name={name}")
+                    logger.debug("pid=%s name=%s", pid, name)
                 except ValueError:
                     continue
 
         self._process_ids = pids
-        logger.info(f"Captured {len(self._process_ids)} application PIDs via shell.")
+        logger.info("Captured %s application PIDs via shell.", len(self._process_ids))
 
         now_ns = self.shared.time_ns()
         history = self.shared.pid_history
@@ -532,7 +532,7 @@ ensuring high throughput without pipeline stalls."""
         best_phone_ns = 0
         best_pc_ns = 0
 
-        self.logger.info(f"Synchronizing coarse monotonic baseline (tries={num_tries})...")
+        self.logger.info("Synchronizing coarse monotonic baseline (tries=%s)...", num_tries)
 
         for i in range(num_tries):
             t0 = time_ns()
@@ -577,7 +577,7 @@ ensuring high throughput without pipeline stalls."""
             'echo "$BOOT $MONO"'
         )
 
-        self.logger.info(f"Synchronizing sleep offset (samples={num_samples})...")
+        self.logger.info("Synchronizing sleep offset (samples=%s)...", num_samples)
 
         for i in range(num_samples):
             res = self.query(cmd)
@@ -601,7 +601,7 @@ ensuring high throughput without pipeline stalls."""
 
         # Optional: Log the jitter to see how 'clean' the phone is behaving
         jitter_ms = (max(offsets) - min(offsets)) / 1_000_000.0
-        self.logger.info(f"Offset synced: {stable_offset / 1e9:.6f}s (Jitter: {jitter_ms:.3f}ms)")
+        self.logger.info("Offset synced: %.6fs (Jitter: %.3fms)", stable_offset / 1e9, jitter_ms)
 
         return stable_offset
 
@@ -652,7 +652,7 @@ ensuring high throughput without pipeline stalls."""
             # Forensic Boot Date Calculation
             boot_time_sec = (pc_ns - phone_boot_ns) / 1e9
             dt = datetime.datetime.fromtimestamp(boot_time_sec).astimezone()
-            self.logger.info(f"Legacy Anchor Found. Approx Phone Boot: {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            self.logger.info("Legacy Anchor Found. Approx Phone Boot: %s", dt.strftime("%Y-%m-%d %H:%M:%S"))
 
             # Prime the bridge
             sync_state_obj.ref_time[:] = [phone_mono_ns, phone_mono_ns]

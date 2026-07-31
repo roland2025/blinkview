@@ -204,7 +204,7 @@ class CircularLogPool:
                     segment = PooledLogBatch.from_compressed_archive(archive_paths[name])
             except (OSError, ValueError) as e:
                 if self._logger:
-                    self._logger.warning(f"Skipping unreadable persisted cold segment '{name}': {e}")
+                    self._logger.warning("Skipping unreadable persisted cold segment '%s': %s", name, e)
                 continue
 
             self.cold_segments.append(segment)
@@ -215,8 +215,10 @@ class CircularLogPool:
             self.sequence = dtypes.SEQ_TYPE(highest_seq)
             if self._logger:
                 self._logger.info(
-                    f"Resumed {len(self.cold_segments)} persisted cold segment(s) from {cold_dir} "
-                    f"(sequence continues from {highest_seq})."
+                    "Resumed %s persisted cold segment(s) from %s (sequence continues from %s).",
+                    len(self.cold_segments),
+                    cold_dir,
+                    highest_seq,
                 )
 
     def latest_sequence(self):
@@ -275,7 +277,7 @@ class CircularLogPool:
             # exact segment, so release() above didn't drop the ref-count to zero yet and the
             # mmap (on Windows) still has the file locked - don't give up on it, just defer.
             if self._logger:
-                self._logger.warning(f"Cold segment file locked, will retry deletion later: {path}")
+                self._logger.warning("Cold segment file locked, will retry deletion later: %s", path)
             self._pending_cold_deletions.append(path)
         self._retry_pending_cold_deletions()
 
@@ -295,8 +297,8 @@ class CircularLogPool:
         still_pending = [p for p in self._pending_cold_deletions if not self._try_delete_cold_file(p)]
         if self._logger and len(still_pending) < len(self._pending_cold_deletions):
             self._logger.info(
-                f"Deleted {len(self._pending_cold_deletions) - len(still_pending)} "
-                "previously-locked cold segment file(s) on retry."
+                "Deleted %s previously-locked cold segment file(s) on retry.",
+                len(self._pending_cold_deletions) - len(still_pending),
             )
         self._pending_cold_deletions = still_pending
 

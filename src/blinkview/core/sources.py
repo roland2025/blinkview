@@ -88,7 +88,7 @@ class SourcesManager:
                         # self.logger.debug(f"'{item_id}' new_targets: {new_targets}")
 
                         if self.logger:
-                            self.logger.info(f"Source '{item_id}' config changed; rebuilding topology.")
+                            self.logger.info("Source '%s' config changed; rebuilding topology.", item_id)
 
                         # Re-bind the source/target links based on the updated config
                         # 3. Reconcile Sources (Upstream)
@@ -123,7 +123,7 @@ class SourcesManager:
 
             except Exception as e:
                 if self.logger:
-                    self.logger.error(f"Failed to process source '{item_id}'", exc=e)
+                    self.logger.error("Failed to process source '%s'", item_id, exc=e)
         # Finalize initialization
         if not self.needs_delayed_init:
             self.start()
@@ -148,19 +148,19 @@ class SourcesManager:
         print(f"Applying targets for source '{item_id}'")
         if hasattr(item, "sources_"):
             # check if its a list or a single string
-            self.logger.warn(f"Source '{item_id}' has sources: {item.sources_}")
+            self.logger.warn("Source '%s' has sources: %s", item_id, item.sources_)
             sources = [item.sources_] if isinstance(item.sources_, str) else item.sources_
             for source in sources:
-                self.logger.debug(f"Source '{item_id}' has source: {source}")
+                self.logger.debug("Source '%s' has source: %s", item_id, source)
                 self.shared.registry.get_reference_target(source).subscribe(item)
 
         if hasattr(item, "targets_"):
-            self.logger.warn(f"Applying targets for source '{item_id}': {item.targets_}")
+            self.logger.warn("Applying targets for source '%s': %s", item_id, item.targets_)
             targets = [item.targets_] if isinstance(item.targets_, str) else item.targets_
 
             for target in targets:
                 target_ref = self.shared.registry.get_reference_target(target)
-                self.logger.debug(f"Source '{item_id}' has target: {target}")
+                self.logger.debug("Source '%s' has target: %s", item_id, target)
                 item.subscribe(target_ref)
 
     def get_schema(self, name: str):

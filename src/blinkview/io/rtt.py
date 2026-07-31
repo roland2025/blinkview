@@ -269,12 +269,12 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                         batch = None
 
                 except Exception as e:
-                    self.logger_link.error("Problem.", e)
+                    self.logger_link.error("Problem.", exc=e)
                     self.cleanup_jlink()
                     sleep(1.0)
 
         except Exception as e:
-            logger.exception("Fatal error in J-Link RTT Reader loop", e)
+            logger.exception("Fatal error in J-Link RTT Reader loop", exc=e)
         finally:
             # 7. Final Cleanup
             if batch is not None:
@@ -313,7 +313,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         """
         with self._jlink_lock:
             horizon = self.target_rtt_buffer_size
-            self.logger.info(f"Draining RTT (Target Buffer: {horizon} bytes)...")
+            self.logger.info("Draining RTT (Target Buffer: %s bytes)...", horizon)
 
             total_drained = 0
 
@@ -335,7 +335,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
                     # --- THE HORIZON CHECK ---
                     if total_drained >= horizon:
-                        self.logger.info(f"Drain: Horizon reached ({total_drained} bytes). Handing off.")
+                        self.logger.info("Drain: Horizon reached (%s bytes). Handing off.", total_drained)
                         break
 
                     # Fast-Drain: DO NOT SLEEP if data was found
@@ -344,7 +344,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                 else:
                     # If we've seen data and it suddenly stops, we're dry.
                     if total_drained > 0:
-                        self.logger.debug(f"Drain: Buffer dry after {total_drained} bytes.")
+                        self.logger.debug("Drain: Buffer dry after %s bytes.", total_drained)
                         break
 
                 # Wait State: Sleep ONLY if no data was found yet
@@ -356,7 +356,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
             try:
                 import pylink
 
-                self.logger_link.info(f"Connecting to J-Link: {self.serial_number}")
+                self.logger_link.info("Connecting to J-Link: %s", self.serial_number)
                 jl = pylink.JLink()
                 jl.exec_command("SuppressGUI")
 
@@ -404,7 +404,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                     # rtt_write returns the number of bytes actually written
                     return self.jlink.rtt_write(channel, encoded)
                 except Exception as e:
-                    self.logger_link.error("RTT Write failed", e)
+                    self.logger_link.error("RTT Write failed", exc=e)
             return 0
 
     def get_commands(self) -> list[tuple[str, str]]:
@@ -420,7 +420,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         """Processes incoming command strings routed from the UI/CLI layers."""
         command = command.strip()
 
-        self.logger.debug(f"send_command: {command}")
+        self.logger.debug("send_command: %s", command)
 
         with self._jlink_lock:
             if not self.jlink:
@@ -434,12 +434,12 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                     self.logger.info("RTT System restarted manually.")
 
                 case "reset":
-                    self.logger.info(f"Initiating hardware reset on target MCU: {self.target_device}")
+                    self.logger.info("Initiating hardware reset on target MCU: %s", self.target_device)
                     try:
                         self.jlink.reset(halt=False)
                         self.logger.info("Target MCU successfully reset.")
                     except Exception as e:
-                        self.logger.error(f"Hardware reset failed: {e}")
+                        self.logger.error("Hardware reset failed: %s", e)
 
                 case "halt":
                     try:
@@ -450,7 +450,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                             self.logger.error("Target was not halted")
 
                     except Exception as e:
-                        self.logger.error(f"Failed to halt core: {e}")
+                        self.logger.error("Failed to halt core: %s", e)
 
                 case "restart":
                     try:
@@ -459,7 +459,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                         else:
                             self.logger.warn("Target was not halted")
                     except Exception as e:
-                        self.logger.error(f"Failed to resume core: {e}")
+                        self.logger.error("Failed to resume core: %s", e)
 
                 case _:
                     # Fall back to raw string transmission over RTT Down-buffer channel 0

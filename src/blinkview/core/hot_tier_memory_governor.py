@@ -142,7 +142,11 @@ class HotTierMemoryGovernor:
         if self._logger:
             direction = "shrinking" if target < current_pieces else "growing"
             self._logger.info(
-                f"HotTierMemoryGovernor {direction} hot tier: {current_pieces} -> {target} pieces "
-                f"(available={available // (1024 * 1024)}MB, target_free={self.target_free_bytes // (1024 * 1024)}MB)"
+                "HotTierMemoryGovernor %s hot tier: %s -> %s pieces (available=%sMB, target_free=%sMB)",
+                direction,
+                current_pieces,
+                target,
+                available // (1024 * 1024),
+                self.target_free_bytes // (1024 * 1024),
             )
         self._log_pool.update_max_pieces(target)

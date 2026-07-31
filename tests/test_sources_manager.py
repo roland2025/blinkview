@@ -28,11 +28,11 @@ class FakeLogger:
     def debug(self, *a, **k):
         pass
 
-    def info(self, msg):
-        self.infos.append(msg)
+    def info(self, msg, *args):
+        self.infos.append(msg % args if args else msg)
 
-    def error(self, msg, exc=None):
-        self.errors.append((msg, exc))
+    def error(self, msg, *args, exc=None):
+        self.errors.append((msg % args if args else msg, exc))
 
 
 class FakeItem:
