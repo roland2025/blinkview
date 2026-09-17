@@ -133,22 +133,25 @@ blink
   * CAN-bus (with DBC decoding)
   * SEGGER RTT
   * TCP/UDP sockets
-  * ADB logcat—dedicated long-format decoder with timestamp, level, module, and PID/TID extraction built in as ready-to-use pipeline steps. PID→process-name resolution is history-aware, so a reused PID (Android recycles them) still resolves to whichever process actually owned it at that line's timestamp, not just whatever currently holds it.
-  * Live file tailing—follows a growing text/log file (`tail -f`-style), with truncation/rotation detection, for desktop and console application logs.
-  * Binary file replay—for offline analysis or replaying a previously captured session.
-* **Generic Desktop/Console Log Parsing:** Timestamp formats beyond embedded-device conventions—ISO 8601-style (`YYYY-MM-DD HH:MM:SS[.,]fff`, e.g. Python `logging`/log4j output) and classic RFC3164 syslog (`Mon DD HH:MM:SS`)—so plain desktop/service logs parse without a custom pipeline.
+  * ADB logcat
+  * Live file tailing
 * **Text Log Viewer:** 
   * Advanced filtering by device, module, and log level.
   * High-speed text search and highlighting.
-  * Structured `key=value` (logfmt) filtering—combine free-text search with exact-match conditions like `status=ok user_id=42`, evaluated directly on parsed log rows via a Numba-JIT kernel.
+  * Structured `key=value` (logfmt) filtering—combine free-text search with exact-match conditions like `status=ok user_id=42`.
   * Auto-pause on high-velocity bursts to maintain UI responsiveness.
-* **Table-Based Log Viewer:** A structured, columnar alternative to the text viewer—Time, Device, Level, Module, and Message as resizable columns. Shares the same live-tail / bounded-history fetch model and `key=value` filtering as the text viewer.
+* **Table-Based Log Viewer:** A structured, columnar alternative to the text viewer—Time, Device, Level, Module, and Message as resizable columns. Shares the `key=value` filtering as the text viewer.
 * **Parsing & Extraction:**
-  * Multi-rule Key-Value extractor—Numba-JIT backed, five composable rule types for pulling structured data out of raw text streams: `key=value` pairs, anchor-word patterns (startswith/endswith/contains), lightweight JSON key lookup, CSV-like delimiter-separated fields, and fixed word-position slices.
+  * Multi-rule Key-Value extractor - five composable rule types for pulling structured data out of raw text streams: 
+    * `key=value` pairs, 
+    * anchor-word patterns (startswith/endswith/contains).
+    * lightweight JSON key lookup
+    * CSV-like delimiter-separated fields
+    * fixed word-position slices.
 * **Playback & Scrubbing:** Treats live and recorded data as one continuous timeline, not two separate modes.
   * **LIVE / REPLAY:** Drop out of the live tail at any point to scrub history, then jump straight back to live.
-  * **Session Replay:** Reopen any past recording from the **Load Session...** menu (or `blink replay` on the CLI) and scrub it exactly like a live one. The main timeline pins itself to that recording's actual length instead of the raw memory buffer, while a second, always-visible timeline keeps tracking the live edge independently—so replaying a fixed session never costs you your place in "now."
-  * **Jog Wheel:** Press-and-drag precise scrubbing—the cursor hides and the drag speed (not distance) determines step size, from single-row stepping at a slow drag up to a fast shuttle.
+  * **Session Replay:** Reopen any past recording from the **Load Session...** menu (or `blink replay` on the CLI) and scrub it exactly like a live one.
+  * **Jog Wheel:** Press-and-drag precise scrubbing—from single-row stepping at a slow drag up to a fast shuttle.
   * **Named Ranges:** Mark start/end points and name them like clips in a video editor. Saved alongside the session's own captured data, so ranges are there again the next time that session is replayed.
   * **Force Live:** Pin an individual view (table, watch list, plot) to live data even while the shared clock is scrubbed into REPLAY elsewhere—useful for keeping one window on "now" while you dig through history in another.
 * **Extended Scrollback:** Evicted segments are archived to a memory-mapped disk tier (ideally on NVMe) instead of being dropped—extending scrollback far past what fits in memory, transparently, with no change to filtering/search.
@@ -162,7 +165,7 @@ blink
   * **Discrete Mode:** Supports rendering boolean or integer state values by automatically synthesizing intermediate steps. This creates a clean, "staircased" layout that accurately represents step-wise state changes rather than continuous slopes.
 * **Unified Timeline Alignment:**
   * Best-effort time alignment across sources with different transport characteristics.
-  * Leverages high-precision internal clocks where the hardware/transport allows (e.g., SEGGER RTT) and provides time-correlated views for higher-latency sources like UART or ADB.
+  * Leverages high-precision internal clocks where the hardware/transport allows (e.g., SEGGER RTT) and provides time-correlated views for higher-latency sources like UART or ADB. 
 
 ---
 
@@ -171,8 +174,8 @@ blink
 BlinkView is designed for high-throughput telemetry. It utilizes a multi-threaded ingestion pipeline where data sources run in isolated threads to prevent cross-source blocking.
 
 *   **Numba JIT Compilation:** Core parsing, filtering, and reordering logic is compiled to machine code for near-native performance.
-*   **KV Extraction:** A dedicated extractor identifies key-value pairs within the stream for real-time monitoring.
-*   **Time-Reordering:** A reorder layer buffers incoming packets to handle varying transport latencies and produce a cohesive chronological stream.
+  * Minor caveat, the first run after installation needs to run LLVM compilation
+*   **Time-Reordering:** A reorder layer buffers incoming packets to handle varying transport latencies and produce a cohesive chronological stream. (default window size is 100ms, but can be increased if data source needs it )
 *   **Pooled, Struct-of-Arrays Storage:** Log rows are held as pooled NumPy arrays (not per-message Python objects), with an optional memory-mapped disk tier for older segments—the same filter/search kernels run unmodified whether a segment is in RAM or on disk.
 
 ```mermaid
