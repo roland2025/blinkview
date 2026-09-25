@@ -136,9 +136,7 @@ class TestParseRfc3339:
         cursor = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, _identity_state(), EmptyUnifiedParserConfig)
 
         assert cursor == msg.index("INFO")
-        expected = int(
-            datetime(2026, 9, 20, 13, 9, 38, 424119, tzinfo=timezone(timedelta(hours=3))).timestamp() * 1e9
-        )
+        expected = int(datetime(2026, 9, 20, 13, 9, 38, 424119, tzinfo=timezone(timedelta(hours=3))).timestamp() * 1e9)
         assert out_b.timestamps[0] == expected
 
     def test_numeric_negative_offset(self):
@@ -149,8 +147,7 @@ class TestParseRfc3339:
 
         assert cursor == msg.index("INFO")
         expected = int(
-            datetime(2026, 9, 20, 13, 9, 38, 424119, tzinfo=timezone(-timedelta(hours=5, minutes=30))).timestamp()
-            * 1e9
+            datetime(2026, 9, 20, 13, 9, 38, 424119, tzinfo=timezone(-timedelta(hours=5, minutes=30))).timestamp() * 1e9
         )
         assert out_b.timestamps[0] == expected
 
