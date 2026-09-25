@@ -9,7 +9,7 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.parsing import SyncState
-from blinkview.ops.constants import CHAR_NINE, CHAR_ZERO
+from blinkview.ops.constants import CHAR_DASH, CHAR_NINE, CHAR_Z, CHAR_ZERO
 from blinkview.ops.strings import nb_skip_whitespace
 
 
@@ -48,6 +48,69 @@ def nb_parse_iso8601_to_ns(buffer, start, offset_sec):
     res_ns += ms * 1_000_000
 
     return res_ns - (offset_sec * 1_000_000_000)
+
+
+@app_njit(inline="always")
+def nb_parse_rfc3339_to_ns(buffer, start):
+    """
+    Parses RFC 3339 'YYYY-MM-DDTHH:MM:SS.uuuuuu(Z|+HH:MM|-HH:MM)' starting at 'start'
+    - e.g. journald's short-iso-precise output, or Python's
+    `datetime.now().astimezone().isoformat()`. Returns (utc_ns, consumed_len).
+
+    Same Y/M/D/H/M/S byte offsets, 6-digit microseconds, and Julian-Day-Number epoch
+    formula as nb_parse_unified_log_ts_ns below - only the trailing offset differs:
+    unlike the ADB-style format above (fixed-width, offset supplied separately by the
+    caller), RFC 3339 embeds the offset in the string, and it's the one field whose
+    width isn't fixed ('Z' is 1 byte, '+HH:MM'/'-HH:MM' is 6), so the number of bytes
+    consumed is returned alongside the nanoseconds for the caller to advance past.
+    """
+    # 1. Extraction (Fixed offsets relative to YYYY)
+    y = (
+        (buffer[start + 0] - 48) * 1000
+        + (buffer[start + 1] - 48) * 100
+        + (buffer[start + 2] - 48) * 10
+        + (buffer[start + 3] - 48)
+    )
+    m = (buffer[start + 5] - 48) * 10 + (buffer[start + 6] - 48)
+    d = (buffer[start + 8] - 48) * 10 + (buffer[start + 9] - 48)
+
+    hh = (buffer[start + 11] - 48) * 10 + (buffer[start + 12] - 48)
+    mm = (buffer[start + 14] - 48) * 10 + (buffer[start + 15] - 48)
+    ss = (buffer[start + 17] - 48) * 10 + (buffer[start + 18] - 48)
+    us = (
+        (buffer[start + 20] - 48) * 100000
+        + (buffer[start + 21] - 48) * 10000
+        + (buffer[start + 22] - 48) * 1000
+        + (buffer[start + 23] - 48) * 100
+        + (buffer[start + 24] - 48) * 10
+        + (buffer[start + 25] - 48)
+    )
+
+    # 2. Julian Day Number Algorithm (identical to nb_parse_iso8601_to_ns above)
+    temp_a = (14 - m) // 12
+    temp_y = y + 4800 - temp_a
+    temp_m = m + 12 * temp_a - 3
+
+    jdn = d + (153 * temp_m + 2) // 5 + 365 * temp_y + temp_y // 4 - temp_y // 100 + temp_y // 400 - 32045
+    days_since_1970 = jdn - 2440588
+
+    # 3. Epoch Math
+    res_ns = (days_since_1970 * 86400 + hh * 3600 + mm * 60 + ss) * 1_000_000_000
+    res_ns += us * 1000
+
+    # 4. Trailing offset - 'Z' (1 byte), or a sign followed by HH:MM (6 bytes)
+    offset_char = buffer[start + 26]
+    if offset_char == CHAR_Z:
+        return res_ns, 27
+
+    off_hh = (buffer[start + 27] - 48) * 10 + (buffer[start + 28] - 48)
+    off_mm = (buffer[start + 30] - 48) * 10 + (buffer[start + 31] - 48)
+    offset_sec = off_hh * 3600 + off_mm * 60
+
+    if offset_char == CHAR_DASH:
+        offset_sec = -offset_sec
+
+    return res_ns - offset_sec * 1_000_000_000, 32
 
 
 @app_njit(inline="always")

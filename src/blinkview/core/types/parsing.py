@@ -52,7 +52,11 @@ class ParserID:
 
     TS_IDF_V1 = 17
 
-    TS_SYSLOG = 18
+    TS_RFC3164 = 18
+
+    TS_RFC3339 = 19
+
+    MOD_RSYSLOG_TAG = 20
 
 
 class CodecID:

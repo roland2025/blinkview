@@ -15,6 +15,7 @@ from blinkview.ops.modules import (
     nb_normalize_name_inplace,
     nb_parse_fixed_width_name,
     nb_parse_module_tags_statemachine,
+    nb_parse_rsyslog_tag,
 )
 
 
@@ -295,3 +296,101 @@ class TestParseModuleTagsStatemachine:
         result = nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
 
         assert result == -1
+
+
+class TestParseRSyslogTag:
+    def _state(self, tracker):
+        from blinkview.core.types.parsing import UnifiedParserState
+
+        return UnifiedParserState(modules=tracker)
+
+    def test_tag_with_pid(self):
+        msg = "sshd[1234]: connection closed"
+        buf = _buf(msg)
+        out_b = _out_bundle()
+        tracker = _tracker()
+        table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
+        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=64), string_table=table)
+
+        next_cursor = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+
+        assert out_b.modules[0] != 0
+        start, length = tracker.starts[0], tracker.lengths[0]
+        assert bytes(tracker.name_bytes[start : start + length]).decode() == "sshd"
+        assert buf[next_cursor : next_cursor + 10].tobytes() == b"connection"
+
+    def test_tag_without_pid(self):
+        msg = "kernel: something happened"
+        buf = _buf(msg)
+        out_b = _out_bundle()
+        tracker = _tracker()
+        table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
+        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=64), string_table=table)
+
+        next_cursor = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+
+        assert out_b.modules[0] != 0
+        start, length = tracker.starts[0], tracker.lengths[0]
+        assert bytes(tracker.name_bytes[start : start + length]).decode() == "kernel"
+        assert buf[next_cursor : next_cursor + 9].tobytes() == b"something"
+
+    def test_unclosed_bracket_returns_negative_one(self):
+        msg = "sshd[1234: connection closed"
+        buf = _buf(msg)
+        out_b = _out_bundle()
+        tracker = _tracker()
+        table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
+        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=64), string_table=table)
+
+        result = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+
+        assert result == -1
+
+    def test_non_numeric_pid_returns_negative_one(self):
+        msg = "sshd[abc]: connection closed"
+        buf = _buf(msg)
+        out_b = _out_bundle()
+        tracker = _tracker()
+        table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
+        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=64), string_table=table)
+
+        result = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+
+        assert result == -1
+
+    def test_no_colon_terminator_returns_negative_one(self):
+        msg = "no colon here"
+        buf = _buf(msg)
+        out_b = _out_bundle()
+        tracker = _tracker()
+        table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
+        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=64), string_table=table)
+
+        result = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+
+        assert result == -1
+
+    def test_whitespace_before_terminator_returns_negative_one(self):
+        msg = "not a tag: rest"
+        buf = _buf(msg)
+        out_b = _out_bundle()
+        tracker = _tracker()
+        table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
+        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=64), string_table=table)
+
+        result = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+
+        assert result == -1
+
+    def test_max_length_truncates_tag(self):
+        msg = "verylongtagname[42]: rest"
+        buf = _buf(msg)
+        out_b = _out_bundle()
+        tracker = _tracker()
+        table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
+        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=4), string_table=table)
+
+        nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+
+        start, length = tracker.starts[0], tracker.lengths[0]
+        assert bytes(tracker.name_bytes[start : start + length]).decode() == "very"

@@ -525,3 +525,33 @@ class ZephyrRealTimeParser(SerialParserThread):
 )
 class EspIdfV1Parser(SerialParserThread):
     __doc__ = "ESP-IDF V1 parser"
+
+
+@ParserFactory.register("rsyslog_file_format")
+@override_property(
+    "frame_decoder",
+    default={
+        "type": "line_decoder",
+        "filter_trim_r": True,
+        "filter_printable": True,
+        "filter_ansi": True,
+        "frame_length_minimum": 20,
+    },
+)
+@override_property(
+    "frame_parser",
+    default={
+        "type": "default",
+        "steps": [
+            {"type": "timestamp_rfc3339"},
+            {"type": "skip_words", "count": 1},
+            {"type": "module_name_rsyslog"},
+        ],
+    },
+)
+class RsyslogFileFormatParser(BinaryParser):
+    __doc__ = """rsyslog's default "RSYSLOG_FileFormat" template: an RFC3339 timestamp, the
+hostname, and a "tag[pid]: " syslog TAG field, e.g. "2026-09-20T10:23:01.456789+00:00 myhost
+sshd[1234]: connection closed". For the older low-precision default (RFC3164 "Mon DD HH:MM:SS"
+timestamps, "RSYSLOG_TraditionalFileFormat"), swap the "timestamp_rfc3339" step for
+"timestamp_rfc3164"."""

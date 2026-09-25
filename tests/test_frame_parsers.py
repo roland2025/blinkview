@@ -22,6 +22,7 @@ from blinkview.parsers.frame_parsers import (
     IntegerTimestampParser,
     Iso8601DesktopTimestampParser,
     ModuleNameNormalizer,
+    ModuleNameRSyslogParser,
     SkipWordsParser,
     SyslogTimestampParser,
     ZephyrRealTimeParser,
@@ -221,6 +222,21 @@ class TestModuleNameNormalizerBundle:
         assert config.module_config is parser.module_config
 
 
+class TestModuleNameRSyslogParserBundle:
+    def test_bundle_returns_expected_parser_id_and_config(self, id_registry):
+        parser = ModuleNameRSyslogParser()
+        device = id_registry.get_device("rsyslog_test")
+        parser.shared = make_shared(id_registry)
+        parser.local = SimpleNamespace(device_id=device, sync_state=create_default_sync(0))
+        configure(parser, max_length=32)
+
+        parser_id, state, config = parser.bundle()
+
+        assert parser_id == ParserID.MOD_RSYSLOG_TAG
+        assert state is parser.tracker_state
+        assert config.module_config.max_length == 32
+
+
 class TestTimestampParsers:
     def _configured(self, cls, id_registry, **overrides):
         parser = cls()
@@ -283,7 +299,7 @@ class TestTimestampParsers:
 
         parser_id, state, config = parser.bundle()
 
-        assert parser_id == ParserID.TS_SYSLOG
+        assert parser_id == ParserID.TS_RFC3164
         assert state is parser.state
         from datetime import datetime
 

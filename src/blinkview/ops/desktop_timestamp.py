@@ -12,10 +12,12 @@ from blinkview.ops.constants import (
     CHAR_DOT,
     CHAR_NINE,
     CHAR_SPACE,
+    CHAR_T,
+    CHAR_Z,
     CHAR_ZERO,
 )
 from blinkview.ops.strings import nb_skip_whitespace
-from blinkview.ops.timestamps import nb_parse_iso8601_to_ns, nb_project_synced_ns
+from blinkview.ops.timestamps import nb_parse_iso8601_to_ns, nb_parse_rfc3339_to_ns, nb_project_synced_ns
 
 
 @app_njit(inline="always")
@@ -55,6 +57,47 @@ def nb_parse_iso8601_desktop(
     out_b.timestamps[out_idx] = nb_project_synced_ns(raw_ns, rx_ns, state.timestamp.sync)
 
     return nb_skip_whitespace(buffer, start_cursor + 23, end_cursor)
+
+
+@app_njit(inline="always")
+def nb_parse_rfc3339(
+    buffer,
+    start_cursor,
+    end_cursor,
+    out_b,
+    out_idx,
+    state,
+    config,
+):
+    """
+    Parses RFC 3339 'YYYY-MM-DDTHH:MM:SS.uuuuuu(Z|+HH:MM|-HH:MM)' at the cursor -
+    e.g. journald's short-iso-precise output, or Python's
+    `datetime.now().astimezone().isoformat()`. 27-byte width with a 'Z' offset,
+    32-byte width with a numeric offset (see nb_parse_rfc3339_to_ns).
+    """
+    if start_cursor + 27 > end_cursor:
+        return -1
+
+    if (
+        buffer[start_cursor + 4] != CHAR_DASH
+        or buffer[start_cursor + 7] != CHAR_DASH
+        or buffer[start_cursor + 10] != CHAR_T
+        or buffer[start_cursor + 13] != CHAR_COLON
+        or buffer[start_cursor + 16] != CHAR_COLON
+        or buffer[start_cursor + 19] != CHAR_DOT
+    ):
+        return -1
+
+    width = 27 if buffer[start_cursor + 26] == CHAR_Z else 32
+    if start_cursor + width > end_cursor:
+        return -1
+
+    raw_ns, consumed = nb_parse_rfc3339_to_ns(buffer, start_cursor)
+
+    rx_ns = out_b.rx_timestamps[out_idx]
+    out_b.timestamps[out_idx] = nb_project_synced_ns(raw_ns, rx_ns, state.timestamp.sync)
+
+    return nb_skip_whitespace(buffer, start_cursor + consumed, end_cursor)
 
 
 @app_njit(inline="always")

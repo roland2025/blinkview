@@ -340,3 +340,72 @@ def nb_parse_module_tags_statemachine(
     out_b.modules[out_idx] = mod_id
 
     return nb_skip_whitespace(buffer, curr, end_cursor)
+
+
+@app_njit(inline="always")
+def nb_parse_rsyslog_tag(
+    buffer,
+    cursor,
+    end_cursor,  # Inputs
+    out_b,
+    out_idx,  # Outputs
+    state,  # Mutable State
+    unified_config,  # Read-only Config
+):
+    """Parses the classic syslog/rsyslog TAG field: 'tag[pid]: ' or 'tag: ' - a bare
+    identifier, an optional numeric PID in brackets, and a terminating colon. The PID
+    itself is not captured, only used to validate/skip past the bracketed section."""
+    tracker = state.modules
+    config = unified_config.module_config
+
+    tag_start = cursor
+    curr = cursor
+    while curr < end_cursor:
+        char = buffer[curr]
+        if char == CHAR_LBRACKET or char == CHAR_COLON:
+            break
+        if nb_is_whitespace(char):
+            return -1
+        curr += 1
+
+    tag_len = curr - tag_start
+    if tag_len == 0 or curr >= end_cursor:
+        return -1
+
+    if buffer[curr] == CHAR_LBRACKET:
+        pid_start = curr + 1
+        scan_ptr = pid_start
+        while scan_ptr < end_cursor and nb_is_digit(buffer[scan_ptr]):
+            scan_ptr += 1
+
+        if scan_ptr == pid_start or scan_ptr >= end_cursor or buffer[scan_ptr] != CHAR_RBRACKET:
+            return -1
+
+        curr = scan_ptr + 1
+        if curr >= end_cursor or buffer[curr] != CHAR_COLON:
+            return -1
+
+    # buffer[curr] is now the terminating colon
+    curr += 1
+
+    max_length = config.max_length
+    if max_length > 0 and tag_len > max_length:
+        tag_len = max_length
+
+    write_start = tracker.bytes_cursor[0]
+    if write_start + tag_len > len(tracker.name_bytes):
+        return -1
+
+    tracker.name_bytes[write_start : write_start + tag_len] = buffer[tag_start : tag_start + tag_len]
+
+    squashed_len = int(nb_normalize_name_inplace(tracker.name_bytes, write_start, tag_len))
+    if squashed_len <= 0:
+        return -1
+
+    mod_id = nb_resolve_module_id(tracker.name_bytes, write_start, squashed_len, unified_config.string_table, tracker)
+    if mod_id == MODULE_ID_FULL:
+        return -1
+
+    out_b.modules[out_idx] = mod_id
+
+    return nb_skip_whitespace(buffer, curr, end_cursor)

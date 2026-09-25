@@ -428,6 +428,33 @@ class ModuleNameNormalizer(ModuleNameParserBase):
         return ParserID.MOD_DYNAMIC_SM, self.tracker_state, config
 
 
+@configuration_property(
+    "max_length",
+    type="integer",
+    title="Module name maximum length",
+    required=False,
+    default=64,
+)
+@FrameSectionParserFactory.register("module_name_rsyslog")
+class ModuleNameRSyslogParser(ModuleNameParserBase):
+    """Parses the classic syslog/rsyslog TAG field: 'tag[pid]: ' or 'tag: ' (e.g.
+    "sshd[1234]: " or "kernel: "). The `[pid]` is optional; when present it is only
+    validated, not captured - only the tag itself is kept as the module name."""
+
+    max_length: int
+
+    def __init__(self):
+        super().__init__()
+
+    def bundle(self):
+        config = UnifiedParserConfig(
+            string_table=self.local.device_id.modules_table.bundle(),
+            module_config=DynamicWidthConfig(max_length=self.max_length),
+        )
+
+        return ParserID.MOD_RSYSLOG_TAG, self.tracker_state, config
+
+
 # @FrameSectionParserFactory.register("timestamp")
 class TimestampParser(FrameSectionParser):
     def __init__(self):
@@ -597,6 +624,26 @@ class Iso8601DesktopTimestampParser(TimestampParser):
         return self._bundle
 
 
+@FrameSectionParserFactory.register("timestamp_rfc3339")
+class Rfc3339TimestampParser(TimestampParser):
+    """Parses RFC 3339 'YYYY-MM-DDTHH:MM:SS.uuuuuu(Z|+HH:MM|-HH:MM)' - e.g. journald's
+    short-iso-precise output, or Python's `datetime.now().astimezone().isoformat()`."""
+
+    def __init__(self):
+        super().__init__()
+        self._bundle = None
+
+    def apply_config(self, config: dict):
+        changed = super().apply_config(config)
+
+        self._bundle = ParserID.TS_RFC3339, self.state, EmptyUnifiedParserConfig
+
+        return changed
+
+    def bundle(self):
+        return self._bundle
+
+
 @configuration_property(
     "year",
     type="integer",
@@ -605,7 +652,7 @@ class Iso8601DesktopTimestampParser(TimestampParser):
     default=0,
     help="Year to assume for syslog timestamps, which have no year field. 0 = use the current year.",
 )
-@FrameSectionParserFactory.register("timestamp_syslog")
+@FrameSectionParserFactory.register("timestamp_rfc3164")
 class SyslogTimestampParser(TimestampParser):
     """Parses classic RFC3164 syslog timestamps: 'Mon DD HH:MM:SS' (e.g. "Jan  2 15:04:05").
     Since the format has no year field, one is assumed - either the configured `year`, or the
@@ -623,7 +670,7 @@ class SyslogTimestampParser(TimestampParser):
         assumed_year = self.year if getattr(self, "year", 0) else datetime.now().year
         ts_config = UnifiedParserConfig(syslog_year=assumed_year)
 
-        self._bundle = ParserID.TS_SYSLOG, self.state, ts_config
+        self._bundle = ParserID.TS_RFC3164, self.state, ts_config
 
         return changed
 

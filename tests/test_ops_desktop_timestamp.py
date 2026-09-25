@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
@@ -18,7 +18,7 @@ from blinkview.core.types.parsing import (
     UnifiedParserConfig,
     UnifiedParserState,
 )
-from blinkview.ops.desktop_timestamp import nb_parse_iso8601_desktop, nb_parse_syslog_timestamp
+from blinkview.ops.desktop_timestamp import nb_parse_iso8601_desktop, nb_parse_rfc3339, nb_parse_syslog_timestamp
 
 
 def _out_bundle(capacity=1):
@@ -124,6 +124,67 @@ class TestParseIso8601Desktop:
         result = nb_parse_iso8601_desktop(
             _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
         )
+
+        assert result == -1
+
+
+class TestParseRfc3339:
+    def test_numeric_positive_offset(self):
+        msg = "2026-09-20T13:09:38.424119+03:00 INFO myapp.module: message"
+        out_b = _out_bundle()
+
+        cursor = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, _identity_state(), EmptyUnifiedParserConfig)
+
+        assert cursor == msg.index("INFO")
+        expected = int(
+            datetime(2026, 9, 20, 13, 9, 38, 424119, tzinfo=timezone(timedelta(hours=3))).timestamp() * 1e9
+        )
+        assert out_b.timestamps[0] == expected
+
+    def test_numeric_negative_offset(self):
+        msg = "2026-09-20T13:09:38.424119-05:30 INFO"
+        out_b = _out_bundle()
+
+        cursor = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, _identity_state(), EmptyUnifiedParserConfig)
+
+        assert cursor == msg.index("INFO")
+        expected = int(
+            datetime(2026, 9, 20, 13, 9, 38, 424119, tzinfo=timezone(-timedelta(hours=5, minutes=30))).timestamp()
+            * 1e9
+        )
+        assert out_b.timestamps[0] == expected
+
+    def test_z_offset(self):
+        msg = "2026-09-20T10:09:38.424119Z INFO"
+        out_b = _out_bundle()
+
+        cursor = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, _identity_state(), EmptyUnifiedParserConfig)
+
+        assert cursor == msg.index("INFO")
+        expected = int(datetime(2026, 9, 20, 10, 9, 38, 424119, tzinfo=timezone.utc).timestamp() * 1e9)
+        assert out_b.timestamps[0] == expected
+
+    def test_bad_separator_returns_negative_one(self):
+        msg = "2026-09-20 13:09:38.424119+03:00 INFO"
+        out_b = _out_bundle()
+
+        result = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig)
+
+        assert result == -1
+
+    def test_too_short_buffer_with_z_offset_returns_negative_one(self):
+        msg = "2026-09-20T10:09:38.424119"
+        out_b = _out_bundle()
+
+        result = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig)
+
+        assert result == -1
+
+    def test_too_short_buffer_for_numeric_offset_returns_negative_one(self):
+        msg = "2026-09-20T10:09:38.424119+03"
+        out_b = _out_bundle()
+
+        result = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig)
 
         assert result == -1
 

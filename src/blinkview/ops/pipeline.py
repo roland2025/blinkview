@@ -13,10 +13,18 @@ from blinkview.ops.codec_adb_long import (
     nb_parse_adb_tag,
     nb_parse_adb_timestamp_monotonic,
 )
-from blinkview.ops.desktop_timestamp import nb_parse_iso8601_desktop, nb_parse_syslog_timestamp
+from blinkview.ops.desktop_timestamp import (
+    nb_parse_iso8601_desktop,
+    nb_parse_rfc3339,
+    nb_parse_syslog_timestamp,
+)
 from blinkview.ops.generic import nb_skip_words_parser
 from blinkview.ops.levels import nb_parse_log_level
-from blinkview.ops.modules import nb_parse_fixed_width_name, nb_parse_module_tags_statemachine
+from blinkview.ops.modules import (
+    nb_parse_fixed_width_name,
+    nb_parse_module_tags_statemachine,
+    nb_parse_rsyslog_tag,
+)
 from blinkview.ops.timestamp_idf import nb_parse_int_timestamp_idf_v1
 from blinkview.ops.timestamps import nb_parse_int_timestamp
 from blinkview.ops.zephyr_timestamp import nb_parse_zephyr_realtime, nb_parse_zephyr_uptime_formatted
@@ -24,6 +32,7 @@ from blinkview.ops.zephyr_timestamp import nb_parse_zephyr_realtime, nb_parse_ze
 # --- Extract Specific IDs for Numba ---
 MOD_FIXED_WIDTH = ParserID.MOD_FIXED_WIDTH
 MOD_DYNAMIC_SM = ParserID.MOD_DYNAMIC_SM
+MOD_RSYSLOG_TAG = ParserID.MOD_RSYSLOG_TAG
 LEVEL_NAME_MAP = ParserID.LEVEL_NAME_MAP
 SKIP_WORDS = ParserID.SKIP_WORDS
 
@@ -35,7 +44,8 @@ TS_ZEPHYR_REALTIME = ParserID.TS_ZEPHYR_REALTIME
 TS_INTEGER = ParserID.TS_INTEGER
 TS_IDF_V1 = ParserID.TS_IDF_V1
 TS_ISO8601 = ParserID.TS_ISO8601
-TS_SYSLOG = ParserID.TS_SYSLOG
+TS_RFC3164 = ParserID.TS_RFC3164
+TS_RFC3339 = ParserID.TS_RFC3339
 
 PID_TID_ADB_LONG = ParserID.PID_TID_ADB_LONG
 LEVEL_MAP_ADB_LONG = ParserID.LEVEL_MAP_ADB_LONG
@@ -55,6 +65,9 @@ def nb_process_bundle(buffer, cursor, end_cursor, out_b, out_idx, bundle):
 
     elif p_id == MOD_DYNAMIC_SM:
         return nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == MOD_RSYSLOG_TAG:
+        return nb_parse_rsyslog_tag(buffer, cursor, end_cursor, out_b, out_idx, state, config)
 
     elif p_id == SKIP_WORDS:
         return nb_skip_words_parser(buffer, cursor, end_cursor, out_b, out_idx, state, config)
@@ -77,7 +90,10 @@ def nb_process_bundle(buffer, cursor, end_cursor, out_b, out_idx, bundle):
     elif p_id == TS_ISO8601:
         return nb_parse_iso8601_desktop(buffer, cursor, end_cursor, out_b, out_idx, state, config)
 
-    elif p_id == TS_SYSLOG:
+    elif p_id == TS_RFC3339:
+        return nb_parse_rfc3339(buffer, cursor, end_cursor, out_b, out_idx, state, config)
+
+    elif p_id == TS_RFC3164:
         return nb_parse_syslog_timestamp(buffer, cursor, end_cursor, out_b, out_idx, state, config)
 
     elif p_id == PID_TID_ADB_LONG:

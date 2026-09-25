@@ -9,7 +9,7 @@ Gap 1 (timestamp string parsing) and Gap 2 (live file tailing) are now implement
   `timestamp_iso8601_desktop`) parses `YYYY-MM-DD HH:MM:SS[.,]fff` (Python `logging`, log4j, plain
   ISO8601, no bracket wrapper) - reuses `ops/timestamps.py`'s existing
   `nb_parse_iso8601_to_ns` field-extraction math with `offset_sec=0`. `nb_parse_syslog_timestamp`
-  (new `ParserID.TS_SYSLOG`, registered as `timestamp_syslog`) parses classic RFC3164 syslog `Mon
+  (new `ParserID.TS_RFC3164`, registered as `timestamp_syslog`) parses classic RFC3164 syslog `Mon
   DD HH:MM:SS`; since that format has no year field, one is supplied via a new
   `UnifiedParserConfig.syslog_year` field (either a configured `year`, or the current year at
   config-apply time). Both route through the existing `nb_project_synced_ns` auto-sync path, same

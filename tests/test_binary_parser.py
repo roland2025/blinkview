@@ -12,7 +12,7 @@ from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.factory_registry import FactoryRegistry
 from blinkview.core.logger import PrintLogger
 from blinkview.core.numpy_batch_manager import PooledLogBatch
-from blinkview.parsers.binary_parser import BinaryParser
+from blinkview.parsers.binary_parser import BinaryParser, RsyslogFileFormatParser
 from blinkview.parsers.frame_decoders import FrameDecoderFactory
 from blinkview.parsers.frame_parsers import FrameParserFactory, FrameSectionParserFactory
 from blinkview.utils.log_level import LogLevel
@@ -65,6 +65,17 @@ def drain(q, count, timeout=5.0):
         except queue.Empty:
             break
     return items
+
+
+def make_rsyslog_parser(id_registry, device_name="rsyslog_parser_test", **config_overrides):
+    parser = RsyslogFileFormatParser()
+    parser.logger = PrintLogger("test.rsyslog_parser")
+    parser.shared = make_shared(id_registry)
+    parser.local = SimpleNamespace(device_id=id_registry.get_device(device_name))
+    config = {"delay": 20}
+    config.update(config_overrides)
+    parser.apply_config(parser.hydrate_config(config))
+    return parser
 
 
 class TestApplyConfig:
@@ -163,3 +174,39 @@ class TestRunRealIngestion:
 
         assert [msg for msg, *_r in first_rows] == [b"first batch line"]
         assert [msg for msg, *_r in second_rows] == [b"second batch line"]
+
+
+class TestRsyslogFileFormatParser:
+    """Runs the real 'rsyslog_file_format' preset end to end: RFC3339 timestamp, hostname,
+    'tag[pid]: ' TAG field, matching rsyslog's default RSYSLOG_FileFormat template."""
+
+    def test_parses_hostname_tag_pid_and_message(self, id_registry):
+        parser = make_rsyslog_parser(id_registry, delay=20)
+        parser.enabled = True
+        device = parser.local.device_id
+
+        subscriber = QueueParser()
+        parser.subscribe(subscriber)
+
+        batch = parser.shared.array_pool.create(PooledLogBatch, 8, 256)
+        batch.insert(1000, 1000, b"2026-09-20T10:23:01.456789+00:00 myhost __priming__[1]: x\n")
+        batch.insert(
+            1000,
+            1000,
+            b"2026-09-20T10:23:01.456789+00:00 myhost sshd[1234]: connection closed\n",
+        )
+        batch.insert(1000, 1000, b"2026-09-20T10:23:02.000000+00:00 myhost kernel: something happened\n")
+        parser.put(batch)
+
+        parser.start()
+        try:
+            rows = drain(subscriber.queue, count=2)
+        finally:
+            parser.stop()
+
+        assert [msg for msg, _level, _module in rows] == [b"connection closed", b"something happened"]
+
+        _msg0, _level0, module0 = rows[0]
+        _msg1, _level1, module1 = rows[1]
+        assert module0 == device.get_module("sshd").id
+        assert module1 == device.get_module("kernel").id
