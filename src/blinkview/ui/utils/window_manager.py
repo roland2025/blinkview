@@ -66,12 +66,15 @@ def restore_window_geometry_safe(window, geo_dict: dict):
     client_size = geo_dict.get("client_size")
 
     if frame_pos and client_size:
-        # We calculate the Title Bar height once.
+        # We calculate the Title Bar height and left border width once.
         # (frameGeometry.top - geometry.top) gives us the OS border offset.
         title_bar_height = window.frameGeometry().top() - window.geometry().top()
+        left_border_width = window.frameGeometry().left() - window.geometry().left()
 
         # Set the EXACT rectangle for the internal part of the window
-        window.setGeometry(frame_pos[0], frame_pos[1] - title_bar_height, client_size[0], client_size[1])
+        window.setGeometry(
+            frame_pos[0] - left_border_width, frame_pos[1] - title_bar_height, client_size[0], client_size[1]
+        )
 
     # Off-screen check (unchanged)
     frame = window.frameGeometry()

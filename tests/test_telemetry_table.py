@@ -378,17 +378,6 @@ class TestDoubleClick:
         assert qapp.clipboard().text() == "dbl-value"
 
 
-class TestHoveredRow:
-    def test_set_hovered_row_is_a_noop_for_the_same_value(self, table):
-        table.hovered_row = 3
-        table._set_hovered_row(3)
-        assert table.hovered_row == 3
-
-    def test_set_hovered_row_updates_to_a_new_value(self, table):
-        table._set_hovered_row(2)
-        assert table.hovered_row == 2
-
-
 class TestShowContextMenu:
     def test_builds_a_menu_without_blocking_and_without_raising(self, table, registry, monkeypatch):
         dev = registry.id_registry.get_device("ctxdev")

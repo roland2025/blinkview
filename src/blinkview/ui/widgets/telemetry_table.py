@@ -705,7 +705,6 @@ class TelemetryTable(QWidget):
         self._set_defaults()
 
         self.drag_start_pos = None
-        self.hovered_row = -1
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -971,8 +970,6 @@ class TelemetryTable(QWidget):
         else:
             self.view.unsetCursor()
 
-        self._set_hovered_row(index.row())
-
     def eventFilter(self, source, event):
         if source is not self.view.viewport():
             return super().eventFilter(source, event)
@@ -997,9 +994,6 @@ class TelemetryTable(QWidget):
                     self._perform_drag(index)
                     self.drag_start_pos = None
                     return True
-
-            case QEvent.Leave:
-                self._set_hovered_row(-1)
 
         return super().eventFilter(source, event)
 
@@ -1041,8 +1035,6 @@ class TelemetryTable(QWidget):
     def _trigger_module_action(self, action_id, module):
         if not module:
             return
-
-        self._set_hovered_row(-1)
 
         match action_id:
             case "view_logs" | "view_logs_children" | "view_logs_table" | "view_logs_children_table":
@@ -1092,8 +1084,6 @@ class TelemetryTable(QWidget):
         module = self._get_module_at_index(index)
         if not module:
             return
-
-        self._set_hovered_row(-1)
 
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
@@ -1188,20 +1178,6 @@ class TelemetryTable(QWidget):
         drag.setHotSpot(pixmap.rect().center())
 
         drag.exec_(Qt.CopyAction)
-
-    def _set_hovered_row(self, row: int):
-        if self.hovered_row == row:
-            return
-
-        old_row = self.hovered_row
-        self.hovered_row = row
-
-        for r in (old_row, self.hovered_row):
-            if r != -1:
-                for col in (TelemetryCol.VALUE, TelemetryCol.ACTIONS):
-                    idx = self.model.index(r, col)
-                    if idx.isValid():
-                        self.view.update(idx)
 
     def _toggle_hide_empty(self, checked: bool):
         self.hide_empty = checked
