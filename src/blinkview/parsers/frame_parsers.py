@@ -41,6 +41,10 @@ from blinkview.core.types.parsing import (
     UnusedSyncState,
     pipeline_bundle_type,
 )
+from blinkview.ops.modules import nb_parse_module_tags_statemachine_stage
+from blinkview.ops.stage import nb_stage
+from blinkview.ops.timestamp_idf import nb_parse_int_timestamp_idf_v1_stage
+from blinkview.ops.timestamps import nb_parse_int_timestamp_stage
 from blinkview.utils.log_level import LogLevel
 from blinkview.utils.utc_offset import get_local_utc_offset_seconds
 
@@ -64,6 +68,14 @@ class FrameSectionParser(FrameParser):
     shared: SystemContext
 
     local: SimpleNamespace
+
+    def kernel(self, octx, fctx, n):
+        """Runs this step over the `n` frames of the current chunk (frame k owns output row `octx.size + k`).
+
+        Default: the generic dispatching stage driven by bundle(). Steps override this with a dedicated stage
+        kernel that takes only what they need."""
+        p_id, state, config = self.bundle()
+        nb_stage(p_id, octx.buffer, fctx.fcur, fctx.fend, fctx.fstatus, int(octx.size[0]), n, octx, state, config)
 
 
 @register_factory_category(FactoryCategory.FRAME_SECTION_PARSER)
@@ -250,6 +262,14 @@ class ModuleNameParserBase(FrameSectionParser):
         self._tracker_lengths_mv = memoryview(modules_state.lengths)
         self._tracker_name_bytes_mv = memoryview(modules_state.name_bytes)
 
+        # Built lazily: self.local is only bound after __init__ (see @bindable)
+        self.modules_table_bundle = None
+
+    def make_modules_table_bundle(self):
+        """Creates a new StringTableParams bundle for the current module registry."""
+        device_identity = self.local.device_id
+        self.modules_table_bundle = device_identity.modules_table.bundle()
+
     def post_process(self, batch: PooledLogBatch) -> bool:
         state = self.tracker_state.modules
         unresolved_count = state.count[0]
@@ -257,9 +277,10 @@ class ModuleNameParserBase(FrameSectionParser):
         if unresolved_count == 0:
             return False
 
-        # 1. Snapshot registry size before lookups
-        registry = self.shared.id_registry.modules_table
-        initial_count = registry.count  # Assuming .count represents registered items
+        # 1. Snapshot the size of the table the kernel actually reads (the device's own table, which
+        # get_module fills synchronously) before lookups
+        device_table = self.local.device_id.modules_table
+        initial_count = device_table.count
 
         active_modules = batch.bundle.modules[: batch.size]
         get_module = self.local.device_id.get_module
@@ -295,7 +316,11 @@ class ModuleNameParserBase(FrameSectionParser):
 
         # 4. Compare registry counts
         # If the count is higher, we discovered new modules and need to re-bundle
-        return registry.count > initial_count
+        if device_table.count > initial_count:
+            self.make_modules_table_bundle()
+            return True
+
+        return False
 
 
 # @FrameSectionParserFactory.register("module_name") # TODO: missing bundle function
@@ -419,13 +444,24 @@ class ModuleNameNormalizer(ModuleNameParserBase):
     def bundle(self):
         # 1. Build the IMMUTABLE config snapshot
         # Note: 'tracker' is removed from here.
+
+        self.make_modules_table_bundle()
+
         config = UnifiedParserConfig(
-            string_table=self.local.device_id.modules_table.bundle(),
+            string_table=self.modules_table_bundle,
             module_config=self.module_config,
         )
 
         # 2. Return the universal 3-tuple: (Function, Mutable State, Immutable Config)
         return ParserID.MOD_DYNAMIC_SM, self.tracker_state, config
+
+    def kernel(self, octx, fctx, n):
+        if self.modules_table_bundle is None:
+            self.make_modules_table_bundle()
+
+        nb_parse_module_tags_statemachine_stage(
+            octx, fctx, n, self.tracker_state.modules, self.module_config, self.modules_table_bundle
+        )
 
 
 @configuration_property(
@@ -511,10 +547,16 @@ class IntegerTimestampParser(TimestampParser):
 
         self._bundle = ParserID.TS_INTEGER, self.state, config
 
+        self._precision = config.timestamp_precision
+        self._unix = config.timestamp_unix
+
         return changed
 
     def bundle(self):
         return self._bundle
+
+    def kernel(self, octx, fctx, n):
+        nb_parse_int_timestamp_stage(octx, fctx, n, self.state.timestamp.sync, self._precision, self._unix)
 
 
 @FrameSectionParserFactory.register("timestamp_idf_v1")
@@ -533,7 +575,13 @@ class Esp32V1IntegerTimestampParser(IntegerTimestampParser):
 
         self._bundle = ParserID.TS_IDF_V1, self.state, config
 
+        self._precision = config.timestamp_precision
+        self._unix = config.timestamp_unix
+
         return changed
+
+    def kernel(self, octx, fctx, n):
+        nb_parse_int_timestamp_idf_v1_stage(octx, fctx, n, self.state.timestamp.sync, self._precision, self._unix)
 
 
 #

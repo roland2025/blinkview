@@ -7,6 +7,7 @@
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.parsing import STATE_COMPLETE
 from blinkview.ops.buffers import nb_copy_buf
+from blinkview.ops.decode_loop import nb_decode_loop
 
 
 @app_njit()
@@ -38,7 +39,7 @@ def nb_process_byte_filters(val, ansi_state, filter_ansi, filter_printable):
 
 
 @app_njit(inline="always")
-def nb_decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg, f_state):
+def nb_decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
     # For standard newline frames, we always consume the entire chunk up to the \n
     bytes_consumed = end - start
 
@@ -253,3 +254,20 @@ def nb_shift_frame_buffer(f_buf, read_ptr, write_ptr):
     elif read_ptr > 0:
         return 0
     return write_ptr
+
+
+@app_njit(inline="always")
+def nb_decode_passthrough_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
+    """Consumes the whole frame and emits nothing (decoders without a frame function: COBS/SLIP are not
+    implemented yet, pre-framed input never reaches the frame function)."""
+    return STATE_COMPLETE, out_cursor, end - start
+
+
+@app_njit()
+def nb_decode_frames_newline(f_cfg, f_state, in_b0, p_cfg, o_cfg, out_b0):
+    return nb_decode_loop(nb_decode_newline_frame, f_cfg, f_state, in_b0, p_cfg, o_cfg, out_b0)
+
+
+@app_njit()
+def nb_decode_frames_passthrough(f_cfg, f_state, in_b0, p_cfg, o_cfg, out_b0):
+    return nb_decode_loop(nb_decode_passthrough_frame, f_cfg, f_state, in_b0, p_cfg, o_cfg, out_b0)

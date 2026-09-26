@@ -19,12 +19,20 @@ from blinkview.ops.constants import (
     CHAR_UNDERSCORE,
 )
 from blinkview.ops.discovery import nb_resolve_module_id, nb_resolve_module_id_hashed
+from blinkview.ops.stage_loop import FS_OK, FS_STEP_FAILED
 from blinkview.ops.strings import (
     nb_is_alpha,
     nb_is_digit,
     nb_is_whitespace,
     nb_skip_whitespace,
     nb_to_lower,
+)
+from blinkview.ops.views import (
+    nb_dynamic_width_views,
+    nb_log_bundle_views,
+    nb_string_table_views,
+    nb_tracker_views,
+    nb_view,
 )
 
 
@@ -192,11 +200,11 @@ def _put(nc, nb, w, hw, last, h):
 
 
 @app_njit(inline="always")
-def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx, state, unified_config):
-    tracker = state.modules
+def nb_parse_module_tags_statemachine_optimized(
+    buffer, cursor, end_cursor, out_b, out_idx, tracker, config, string_table
+):
     write_start = np.int64(tracker.bytes_cursor[0])
     nb = tracker.name_bytes
-    config = unified_config.module_config
 
     tag_count = 0
     in_bracket_mode = False
@@ -325,11 +333,47 @@ def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx
     if final_len <= 0:
         return -1
 
-    mod_id = nb_resolve_module_id_hashed(nb, write_start, final_len, h, unified_config.string_table, tracker)
+    mod_id = nb_resolve_module_id_hashed(nb, write_start, final_len, h, string_table, tracker)
     if mod_id == MODULE_ID_FULL:
         return -1
     out_b.modules[out_idx] = mod_id
     return nb_skip_whitespace(buffer, curr, end_cursor)
+
+
+@app_njit(inline="always")
+def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx, state, unified_config):
+    return nb_parse_module_tags_statemachine_optimized(
+        buffer,
+        cursor,
+        end_cursor,
+        out_b,
+        out_idx,
+        state.modules,
+        unified_config.module_config,
+        unified_config.string_table,
+    )
+
+
+@app_njit()
+def nb_parse_module_tags_statemachine_stage(out_b0, f_state, n, tracker0, module_config0, table0):
+    out_b = nb_log_bundle_views(out_b0)
+    buffer = out_b.buffer
+    cur = nb_view(f_state.fcur)
+    end = nb_view(f_state.fend)
+    status = nb_view(f_state.fstatus)
+    tracker = nb_tracker_views(tracker0)
+    config = nb_dynamic_width_views(module_config0)
+    table = nb_string_table_views(table0)
+    first = out_b.size[0]
+    for k in range(n):
+        if status[k] == FS_OK:
+            r = nb_parse_module_tags_statemachine_optimized(
+                buffer, cur[k], end[k], out_b, first + k, tracker, config, table
+            )
+            if r == -1:
+                status[k] = FS_STEP_FAILED
+            else:
+                cur[k] = r
 
 
 @app_njit(inline="always")

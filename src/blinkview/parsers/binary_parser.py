@@ -16,7 +16,7 @@ from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import SyncState, create_default_sync
 from blinkview.core.warmup_registry import register_warmup
-from blinkview.ops.dispatch import nb_process_batch_kernel
+from blinkview.ops.dispatch import nb_finish_frames, nb_process_batch_kernel
 from blinkview.parsers.frame_decoders import FrameDecoder
 from blinkview.parsers.frame_parsers import GenericFrameParser
 from blinkview.parsers.parser import BaseParser, ParserFactory
@@ -186,6 +186,20 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 batch_out = None
                 batch_out_time = 0
 
+            # Stage-by-stage path (decode -> one kernel per pipeline section -> finish). Set to True to run the
+            # single monolithic kernel instead.
+            monolith = False
+            pipeline = parser.pipeline
+            p_config = parser_bundle.config
+            fstart, fcur, fend, ftotal, fstatus = (
+                f_state.fstart,
+                f_state.fcur,
+                f_state.fend,
+                f_state.ftotal,
+                f_state.fstatus,
+            )
+            compact_buffer = o_config.compact_buffer
+
             while not stop_is_set():
                 # 1. Calculate dynamic timeout based on batch age
                 if batch_out is not None and batch_out.size > 0:
@@ -239,15 +253,26 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                         out_bundle = batch_out.bundle
 
                         start_time = time_ns()
-                        out_is_full = nb_process_batch_kernel(
-                            f_config, f_state, in_bundle, parser_bundle, o_config, out_bundle
-                        )
+                        if monolith:
+                            # we keep dont touch nb_process_batch_kernel, to easily test the performance of the new nb_stage() function in isolation
+                            out_is_full = nb_process_batch_kernel(
+                                f_config, f_state, in_bundle, parser_bundle, o_config, out_bundle
+                            )
+                        else:
+                            out_is_full, n = codec.kernel(f_state, in_bundle, p_config, o_config, out_bundle)
+                            if n:
+                                for section in pipeline:
+                                    section.kernel(out_bundle, f_state, n)
+                                nb_finish_frames(
+                                    fstart, fcur, fend, ftotal, fstatus, p_config, compact_buffer, out_bundle, n
+                                )
 
                         end_time = time_ns()
 
                         self.logger_batch.debug("%.6f", (end_time - start_time) / 1_000_000)
+
                         start_time = time_ns()
-                        if parser.post_process(batch_out):
+                        if parser.post_process(batch_out) and monolith:
                             parser_bundle = parser.bundle()
                         end_time = time_ns()
 

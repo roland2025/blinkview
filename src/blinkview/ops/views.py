@@ -68,47 +68,59 @@ def nb_sync_views(s):
 
 
 @app_njit(inline="always")
+def nb_tracker_views(m):
+    return ModuleTrackerState(
+        nb_view(m.count),
+        nb_view(m.bytes_cursor),
+        nb_view(m.starts),
+        nb_view(m.lengths),
+        nb_view(m.hashes),
+        nb_view(m.name_bytes),
+    )
+
+
+@app_njit(inline="always")
 def nb_state_views(st):
-    m = st.modules
     t = st.timestamp
     return UnifiedParserState(
-        ModuleTrackerState(
-            nb_view(m.count),
-            nb_view(m.bytes_cursor),
-            nb_view(m.starts),
-            nb_view(m.lengths),
-            nb_view(m.hashes),
-            nb_view(m.name_bytes),
-        ),
+        nb_tracker_views(st.modules),
         TimeParserState(nb_view(t.utc_offset), nb_sync_views(t.sync)),
     )
 
 
 @app_njit(inline="always")
+def nb_string_table_views(s):
+    return StringTableParams(
+        nb_view(s.buffer),
+        nb_view(s.offsets),
+        nb_view(s.lens),
+        nb_view(s.hashes),
+        nb_view(s.values),
+        s.count,
+        nb_view(s.hash_index),
+    )
+
+
+@app_njit(inline="always")
+def nb_dynamic_width_views(d):
+    return DynamicWidthConfig(
+        d.max_length,
+        d.max_depth,
+        d.enable_brackets,
+        d.enable_dot_separator,
+        nb_view(d.prefix_bytes),
+        d.prefix_match,
+        d.prefix_remove,
+    )
+
+
+@app_njit(inline="always")
 def nb_config_views(c):
-    s = c.string_table
-    d = c.module_config
     return UnifiedParserConfig(
         c.parser_id,
         c.parser_config,
-        StringTableParams(
-            nb_view(s.buffer),
-            nb_view(s.offsets),
-            nb_view(s.lens),
-            nb_view(s.hashes),
-            nb_view(s.values),
-            s.count,
-            nb_view(s.hash_index),
-        ),
-        DynamicWidthConfig(
-            d.max_length,
-            d.max_depth,
-            d.enable_brackets,
-            d.enable_dot_separator,
-            nb_view(d.prefix_bytes),
-            d.prefix_match,
-            d.prefix_remove,
-        ),
+        nb_string_table_views(c.string_table),
+        nb_dynamic_width_views(c.module_config),
         c.timestamp_precision,
         c.timestamp_unix,
         c.syslog_year,

@@ -10,7 +10,9 @@ from blinkview.core import dtypes
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.parsing import SyncState
 from blinkview.ops.constants import CHAR_DASH, CHAR_NINE, CHAR_Z, CHAR_ZERO
+from blinkview.ops.stage_loop import FS_OK, FS_STEP_FAILED
 from blinkview.ops.strings import nb_skip_whitespace
+from blinkview.ops.views import nb_log_bundle_views, nb_sync_views, nb_view
 
 
 @app_njit(inline="always")
@@ -162,14 +164,15 @@ def nb_parse_unified_log_ts_ns(buffer, start):
 
 
 @app_njit(inline="always")
-def nb_parse_int_timestamp(
+def nb_parse_int_timestamp_optimized(
     buffer,
     start_cursor,
     end_cursor,
     out_b,
     out_idx,
-    state,
-    config,  # Precision is pulled from here
+    sync,
+    precision,  # 0: seconds, 1: millis, 2: micros, 3: nanos
+    timestamp_unix,  # the received timestamp is already unix time: no sync projection
 ):
     cursor = start_cursor
 
@@ -194,7 +197,6 @@ def nb_parse_int_timestamp(
 
     # 3. Determine multiplier from config
     # 0: Seconds, 1: Millis, 2: Micros, 3: Nanos
-    precision = config.timestamp_precision
     multiplier = 1
 
     if precision == 0:  # Seconds
@@ -211,17 +213,58 @@ def nb_parse_int_timestamp(
 
     raw_ns = raw_val * multiplier
 
-    timestamp_unix = config.timestamp_unix
     if timestamp_unix:
         ts = raw_ns
     else:
         rx_ns = out_b.rx_timestamps[out_idx]
-        ts = nb_project_synced_ns(raw_ns, rx_ns, state.timestamp.sync)
+        ts = nb_project_synced_ns(raw_ns, rx_ns, sync)
     # 4. Project and Store
 
     out_b.timestamps[out_idx] = ts
 
     return nb_skip_whitespace(buffer, cursor, end_cursor)
+
+
+@app_njit(inline="always")
+def nb_parse_int_timestamp(
+    buffer,
+    start_cursor,
+    end_cursor,
+    out_b,
+    out_idx,
+    state,
+    config,  # Precision is pulled from here
+):
+    return nb_parse_int_timestamp_optimized(
+        buffer,
+        start_cursor,
+        end_cursor,
+        out_b,
+        out_idx,
+        state.timestamp.sync,
+        config.timestamp_precision,
+        config.timestamp_unix,
+    )
+
+
+@app_njit()
+def nb_parse_int_timestamp_stage(out_b0, f_state, n, sync0, precision, timestamp_unix):
+    out_b = nb_log_bundle_views(out_b0)
+    buffer = out_b.buffer
+    cur = nb_view(f_state.fcur)
+    end = nb_view(f_state.fend)
+    status = nb_view(f_state.fstatus)
+    sync = nb_sync_views(sync0)
+    first = out_b.size[0]
+    for k in range(n):
+        if status[k] == FS_OK:
+            r = nb_parse_int_timestamp_optimized(
+                buffer, cur[k], end[k], out_b, first + k, sync, precision, timestamp_unix
+            )
+            if r == -1:
+                status[k] = FS_STEP_FAILED
+            else:
+                cur[k] = r
 
 
 @app_njit(inline="always")

@@ -17,7 +17,6 @@ from blinkview.core.id_registry.tables import IndexedStringTable
 from blinkview.core.id_registry.types import RegistryParams
 from blinkview.core.logger import PrintLogger
 from blinkview.ops.id_registry import NO_PARENT, nb_get_descendants
-from blinkview.utils.level_map import LevelMap
 from blinkview.utils.log_level import LogLevel
 
 if TYPE_CHECKING:
@@ -72,6 +71,10 @@ class IDRegistry:
 
         # non-sequential list of modules
         self.module_list: List["ModuleIdentity"] = []
+
+        # Imported here, not at module level: utils.level_map -> core.types.parsing -> core.id_registry (this
+        # package's __init__ imports this module) would make importing core.types.parsing first a circular import.
+        from blinkview.utils.level_map import LevelMap
 
         self.level_map = LevelMap()
 

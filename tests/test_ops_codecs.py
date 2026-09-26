@@ -81,7 +81,7 @@ class TestDecodeNewlineFrame:
         msg = "hello\n"
         out_buf = np.zeros(32, dtype=dtypes.BYTE)
 
-        status, cursor, consumed = nb_decode_newline_frame(_text_buf(msg), 0, len(msg), out_buf, 0, _cfg(), 0)
+        status, cursor, consumed = nb_decode_newline_frame(_text_buf(msg), 0, len(msg), out_buf, 0, _cfg())
 
         assert status == STATE_COMPLETE
         assert consumed == len(msg)
@@ -92,7 +92,7 @@ class TestDecodeNewlineFrame:
         out_buf = np.zeros(32, dtype=dtypes.BYTE)
 
         status, cursor, consumed = nb_decode_newline_frame(
-            _text_buf(msg), 0, len(msg), out_buf, 0, _cfg(filter_trim_r=True), 0
+            _text_buf(msg), 0, len(msg), out_buf, 0, _cfg(filter_trim_r=True)
         )
 
         assert bytes(out_buf[:cursor]) == b"hello"
@@ -102,7 +102,7 @@ class TestDecodeNewlineFrame:
         out_buf = np.zeros(32, dtype=dtypes.BYTE)
 
         status, cursor, consumed = nb_decode_newline_frame(
-            _text_buf(msg), 0, len(msg), out_buf, 0, _cfg(filter_trim_r=False), 0
+            _text_buf(msg), 0, len(msg), out_buf, 0, _cfg(filter_trim_r=False)
         )
 
         assert bytes(out_buf[:cursor]) == b"hello\r"
@@ -112,7 +112,7 @@ class TestDecodeNewlineFrame:
         out_buf = np.zeros(32, dtype=dtypes.BYTE)
 
         status, cursor, consumed = nb_decode_newline_frame(
-            _text_buf(msg), 0, len(msg), out_buf, 0, _cfg(filter_printable=True), 0
+            _text_buf(msg), 0, len(msg), out_buf, 0, _cfg(filter_printable=True)
         )
 
         assert bytes(out_buf[:cursor]) == b"hello"
@@ -121,7 +121,7 @@ class TestDecodeNewlineFrame:
         msg = "hello\n"
         out_buf = np.zeros(3, dtype=dtypes.BYTE)
 
-        status, cursor, consumed = nb_decode_newline_frame(_text_buf(msg), 0, len(msg), out_buf, 0, _cfg(), 0)
+        status, cursor, consumed = nb_decode_newline_frame(_text_buf(msg), 0, len(msg), out_buf, 0, _cfg())
 
         assert cursor == 3
         assert bytes(out_buf[:cursor]) == b"hel"

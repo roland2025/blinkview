@@ -25,7 +25,7 @@ def nb_dispatch_frame_decoder(target_buf, target_start, target_end, out_buf, out
 
     # Use the extracted local constants instead of CodecID.NEWLINE
     if d_id == _ID_NEWLINE:
-        return nb_decode_newline_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg, f_state)
+        return nb_decode_newline_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
 
     # elif d_id == _ID_COBS:
     #     return nb_decode_cobs_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
@@ -34,7 +34,7 @@ def nb_dispatch_frame_decoder(target_buf, target_start, target_end, out_buf, out
     #     return nb_decode_slip_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
 
     elif d_id == _ID_ADB_LONG:
-        return nb_decode_adb_long_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg, f_state)
+        return nb_decode_adb_long_frame(target_buf, target_start, target_end, out_buf, out_cursor, f_cfg)
 
     #
     # elif d_id == _ID_PLUGIN:

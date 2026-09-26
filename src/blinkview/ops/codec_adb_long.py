@@ -25,10 +25,11 @@ from blinkview.ops.constants import (
     CHAR_UPPER_A,
     CHAR_ZERO,
 )
+from blinkview.ops.decode_loop import nb_decode_loop
 from blinkview.ops.discovery import nb_resolve_module_id
 from blinkview.ops.modules import nb_normalize_name_inplace
 from blinkview.ops.strings import nb_skip_whitespace
-from blinkview.ops.timestamps import nb_project_synced_ns, nb_parse_iso8601_to_ns
+from blinkview.ops.timestamps import nb_parse_iso8601_to_ns, nb_project_synced_ns
 
 
 @app_njit(inline="always")
@@ -85,7 +86,7 @@ def nb_is_adb_long_header_monotonic(buffer, cursor, limit):
 
 
 @app_njit(inline="always")
-def nb_decode_adb_long_frame(f_buf, start, end, out_buf, out_cursor, f_cfg, f_state):
+def nb_decode_adb_long_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
 
     # print(f"Raw Frame Slice: {f_buf[start:end].tobytes()}")
     # --- 1. ORACLE BOUNDARY CHECK ---
@@ -496,3 +497,8 @@ def nb_parse_adb_timestamp_monotonic(
 
     # Move cursor past the timestamp and skip whitespace to reach the PID
     return nb_skip_whitespace(buffer, ts_end, end_cursor)
+
+
+@app_njit()
+def nb_decode_frames_adb_long(f_cfg, f_state, in_b0, p_cfg, o_cfg, out_b0):
+    return nb_decode_loop(nb_decode_adb_long_frame, f_cfg, f_state, in_b0, p_cfg, o_cfg, out_b0)

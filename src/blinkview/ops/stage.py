@@ -12,15 +12,8 @@ inlined into the loop here. Keep the branch list in sync with ``nb_process_bundl
 
 from blinkview.core.numba_config import app_njit
 from blinkview.ops import pipeline as P
+from blinkview.ops.stage_loop import FS_OK, FS_STEP_FAILED
 from blinkview.ops.views import nb_config_views, nb_log_bundle_views, nb_state_views, nb_view
-
-# Per-frame status values shared with ops/dispatch.py
-FS_OK = 0
-FS_FRAME_ERR = 1
-FS_PARSER_ERR = 2
-FS_STEP_FAILED = 3  # a pipeline step returned -1 (turned into FS_PARSER_ERR / FS_DROP in the emit phase)
-FS_DROP = 4
-FS_DECODER_ERR = 5  # row already written by nb_report_error
 
 
 @app_njit()

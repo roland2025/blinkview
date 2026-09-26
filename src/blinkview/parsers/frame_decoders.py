@@ -106,11 +106,14 @@ class FrameDecoder(FrameDecoderBase):
     frame_errors_hidden: bool
 
     def __init__(self):
-        from blinkview.ops.codecs import nb_parser_noop
+        from blinkview.ops.codecs import nb_decode_frames_passthrough, nb_parser_noop
 
         self.decode = nb_parser_noop
         self.codec_id = CodecID.NONE
         self._bundle = None
+        # The decoder kernel: (frame config, f_state, input bundle, parser config, output config, output
+        # bundle) -> (out_full, nframes). Subclasses with a real frame function replace it.
+        self._kernel = nb_decode_frames_passthrough
 
     def apply_config(self, config: dict):
 
@@ -132,6 +135,11 @@ class FrameDecoder(FrameDecoderBase):
     def bundle(self):
         return self._bundle
 
+    def kernel(self, f_state, in_b, p_config, o_config, out_b):
+        """Splits the input batch into frames, decodes them and reserves one output row per frame.
+        Returns (out_full, nframes); the parser sections then run over the nframes rows."""
+        return self._kernel(self._bundle, f_state, in_b, p_config, o_config, out_b)
+
 
 @FrameDecoderFactory.register("none")
 class PreFramedDecoder(FrameDecoder):
@@ -149,8 +157,10 @@ class LineDecoder(FrameDecoder):
 
     def __init__(self):
         super().__init__()
+        from blinkview.ops.codecs import nb_decode_frames_newline
 
         self.codec_id = CodecID.NEWLINE
+        self._kernel = nb_decode_frames_newline
 
 
 @FrameDecoderFactory.register("cobs_decoder")
