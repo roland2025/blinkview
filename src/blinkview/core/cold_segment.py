@@ -214,7 +214,13 @@ class _MmapFileRef:
             self._refcount -= 1
             if self._refcount > 0:
                 return
-        self._mmap.close()
+        try:
+            self._mmap.close()
+        except BufferError:
+            # A numpy view of the mapping outlived its handle (e.g. a query kept a slice). The
+            # mmap closes itself once the last view is GC'd; the file-deletion retry covers the wait.
+            pass
+        self._mmap = None
         self._file.close()
 
     def view(self, dtype, offset: int, length_bytes: int) -> np.ndarray:
