@@ -8,6 +8,7 @@ from typing import Optional
 
 from blinkview.core import dtypes
 from blinkview.core.configurable import override_property
+from blinkview.core.frame_warmup_registry import frame_decoder_warmup, frame_section_warmup
 from blinkview.core.id_registry.tables import IndexedStringTable
 from blinkview.core.types.modules import DynamicWidthConfig
 from blinkview.core.types.parsing import (
@@ -17,7 +18,14 @@ from blinkview.core.types.parsing import (
     ParserID,
     UnifiedParserConfig,
 )
-from blinkview.ops.codec_adb_long import nb_decode_adb_long_frame, nb_decode_frames_adb_long
+from blinkview.ops.codec_adb_long import (
+    nb_decode_adb_long_frame,
+    nb_decode_frames_adb_long,
+    nb_parse_adb_level_stage,
+    nb_parse_adb_pid_tid_stage,
+    nb_parse_adb_tag_stage,
+    nb_parse_adb_timestamp_monotonic_stage,
+)
 from blinkview.ops.constants import CHAR_LF
 from blinkview.parsers.frame_decoders import FrameDecoder, FrameDecoderFactory
 from blinkview.parsers.frame_parsers import (
@@ -30,6 +38,7 @@ from blinkview.utils.log_level import LogLevel
 
 
 @FrameDecoderFactory.register("decode_adb_long_frame")
+@frame_decoder_warmup("decode_adb_long_frame")
 @override_property("frame_delimiter", default=CHAR_LF)
 @override_property("frame_length_maximum", default=32 * 1024)
 class AdbDecoder(FrameDecoder):
@@ -43,6 +52,7 @@ class AdbDecoder(FrameDecoder):
 
 
 @FrameSectionParserFactory.register("module_name_adb_long_frame")
+@frame_section_warmup("module_name_adb_long_frame")
 class AdbModuleName(ModuleNameParserBase):
     """This parser extracts module names from variable-width fields by scanning for common delimiters (spaces, tabs, brackets) and normalizing them. It is designed for log formats where module names may be of varying lengths and may include hierarchical components separated by dots or enclosed in brackets."""
 
@@ -68,8 +78,12 @@ class AdbModuleName(ModuleNameParserBase):
         # 2. Return the universal 3-tuple: (Function, Mutable State, Immutable Config)
         return ParserID.MOD_ADB_LONG, self.tracker_state, config
 
+    def kernel(self, octx, fctx, n):
+        nb_parse_adb_tag_stage(octx, fctx, n, self.tracker_state.modules, self.table_bundle())
+
 
 @FrameSectionParserFactory.register("timestamp_adb_long_frame")
+@frame_section_warmup("timestamp_adb_long_frame")
 class AdbLongTimestamp(TimestampParser):
     def __init__(self):
         super().__init__()
@@ -86,8 +100,12 @@ class AdbLongTimestamp(TimestampParser):
     def bundle(self):
         return self._bundle
 
+    def kernel(self, octx, fctx, n):
+        nb_parse_adb_timestamp_monotonic_stage(octx, fctx, n, self.state.timestamp.sync)
+
 
 @FrameSectionParserFactory.register("process_pid_tid_adb_long_frame")
+@frame_section_warmup("process_pid_tid_adb_long_frame")
 class AdbPidTid(FrameSectionParser):
     def __init__(self):
         super().__init__()
@@ -97,8 +115,12 @@ class AdbPidTid(FrameSectionParser):
     def bundle(self):
         return self._bundle
 
+    def kernel(self, octx, fctx, n):
+        nb_parse_adb_pid_tid_stage(octx, fctx, n)
+
 
 @FrameSectionParserFactory.register("log_level_adb_long_frame")
+@frame_section_warmup("log_level_adb_long_frame")
 class LevelMap(FrameSectionParser):
     def __init__(self):
         super().__init__()
@@ -124,15 +146,19 @@ class LevelMap(FrameSectionParser):
             # Register string at index i
             self._table.register_name(i, text, level_val)
 
+        self._table_bundle = self._table.bundle()
         self._bundle = (
             ParserID.LEVEL_MAP_ADB_LONG,
             EmptyUnifiedParserState,
-            UnifiedParserConfig(string_table=self._table.bundle()),
+            UnifiedParserConfig(string_table=self._table_bundle),
         )
 
     def bundle(self):
         """Returns the StringTableParams for backend processing."""
         return self._bundle
+
+    def kernel(self, octx, fctx, n):
+        nb_parse_adb_level_stage(octx, fctx, n, self._table_bundle)
 
     def release(self):
         """Explicitly release pool resources."""

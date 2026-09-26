@@ -10,6 +10,7 @@ sys.argv directly rather than accepting an argv parameter, and its subcommand ha
 (run_gui/run_cli/run_daemon) are plain module-level names looked up at call time - so these tests
 monkeypatch sys.argv and those module attributes rather than passing arguments in directly."""
 
+import io
 import sys
 
 import pytest
@@ -105,3 +106,22 @@ class TestDispatchedCommandFailure:
             main_module.main()
 
         assert exc_info.value.code == 1
+
+
+class TestFaultHandler:
+    def test_enables_faulthandler_for_all_threads(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(main_module.faulthandler, "enable", lambda **kwargs: calls.append(kwargs))
+
+        main_module.enable_fault_handler()
+
+        assert calls == [{"all_threads": True}]
+
+    @pytest.mark.parametrize("error", [RuntimeError("sys.stderr is None"), io.UnsupportedOperation("fileno")])
+    def test_never_stops_startup_when_stderr_has_no_file_descriptor(self, monkeypatch, error):
+        def enable(**kwargs):
+            raise error
+
+        monkeypatch.setattr(main_module.faulthandler, "enable", enable)
+
+        main_module.enable_fault_handler()  # must not raise

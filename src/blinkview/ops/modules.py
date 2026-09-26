@@ -19,7 +19,7 @@ from blinkview.ops.constants import (
     CHAR_UNDERSCORE,
 )
 from blinkview.ops.discovery import nb_resolve_module_id, nb_resolve_module_id_hashed
-from blinkview.ops.stage_loop import FS_OK, FS_STEP_FAILED
+from blinkview.ops.stage_loop import FS_OK, FS_STEP_FAILED, nb_stage_loop_a3
 from blinkview.ops.strings import (
     nb_is_alpha,
     nb_is_digit,
@@ -88,17 +88,10 @@ def nb_normalize_name_inplace(buffer, start_idx, length):
 
 
 @app_njit(inline="always")
-def nb_parse_fixed_width_name(
-    buffer,
-    start_cursor,
-    end_cursor,  # Inputs
-    out_b,
-    out_idx,  # Outputs
-    state,  # Mutable State
-    config,  # Read-only Config
+def nb_parse_fixed_width_name_optimized(
+    buffer, start_cursor, end_cursor, out_b, out_idx, tracker, max_length, string_table
 ):
-    tracker = state.modules
-    width = config.module_config.max_length
+    width = max_length
 
     actual_width = width
     if start_cursor + width > end_cursor:
@@ -145,9 +138,7 @@ def nb_parse_fixed_width_name(
         if squashed_len > 0:
             tracker.name_bytes[current_byte_write + squashed_len] = 0
             # Config provides the map, Tracker provides the state
-            mod_id = nb_resolve_module_id(
-                tracker.name_bytes, current_byte_write, squashed_len, config.string_table, tracker
-            )
+            mod_id = nb_resolve_module_id(tracker.name_bytes, current_byte_write, squashed_len, string_table, tracker)
             if mod_id == MODULE_ID_FULL:
                 return -1
             out_b.modules[out_idx] = mod_id
@@ -177,6 +168,42 @@ for _c in range(256):
 
 FNV_PRIME = np.uint64(1099511628211)
 FNV_BASIS = np.uint64(14695981039346656037)
+
+
+@app_njit(inline="always")
+def nb_parse_fixed_width_name(
+    buffer,
+    start_cursor,
+    end_cursor,  # Inputs
+    out_b,
+    out_idx,  # Outputs
+    state,  # Mutable State
+    config,  # Read-only Config
+):
+    """Unified-struct entry point; the logic lives in nb_parse_fixed_width_name_optimized."""
+    return nb_parse_fixed_width_name_optimized(
+        buffer,
+        start_cursor,
+        end_cursor,
+        out_b,
+        out_idx,
+        state.modules,
+        config.module_config.max_length,
+        config.string_table,
+    )
+
+
+@app_njit()
+def nb_parse_fixed_width_name_stage(out_b0, f_state, n, tracker0, max_length, table0):
+    nb_stage_loop_a3(
+        nb_parse_fixed_width_name_optimized,
+        out_b0,
+        f_state,
+        n,
+        nb_tracker_views(tracker0),
+        max_length,
+        nb_string_table_views(table0),
+    )
 
 
 @app_njit(inline="always")
@@ -377,20 +404,10 @@ def nb_parse_module_tags_statemachine_stage(out_b0, f_state, n, tracker0, module
 
 
 @app_njit(inline="always")
-def nb_parse_rsyslog_tag(
-    buffer,
-    cursor,
-    end_cursor,  # Inputs
-    out_b,
-    out_idx,  # Outputs
-    state,  # Mutable State
-    unified_config,  # Read-only Config
-):
+def nb_parse_rsyslog_tag_optimized(buffer, cursor, end_cursor, out_b, out_idx, tracker, max_length, string_table):
     """Parses the classic syslog/rsyslog TAG field: 'tag[pid]: ' or 'tag: ' - a bare
     identifier, an optional numeric PID in brackets, and a terminating colon. The PID
     itself is not captured, only used to validate/skip past the bracketed section."""
-    tracker = state.modules
-    config = unified_config.module_config
 
     tag_start = cursor
     curr = cursor
@@ -422,7 +439,6 @@ def nb_parse_rsyslog_tag(
     # buffer[curr] is now the terminating colon
     curr += 1
 
-    max_length = config.max_length
     if max_length > 0 and tag_len > max_length:
         tag_len = max_length
 
@@ -436,10 +452,46 @@ def nb_parse_rsyslog_tag(
     if squashed_len <= 0:
         return -1
 
-    mod_id = nb_resolve_module_id(tracker.name_bytes, write_start, squashed_len, unified_config.string_table, tracker)
+    mod_id = nb_resolve_module_id(tracker.name_bytes, write_start, squashed_len, string_table, tracker)
     if mod_id == MODULE_ID_FULL:
         return -1
 
     out_b.modules[out_idx] = mod_id
 
     return nb_skip_whitespace(buffer, curr, end_cursor)
+
+
+@app_njit(inline="always")
+def nb_parse_rsyslog_tag(
+    buffer,
+    cursor,
+    end_cursor,  # Inputs
+    out_b,
+    out_idx,  # Outputs
+    state,  # Mutable State
+    unified_config,  # Read-only Config
+):
+    """Unified-struct entry point; the logic lives in nb_parse_rsyslog_tag_optimized."""
+    return nb_parse_rsyslog_tag_optimized(
+        buffer,
+        cursor,
+        end_cursor,
+        out_b,
+        out_idx,
+        state.modules,
+        unified_config.module_config.max_length,
+        unified_config.string_table,
+    )
+
+
+@app_njit()
+def nb_parse_rsyslog_tag_stage(out_b0, f_state, n, tracker0, max_length, table0):
+    nb_stage_loop_a3(
+        nb_parse_rsyslog_tag_optimized,
+        out_b0,
+        f_state,
+        n,
+        nb_tracker_views(tracker0),
+        max_length,
+        nb_string_table_views(table0),
+    )

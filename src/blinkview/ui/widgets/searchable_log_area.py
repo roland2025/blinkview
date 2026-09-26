@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from qtpy.QtCore import QEvent, QPoint, Qt
+from qtpy.QtCore import QEvent, QPoint, Qt, QTimer
 from qtpy.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor, QTextDocument
 from qtpy.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QTextEdit, QToolButton, QVBoxLayout, QWidget
 
@@ -32,6 +32,13 @@ class SearchableLogArea(QWidget):
         self.editor.setFont(QFont("Consolas", 10))
         self.editor.setMaximumBlockCount(maxlen)
         self.editor.document().setDocumentMargin(0)
+
+        # Pins the view to the newest line one event-loop turn after an append (see append_log). Restarting
+        # a single-shot timer coalesces several appends within one turn into one scroll.
+        self._pin_timer = QTimer(self)
+        self._pin_timer.setSingleShot(True)
+        self._pin_timer.setInterval(0)
+        self._pin_timer.timeout.connect(self.scroll_to_end)
 
         # The Find Bar (Hidden by default)
         self.find_bar = QWidget()
@@ -167,7 +174,12 @@ class SearchableLogArea(QWidget):
             self.editor.blockSignals(False)
 
         if was_at_bottom:
-            scrollbar.setValue(scrollbar.maximum())
+            # Not scrollbar.setValue(scrollbar.maximum()) here: with setMaximumBlockCount the insert above may
+            # have trimmed blocks from the top, the scrollbar's range was updated while its signals were
+            # blocked, and setting a value from that stale range makes QPlainTextEdit look up a block that no
+            # longer exists (null QTextLayout in blockBoundingRect - a native crash, not an exception). Scroll
+            # once the event loop has let the editor and its scrollbar settle.
+            self._pin_timer.start()
 
     def clear(self):
         self.editor.clear()

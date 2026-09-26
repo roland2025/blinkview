@@ -11,6 +11,7 @@ from blinkview.core.configurable import (
     configuration_property,
     override_property,
 )
+from blinkview.core.frame_warmup_registry import frame_section_warmup
 from blinkview.core.id_registry.tables import IndexedStringTable
 from blinkview.core.types.parsing import EmptyUnifiedParserState, ParserID, UnifiedParserConfig
 from blinkview.ops.levels import nb_parse_log_level_stage
@@ -19,6 +20,7 @@ from blinkview.utils.log_level import LogLevel
 
 
 @FrameSectionParserFactory.register("log_level_default")
+@frame_section_warmup("log_level_default")
 @configuration_property(
     "mapping",
     type="object",
@@ -106,6 +108,7 @@ class LevelMap(FrameSectionParser):
 
 
 @FrameSectionParserFactory.register("log_level_nrf")
+@frame_section_warmup("log_level_nrf")
 @override_property(
     "mapping",
     title="NRF Level Mappings",
@@ -126,6 +129,7 @@ class NrfLevelMap(LevelMap):
 
 
 @FrameSectionParserFactory.register("log_level_zephyr")
+@frame_section_warmup("log_level_zephyr")
 @override_property(
     "mapping",
     title="Zephyr Level Mappings",
@@ -142,6 +146,7 @@ class ZephyrLevelMap(LevelMap):
 
 
 @FrameSectionParserFactory.register("log_level_zephyr_minimal")
+@frame_section_warmup("log_level_zephyr_minimal")
 @override_property(
     "mapping",
     title="Zephyr Level Mappings",
@@ -158,6 +163,7 @@ class ZephyrMinimalLevelMap(LevelMap):
 
 
 @FrameSectionParserFactory.register("log_level_idf")
+@frame_section_warmup("log_level_idf")
 @override_property(
     "mapping",
     title="ESP-IDF Level Mappings",
@@ -175,12 +181,14 @@ class EspIdfLevelMap(LevelMap):
 
 
 @FrameSectionParserFactory.register("log_level_custom")
+@frame_section_warmup("log_level_custom")
 @override_property("mapping", title="Custom level Mappings", description="Custom mapping for logs.", default={})
 class CustomLevelMap(LevelMap):
     pass
 
 
 @FrameSectionParserFactory.register("log_level_python")
+@frame_section_warmup("log_level_python")
 @override_property(
     "mapping",
     title="Python Logging levels",

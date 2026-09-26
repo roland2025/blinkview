@@ -12,20 +12,35 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property, on_config_change, override_property
 from blinkview.core.constants import FactoryCategory
+from blinkview.core.frame_warmup_registry import FRAME_DECODER_WARMUPS, FRAME_SECTION_WARMUPS
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import SyncState, create_default_sync
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.dispatch import nb_finish_frames, nb_process_batch_kernel
+from blinkview.parsers import adb_decoder  # noqa: F401  (registers the ADB decoder/sections and their warmups)
 from blinkview.parsers.frame_decoders import FrameDecoder
 from blinkview.parsers.frame_parsers import GenericFrameParser
 from blinkview.parsers.parser import BaseParser, ParserFactory
 from blinkview.parsers.state import FrameState
 from blinkview.storage.file_logger import BinaryBatchProcessor, LogRowBatchProcessor
+from blinkview.utils import level_map  # noqa: F401  (registers the log_level_* sections and their warmups)
 from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 if TYPE_CHECKING:
     from blinkview.core.device_identity import DeviceIdentity
+
+# Decoder settings the warmup runs with (any config builds the same compiled kernels; these exercise the filters)
+WARMUP_DECODER_DEFAULTS = {
+    "frame_errors_hidden": False,
+    "filter_trim_r": True,
+    "filter_printable": True,
+    "filter_ansi": True,
+    "frame_length_dynamic": True,
+    "frame_length": 0,
+    "frame_length_minimum": 8,
+    "frame_length_maximum": 1024,
+}
 
 
 @configuration_property(
@@ -59,6 +74,9 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
     frame_parser: dict
     frame_decoder: dict
+
+    # Run the single monolithic kernel (nb_process_batch_kernel) instead of decoder.kernel -> section.kernel -> finish.
+    monolith = False
 
     def __init__(self):
         super().__init__()
@@ -186,9 +204,9 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 batch_out = None
                 batch_out_time = 0
 
-            # Stage-by-stage path (decode -> one kernel per pipeline section -> finish). Set to True to run the
-            # single monolithic kernel instead.
-            monolith = False
+            # Stage-by-stage path (decode -> one kernel per pipeline section -> finish); the monolithic kernel
+            # only runs when BinaryParser.monolith is set.
+            monolith = self.monolith
             pipeline = parser.pipeline
             p_config = parser_bundle.config
             fstart, fcur, fend, ftotal, fstatus = (
@@ -293,8 +311,8 @@ Each stage is configurable via the factory system, allowing users to mix and mat
     @staticmethod
     def _warmup_config(helper: "NumbaWarmupHelper", frame_config, parser_config):
         """Builds one frame_decoder/frame_parser pair from the given configs and drives a dummy
-        batch through nb_process_batch_kernel + the batch processors, to trigger compilation for
-        that particular combination of decoder/parser steps."""
+        batch through the decoder kernel, every section's kernel, nb_finish_frames and the batch
+        processors, to trigger compilation of exactly those kernels."""
         frame_codec = None
         frame_parser = None
         try:
@@ -391,16 +409,34 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 # 3. Pass it into your structured logging pipeline
                 dummy_in.insert(time_ns(), time_ns(), msg_2_mv)
 
-                # 3. Trigger the kernel
-                # This will block the thread while LLVM does its work
-                _ = nb_process_batch_kernel(
-                    f_config,
-                    f_state,
-                    dummy_in.bundle,
-                    parser_bundle,
-                    o_config,
-                    dummy_out.bundle,
-                )
+                # 3. Trigger the kernels (this blocks the thread while LLVM does its work)
+                if BinaryParser.monolith:
+                    nb_process_batch_kernel(
+                        f_config,
+                        f_state,
+                        dummy_in.bundle,
+                        parser_bundle,
+                        o_config,
+                        dummy_out.bundle,
+                    )
+                else:
+                    _, n = frame_codec.kernel(
+                        f_state, dummy_in.bundle, parser_bundle.config, o_config, dummy_out.bundle
+                    )
+                    for section in frame_parser.pipeline:
+                        section.kernel(dummy_out.bundle, f_state, n)
+                    nb_finish_frames(
+                        f_state.fstart,
+                        f_state.fcur,
+                        f_state.fend,
+                        f_state.ftotal,
+                        f_state.fstatus,
+                        parser_bundle.config,
+                        o_config.compact_buffer,
+                        dummy_out.bundle,
+                        n,
+                    )
+                frame_parser.post_process(dummy_out)
 
                 bin_processor = BinaryBatchProcessor()
                 bin_processor.shared = helper.shared
@@ -416,44 +452,23 @@ Each stage is configurable via the factory system, allowing users to mix and mat
     @staticmethod
     @register_warmup
     def warmup(helper: "NumbaWarmupHelper"):
-        """Triggers compilation for the default (BinaryParser) decode/parse pipeline across a
-        progressively growing set of parser steps, matching how real device configs commonly
-        stack steps (skip_words, log_level_default, module_name_normalizer, ...)."""
-        print("[Warmup] BinaryParser ...")
+        """Compiles every frame decoder and every frame parser section in one go.
 
-        steps = []
-        all_steps = [
-            {"type": "skip_words", "count": 1},
-            {"type": "log_level_default"},
-            {"type": "module_name_normalizer", "max_depth": 8, "max_length": 64},
-            {"type": "skip_words", "count": 1},
-            {"type": "skip_words", "count": 1},
-        ]
+        Each registered decoder (core/frame_warmup_registry.py) runs with an empty pipeline, which also compiles the
+        shared finish kernel and the batch processors. Each registered section then runs behind the default line
+        decoder. Sections are independent kernels, so there is no per-pipeline-length compilation to cover."""
+        print("[Warmup] BinaryParser frame decoders and sections ...")
 
-        for step in all_steps:
-            decoder_config = {
-                "type": "line_decoder",
-                "frame_errors_hidden": False,
-                "filter_trim_r": True,
-                "filter_printable": True,
-                "filter_ansi": True,
-                "frame_length_dynamic": True,
-                "frame_length": 0,
-                "frame_length_minimum": 8,
-                "frame_length_maximum": 1024,
-            }
+        no_steps = {"type": "default", "parser_errors_hidden": False, "steps": [], "filter_squash_spaces": False}
 
-            parser_config = {
-                "type": "default",
-                "parser_errors_hidden": False,
-                "steps": steps,
-                "filter_squash_spaces": False,
-            }
+        for decoder_config in FRAME_DECODER_WARMUPS:
+            BinaryParser._warmup_config(helper, {**WARMUP_DECODER_DEFAULTS, **decoder_config}, no_steps)
 
-            BinaryParser._warmup_config(helper, decoder_config, parser_config)
-            steps.append(step)
+        line_decoder = {**WARMUP_DECODER_DEFAULTS, "type": "line_decoder"}
+        for step_config in FRAME_SECTION_WARMUPS:
+            BinaryParser._warmup_config(helper, line_decoder, {**no_steps, "steps": [step_config]})
 
-        print("[Warmup] BinaryParser ... done")
+        print("[Warmup] BinaryParser frame decoders and sections ... done")
 
 
 @ParserFactory.register("serial_default")

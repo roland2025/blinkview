@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import faulthandler
 import sys
 from argparse import ArgumentParser
 
@@ -64,7 +65,21 @@ def run_replay(args):
 
 
 # --- Parser Setup ---
+def enable_fault_handler():
+    """Native crashes (Qt, numba, mmap) kill the process without a Python exception; with this enabled a fatal
+    signal prints every thread's Python stack (and the C stack of the faulting one) to stderr.
+
+    Best effort: faulthandler needs a real file descriptor on sys.stderr, which does not exist when stderr is
+    captured (tests) or missing (a GUI process started without a console)."""
+    try:
+        faulthandler.enable(all_threads=True)
+    except (RuntimeError, OSError, ValueError, AttributeError):  # io.UnsupportedOperation is an OSError
+        pass
+
+
 def main():
+    enable_fault_handler()
+
     parser = ArgumentParser(description="BlinkView Telemetry Suite - 2026")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 

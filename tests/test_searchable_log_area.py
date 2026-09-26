@@ -52,14 +52,31 @@ class TestAppendLog:
         area.append_log([])
         assert area.editor.toPlainText() == ""
 
-    def test_autoscrolls_when_already_at_bottom(self, area):
+    def test_autoscrolls_when_already_at_bottom(self, area, qtbot):
         area.append_log("\n".join(f"line{i}" for i in range(200)))
         scrollbar = area.editor.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
         area.append_log("new line")
 
-        assert scrollbar.value() == scrollbar.maximum()
+        # The scroll is deferred one event-loop turn (see append_log)
+        qtbot.waitUntil(lambda: scrollbar.value() == scrollbar.maximum())
+
+    def test_stays_pinned_when_a_batch_exceeds_the_block_cap(self, qapp, qtbot):
+        """The live view caps the editor at a few dozen blocks, and one poll can deliver far more rows than that,
+        so Qt trims blocks while the batch is still being inserted. Pinning to the bottom must survive that."""
+        w = SearchableLogArea(maxlen=20)
+        qtbot.addWidget(w)
+        w.resize(400, 300)
+        w.show()
+        scrollbar = w.editor.verticalScrollBar()
+
+        for batch in range(5):
+            w.append_log([f"batch{batch} line{i}" for i in range(500)])
+            qtbot.waitUntil(lambda: scrollbar.value() == scrollbar.maximum())
+
+        assert w.editor.blockCount() == 20
+        assert w.editor.toPlainText().splitlines()[-1] == "batch4 line499"
 
     def test_does_not_scroll_when_user_scrolled_away(self, area):
         area.append_log("\n".join(f"line{i}" for i in range(200)))

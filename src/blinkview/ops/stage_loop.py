@@ -50,3 +50,87 @@ def nb_stage_loop(step, out_b0, f_state, n, state0, config0):
                 status[k] = FS_STEP_FAILED
             else:
                 cur[k] = r
+
+
+@app_njit(inline="always")
+def nb_stage_loop_a0(step, out_b0, f_state, n):
+    """nb_stage_loop for steps that take 0 extra arguments: `step(buffer, cursor, end, out_b, out_idx)`.
+    The extras must already be meminfo-free views / scalars (build them in the stage function that calls this
+    one; this function is inlined, so they are not converted twice). Numba's inliner does not support *args,
+    hence one function per arity."""
+    out_b = nb_log_bundle_views(out_b0)
+    buffer = out_b.buffer
+    cur = nb_view(f_state.fcur)
+    end = nb_view(f_state.fend)
+    status = nb_view(f_state.fstatus)
+    first = out_b.size[0]
+    for k in range(n):
+        if status[k] == FS_OK:
+            r = step(buffer, cur[k], end[k], out_b, first + k)
+            if r == -1:
+                status[k] = FS_STEP_FAILED
+            else:
+                cur[k] = r
+
+
+@app_njit(inline="always")
+def nb_stage_loop_a1(step, out_b0, f_state, n, x0):
+    """nb_stage_loop for steps that take 1 extra argument: `step(buffer, cursor, end, out_b, out_idx, x0)`.
+    The extras must already be meminfo-free views / scalars (build them in the stage function that calls this
+    one; this function is inlined, so they are not converted twice). Numba's inliner does not support *args,
+    hence one function per arity."""
+    out_b = nb_log_bundle_views(out_b0)
+    buffer = out_b.buffer
+    cur = nb_view(f_state.fcur)
+    end = nb_view(f_state.fend)
+    status = nb_view(f_state.fstatus)
+    first = out_b.size[0]
+    for k in range(n):
+        if status[k] == FS_OK:
+            r = step(buffer, cur[k], end[k], out_b, first + k, x0)
+            if r == -1:
+                status[k] = FS_STEP_FAILED
+            else:
+                cur[k] = r
+
+
+@app_njit(inline="always")
+def nb_stage_loop_a2(step, out_b0, f_state, n, x0, x1):
+    """nb_stage_loop for steps that take 2 extra arguments: `step(buffer, cursor, end, out_b, out_idx, x0, x1)`.
+    The extras must already be meminfo-free views / scalars (build them in the stage function that calls this
+    one; this function is inlined, so they are not converted twice). Numba's inliner does not support *args,
+    hence one function per arity."""
+    out_b = nb_log_bundle_views(out_b0)
+    buffer = out_b.buffer
+    cur = nb_view(f_state.fcur)
+    end = nb_view(f_state.fend)
+    status = nb_view(f_state.fstatus)
+    first = out_b.size[0]
+    for k in range(n):
+        if status[k] == FS_OK:
+            r = step(buffer, cur[k], end[k], out_b, first + k, x0, x1)
+            if r == -1:
+                status[k] = FS_STEP_FAILED
+            else:
+                cur[k] = r
+
+
+@app_njit(inline="always")
+def nb_stage_loop_a3(step, out_b0, f_state, n, x0, x1, x2):
+    """nb_stage_loop for steps that take 3 extra arguments: `step(buffer, cursor, end, out_b, out_idx, x0, x1, x2)`.
+    The extras must already be meminfo-free views / scalars (build them in the stage function that calls this
+    one; this function is inlined, so they are not converted twice). Numba's inliner does not support *args,
+    hence one function per arity."""
+    out_b = nb_log_bundle_views(out_b0)
+    buffer = out_b.buffer
+    cur = nb_view(f_state.fcur)
+    end = nb_view(f_state.fend)
+    status = nb_view(f_state.fstatus)
+    first = out_b.size[0]
+    for k in range(n):
+        if status[k] == FS_OK:
+            r = step(buffer, cur[k], end[k], out_b, first + k, x0, x1, x2)
+            if r == -1:
+                status[k] = FS_STEP_FAILED
+            else:
+                cur[k] = r

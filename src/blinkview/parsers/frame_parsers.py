@@ -17,6 +17,7 @@ from blinkview.core.configurable import configurable, configuration_property, ov
 from blinkview.core.constants import FactoryCategory
 from blinkview.core.factory import BaseFactory
 from blinkview.core.factory_category_registry import register_factory_category
+from blinkview.core.frame_warmup_registry import frame_section_warmup
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.system_context import SystemContext
 from blinkview.core.types.empty import EMPTY_BYTES_RO
@@ -41,10 +42,21 @@ from blinkview.core.types.parsing import (
     UnusedSyncState,
     pipeline_bundle_type,
 )
-from blinkview.ops.modules import nb_parse_module_tags_statemachine_stage
+from blinkview.ops.desktop_timestamp import (
+    nb_parse_iso8601_desktop_stage,
+    nb_parse_rfc3339_stage,
+    nb_parse_syslog_timestamp_stage,
+)
+from blinkview.ops.generic import nb_skip_words_parser_stage
+from blinkview.ops.modules import (
+    nb_parse_fixed_width_name_stage,
+    nb_parse_module_tags_statemachine_stage,
+    nb_parse_rsyslog_tag_stage,
+)
 from blinkview.ops.stage import nb_stage
 from blinkview.ops.timestamp_idf import nb_parse_int_timestamp_idf_v1_stage
 from blinkview.ops.timestamps import nb_parse_int_timestamp_stage
+from blinkview.ops.zephyr_timestamp import nb_parse_zephyr_realtime_stage, nb_parse_zephyr_uptime_formatted_stage
 from blinkview.utils.log_level import LogLevel
 from blinkview.utils.utc_offset import get_local_utc_offset_seconds
 
@@ -270,6 +282,12 @@ class ModuleNameParserBase(FrameSectionParser):
         device_identity = self.local.device_id
         self.modules_table_bundle = device_identity.modules_table.bundle()
 
+    def table_bundle(self):
+        """The current module table snapshot, built on first use (self.local is bound after __init__)."""
+        if self.modules_table_bundle is None:
+            self.make_modules_table_bundle()
+        return self.modules_table_bundle
+
     def post_process(self, batch: PooledLogBatch) -> bool:
         state = self.tracker_state.modules
         unresolved_count = state.count[0]
@@ -337,6 +355,7 @@ class ModuleNameParser(ModuleNameParserBase):
     default=0,
 )
 @FrameSectionParserFactory.register("module_name_fixed_width")
+@frame_section_warmup("module_name_fixed_width", max_length=8)
 class FixedWidthModuleNameParser(ModuleNameParserBase):
     """This parser extracts names from fixed-width fields by scanning for double-space or tab terminators. It is designed for log formats where module names are left-aligned in a fixed-width column, and shorter names are padded with spaces."""
 
@@ -357,6 +376,9 @@ class FixedWidthModuleNameParser(ModuleNameParserBase):
         # 2. Return the universal 3-tuple: (Function, Mutable State, Immutable Config)
         # self.tracker_state is the flattened state initialized in the base class
         return ParserID.MOD_FIXED_WIDTH, self.tracker_state, config
+
+    def kernel(self, octx, fctx, n):
+        nb_parse_fixed_width_name_stage(octx, fctx, n, self.tracker_state.modules, self.max_length, self.table_bundle())
 
 
 @configuration_property(
@@ -405,6 +427,7 @@ class FixedWidthModuleNameParser(ModuleNameParserBase):
     help="Remove prefix from name",
 )
 @FrameSectionParserFactory.register("module_name_normalizer")
+@frame_section_warmup("module_name_normalizer", max_depth=8, max_length=64)
 class ModuleNameNormalizer(ModuleNameParserBase):
     """This parser extracts module names from variable-width fields by scanning for common delimiters (spaces, tabs, brackets) and normalizing them. It is designed for log formats where module names may be of varying lengths and may include hierarchical components separated by dots or enclosed in brackets."""
 
@@ -456,11 +479,8 @@ class ModuleNameNormalizer(ModuleNameParserBase):
         return ParserID.MOD_DYNAMIC_SM, self.tracker_state, config
 
     def kernel(self, octx, fctx, n):
-        if self.modules_table_bundle is None:
-            self.make_modules_table_bundle()
-
         nb_parse_module_tags_statemachine_stage(
-            octx, fctx, n, self.tracker_state.modules, self.module_config, self.modules_table_bundle
+            octx, fctx, n, self.tracker_state.modules, self.module_config, self.table_bundle()
         )
 
 
@@ -472,6 +492,7 @@ class ModuleNameNormalizer(ModuleNameParserBase):
     default=64,
 )
 @FrameSectionParserFactory.register("module_name_rsyslog")
+@frame_section_warmup("module_name_rsyslog", max_length=64)
 class ModuleNameRSyslogParser(ModuleNameParserBase):
     """Parses the classic syslog/rsyslog TAG field: 'tag[pid]: ' or 'tag: ' (e.g.
     "sshd[1234]: " or "kernel: "). The `[pid]` is optional; when present it is only
@@ -489,6 +510,9 @@ class ModuleNameRSyslogParser(ModuleNameParserBase):
         )
 
         return ParserID.MOD_RSYSLOG_TAG, self.tracker_state, config
+
+    def kernel(self, octx, fctx, n):
+        nb_parse_rsyslog_tag_stage(octx, fctx, n, self.tracker_state.modules, self.max_length, self.table_bundle())
 
 
 # @FrameSectionParserFactory.register("timestamp")
@@ -530,6 +554,7 @@ TS_PRECISIONS_DESC = [
 )
 @configuration_property("unix_timestamp", type="boolean", default=False, required=False)
 @FrameSectionParserFactory.register("timestamp_integer")
+@frame_section_warmup("timestamp_integer")
 class IntegerTimestampParser(TimestampParser):
     precision: int
 
@@ -560,6 +585,7 @@ class IntegerTimestampParser(TimestampParser):
 
 
 @FrameSectionParserFactory.register("timestamp_idf_v1")
+@frame_section_warmup("timestamp_idf_v1")
 @override_property("unix_timestamp", hidden=True, default=False)
 class Esp32V1IntegerTimestampParser(IntegerTimestampParser):
     precision: int
@@ -598,6 +624,7 @@ class Esp32V1IntegerTimestampParser(IntegerTimestampParser):
     default=1,
 )
 @FrameSectionParserFactory.register("skip_words")
+@frame_section_warmup("skip_words", count=1)
 class SkipWordsParser(FrameSectionParser):
     """
     Structural parser that advances the cursor past a specific number of words.
@@ -617,8 +644,12 @@ class SkipWordsParser(FrameSectionParser):
         # We use EMPTY_STATE because we aren't extracting any module IDs
         return ParserID.SKIP_WORDS, EmptyUnifiedParserState, config
 
+    def kernel(self, octx, fctx, n):
+        nb_skip_words_parser_stage(octx, fctx, n, self.count)
+
 
 @FrameSectionParserFactory.register("timestamp_zephyr_uptime_formatted")
+@frame_section_warmup("timestamp_zephyr_uptime_formatted")
 class ZephyrUptimeFormattedParser(TimestampParser):
     def __init__(self):
         super().__init__()
@@ -634,8 +665,12 @@ class ZephyrUptimeFormattedParser(TimestampParser):
     def bundle(self):
         return self._bundle
 
+    def kernel(self, octx, fctx, n):
+        nb_parse_zephyr_uptime_formatted_stage(octx, fctx, n, self.state.timestamp.sync)
+
 
 @FrameSectionParserFactory.register("timestamp_zephyr_realtime")
+@frame_section_warmup("timestamp_zephyr_realtime")
 class ZephyrRealTimeParser(TimestampParser):
     def __init__(self):
         super().__init__()
@@ -651,8 +686,12 @@ class ZephyrRealTimeParser(TimestampParser):
     def bundle(self):
         return self._bundle
 
+    def kernel(self, octx, fctx, n):
+        nb_parse_zephyr_realtime_stage(octx, fctx, n, self.state.timestamp.sync)
+
 
 @FrameSectionParserFactory.register("timestamp_iso8601_desktop")
+@frame_section_warmup("timestamp_iso8601_desktop")
 class Iso8601DesktopTimestampParser(TimestampParser):
     """Parses 'YYYY-MM-DD HH:MM:SS[.,]fff' - the common desktop log format used by
     Python's `logging` module, log4j, and plain ISO8601 output (no bracket wrapper)."""
@@ -671,8 +710,12 @@ class Iso8601DesktopTimestampParser(TimestampParser):
     def bundle(self):
         return self._bundle
 
+    def kernel(self, octx, fctx, n):
+        nb_parse_iso8601_desktop_stage(octx, fctx, n, self.state.timestamp.sync)
+
 
 @FrameSectionParserFactory.register("timestamp_rfc3339")
+@frame_section_warmup("timestamp_rfc3339")
 class Rfc3339TimestampParser(TimestampParser):
     """Parses RFC 3339 'YYYY-MM-DDTHH:MM:SS.uuuuuu(Z|+HH:MM|-HH:MM)' - e.g. journald's
     short-iso-precise output, or Python's `datetime.now().astimezone().isoformat()`."""
@@ -691,6 +734,9 @@ class Rfc3339TimestampParser(TimestampParser):
     def bundle(self):
         return self._bundle
 
+    def kernel(self, octx, fctx, n):
+        nb_parse_rfc3339_stage(octx, fctx, n, self.state.timestamp.sync)
+
 
 @configuration_property(
     "year",
@@ -701,6 +747,7 @@ class Rfc3339TimestampParser(TimestampParser):
     help="Year to assume for syslog timestamps, which have no year field. 0 = use the current year.",
 )
 @FrameSectionParserFactory.register("timestamp_rfc3164")
+@frame_section_warmup("timestamp_rfc3164")
 class SyslogTimestampParser(TimestampParser):
     """Parses classic RFC3164 syslog timestamps: 'Mon DD HH:MM:SS' (e.g. "Jan  2 15:04:05").
     Since the format has no year field, one is assumed - either the configured `year`, or the
@@ -719,8 +766,12 @@ class SyslogTimestampParser(TimestampParser):
         ts_config = UnifiedParserConfig(syslog_year=assumed_year)
 
         self._bundle = ParserID.TS_RFC3164, self.state, ts_config
+        self._year = ts_config.syslog_year
 
         return changed
 
     def bundle(self):
         return self._bundle
+
+    def kernel(self, octx, fctx, n):
+        nb_parse_syslog_timestamp_stage(octx, fctx, n, self.state.timestamp.sync, self._year)
