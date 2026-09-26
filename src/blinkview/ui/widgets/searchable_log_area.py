@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from qtpy.QtCore import QEvent, QPoint, Qt, QTimer
+from qtpy.QtCore import QEvent, QPoint, Qt, QTimer, Signal
 from qtpy.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor, QTextDocument
 from qtpy.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QTextEdit, QToolButton, QVBoxLayout, QWidget
 
@@ -14,6 +14,11 @@ class SearchableLogArea(QWidget):
     COLOR_FIND_BAR = QColor(255, 190, 0, 140)  # Vibrant Amber (Translucent)
     COLOR_SELECTION = QColor(255, 80, 80, 140)  # Soft Coral/Red (Translucent)
     COLOR_CURRENT = QColor(40, 150, 40, 255)  # Solid Green for the active match
+
+    # Fires on the edge from "no selection" to "has a selection" (mouse drag, Shift+arrows,
+    # Ctrl+A, ...) - lets the owning viewer freeze its live tail so the selection doesn't
+    # scroll/trim away underneath the user.
+    selection_started = Signal()
 
     def __init__(self, parent=None, maxlen=10000):
         super().__init__(parent)
@@ -79,6 +84,7 @@ class SearchableLogArea(QWidget):
         # Internal state for both types
         self._find_text = ""
         self._manual_text = ""
+        self._had_selection = False
 
         # Performance cache for formats
         self._fmt_find = QTextCharFormat()
@@ -181,9 +187,71 @@ class SearchableLogArea(QWidget):
             # once the event loop has let the editor and its scrollbar settle.
             self._pin_timer.start()
 
+    def prepend_lines(self, text: str) -> int:
+        """Inserts `text` as whole lines above the current first line and returns how many lines
+        were added. Existing QTextCursors - including the user's selection, even mid-drag - shift
+        with the insert, and the scrollbar is moved by the same amount so the viewport stays on
+        the same content. The caller must raise the max block count first, or Qt trims the top
+        right back off."""
+        text = text.rstrip("\n")
+        if not text:
+            return 0
+        doc = self.editor.document()
+        scrollbar = self.editor.verticalScrollBar()
+        old_blocks = doc.blockCount()
+        old_value = scrollbar.value()
+
+        cursor = QTextCursor(doc)
+        cursor.movePosition(QTextCursor.Start)
+        cursor.insertText(text + "\n")
+
+        added = doc.blockCount() - old_blocks
+        scrollbar.setValue(old_value + added)
+        return added
+
+    def append_lines(self, text: str):
+        """Appends `text` as whole lines after the last line, keeping the document's trailing
+        empty block. Unlike append_log this never pins the view to the bottom, and it keeps the
+        user's selection exactly where it was - a selection ending at the document end would
+        otherwise grow to swallow the inserted text, since cursors at the insert point move with
+        it."""
+        text = text.rstrip("\n")
+        if not text:
+            return
+        doc = self.editor.document()
+        scrollbar = self.editor.verticalScrollBar()
+        scroll_value = scrollbar.value()
+        selection = self.editor.textCursor()
+        anchor, position = selection.anchor(), selection.position()
+
+        cursor = QTextCursor(doc)
+        cursor.movePosition(QTextCursor.End)
+        if not cursor.atBlockStart():
+            cursor.insertBlock()
+        cursor.insertText(text + "\n")
+
+        selection = self.editor.textCursor()
+        if (selection.anchor(), selection.position()) != (anchor, position):
+            selection.setPosition(anchor)
+            selection.setPosition(position, QTextCursor.KeepAnchor)
+            self.editor.setTextCursor(selection)
+        scrollbar.setValue(scroll_value)
+
     def clear(self):
         self.editor.clear()
         self.editor.setExtraSelections([])
+
+    def line_count(self) -> int:
+        """Number of real lines - the block count minus the empty block a trailing newline
+        leaves at the end."""
+        doc = self.editor.document()
+        count = doc.blockCount()
+        if count and not doc.lastBlock().text():
+            count -= 1
+        return count
+
+    def has_selection(self) -> bool:
+        return self.editor.textCursor().hasSelection()
 
     def set_font(self, font):
         self.editor.setFont(font)
@@ -287,7 +355,15 @@ class SearchableLogArea(QWidget):
 
     def _handle_selection_changed(self):
         """Updates the 'Manual Selection' text."""
-        sel_text = self.editor.textCursor().selectedText()
+        cursor = self.editor.textCursor()
+        has_selection = cursor.hasSelection()
+        if has_selection and not self._had_selection:
+            self._had_selection = True
+            self.selection_started.emit()
+        elif not has_selection:
+            self._had_selection = False
+
+        sel_text = cursor.selectedText()
         # If user clears selection, reset manual text
         if len(sel_text) > 2 and not sel_text.isspace():
             self._manual_text = sel_text

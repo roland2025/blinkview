@@ -370,6 +370,7 @@ QToolButton[filterEnabled="true"] {
         self.text_area.setMinimumWidth(300)
 
         self.text_area.verticalScrollBar().valueChanged.connect(self._on_scroll_value_changed)
+        self.text_area.selection_started.connect(self._on_selection_started)
 
         self.splitter.addWidget(self.text_area)
 
@@ -917,6 +918,78 @@ QToolButton[filterEnabled="true"] {
             result.text,
         )
 
+    def _on_selection_started(self):
+        """Selecting text pauses the view so the selection doesn't scroll/trim away. Unlike
+        _apply_freeze's LIVE branch this must not refetch: _enter_history_mode's setPlainText
+        would wipe the very selection the user is making, so the live document is frozen in
+        place instead. A FOLLOWING window is already static and _apply_freeze keeps it as-is."""
+        action = self._playback.handle(FollowEvent.TogglePause(True), self._clock_snapshot(self._clock()))
+        if action.kind is not FollowActionKind.FREEZE:
+            return
+        if action.from_state is FollowState.LIVE:
+            self._freeze_live_in_place()
+        else:
+            self._apply_freeze(action)
+
+    def _freeze_live_in_place(self):
+        """Turns the live tail currently on screen into a seq-anchored history window without
+        rebuilding the document. _live_seqs is kept 1:1 with the editor's blocks (both capped at
+        max_rows - see _live_seq_for_block), so its ends are the window's bounds for later
+        paging. The live tail
+        is only about a screenful, so older rows are then prepended (see
+        _backfill_frozen_history) to give the selection real scrollback to extend into."""
+        if not self._live_seqs:
+            self._set_pause_ui(True)
+            return
+        self.view_mode = LogViewMode.HISTORY
+        self.history_anchor_seq = self._live_seq_for_block(self.text_area.first_visible_block())
+        self.history_anchor_ts_ns = None
+        self.history_oldest_seq = self._live_seq_for_block(0)
+        self.history_newest_seq = self._live_seqs[-1]
+        self.history_reached_start = False
+        self._set_pause_ui(True)
+        # Deferred one event-loop turn: this runs from inside the editor's selectionChanged
+        # (often mid mouse-press), so don't mutate the document under QPlainTextEdit's own
+        # in-progress cursor handling.
+        QTimer.singleShot(0, lambda: self._extend_history_in_place(older=True))
+
+    def _extend_history_in_place(self, older: bool):
+        """Grows the current seq-anchored history window by up to HISTORY_BEFORE older rows
+        (prepended) or HISTORY_AFTER newer rows (appended) without rebuilding the document, so
+        the user's selection survives - the in-place counterpart of _reanchor_history's paging,
+        used while a selection exists. The document isn't trimmed back down: it only grows one
+        page per user scroll to an edge, and trimming the top would shift the viewport."""
+        if self.view_mode != LogViewMode.HISTORY or self.history_anchor_ts_ns is not None:
+            return  # Resumed/re-anchored (e.g. before a deferred call ran), or a ts-anchored window
+        edge_seq = self.history_oldest_seq if older else self.history_newest_seq
+        if edge_seq is None:
+            return
+
+        if older:
+            count, _, new_oldest_seq, _, reached_start, text = self._fetch_history_window(
+                anchor_seq=edge_seq, before_cap=self.HISTORY_BEFORE, after_cap=0
+            )
+            self.history_reached_start = reached_start
+        else:
+            # The "after" scan includes its anchor, so start one past the current newest row
+            _, count, _, new_newest_seq, _, text = self._fetch_history_window(
+                anchor_seq=edge_seq + 1, before_cap=0, after_cap=self.HISTORY_AFTER
+            )
+        if count == 0:
+            return
+
+        self._programmatic_scroll = True
+        try:
+            self.text_area.set_max_block_count(self.text_area.document().blockCount() + count + 1)
+            if older:
+                self.text_area.prepend_lines(text)
+                self.history_oldest_seq = new_oldest_seq
+            else:
+                self.text_area.append_lines(text)
+                self.history_newest_seq = new_newest_seq
+        finally:
+            self._programmatic_scroll = False
+
     def _enter_history_mode(self, auto: bool = False):
         """Called the moment the user scrolls away from the live tail, or when clog protection
         (auto=True) or the manual Pause button needs to freeze the view. Anchors the new history
@@ -924,8 +997,17 @@ QToolButton[filterEnabled="true"] {
         doesn't visually jump."""
         if not self._live_seqs:
             return
-        idx = max(0, min(self.text_area.first_visible_block(), len(self._live_seqs) - 1))
-        self._reanchor_history(self._live_seqs[idx], auto=auto)
+        self._reanchor_history(self._live_seq_for_block(self.text_area.first_visible_block()), auto=auto)
+
+    def _live_seq_for_block(self, block_number: int) -> int:
+        """Sequence id of the live tail's line at `block_number`. _live_seqs and the editor are
+        both capped at max_rows, but the formatted text ends with a newline, so the editor's
+        last block is an empty one that also counts against its cap - it shows one row fewer
+        than _live_seqs holds. Align from the newest end instead of assuming index 0 matches."""
+        line_count = self.text_area.line_count()
+        offset = max(0, len(self._live_seqs) - line_count)
+        idx = max(0, min(block_number + offset, len(self._live_seqs) - 1))
+        return self._live_seqs[idx]
 
     def _reanchor_history(self, anchor_seq=None, anchor_ts=None, auto: bool = False, before_cap=None, after_cap=None):
         """Rebuilds the history window around anchor_seq or anchor_ts (mutually exclusive) and
@@ -1011,7 +1093,10 @@ QToolButton[filterEnabled="true"] {
         if self.history_newest_seq >= pool.latest_sequence():
             return  # Nothing new has arrived past our last fetch
 
-        self._reanchor_history(self.history_newest_seq)
+        if self.text_area.has_selection():
+            self._extend_history_in_place(older=False)
+        else:
+            self._reanchor_history(self.history_newest_seq)
 
     def _on_scroll_value_changed(self, value):
         if self._programmatic_scroll:
@@ -1055,6 +1140,17 @@ QToolButton[filterEnabled="true"] {
             # about to change under this rebuild, so don't also evaluate the top/bottom checks
             # below against them this same invocation).
             self._reanchor_history(anchor_ts=self.history_anchor_ts_ns)
+            return
+
+        if self.text_area.has_selection():
+            # Paging/resuming live via _reanchor_history/_redraw_history rebuilds the document,
+            # dropping the selection (a drag-select auto-scrolling past the viewport edge lands
+            # here too) - grow the window in place instead, and stay frozen at the live edge
+            # rather than resuming. Once the selection is cleared, normal paging takes over.
+            if value <= scrollbar.minimum() + 1 and not self.history_reached_start:
+                self._extend_history_in_place(older=True)
+            if value >= scrollbar.maximum() - 1:
+                self._extend_history_in_place(older=False)
             return
 
         if value <= scrollbar.minimum() + 1:

@@ -147,6 +147,81 @@ class TestPauseResume:
         assert viewer.is_paused is False
         assert viewer.view_mode == LogViewMode.LIVE
 
+    def _select_first_line(self, viewer):
+        from qtpy.QtGui import QTextCursor
+
+        editor = viewer.text_area.editor
+        cursor = editor.textCursor()
+        cursor.movePosition(QTextCursor.Start)
+        cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+        editor.setTextCursor(cursor)
+
+    def test_starting_a_selection_pauses_without_dropping_it(self, qtbot, viewer, registry):
+        # More history than the ~max_rows live tail holds, so there's something to backfill
+        device = registry.id_registry.get_device("logviewertest")
+        _push_messages(registry, device, device.get_module("mod1"), 300, text="bulk")
+        viewer._redraw_history()
+        live_text = viewer.text_area.document().toPlainText().rstrip("\n")
+        live_blocks = viewer.text_area.document().blockCount()
+        assert live_text.endswith("bulk299")
+        assert "message0" not in live_text
+
+        self._select_first_line(viewer)
+        selected = viewer.text_area.editor.textCursor().selectedText()
+        assert selected
+
+        assert viewer.is_paused is True
+        assert viewer.action_pause.isChecked() is True
+        assert viewer.view_mode == LogViewMode.HISTORY
+
+        # Older rows get prepended above the frozen tail one event-loop turn later
+        qtbot.waitUntil(lambda: viewer.text_area.document().blockCount() > live_blocks, timeout=2000)
+        doc_text = viewer.text_area.document().toPlainText()
+        assert doc_text.rstrip("\n").endswith(live_text)
+        # All 320 rows fit under HISTORY_BEFORE, so the backfill reaches the very first one
+        names = [line.rsplit(" ", 1)[-1] for line in doc_text.rstrip("\n").splitlines()]
+        expected = [f"message{i}" for i in range(20)] + [f"bulk{i}" for i in range(300)]
+        assert names == expected
+        assert "message0" in doc_text
+        assert viewer.history_reached_start is True
+        assert viewer.history_oldest_seq < viewer._live_seqs[0]
+        # The selection moved with its text rather than being dropped or left on the new lines
+        assert viewer.text_area.editor.textCursor().selectedText() == selected
+
+        # Still sitting at the bottom: newer rows get appended in place by the tail poll rather
+        # than the document being rebuilt under the selection, and the view stays frozen
+        _push_messages(registry, device, device.get_module("mod1"), 5, text="later")
+        viewer.prev_history_poll = 0
+        viewer.apply_updates()
+
+        doc_after = viewer.text_area.document().toPlainText()
+        assert doc_after.startswith(doc_text.rstrip("\n"))
+        assert [line.rsplit(" ", 1)[-1] for line in doc_after.splitlines()[-5:]] == [f"later{i}" for i in range(5)]
+        assert viewer.text_area.editor.textCursor().selectedText() == selected
+        assert viewer.is_paused is True
+
+    def test_selection_reaching_document_end_does_not_swallow_appended_rows(self, qtbot, viewer, registry):
+        viewer.apply_updates()
+        viewer.text_area.editor.selectAll()
+        assert viewer.is_paused is True
+        qtbot.wait(10)  # let the deferred backfill run
+        selected = viewer.text_area.editor.textCursor().selectedText()
+
+        device = registry.id_registry.get_device("logviewertest")
+        _push_messages(registry, device, device.get_module("mod1"), 3, text="later")
+        viewer._extend_history_in_place(older=False)
+
+        assert viewer.text_area.document().toPlainText().rstrip("\n").endswith("later2")
+        assert viewer.text_area.editor.textCursor().selectedText() == selected
+
+    def test_resume_after_selection_pause_returns_live(self, viewer):
+        viewer.apply_updates()
+        self._select_first_line(viewer)
+        viewer._toggle_pause(False)
+
+        assert viewer.is_paused is False
+        assert viewer.view_mode == LogViewMode.LIVE
+
     def test_toggle_telemetry_sidebar(self, viewer):
         viewer.show()
         viewer.action_telemetry.setChecked(True)
