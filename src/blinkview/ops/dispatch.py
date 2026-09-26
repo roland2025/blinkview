@@ -6,34 +6,80 @@
 
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.frames import FrameStateParams
-from blinkview.core.types.parsing import STATE_COMPLETE, STATE_ERROR, STATE_INCOMPLETE
-from blinkview.ops.buffers import nb_copy_buf, nb_move_buf, nb_report_error, nb_sync_push, nb_sync_shift_leftovers
+from blinkview.core.types.parsing import STATE_COMPLETE, STATE_ERROR, STATE_INCOMPLETE, CodecID
+from blinkview.ops.buffers import (
+    nb_copy_buf,
+    nb_find_byte,
+    nb_move_buf,
+    nb_report_error,
+    nb_sync_push,
+    nb_sync_shift_leftovers,
+)
+from blinkview.ops.codecs import nb_decode_newline_plain
 from blinkview.ops.frame_dispatch import nb_dispatch_frame_decoder
-from blinkview.ops.pipeline import nb_execute_parser_pipeline
-from blinkview.ops.strings import nb_squash_spaces_inplace, nb_trim_spaces
+from blinkview.ops.stage import (
+    FS_DECODER_ERR,
+    FS_DROP,
+    FS_FRAME_ERR,
+    FS_OK,
+    FS_PARSER_ERR,
+    FS_STEP_FAILED,
+    nb_stage,
+)
+from blinkview.ops.strings import nb_skip_whitespace, nb_skip_whitespace_reverse, nb_squash_spaces_inplace
+from blinkview.ops.views import nb_log_bundle_views, nb_view
+
+_ID_NEWLINE = CodecID.NEWLINE
+
+
+@app_njit(inline="always")
+def nb_copy_row(out_b, dst, src):
+    """Moves every per-row column the pipeline can write from row `src` to row `dst` (offsets/lengths and
+    devices are set by the caller)."""
+    out_b.rx_timestamps[dst] = out_b.rx_timestamps[src]
+    out_b.timestamps[dst] = out_b.timestamps[src]
+    if out_b.has_levels:
+        out_b.levels[dst] = out_b.levels[src]
+    if out_b.has_modules:
+        out_b.modules[dst] = out_b.modules[src]
+    if out_b.has_sequences:
+        out_b.sequences[dst] = out_b.sequences[src]
+    if out_b.has_pids:
+        out_b.pids[dst] = out_b.pids[src]
+    if out_b.has_tids:
+        out_b.tids[dst] = out_b.tids[src]
+    if out_b.has_ext_u32_1:
+        out_b.ext_u32_1[dst] = out_b.ext_u32_1[src]
+    if out_b.has_ext_u32_2:
+        out_b.ext_u32_2[dst] = out_b.ext_u32_2[src]
+    if out_b.has_ext_u64_1:
+        out_b.ext_u64_1[dst] = out_b.ext_u64_1[src]
 
 
 @app_njit()
 def nb_process_batch_kernel(
     f_cfg,
     f_state: FrameStateParams,
-    in_b,
+    in_b0,
     parser,
     o_cfg,
-    out_b,
+    out_b0,
 ):
-    # --- 1. Load State from length-1 arrays ---
+    """Stage-major batch kernel: (A) decode frames and reserve an output row each, (B) run every pipeline
+    step over all frames of the chunk, (C) trim/compact/emit rows in frame order."""
+    # Meminfo-free views of the arrays used per frame (see ops/views.py); they never leave this call.
+    in_b = nb_log_bundle_views(in_b0)
+    out_b = nb_log_bundle_views(out_b0)
     curr_write = f_state.offset[0]
     in_idx = f_state.in_idx[0]
     read_offset = f_state.in_offset[0]
     in_frame = f_state.in_frame[0]
-    f_buf = f_state.buffer
-    f_ts_buf = f_state.ts_buffer
+    f_buf = nb_view(f_state.buffer)
+    f_ts_buf = nb_view(f_state.ts_buffer)
 
     in_size = in_b.size[0]
     p_cfg = parser.config
 
-    # Frame Configs
     frame_delimiter = f_cfg.delimiter
     frame_length_min = f_cfg.length_min
     frame_length_max = f_cfg.length_max
@@ -41,8 +87,9 @@ def nb_process_batch_kernel(
     frame_length = f_cfg.length
     report_frame_error = f_cfg.report_error
     is_pre_framed = f_cfg.decode_id == 0
+    trim_r = f_cfg.filter_trim_r
+    is_plain_newline = f_cfg.decode_id == _ID_NEWLINE and not f_cfg.filter_printable and not f_cfg.filter_ansi
 
-    # Parser/Output Configs
     filter_squash_spaces = p_cfg.filter_squash_spaces
     report_parser_error = p_cfg.report_error
     device_id = p_cfg.device_id
@@ -51,15 +98,26 @@ def nb_process_batch_kernel(
     compact_buffer = o_cfg.compact_buffer
 
     start_out_idx = out_b.size[0]
-    curr_out_idx = start_out_idx
-    curr_out_cursor = out_b.msg_cursor[0]
+    curr_out_idx = start_out_idx  # rows reserved so far (one per decoded frame)
+    start_out_cursor = out_b.msg_cursor[0]
+    curr_out_cursor = start_out_cursor  # uncompacted decode position
 
     out_cap = out_b.timestamps.shape[0]
     out_buf_cap = out_b.buffer.shape[0]
     report_errors = report_frame_error or report_parser_error
     out_full = False
 
-    # --- 2. Main Chunking Loop ---
+    # per-frame bookkeeping (preallocated in FrameState), indexed by frame ordinal k = row slot - start_out_idx.
+    # Its length caps the rows this call may reserve, so it doubles as an output-capacity limit.
+    fstart = f_state.fstart
+    fcur = f_state.fcur
+    fend = f_state.fend
+    ftotal = f_state.ftotal
+    fstatus = f_state.fstatus
+    out_cap = min(out_cap, start_out_idx + fstatus.shape[0])
+    nframes = 0
+
+    # ---------------- Phase A: decode frames, reserve a row slot for each ----------------
     while in_idx < in_size:
         in_len = in_b.lengths[in_idx]
         in_off = in_b.offsets[in_idx]
@@ -67,23 +125,21 @@ def nb_process_batch_kernel(
 
         scan_idx = read_offset
 
-        # Unified Scan & Process Loop
         while scan_idx < in_len:
             found_frame = False
             chunk_len = 0
 
-            # Step A: Determine Frame Boundaries
             if is_pre_framed:
                 chunk_len = in_len
-                scan_idx = in_len - 1  # Force inner loop to terminate after this pass
+                scan_idx = in_len - 1
                 found_frame = True
             else:
-                byte = in_b.buffer[in_off + scan_idx]
-                if byte == frame_delimiter:
+                # jump straight to the next delimiter (or the end of this input row)
+                scan_idx = nb_find_byte(in_b.buffer, in_off + scan_idx, in_off + in_len, frame_delimiter) - in_off
+                if scan_idx < in_len:
                     chunk_len = (scan_idx - read_offset) + 1
                     found_frame = True
 
-            # Step B: Process the Found Frame
             if found_frame:
                 if in_frame:
                     if (curr_out_idx >= out_cap) or (curr_out_cursor + curr_write + chunk_len > out_buf_cap):
@@ -95,9 +151,7 @@ def nb_process_batch_kernel(
                 target_end = 0
                 process_frame = False
                 is_zero_copy = False
-                error_code = 0
 
-                # Determine if Zero-Copy or Buffer Push
                 if in_frame and curr_write == 0 and chunk_len <= frame_length_max:
                     target_buf = in_b.buffer
                     target_start = in_off + read_offset
@@ -123,14 +177,16 @@ def nb_process_batch_kernel(
 
                 if process_frame:
                     if is_pre_framed:
-                        # Bypass decoder: direct memory copy
                         nb_copy_buf(target_buf, target_start, out_b.buffer, curr_out_cursor, chunk_len)
-
                         final_cursor = curr_out_cursor + chunk_len
                         bytes_consumed = chunk_len
                         decoder_state = STATE_COMPLETE
+                    elif is_plain_newline:
+                        # inlined fast path: passing f_cfg/f_state into the generic decoder costs ~50 ns per frame
+                        decoder_state, final_cursor, bytes_consumed = nb_decode_newline_plain(
+                            target_buf, target_start, target_end, out_b.buffer, curr_out_cursor, trim_r
+                        )
                     else:
-                        # Standard decoder dispatch
                         decoder_state, final_cursor, bytes_consumed = nb_dispatch_frame_decoder(
                             target_buf, target_start, target_end, out_b.buffer, curr_out_cursor, f_cfg, f_state
                         )
@@ -148,7 +204,10 @@ def nb_process_batch_kernel(
                     elif decoder_state == STATE_ERROR:
                         mangled_len = target_end - target_start
                         if report_errors and curr_out_idx < out_cap and mangled_len > 0:
-                            curr_out_cursor = nb_report_error(
+                            # the raw bytes are not in the output buffer yet; nb_report_error copies them in
+                            # place at curr_out_cursor and takes a row slot, so it doubles as a frame here
+                            k = curr_out_idx - start_out_idx
+                            new_cursor = nb_report_error(
                                 out_b,
                                 curr_out_idx,
                                 curr_out_cursor,
@@ -158,72 +217,41 @@ def nb_process_batch_kernel(
                                 p_cfg.level_error,
                                 p_cfg.module_unknown,
                             )
+                            fstart[k] = curr_out_cursor
+                            ftotal[k] = new_cursor - curr_out_cursor  # nb_report_error may truncate
+                            fstatus[k] = FS_DECODER_ERR  # already fully written
+                            curr_out_cursor = new_cursor
                             curr_out_idx += 1
+                            nframes += 1
                         bytes_consumed = target_end - target_start
 
                     else:
-                        # STATE_COMPLETE: Unified Pipeline Execution
-                        frame_ts = ts_in
-
-                        out_b.rx_timestamps[curr_out_idx] = frame_ts
-                        out_b.timestamps[curr_out_idx] = frame_ts
-                        out_b.levels[curr_out_idx] = default_level
-                        out_b.modules[curr_out_idx] = default_module
-
                         total_frame_length = final_cursor - curr_out_cursor
-
-                        if total_frame_length <= 0:
-                            error_code = 0
-                        else:
+                        if total_frame_length > 0:
+                            k = curr_out_idx - start_out_idx
+                            out_b.rx_timestamps[curr_out_idx] = ts_in
+                            out_b.timestamps[curr_out_idx] = ts_in
+                            out_b.levels[curr_out_idx] = default_level
+                            out_b.modules[curr_out_idx] = default_module
+                            fstart[k] = curr_out_cursor
+                            fcur[k] = curr_out_cursor
+                            fend[k] = final_cursor
+                            ftotal[k] = total_frame_length
+                            valid = True
                             if frame_length_fixed != 0:
-                                is_valid_frame = total_frame_length == frame_length
+                                valid = total_frame_length == frame_length
                             else:
-                                is_valid_frame = total_frame_length >= frame_length_min
-
-                            if not is_valid_frame:
-                                if report_frame_error:
-                                    error_code = 1
+                                valid = total_frame_length >= frame_length_min
+                            if valid:
+                                fstatus[k] = FS_OK
+                            elif report_frame_error:
+                                fstatus[k] = FS_FRAME_ERR
                             else:
-                                msg_start = nb_execute_parser_pipeline(
-                                    out_b.buffer, curr_out_cursor, final_cursor, out_b, curr_out_idx, parser.pipeline
-                                )
-
-                                if msg_start == -1:
-                                    if report_parser_error:
-                                        error_code = 2
-                                else:
-                                    if filter_squash_spaces:
-                                        msg_start, final_cursor = nb_squash_spaces_inplace(
-                                            out_b.buffer, msg_start, final_cursor
-                                        )
-                                    else:
-                                        msg_start, final_cursor = nb_trim_spaces(out_b.buffer, msg_start, final_cursor)
-
-                                    payload_length = final_cursor - msg_start
-
-                                    if payload_length > 0:
-                                        if compact_buffer:
-                                            if msg_start > curr_out_cursor:
-                                                nb_move_buf(out_b.buffer, msg_start, curr_out_cursor, payload_length)
-                                            out_b.offsets[curr_out_idx] = curr_out_cursor
-                                            out_b.lengths[curr_out_idx] = payload_length
-                                            curr_out_cursor += payload_length
-                                        else:
-                                            out_b.offsets[curr_out_idx] = msg_start
-                                            out_b.lengths[curr_out_idx] = payload_length
-                                            curr_out_cursor = final_cursor
-
-                                        curr_out_idx += 1
-
-                        if report_errors and error_code > 0 and total_frame_length > 0:
-                            out_b.offsets[curr_out_idx] = curr_out_cursor
-                            out_b.lengths[curr_out_idx] = total_frame_length
-                            out_b.levels[curr_out_idx] = p_cfg.level_error
-                            out_b.modules[curr_out_idx] = p_cfg.module_unknown
-                            curr_out_cursor += total_frame_length
+                                fstatus[k] = FS_DROP
                             curr_out_idx += 1
+                            nframes += 1
+                            curr_out_cursor = final_cursor
 
-                    # Shift unconsumed bytes
                     unconsumed = (target_end - target_start) - bytes_consumed
                     if unconsumed > 0:
                         nb_sync_shift_leftovers(
@@ -241,7 +269,6 @@ def nb_process_batch_kernel(
         if out_full:
             break
 
-        # --- 3. Handle Batch Tail-End Carryover ---
         remaining = in_len - read_offset
         if remaining > 0 and in_frame:
             if curr_write + remaining <= frame_length_max:
@@ -254,11 +281,76 @@ def nb_process_batch_kernel(
         in_idx += 1
         read_offset = 0
 
-    # --- 4. Final Updates & State Persistence ---
-    if curr_out_idx > start_out_idx:
-        out_b.devices[start_out_idx:curr_out_idx] = device_id
-        out_b.size[0] = curr_out_idx
-        out_b.msg_cursor[0] = curr_out_cursor
+    # ---------------- Phase B: one pass over all frames per pipeline step ----------------
+    if nframes > 0:
+        for e in parser.pipeline:
+            nb_stage(e[0], out_b0.buffer, fcur, fend, fstatus, start_out_idx, nframes, out_b0, e[1], e[2])
+
+    # ---------------- Phase C: trim, compact, emit rows in order ----------------
+    w_cursor = start_out_cursor
+    w_idx = start_out_idx
+    for k in range(nframes):
+        slot = start_out_idx + k
+        st = fstatus[k]
+        if st == FS_DECODER_ERR:
+            # decoder-error row written by nb_report_error at the frame's own position
+            if compact_buffer and w_cursor != fstart[k]:
+                nb_move_buf(out_b.buffer, fstart[k], w_cursor, ftotal[k])
+            if w_idx != slot:
+                nb_copy_row(out_b, w_idx, slot)
+            out_b.offsets[w_idx] = w_cursor if compact_buffer else fstart[k]
+            out_b.lengths[w_idx] = ftotal[k]
+            w_cursor = w_cursor + ftotal[k] if compact_buffer else fstart[k] + ftotal[k]
+            w_idx += 1
+            continue
+
+        if st == FS_STEP_FAILED:
+            st = FS_PARSER_ERR if report_parser_error else FS_DROP
+
+        if st == FS_OK:
+            msg_start = fcur[k]
+            final_cursor = fend[k]
+            if filter_squash_spaces:
+                msg_start, final_cursor = nb_squash_spaces_inplace(out_b.buffer, msg_start, final_cursor)
+            else:
+                final_cursor = nb_skip_whitespace_reverse(out_b.buffer, msg_start, final_cursor)
+                msg_start = nb_skip_whitespace(out_b.buffer, msg_start, final_cursor)
+            payload_length = final_cursor - msg_start
+            if payload_length > 0:
+                if compact_buffer:
+                    if msg_start > w_cursor:
+                        nb_move_buf(out_b.buffer, msg_start, w_cursor, payload_length)
+                    off = w_cursor
+                    w_cursor += payload_length
+                else:
+                    off = msg_start
+                    w_cursor = final_cursor
+                if w_idx != slot:
+                    nb_copy_row(out_b, w_idx, slot)
+                out_b.offsets[w_idx] = off
+                out_b.lengths[w_idx] = payload_length
+                w_idx += 1
+        elif st == FS_FRAME_ERR or st == FS_PARSER_ERR:
+            if w_idx != slot:
+                nb_copy_row(out_b, w_idx, slot)
+            if compact_buffer and w_cursor != fstart[k]:
+                nb_move_buf(out_b.buffer, fstart[k], w_cursor, ftotal[k])
+            off = w_cursor if compact_buffer else fstart[k]
+            out_b.offsets[w_idx] = off
+            out_b.lengths[w_idx] = ftotal[k]
+            out_b.levels[w_idx] = p_cfg.level_error
+            out_b.modules[w_idx] = p_cfg.module_unknown
+            w_cursor = w_cursor + ftotal[k] if compact_buffer else fstart[k] + ftotal[k]
+            w_idx += 1
+        else:
+            # dropped frame: nothing emitted; without compaction the region stays as padding
+            if not compact_buffer:
+                w_cursor = fend[k]
+
+    if w_idx > start_out_idx:
+        out_b.devices[start_out_idx:w_idx] = device_id
+        out_b.size[0] = w_idx
+        out_b.msg_cursor[0] = w_cursor
 
     f_state.offset[0] = curr_write
     f_state.in_idx[0] = in_idx

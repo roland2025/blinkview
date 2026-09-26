@@ -17,6 +17,14 @@ class FrameStateParams(NamedTuple):
     in_offset: np.ndarray
     in_frame: np.ndarray
 
+    # Per-frame scratch for the stage-major kernel, indexed by frame ordinal within one kernel call. Its length
+    # also caps how many frames one call may reserve (the kernel returns out_full when it is reached).
+    fstart: np.ndarray  # int64: frame position in the output buffer as decoded
+    fcur: np.ndarray  # int64: cursor advanced by the pipeline steps
+    fend: np.ndarray  # int64: frame end in the output buffer
+    ftotal: np.ndarray  # int64: decoded frame length
+    fstatus: np.ndarray  # int8: per-frame status (see ops/stage.py FS_*)
+
 
 class FrameConfig(NamedTuple):
     decode_id: int  # ID of the decode function to use (e.g., nb_decode_newline_frame)

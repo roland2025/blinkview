@@ -10,10 +10,14 @@ from blinkview.core import dtypes
 from blinkview.core.types.frames import FrameStateParams
 
 
+# Upper bound on output rows one kernel call may reserve (bounds the per-frame scratch arrays)
+MAX_FRAMES_PER_CALL = 8192
+
+
 class FrameState:
     __slots__ = ("_pool_handle", "_ts_handle", "bundle")
 
-    def __init__(self, pool, size_bytes=4096):
+    def __init__(self, pool, size_bytes=4096, max_frames=MAX_FRAMES_PER_CALL):
         self._pool_handle = pool.acquire(size_bytes, dtype=dtypes.BYTE)
 
         self._ts_handle = pool.acquire(size_bytes, dtype=dtypes.TS_TYPE)
@@ -27,6 +31,11 @@ class FrameState:
             in_idx=np.zeros(1, dtype=np.int64),
             in_offset=np.zeros(1, dtype=np.int64),
             in_frame=np.zeros(1, dtype=np.bool_),
+            fstart=np.empty(max_frames, dtype=np.int64),
+            fcur=np.empty(max_frames, dtype=np.int64),
+            fend=np.empty(max_frames, dtype=np.int64),
+            ftotal=np.empty(max_frames, dtype=np.int64),
+            fstatus=np.zeros(max_frames, dtype=np.int8),
         )
 
     def reset_batch_trackers(self):

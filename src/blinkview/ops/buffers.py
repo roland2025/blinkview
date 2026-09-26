@@ -4,22 +4,101 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-# --- Configuration Constants ---
-# The threshold where Numba's loop-lifting becomes less efficient than
-# calling the C-library's optimized memcpy/memmove (in bytes).
-from blinkview.core.numba_config import app_njit
+import numpy as np
 
+from blinkview.core.numba_config import NUMBA_DISABLE, app_njit
+
+# Below this size nb_fill_buf loops instead of slice-assigning
 COPY_THRESHOLD = 256
+
+# Constants for the word-at-a-time (SWAR) byte search
+_ONES = np.uint64(0x0101010101010101)
+_HIGH = np.uint64(0x8080808080808080)
+
+if NUMBA_DISABLE:
+
+    def nb_memmove(dst, dst_off, src, src_off, length):
+        """memmove between (possibly identical) arrays; numpy slice assignment handles overlap."""
+        dst[dst_off : dst_off + length] = src[src_off : src_off + length]
+
+    def nb_find_byte(buf, start, end, value):
+        """Index of the first `value` byte in buf[start:end], or `end` if there is none."""
+        i = start
+        while i < end and buf[i] != value:
+            i += 1
+        return i
+
+else:
+    from llvmlite import ir
+    from numba import types
+    from numba.extending import intrinsic
+
+    @intrinsic
+    def _nb_memmove_addr(typingctx, dst, src, length):
+        sig = types.void(types.int64, types.int64, types.int64)
+
+        def codegen(context, builder, sig, args):
+            i8p = ir.PointerType(ir.IntType(8))
+            fn = builder.module.declare_intrinsic("llvm.memmove", [i8p, i8p, ir.IntType(64)])
+            builder.call(
+                fn,
+                [
+                    builder.inttoptr(args[0], i8p),
+                    builder.inttoptr(args[1], i8p),
+                    args[2],
+                    ir.Constant(ir.IntType(1), 0),
+                ],
+            )
+            return context.get_dummy_value()
+
+        return sig, codegen
+
+    @intrinsic
+    def _nb_load_u64(typingctx, addr):
+        sig = types.uint64(types.int64)
+
+        def codegen(context, builder, sig, args):
+            return builder.load(builder.inttoptr(args[0], ir.PointerType(ir.IntType(64))), align=1)
+
+        return sig, codegen
+
+    @app_njit(inline="always")
+    def nb_memmove(dst, dst_off, src, src_off, length):
+        """memmove between (possibly identical) arrays via llvm.memmove.
+
+        Much cheaper than numba slice assignment (~35 ns fixed cost per call) or a byte loop for the small
+        payloads that dominate log parsing. Arrays must be C-contiguous."""
+        size = dst.itemsize
+        _nb_memmove_addr(
+            np.int64(dst.ctypes.data) + dst_off * size,
+            np.int64(src.ctypes.data) + src_off * size,
+            length * size,
+        )
+
+    @app_njit(inline="always")
+    def nb_find_byte(buf, start, end, value):
+        """Index of the first `value` byte in buf[start:end], or `end` if there is none.
+
+        Scans 8 bytes per step (zero-byte test on word ^ broadcast value), then finishes bytewise. Never reads
+        outside [start, end). Only detects *some* matching byte within a word, so endianness is irrelevant."""
+        i = start
+        pattern = np.uint64(value) * _ONES
+        base = np.int64(buf.ctypes.data)
+        while i + 8 <= end:
+            w = _nb_load_u64(base + i) ^ pattern
+            if ((w - _ONES) & ~w & _HIGH) != np.uint64(0):
+                break
+            i += 8
+        while i < end and buf[i] != value:
+            i += 1
+        return i
 
 
 @app_njit(inline="always")
 def nb_copy_buf(src, src_off, dst, dst_off, length):
-    """Hybrid copy: Loop for small, Slicing for large."""
-    if length < COPY_THRESHOLD:
-        for i in range(length):
-            dst[dst_off + i] = src[src_off + i]
-    else:
-        dst[dst_off : dst_off + length] = src[src_off : src_off + length]
+    """Copy `length` items from src to dst (memmove semantics)."""
+    if length > 0:
+        nb_memmove(dst, dst_off, src, src_off, length)
 
 
 @app_njit(inline="always")
@@ -58,25 +137,10 @@ def nb_sync_shift_leftovers(f_buf, f_ts_buf, target_buf, target_off, ts_in, is_z
 
 @app_njit(inline="always")
 def nb_move_buf(buf, src_off, dst_off, length):
-    """
-    Safely moves data within the same buffer (memmove equivalent).
-    Handles overlapping regions by checking direction.
-    """
+    """Safely moves data within the same buffer (memmove; overlapping regions are fine)."""
     if length <= 0 or src_off == dst_off:
         return
-
-    if dst_off < src_off:
-        # Left Shift: Safe to use a forward loop or slice (Numba handles this)
-        if length < COPY_THRESHOLD:
-            for i in range(length):
-                buf[dst_off + i] = buf[src_off + i]
-        else:
-            buf[dst_off : dst_off + length] = buf[src_off : src_off + length]
-    else:
-        # Right Shift: MUST use a backward loop to avoid overwriting source
-        # (Though compaction is almost always a left shift)
-        for i in range(length - 1, -1, -1):
-            buf[dst_off + i] = buf[src_off + i]
+    nb_memmove(buf, dst_off, buf, src_off, length)
 
 
 @app_njit(inline="always")

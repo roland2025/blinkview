@@ -6,6 +6,7 @@
 
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.parsing import STATE_COMPLETE
+from blinkview.ops.buffers import nb_copy_buf
 
 
 @app_njit()
@@ -75,7 +76,7 @@ def nb_decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg, f_sta
                 break
 
     if not needs_filtering:
-        out_buf[cursor : cursor + process_len] = f_buf[start : start + process_len]
+        nb_copy_buf(f_buf, start, out_buf, cursor, process_len)
         return STATE_COMPLETE, cursor + process_len, bytes_consumed
 
     ansi_state = 0
@@ -106,6 +107,25 @@ def nb_decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg, f_sta
         cursor += 1
 
     return STATE_COMPLETE, cursor, bytes_consumed
+
+
+@app_njit(inline="always")
+def nb_decode_newline_plain(f_buf, start, end, out_buf, out_cursor, trim_r):
+    """nb_decode_newline_frame for the no-filter case, taking only arrays and scalars so it inlines without
+    refcounting the config/state tuples. Same results as the general decoder with both filters off."""
+    true_end = end - 1  # 'end' is exclusive and f_buf[end - 1] is the delimiter
+    if trim_r and true_end > start and f_buf[true_end - 1] == 13:
+        true_end -= 1
+
+    process_len = true_end - start
+    available = out_buf.shape[0] - out_cursor
+    if process_len > available:
+        process_len = available
+    if process_len <= 0:
+        return STATE_COMPLETE, out_cursor, end - start
+
+    nb_copy_buf(f_buf, start, out_buf, out_cursor, process_len)
+    return STATE_COMPLETE, out_cursor + process_len, end - start
 
 
 @app_njit()
