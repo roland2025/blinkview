@@ -9,12 +9,20 @@ from blinkview.core.types.modules import MODULE_ID_FULL, MODULE_ID_UNKNOWN, MODU
 from blinkview.ops.strings import nb_fnv1a_64_fast
 
 
-@app_njit()
+@app_njit(inline="always")
 def nb_resolve_module_id(name_buffer, name_start, name_len, table, tracker):
     if name_len == 0:
         return MODULE_ID_UNKNOWN
 
     name_hash = nb_fnv1a_64_fast(name_buffer, name_start, name_len)
+    return nb_resolve_module_id_hashed(name_buffer, name_start, name_len, name_hash, table, tracker)
+
+
+@app_njit(inline="always")
+def nb_resolve_module_id_hashed(name_buffer, name_start, name_len, name_hash, table, tracker):
+    """nb_resolve_module_id for callers that already hold the FNV-1a hash of the name."""
+    if name_len == 0:
+        return MODULE_ID_UNKNOWN
 
     # Check Permanent Registry (ByteMap)
     bm_buffer = table.buffer

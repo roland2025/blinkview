@@ -4,6 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import numpy as np
+
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.modules import MODULE_ID_FULL
 from blinkview.ops.constants import (
@@ -16,7 +18,7 @@ from blinkview.ops.constants import (
     CHAR_TAB,
     CHAR_UNDERSCORE,
 )
-from blinkview.ops.discovery import nb_resolve_module_id
+from blinkview.ops.discovery import nb_resolve_module_id, nb_resolve_module_id_hashed
 from blinkview.ops.strings import (
     nb_is_alpha,
     nb_is_digit,
@@ -26,7 +28,7 @@ from blinkview.ops.strings import (
 )
 
 
-@app_njit()
+@app_njit(inline="always")
 def nb_normalize_name_inplace(buffer, start_idx, length):
     """
     Converts A-Z to lowercase.
@@ -35,6 +37,8 @@ def nb_normalize_name_inplace(buffer, start_idx, length):
     Squashes duplicate dots and duplicate underscores.
     Strips leading and trailing separators.
     """
+    start_idx = np.int64(start_idx)
+    length = np.int64(length)
     write_idx = start_idx
     last_written = CHAR_NULL
 
@@ -145,81 +149,103 @@ def nb_parse_fixed_width_name(
     return start_cursor + actual_width
 
 
-@app_njit(inline="always")
-def nb_parse_module_tags_statemachine(
-    buffer,
-    cursor,
-    end_cursor,  # Inputs
-    out_b,
-    out_idx,  # Outputs
-    state,  # Mutable State
-    unified_config,  # Read-only Config
-):
-    tracker = state.modules
-    write_start = tracker.bytes_cursor[0]
-    write_ptr = write_start
+# Character tables for the single-pass tag parser below.
+# NORM[c] is what nb_normalize_name_inplace turns c into (lowercase alnum, '.', or '_');
+# VALID[c] marks the characters allowed in an unbracketed "word:" tag: [0-9A-Za-z_./-].
+NORM = np.full(256, 95, dtype=np.uint8)
+VALID = np.zeros(256, dtype=np.uint8)
+for _c in range(256):
+    if 48 <= _c <= 57 or 97 <= _c <= 122:
+        NORM[_c] = _c
+        VALID[_c] = 1
+    elif 65 <= _c <= 90:
+        NORM[_c] = _c + 32
+        VALID[_c] = 1
+    elif _c == 46:
+        NORM[_c] = 46
+        VALID[_c] = 1
+    elif _c in (95, 45, 47):
+        VALID[_c] = 1
 
+FNV_PRIME = np.uint64(1099511628211)
+FNV_BASIS = np.uint64(14695981039346656037)
+
+
+@app_njit(inline="always")
+def _put(nc, nb, w, hw, last, h):
+    """Streaming normalize of one char (already mapped through NORM) with incremental FNV-1a.
+    w = physical write index, hw = index up to which h has folded (excludes pending separators)."""
+    if nc != 46 and nc != 95:
+        while hw < w:
+            h = (h ^ np.uint64(nb[hw])) * FNV_PRIME
+            hw += 1
+        nb[w] = nc
+        w += 1
+        h = (h ^ np.uint64(nc)) * FNV_PRIME
+        hw = w
+        last = nc
+    elif last != 0 and last != nc:
+        nb[w] = nc
+        w += 1
+        last = nc
+    return w, hw, last, h
+
+
+@app_njit(inline="always")
+def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx, state, unified_config):
+    tracker = state.modules
+    write_start = np.int64(tracker.bytes_cursor[0])
+    nb = tracker.name_bytes
     config = unified_config.module_config
 
     tag_count = 0
-    curr = cursor
     in_bracket_mode = False
 
     prefix_len = config.prefix_bytes.size
     if prefix_len > 0 and (config.prefix_match or config.prefix_remove):
         temp_curr = cursor
-
-        # 1. Skip any leading whitespace leading up to the tag
         while temp_curr < end_cursor and nb_is_whitespace(buffer[temp_curr]):
             temp_curr += 1
-
-        # 2. Check if the remaining buffer is even long enough to hold the prefix
         if temp_curr + prefix_len > end_cursor:
             if config.prefix_match:
-                return -1  # Bail early: Line too short
+                return -1
         else:
-            # 3. Direct Numba-friendly byte comparison
             has_prefix = True
             for i in range(prefix_len):
                 if buffer[temp_curr + i] != config.prefix_bytes[i]:
                     has_prefix = False
                     break
-
-            # 4. BAIL EARLY if it doesn't match
             if config.prefix_match and not has_prefix:
                 return -1
-
-            # 5. Remove the prefix by simply jumping the cursor forward
             if config.prefix_remove and has_prefix:
                 cursor = temp_curr + prefix_len
-
-                # Optional: If you want to strip the trailing dot (e.g. "Elixir.")
-                # and your prefix config doesn't include the dot, do it here.
                 if cursor < end_cursor and buffer[cursor] == CHAR_DOT:
                     cursor += 1
 
-    # Update the starting position for the main state machine
     curr = cursor
+    max_length = config.max_length
+    max_depth = config.max_depth
+
+    raw_len = 0  # projected pre-normalisation length, for the max_length rule
+    w = write_start
+    hw = write_start
+    last = 0
+    h = FNV_BASIS
 
     while curr < end_cursor:
-        # 1. Skip whitespace using utility
         while curr < end_cursor and nb_is_whitespace(buffer[curr]):
             curr += 1
-
         if curr >= end_cursor:
             break
 
         saw_dot = False
         if config.enable_dot_separator:
-            if curr < end_cursor and buffer[curr] == CHAR_DOT:
+            if buffer[curr] == CHAR_DOT:
                 while curr < end_cursor and buffer[curr] == CHAR_DOT:
                     curr += 1
                 saw_dot = True
-
-                # Consume any trailing whitespace after the dots
                 while curr < end_cursor and nb_is_whitespace(buffer[curr]):
                     curr += 1
-
                 if curr >= end_cursor:
                     break
 
@@ -228,117 +254,81 @@ def nb_parse_module_tags_statemachine(
         if tag_count > 0:
             if first_char != CHAR_LBRACKET:
                 if in_bracket_mode:
-                    # Terminate if we were chaining brackets but hit standard text
                     break
                 elif not saw_dot:
-                    # Terminate if it's a new word with NO dot separator connecting them.
-                    # This protects 'gnss: SNR_Max:' while allowing 'events: ...util:'
                     break
 
-        found_current_tag = False
-        tag_len = 0
-        tag_data_start = 0
-        move_cursor_to = 0
+        sep_len = 1 if tag_count > 0 else 0
+        # trial state
+        tw = w
+        thw = hw
+        tlast = last
+        th = h
+        if tag_count > 0:
+            tw, thw, tlast, th = _put(46, nb, tw, thw, tlast, th)
 
-        # --- BRANCH A: Bracketed Tag [...] ---
         if config.enable_brackets and first_char == CHAR_LBRACKET:
             tag_data_start = curr + 1
             scan_ptr = tag_data_start
             while scan_ptr < end_cursor and buffer[scan_ptr] != CHAR_RBRACKET:
                 scan_ptr += 1
-
-            if scan_ptr < end_cursor and buffer[scan_ptr] == CHAR_RBRACKET:
-                tag_len = scan_ptr - tag_data_start
-                move_cursor_to = scan_ptr + 1
-                if move_cursor_to < end_cursor and buffer[move_cursor_to] == CHAR_COLON:
-                    move_cursor_to += 1
-
-                found_current_tag = True
-                in_bracket_mode = True
-            else:
+            if scan_ptr >= end_cursor:
                 return -1
-
-        # --- BRANCH B: Word ending in colon ---
+            tag_len = scan_ptr - tag_data_start
+            move_cursor_to = scan_ptr + 1
+            if move_cursor_to < end_cursor and buffer[move_cursor_to] == CHAR_COLON:
+                move_cursor_to += 1
+            in_bracket_mode = True
+            if tag_len == 0 or tag_count >= max_depth or raw_len + sep_len + tag_len > max_length:
+                return -1
+            for i in range(tag_len):
+                tw, thw, tlast, th = _put(NORM[buffer[tag_data_start + i]], nb, tw, thw, tlast, th)
         else:
             tag_data_start = curr
             scan_ptr = curr
-            valid_word_tag = True
-
+            overflow = False
             while scan_ptr < end_cursor:
-                char = buffer[scan_ptr]
-
-                # Break on whitespace boundaries
-                if nb_is_whitespace(char):
+                c = buffer[scan_ptr]
+                if VALID[c] == 0:
                     break
-
-                if char == CHAR_COLON:
-                    # LOOKAHEAD: A colon only terminates a tag if it's the last character.
-                    # If the next character is not whitespace (or EOF), the colon is INSIDE the word.
-                    if scan_ptr + 1 < end_cursor and not nb_is_whitespace(buffer[scan_ptr + 1]):
-                        valid_word_tag = False
-                    break
-
-                # ENFORCEMENT: Only allow standard identifier characters.
-                if not (
-                    (48 <= char <= 57)  # 0-9
-                    or (65 <= char <= 90)  # A-Z
-                    or (97 <= char <= 122)  # a-z
-                    or char == 95
-                    or char == 45  # _ or -
-                    or char == 46
-                    or char == 47  # . or /
-                ):
-                    valid_word_tag = False
-                    break
-
+                if raw_len + sep_len + (scan_ptr - curr) < max_length:
+                    tw, thw, tlast, th = _put(NORM[c], nb, tw, thw, tlast, th)
+                else:
+                    overflow = True
                 scan_ptr += 1
 
-            # Only accept if it's purely valid chars AND stopped cleanly on a final colon
-            if valid_word_tag and tag_data_start < scan_ptr < end_cursor and buffer[scan_ptr] == CHAR_COLON:
-                tag_len = scan_ptr - tag_data_start
-                move_cursor_to = scan_ptr + 1
-                found_current_tag = True
-            else:
+            ok = False
+            if tag_data_start < scan_ptr < end_cursor and buffer[scan_ptr] == CHAR_COLON:
+                if scan_ptr + 1 >= end_cursor or nb_is_whitespace(buffer[scan_ptr + 1]):
+                    ok = True
+            if not ok:
                 if tag_count == 0:
                     return -1
                 break
-
-        # --- TAG VALIDATION & WRITE ---
-        if found_current_tag:
-            if tag_len == 0 or tag_count >= config.max_depth:
+            tag_len = scan_ptr - tag_data_start
+            move_cursor_to = scan_ptr + 1
+            if tag_count >= max_depth or overflow or raw_len + sep_len + tag_len > max_length:
                 return -1
 
-            sep_len = 1 if tag_count > 0 else 0
-            total_projected_len = (write_ptr - write_start) + sep_len + tag_len
-            if total_projected_len > config.max_length:
-                return -1
-
-            if tag_count > 0:
-                tracker.name_bytes[write_ptr] = CHAR_DOT
-                write_ptr += 1
-
-            for i in range(tag_len):
-                tracker.name_bytes[write_ptr + i] = buffer[tag_data_start + i]
-
-            write_ptr += tag_len
-            tag_count += 1
-            curr = move_cursor_to
+        raw_len += sep_len + tag_len
+        w = tw
+        hw = thw
+        last = tlast
+        h = th
+        tag_count += 1
+        curr = move_cursor_to
 
     if tag_count == 0:
         return -1
 
-    logical_len = write_ptr - write_start
-    final_len = int(nb_normalize_name_inplace(tracker.name_bytes, write_start, logical_len))
-
+    final_len = hw - write_start
     if final_len <= 0:
         return -1
 
-    mod_id = nb_resolve_module_id(tracker.name_bytes, write_start, final_len, unified_config.string_table, tracker)
+    mod_id = nb_resolve_module_id_hashed(nb, write_start, final_len, h, unified_config.string_table, tracker)
     if mod_id == MODULE_ID_FULL:
         return -1
-
     out_b.modules[out_idx] = mod_id
-
     return nb_skip_whitespace(buffer, curr, end_cursor)
 
 

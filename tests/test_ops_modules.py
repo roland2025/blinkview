@@ -394,3 +394,52 @@ class TestParseRSyslogTag:
 
         start, length = tracker.starts[0], tracker.lengths[0]
         assert bytes(tracker.name_bytes[start : start + length]).decode() == "very"
+
+
+class TestStatemachineSinglePassNormalization:
+    """The state machine normalizes and hashes while scanning. Its stored name and hash must equal
+    what the separate nb_normalize_name_inplace + nb_fnv1a_64_fast passes produce."""
+
+    def test_stored_name_and_hash_match_two_pass_result(self):
+        import random
+
+        from blinkview.core.types.parsing import UnifiedParserState
+        from blinkview.ops.strings import nb_fnv1a_64_fast
+
+        rng = random.Random(7)
+        word_chars = "abcXYZ019_-./"
+        bracket_chars = word_chars + " :$#"
+        accepted = 0
+
+        for _ in range(3000):
+            # Chains the parser consumes completely: all-bracket, or all-word joined by dots.
+            bracketed = rng.random() < 0.5
+            chars = bracket_chars if bracketed else word_chars
+            tags = ["".join(rng.choice(chars) for _ in range(rng.randint(1, 8))) for _ in range(rng.randint(1, 3))]
+            if bracketed:
+                msg = "".join(f"[{t}]" for t in tags)
+            else:
+                msg = ".".join(f"{t}:" if i == len(tags) - 1 else t for i, t in enumerate(tags))
+            msg += " payload"
+
+            tracker = _tracker()
+            table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
+            module_config = DynamicWidthConfig(
+                max_length=64, max_depth=4, enable_brackets=True, enable_dot_separator=True
+            )
+            config = UnifiedParserConfig(module_config=module_config, string_table=table)
+            result = nb_parse_module_tags_statemachine(
+                _buf(msg), 0, len(msg), _out_bundle(), 0, UnifiedParserState(modules=tracker), config
+            )
+            if result == -1:
+                continue
+            accepted += 1
+
+            joined = ".".join(tags)
+            raw = _buf(joined)
+            n = nb_normalize_name_inplace(raw, 0, len(joined))
+            stored = bytes(tracker.name_bytes[: tracker.lengths[0]])
+            assert stored == bytes(raw[:n]), msg
+            assert tracker.hashes[0] == nb_fnv1a_64_fast(raw, 0, n), msg
+
+        assert accepted > 500
