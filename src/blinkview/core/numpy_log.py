@@ -507,8 +507,12 @@ class CircularLogPool:
                 self.active_segment = None
             for seg in to_drop:
                 seg.release()
+            # block=True: the whole hot tier is handed over at once, typically far more segments
+            # than the archiver's small queue holds - a non-blocking hand-off would drop the rest
+            # (the newest data of the session). Waiting is fine here; this is teardown, not the
+            # ingestion path.
             for seg in to_archive:
-                self._archiver.archive(seg)
+                self._archiver.archive(seg, block=True)
 
         # Stop the archiver (and let it drain whatever's already in its queue - including any
         # hot segments just handed off above) *before* draining segments/cold_segments -

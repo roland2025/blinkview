@@ -325,6 +325,32 @@ class TestPersistColdStorageOnClose:
         last_seqs = sorted(read_cold_segment_header(p).last_seq for p in blkseg_files)
         assert last_seqs == [1, 2, 3, 4]
 
+    def test_release_all_persists_a_hot_tier_larger_than_the_archiver_queue(self, global_pool, tmp_path):
+        """12 hot one-row segments against the archiver's 4-deep queue: release_all() must wait
+        for queue space rather than drop whatever doesn't fit - closing the app must not lose the
+        newest part of the session."""
+        pool = CircularLogPool(
+            global_pool,
+            max_pieces=16,
+            cold_max_pieces=64,
+            cold_storage_dir=str(tmp_path),
+            final_buffer_bytes=1024,
+            persist_cold_storage=True,
+        )
+        pool.segment_capacity = 1
+        pool._optimized = True
+        pool.clear()
+
+        push_rows(pool, global_pool, 12, ts_start=100)
+        assert len(pool.cold_segments) == 0  # everything still hot
+
+        pool.release_all()
+
+        from blinkview.core.cold_segment import read_cold_segment_header
+
+        last_seqs = sorted(read_cold_segment_header(p).last_seq for p in tmp_path.glob("segment_*.blkseg"))
+        assert last_seqs == list(range(1, 13))
+
     def test_reopening_the_same_directory_remounts_and_continues_sequence(self, global_pool, tmp_path):
         pool = CircularLogPool(
             global_pool,

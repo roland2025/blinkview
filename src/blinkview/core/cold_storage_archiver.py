@@ -20,6 +20,10 @@ from typing import Callable, Optional, Union
 from blinkview.core.cold_segment import ColdSegmentMeta, write_cold_segment_file
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 
+# archive(block=True)'s wait for queue space before giving up and dropping the segment - only
+# reachable if the writer thread has stalled on disk for this long.
+ARCHIVE_BLOCK_TIMEOUT_S = 60.0
+
 
 class ColdStorageArchiver:
     def __init__(
@@ -86,14 +90,22 @@ class ColdStorageArchiver:
 
         return highest + 1
 
-    def archive(self, segment: PooledLogBatch) -> bool:
+    def archive(self, segment: PooledLogBatch, block: bool = False) -> bool:
         """Takes ownership of `segment`'s caller-held reference (the caller must not touch it
         again after calling this). Returns True if it was queued for background writing, False if
         the queue was full and the segment was dropped (released) immediately instead - same
         end-user-visible behavior as today's unconditional release-on-evict, just usually
-        deferred to disk first."""
+        deferred to disk first.
+
+        `block=True` waits for queue space instead of dropping (up to ARCHIVE_BLOCK_TIMEOUT_S) -
+        for a caller deliberately persisting a whole tier at once (CircularLogPool.release_all),
+        which would otherwise overrun the small queue and drop most of it. Never used on the
+        ingestion path, which must not wait on disk."""
         try:
-            self._queue.put_nowait(segment)
+            if block:
+                self._queue.put(segment, timeout=ARCHIVE_BLOCK_TIMEOUT_S)
+            else:
+                self._queue.put_nowait(segment)
             return True
         except queue.Full:
             if self._logger:
