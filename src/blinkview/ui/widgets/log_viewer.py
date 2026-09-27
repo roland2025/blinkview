@@ -119,8 +119,6 @@ QToolButton[filterEnabled="true"] {
 
         self.logger = gui_context.logger.child("log_viewer")
 
-        self.latest_seq_manual = SEQ_NONE
-
         self.prev_apply = 0  # Timestamp of the last apply_updates call for throttling
         self.prev_history_poll = 0  # Timestamp of the last history-mode tail poll, same throttle window
 
@@ -282,8 +280,12 @@ QToolButton[filterEnabled="true"] {
         self.toolbar.addSeparator()
 
         self.action_clear = QAction("Clear", self)
+        self.action_clear.setToolTip("Clear this view")
         self.action_clear.triggered.connect(self.clear_logs)
         self.toolbar.addAction(self.action_clear)
+        clear_button = self.toolbar.widgetForAction(self.action_clear)
+        clear_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        clear_button.customContextMenuRequested.connect(self._restore_cleared_logs)
 
         self.auto_paused = False
         self._is_catching_up = True
@@ -801,7 +803,7 @@ QToolButton[filterEnabled="true"] {
         if generation == self._session_generation:
             return False
         self._session_generation = generation
-        self.latest_seq_manual = SEQ_NONE
+        self._set_clear_floor(SEQ_NONE)
         self._last_followed_ts_ns = None
         self._redraw_history()
         return True
@@ -857,7 +859,8 @@ QToolButton[filterEnabled="true"] {
             self._playback.state = FollowState.LIVE
 
             # Reset trackers so apply_updates fetches everything again
-            self._fetcher.latest_seq_seen = self.latest_seq_manual
+            # scan_tail clamps to the scanner's Clear floor itself
+            self._fetcher.latest_seq_seen = SEQ_NONE
             self.velocity_tracker.reset()
             self._is_catching_up = True
 
@@ -889,10 +892,27 @@ QToolButton[filterEnabled="true"] {
 
         log_pool = self.gui_context.registry.central.log_pool
 
-        self.latest_seq_manual = self._fetcher.latest_seq_seen = log_pool.latest_sequence()
+        self._fetcher.latest_seq_seen = log_pool.latest_sequence()
+        self._set_clear_floor(self._fetcher.latest_seq_seen)
 
         self.velocity_tracker.reset()
         self._is_catching_up = True
+
+    def _set_clear_floor(self, floor_seq: int):
+        """Hard lower bound for every fetch in this tab (live tail, filter refresh, history
+        paging) - rows at/before the last Clear stay hidden until the floor is lifted."""
+        self._scanner.floor_seq = floor_seq
+        if floor_seq == SEQ_NONE:
+            self.action_clear.setToolTip("Clear this view")
+        else:
+            self.action_clear.setToolTip("Clear this view (right-click: show cleared rows again)")
+
+    def _restore_cleared_logs(self, _pos=None):
+        """Right-click on Clear: lift the floor and rebuild, so the cleared rows reappear."""
+        if self._scanner.floor_seq == SEQ_NONE:
+            return
+        self._set_clear_floor(SEQ_NONE)
+        self._redraw_history()
 
     # --- Live/history mode transitions -----------------------------------------------------
 

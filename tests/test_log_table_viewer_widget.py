@@ -247,11 +247,12 @@ class TestClearLogs:
             model=SimpleNamespace(clear_logs=lambda: calls.append("clear")),
             view=SimpleNamespace(selected_seq="prev", request_repaint=lambda: calls.append("repaint")),
             _set_live_ui_state=lambda: calls.append("live_ui"),
+            _update_clear_tooltip=lambda: calls.append("tooltip"),
         )
 
         LogTableViewerWidget.clear_logs(stub)
 
-        assert calls == ["clear", "live_ui", "repaint"]
+        assert calls == ["clear", "live_ui", "tooltip", "repaint"]
         assert stub.view.selected_seq is None
 
 

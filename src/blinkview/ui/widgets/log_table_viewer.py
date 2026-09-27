@@ -514,9 +514,21 @@ class LogTableStore:
         self._message_cache = [None] * self.capacity
         log_pool = self.gui_context.registry.central.log_pool
         self._last_backend_seq = log_pool.latest_sequence()
+        # Hard lower bound for every later fetch (live, full rescan, history) - see floor_seq.
+        self._scanner.floor_seq = self._last_backend_seq
         self.mode = LogViewMode.LIVE
         self.anchor_seq = None
         self.anchor_ts = None
+
+    @property
+    def floor_seq(self) -> int:
+        """Per-tab Clear point: rows with seq <= floor_seq are hidden from every fetch until it's
+        lifted (set back to SEQ_NONE)."""
+        return self._scanner.floor_seq
+
+    @floor_seq.setter
+    def floor_seq(self, value: int):
+        self._scanner.floor_seq = value
 
     def reload_and_redraw(self):
         """Forces a re-fetch under the current mode (used when filter settings change - same
@@ -1192,8 +1204,12 @@ QToolButton[manualPaused="true"] {
         self.toolbar.addSeparator()
 
         self.action_clear = QAction("Clear", self)
+        self.action_clear.setToolTip("Clear this view")
         self.action_clear.triggered.connect(self.clear_logs)
         self.toolbar.addAction(self.action_clear)
+        clear_button = self.toolbar.widgetForAction(self.action_clear)
+        clear_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        clear_button.customContextMenuRequested.connect(self._restore_cleared_logs)
 
         self.auto_paused = False
         self._is_catching_up = True
@@ -1473,6 +1489,8 @@ QToolButton[manualPaused="true"] {
         self._session_generation = generation
         self._last_followed_ts_ns = None
         self.view.selected_seq = None
+        self.model.floor_seq = SEQ_NONE  # pointed into the previous session
+        self._update_clear_tooltip()
         self._go_live()
         return True
 
@@ -1561,7 +1579,22 @@ QToolButton[manualPaused="true"] {
         self.model.clear_logs()
         self.view.selected_seq = None
         self._set_live_ui_state()
+        self._update_clear_tooltip()
         self.view.request_repaint()
+
+    def _restore_cleared_logs(self, _pos=None):
+        """Right-click on Clear: lift the floor and refetch, so the cleared rows reappear."""
+        if self.model.floor_seq == SEQ_NONE:
+            return
+        self.model.floor_seq = SEQ_NONE
+        self._update_clear_tooltip()
+        self._go_live()
+
+    def _update_clear_tooltip(self):
+        if self.model.floor_seq == SEQ_NONE:
+            self.action_clear.setToolTip("Clear this view")
+        else:
+            self.action_clear.setToolTip("Clear this view (right-click: show cleared rows again)")
 
     # --- Live/history mode transitions -----------------------------------------------------
 

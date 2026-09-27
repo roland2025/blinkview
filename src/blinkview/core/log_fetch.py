@@ -90,6 +90,10 @@ class LogSegmentScanner:
         self._filter_cache = None
         self._filter_cache_computed = False
         self._effective_mask = None
+        # Per-view hard lower bound (exclusive, like start_seq): rows with seq <= floor_seq are
+        # invisible to every scan below - live tail, full rescan and history paging alike. Set by
+        # a viewer's per-tab Clear, lifted again (SEQ_NONE) to bring the older rows back.
+        self.floor_seq = SEQ_NONE
 
     def invalidate_mask(self) -> None:
         self._effective_mask = None
@@ -185,6 +189,7 @@ class LogSegmentScanner:
         self.ensure_effective_mask()
         kv = self.log_filter.bake_kv_arrays()
         text = self.log_filter.bake_text_search()
+        start_seq = max(start_seq, self.floor_seq)
 
         total_new_rows = 0
         reached_live_edge = True
@@ -260,6 +265,7 @@ class LogSegmentScanner:
 
         has_seq_anchor = anchor_seq is not None and anchor_seq > dtypes.SEQ_START
         has_ts_anchor = anchor_ts is not None
+        floor_seq = self.floor_seq
 
         # --- "Before" set: matches strictly before the anchor, scanning newest-to-oldest ---
         before_count = 0
@@ -278,6 +284,10 @@ class LogSegmentScanner:
                     if allowed <= 0:
                         break
 
+                    # Newest-to-oldest: once a segment ends at/below the floor, so does the rest.
+                    if segment.last_sequence_id <= floor_seq:
+                        break
+
                     # Skip segments that provably can't contain a match before calling into the
                     # (binary-search-based) kernel - both checks are plain-int cache reads
                     # (PooledLogBatch.first_sequence_id/start_ts), cheap for hot and cold segments
@@ -294,6 +304,7 @@ class LogSegmentScanner:
                         effective_mask=self._effective_mask,
                         out_indices=indices.array,
                         max_matches=allowed,
+                        start_seq=floor_seq,
                         kv=kv,
                         text=text,
                         **before_kwargs,
@@ -317,11 +328,13 @@ class LogSegmentScanner:
         newest_seq = anchor_seq if has_seq_anchor else None
 
         if has_seq_anchor:
-            after_kwargs = {"start_seq": anchor_seq - 1}  # start_seq is an exclusive lower bound
+            # start_seq is an exclusive lower bound
+            after_kwargs = {"start_seq": max(anchor_seq - 1, floor_seq)}
         elif has_ts_anchor:
-            after_kwargs = {"start_ts": anchor_ts}  # start_ts is an inclusive lower bound - no -1
+            # start_ts is an inclusive lower bound - no -1
+            after_kwargs = {"start_ts": anchor_ts, "start_seq": floor_seq}
         else:
-            after_kwargs = {"start_seq": SEQ_NONE}
+            after_kwargs = {"start_seq": floor_seq}
 
         with log_pool.get_snapshot() as segments, log_pool.acquire_indices_buffer() as indices:
             for segment in segments:
@@ -333,6 +346,8 @@ class LogSegmentScanner:
                     break
 
                 # Mirror image of the before-loop's skip above.
+                if segment.last_sequence_id <= floor_seq:
+                    continue
                 if has_seq_anchor and segment.last_sequence_id <= anchor_seq - 1:
                     continue
                 if has_ts_anchor and segment.end_ts < anchor_ts:
