@@ -13,7 +13,6 @@ from blinkview.core.configurable import (
 )
 from blinkview.core.frame_warmup_registry import frame_section_warmup
 from blinkview.core.id_registry.tables import IndexedStringTable
-from blinkview.core.types.parsing import EmptyUnifiedParserState, ParserID, UnifiedParserConfig
 from blinkview.ops.levels import nb_parse_log_level_stage
 from blinkview.parsers.frame_parsers import FrameSectionParser, FrameSectionParserFactory
 from blinkview.utils.log_level import LogLevel
@@ -50,7 +49,7 @@ class LevelMap(FrameSectionParser):
         self._table: Optional[IndexedStringTable] = None
 
         self._lookup = {}
-        self._bundle = None
+        self._table_bundle = None
 
     def apply_config(self, config):
         changed = super().apply_config(config)
@@ -75,20 +74,10 @@ class LevelMap(FrameSectionParser):
 
         self._table_bundle = self._table.bundle()
 
-        self._bundle = (
-            ParserID.LEVEL_NAME_MAP,
-            EmptyUnifiedParserState,
-            UnifiedParserConfig(string_table=self._table_bundle),
-        )
-
         return changed
 
     def kernel(self, octx, fctx, n):
         nb_parse_log_level_stage(octx, fctx, n, self._table_bundle)
-
-    def bundle(self):
-        """Returns the StringTableParams for backend processing."""
-        return self._bundle
 
     def table(self):
         return self._table

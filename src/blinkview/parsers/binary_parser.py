@@ -17,7 +17,7 @@ from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import SyncState, create_default_sync
 from blinkview.core.warmup_registry import register_warmup
-from blinkview.ops.dispatch import nb_finish_frames, nb_process_batch_kernel
+from blinkview.ops.dispatch import nb_finish_frames
 from blinkview.parsers import adb_decoder  # noqa: F401  (registers the ADB decoder/sections and their warmups)
 from blinkview.parsers.frame_decoders import FrameDecoder
 from blinkview.parsers.frame_parsers import GenericFrameParser
@@ -74,9 +74,6 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
     frame_parser: dict
     frame_decoder: dict
-
-    # Run the single monolithic kernel (nb_process_batch_kernel) instead of decoder.kernel -> section.kernel -> finish.
-    monolith = False
 
     def __init__(self):
         super().__init__()
@@ -160,14 +157,13 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
             codec = self._frame_codec
 
-            f_config = codec.bundle()
             frame_state = FrameState(pool, codec.frame_length_maximum)
             f_state = frame_state.bundle
 
             o_config = OutputConfig(compact_buffer=getattr(self, "compact_buffer", True))
 
             parser = self._frame_parser
-            parser_bundle = parser.bundle()
+            p_config = parser.bundle()
 
             stop_is_set = self._stop_event.is_set
 
@@ -204,11 +200,8 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 batch_out = None
                 batch_out_time = 0
 
-            # Stage-by-stage path (decode -> one kernel per pipeline section -> finish); the monolithic kernel
-            # only runs when BinaryParser.monolith is set.
-            monolith = self.monolith
+            # Stage-by-stage path: decode -> one kernel per pipeline section -> finish
             pipeline = parser.pipeline
-            p_config = parser_bundle.config
             fstart, fcur, fend, ftotal, fstatus = (
                 f_state.fstart,
                 f_state.fcur,
@@ -271,27 +264,20 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                         out_bundle = batch_out.bundle
 
                         start_time = time_ns()
-                        if monolith:
-                            # we keep dont touch nb_process_batch_kernel, to easily test the performance of the new nb_stage() function in isolation
-                            out_is_full = nb_process_batch_kernel(
-                                f_config, f_state, in_bundle, parser_bundle, o_config, out_bundle
+                        out_is_full, n = codec.kernel(f_state, in_bundle, p_config, o_config, out_bundle)
+                        if n:
+                            for section in pipeline:
+                                section.kernel(out_bundle, f_state, n)
+                            nb_finish_frames(
+                                fstart, fcur, fend, ftotal, fstatus, p_config, compact_buffer, out_bundle, n
                             )
-                        else:
-                            out_is_full, n = codec.kernel(f_state, in_bundle, p_config, o_config, out_bundle)
-                            if n:
-                                for section in pipeline:
-                                    section.kernel(out_bundle, f_state, n)
-                                nb_finish_frames(
-                                    fstart, fcur, fend, ftotal, fstatus, p_config, compact_buffer, out_bundle, n
-                                )
 
                         end_time = time_ns()
 
                         self.logger_batch.debug("%.6f", (end_time - start_time) / 1_000_000)
 
                         start_time = time_ns()
-                        if parser.post_process(batch_out) and monolith:
-                            parser_bundle = parser.bundle()
+                        parser.post_process(batch_out)
                         end_time = time_ns()
 
                         self.logger_post.debug("%.6f", (end_time - start_time) / 1_000_000)
@@ -344,14 +330,13 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
             codec = frame_codec
 
-            f_config = codec.bundle()
             frame_state = FrameState(pool, codec.frame_length_maximum)
             f_state = frame_state.bundle
 
             o_config = OutputConfig(compact_buffer=True)
 
             parser = frame_parser
-            parser_bundle = parser.bundle()
+            p_config = parser.bundle()
 
             def batch_acquire():
                 return pool_create(
@@ -410,32 +395,20 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 dummy_in.insert(time_ns(), time_ns(), msg_2_mv)
 
                 # 3. Trigger the kernels (this blocks the thread while LLVM does its work)
-                if BinaryParser.monolith:
-                    nb_process_batch_kernel(
-                        f_config,
-                        f_state,
-                        dummy_in.bundle,
-                        parser_bundle,
-                        o_config,
-                        dummy_out.bundle,
-                    )
-                else:
-                    _, n = frame_codec.kernel(
-                        f_state, dummy_in.bundle, parser_bundle.config, o_config, dummy_out.bundle
-                    )
-                    for section in frame_parser.pipeline:
-                        section.kernel(dummy_out.bundle, f_state, n)
-                    nb_finish_frames(
-                        f_state.fstart,
-                        f_state.fcur,
-                        f_state.fend,
-                        f_state.ftotal,
-                        f_state.fstatus,
-                        parser_bundle.config,
-                        o_config.compact_buffer,
-                        dummy_out.bundle,
-                        n,
-                    )
+                _, n = frame_codec.kernel(f_state, dummy_in.bundle, p_config, o_config, dummy_out.bundle)
+                for section in parser.pipeline:
+                    section.kernel(dummy_out.bundle, f_state, n)
+                nb_finish_frames(
+                    f_state.fstart,
+                    f_state.fcur,
+                    f_state.fend,
+                    f_state.ftotal,
+                    f_state.fstatus,
+                    p_config,
+                    o_config.compact_buffer,
+                    dummy_out.bundle,
+                    n,
+                )
                 frame_parser.post_process(dummy_out)
 
                 bin_processor = BinaryBatchProcessor()

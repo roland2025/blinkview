@@ -7,7 +7,6 @@
 import time
 from types import SimpleNamespace
 
-import pytest
 
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.factory_registry import FactoryRegistry
@@ -62,10 +61,7 @@ def _helper():
     return NumbaWarmupHelper(shared)
 
 
-@pytest.mark.parametrize("monolith", [False, True])
-def test_binary_parser_warmup_runs_every_registered_decoder_and_section(monkeypatch, monolith):
-    monkeypatch.setattr(BinaryParser, "monolith", monolith)
-
+def test_binary_parser_warmup_runs_every_registered_decoder_and_section(monkeypatch):
     built = []
     original = BinaryParser._warmup_config
 

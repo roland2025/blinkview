@@ -21,4 +21,3 @@ EMPTY_INDEX = np.empty(0, dtype=dtypes.INDEX_TYPE)
 
 ZERO_COUNT = np.zeros(1, dtype=dtypes.ID_TYPE)
 ZERO_CURSOR = np.zeros(1, dtype=dtypes.OFFSET_TYPE)
-ZERO_UTC_OFFSET = np.zeros(1, dtype=dtypes.TS_TYPE)

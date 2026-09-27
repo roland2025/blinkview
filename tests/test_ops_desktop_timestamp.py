@@ -11,14 +11,14 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.types.log_batch import LogBundle
 from blinkview.core.types.parsing import (
-    EmptyUnifiedParserConfig,
-    EmptyUnifiedParserState,
     SyncState,
-    TimeParserState,
-    UnifiedParserConfig,
-    UnifiedParserState,
+    UnusedSyncState,
 )
-from blinkview.ops.desktop_timestamp import nb_parse_iso8601_desktop, nb_parse_rfc3339, nb_parse_syslog_timestamp
+from blinkview.ops.desktop_timestamp import (
+    nb_parse_iso8601_desktop,
+    nb_parse_rfc3339,
+    nb_parse_syslog_timestamp,
+)
 
 
 def _out_bundle(capacity=1):
@@ -72,16 +72,12 @@ def _identity_sync_state():
     )
 
 
-def _identity_state():
-    return UnifiedParserState(timestamp=TimeParserState(sync=_identity_sync_state()))
-
-
 class TestParseIso8601Desktop:
     def test_python_logging_format_with_comma_separator(self):
         msg = "2026-01-15 10:23:01,456 INFO myapp.module: message"
         out_b = _out_bundle()
 
-        cursor = nb_parse_iso8601_desktop(_buf(msg), 0, len(msg), out_b, 0, _identity_state(), EmptyUnifiedParserConfig)
+        cursor = nb_parse_iso8601_desktop(_buf(msg), 0, len(msg), out_b, 0, _identity_sync_state())
 
         assert cursor == msg.index("INFO")
         expected = int(datetime(2026, 1, 15, 10, 23, 1, 456000, tzinfo=timezone.utc).timestamp() * 1e9)
@@ -91,7 +87,7 @@ class TestParseIso8601Desktop:
         msg = "2026-01-15 10:23:01.456 INFO myapp.module: message"
         out_b = _out_bundle()
 
-        cursor = nb_parse_iso8601_desktop(_buf(msg), 0, len(msg), out_b, 0, _identity_state(), EmptyUnifiedParserConfig)
+        cursor = nb_parse_iso8601_desktop(_buf(msg), 0, len(msg), out_b, 0, _identity_sync_state())
 
         assert cursor == msg.index("INFO")
         expected = int(datetime(2026, 1, 15, 10, 23, 1, 456000, tzinfo=timezone.utc).timestamp() * 1e9)
@@ -101,9 +97,7 @@ class TestParseIso8601Desktop:
         msg = "2026x01-15 10:23:01.456 INFO"
         out_b = _out_bundle()
 
-        result = nb_parse_iso8601_desktop(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_iso8601_desktop(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -111,9 +105,7 @@ class TestParseIso8601Desktop:
         msg = "2026-01-15 10:23:01x456 INFO"
         out_b = _out_bundle()
 
-        result = nb_parse_iso8601_desktop(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_iso8601_desktop(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -121,9 +113,7 @@ class TestParseIso8601Desktop:
         msg = "2026-01-15 10:23:01."
         out_b = _out_bundle()
 
-        result = nb_parse_iso8601_desktop(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_iso8601_desktop(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -133,7 +123,7 @@ class TestParseRfc3339:
         msg = "2026-09-20T13:09:38.424119+03:00 INFO myapp.module: message"
         out_b = _out_bundle()
 
-        cursor = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, _identity_state(), EmptyUnifiedParserConfig)
+        cursor = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, _identity_sync_state())
 
         assert cursor == msg.index("INFO")
         expected = int(datetime(2026, 9, 20, 13, 9, 38, 424119, tzinfo=timezone(timedelta(hours=3))).timestamp() * 1e9)
@@ -143,7 +133,7 @@ class TestParseRfc3339:
         msg = "2026-09-20T13:09:38.424119-05:30 INFO"
         out_b = _out_bundle()
 
-        cursor = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, _identity_state(), EmptyUnifiedParserConfig)
+        cursor = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, _identity_sync_state())
 
         assert cursor == msg.index("INFO")
         expected = int(
@@ -155,7 +145,7 @@ class TestParseRfc3339:
         msg = "2026-09-20T10:09:38.424119Z INFO"
         out_b = _out_bundle()
 
-        cursor = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, _identity_state(), EmptyUnifiedParserConfig)
+        cursor = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, _identity_sync_state())
 
         assert cursor == msg.index("INFO")
         expected = int(datetime(2026, 9, 20, 10, 9, 38, 424119, tzinfo=timezone.utc).timestamp() * 1e9)
@@ -165,7 +155,7 @@ class TestParseRfc3339:
         msg = "2026-09-20 13:09:38.424119+03:00 INFO"
         out_b = _out_bundle()
 
-        result = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig)
+        result = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -173,7 +163,7 @@ class TestParseRfc3339:
         msg = "2026-09-20T10:09:38.424119"
         out_b = _out_bundle()
 
-        result = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig)
+        result = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -181,7 +171,7 @@ class TestParseRfc3339:
         msg = "2026-09-20T10:09:38.424119+03"
         out_b = _out_bundle()
 
-        result = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig)
+        result = nb_parse_rfc3339(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -190,9 +180,9 @@ class TestParseSyslogTimestamp:
     def test_zero_padded_day(self):
         msg = "Jan 02 15:04:05 myhost app: message"
         out_b = _out_bundle()
-        config = UnifiedParserConfig(syslog_year=2026)
+        year = 2026
 
-        cursor = nb_parse_syslog_timestamp(_buf(msg), 0, len(msg), out_b, 0, _identity_state(), config)
+        cursor = nb_parse_syslog_timestamp(_buf(msg), 0, len(msg), out_b, 0, _identity_sync_state(), year)
 
         assert cursor == msg.index("myhost")
         expected = int(datetime(2026, 1, 2, 15, 4, 5, tzinfo=timezone.utc).timestamp() * 1e9)
@@ -201,9 +191,9 @@ class TestParseSyslogTimestamp:
     def test_space_padded_day(self):
         msg = "Jan  2 15:04:05 myhost app: message"
         out_b = _out_bundle()
-        config = UnifiedParserConfig(syslog_year=2026)
+        year = 2026
 
-        cursor = nb_parse_syslog_timestamp(_buf(msg), 0, len(msg), out_b, 0, _identity_state(), config)
+        cursor = nb_parse_syslog_timestamp(_buf(msg), 0, len(msg), out_b, 0, _identity_sync_state(), year)
 
         assert cursor == msg.index("myhost")
         expected = int(datetime(2026, 1, 2, 15, 4, 5, tzinfo=timezone.utc).timestamp() * 1e9)
@@ -212,9 +202,9 @@ class TestParseSyslogTimestamp:
     def test_december(self):
         msg = "Dec 31 23:59:59 myhost app: message"
         out_b = _out_bundle()
-        config = UnifiedParserConfig(syslog_year=2026)
+        year = 2026
 
-        cursor = nb_parse_syslog_timestamp(_buf(msg), 0, len(msg), out_b, 0, _identity_state(), config)
+        cursor = nb_parse_syslog_timestamp(_buf(msg), 0, len(msg), out_b, 0, _identity_sync_state(), year)
 
         assert cursor == msg.index("myhost")
         expected = int(datetime(2026, 12, 31, 23, 59, 59, tzinfo=timezone.utc).timestamp() * 1e9)
@@ -224,9 +214,7 @@ class TestParseSyslogTimestamp:
         msg = "Xxx  2 15:04:05 myhost"
         out_b = _out_bundle()
 
-        result = nb_parse_syslog_timestamp(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_syslog_timestamp(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState, 0)
 
         assert result == -1
 
@@ -234,9 +222,7 @@ class TestParseSyslogTimestamp:
         msg = "Jan  2 15x04x05 myhost"
         out_b = _out_bundle()
 
-        result = nb_parse_syslog_timestamp(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_syslog_timestamp(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState, 0)
 
         assert result == -1
 
@@ -244,8 +230,6 @@ class TestParseSyslogTimestamp:
         msg = "Jan  2 15:04"
         out_b = _out_bundle()
 
-        result = nb_parse_syslog_timestamp(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_syslog_timestamp(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState, 0)
 
         assert result == -1

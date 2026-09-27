@@ -8,12 +8,12 @@ from blinkview.core.numba_config import app_njit
 from blinkview.ops.constants import CHAR_LPAREN, CHAR_RPAREN
 from blinkview.ops.stage_loop import FS_OK, FS_STEP_FAILED
 from blinkview.ops.strings import nb_skip_whitespace
-from blinkview.ops.timestamps import nb_parse_int_timestamp_optimized
+from blinkview.ops.timestamps import nb_parse_int_timestamp
 from blinkview.ops.views import nb_log_bundle_views, nb_sync_views, nb_view
 
 
 @app_njit(inline="always")
-def nb_parse_int_timestamp_idf_v1_optimized(
+def nb_parse_int_timestamp_idf_v1(
     buffer,
     start_cursor,
     end_cursor,
@@ -31,9 +31,7 @@ def nb_parse_int_timestamp_idf_v1_optimized(
     cursor += 1  # Move past '('
 
     # Delegate to the core integer parser
-    cursor = nb_parse_int_timestamp_optimized(
-        buffer, cursor, end_cursor, out_b, out_idx, sync, precision, timestamp_unix
-    )
+    cursor = nb_parse_int_timestamp(buffer, cursor, end_cursor, out_b, out_idx, sync, precision, timestamp_unix)
 
     # If the inner parser failed, propagate the error
     if cursor == -1:
@@ -44,28 +42,6 @@ def nb_parse_int_timestamp_idf_v1_optimized(
     cursor += 1  # Move past ')'
 
     return nb_skip_whitespace(buffer, cursor, end_cursor)
-
-
-@app_njit(inline="always")
-def nb_parse_int_timestamp_idf_v1(
-    buffer,
-    start_cursor,
-    end_cursor,
-    out_b,
-    out_idx,
-    state,
-    config,
-):
-    return nb_parse_int_timestamp_idf_v1_optimized(
-        buffer,
-        start_cursor,
-        end_cursor,
-        out_b,
-        out_idx,
-        state.timestamp.sync,
-        config.timestamp_precision,
-        config.timestamp_unix,
-    )
 
 
 @app_njit()
@@ -79,9 +55,7 @@ def nb_parse_int_timestamp_idf_v1_stage(out_b0, f_state, n, sync0, precision, ti
     first = out_b.size[0]
     for k in range(n):
         if status[k] == FS_OK:
-            r = nb_parse_int_timestamp_idf_v1_optimized(
-                buffer, cur[k], end[k], out_b, first + k, sync, precision, timestamp_unix
-            )
+            r = nb_parse_int_timestamp_idf_v1(buffer, cur[k], end[k], out_b, first + k, sync, precision, timestamp_unix)
             if r == -1:
                 status[k] = FS_STEP_FAILED
             else:

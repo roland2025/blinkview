@@ -18,11 +18,7 @@ from blinkview.core.types.frames import FrameConfig
 from blinkview.core.types.log_batch import LogBundle
 from blinkview.core.types.modules import ModuleTrackerState
 from blinkview.core.types.parsing import (
-    EmptyUnifiedParserConfig,
-    EmptyUnifiedParserState,
-    TimeParserState,
-    UnifiedParserConfig,
-    UnifiedParserState,
+    UnusedSyncState,
     create_default_sync,
 )
 from blinkview.ops.codec_adb_long import (
@@ -129,15 +125,13 @@ class TestParseAdbTimestampMonotonic:
         out_b = _out_bundle()
         out_b.rx_timestamps[0] = 123_456_789  # nonzero, so a real projection is observable
 
-        # Uses a fresh, per-test sync state rather than EmptyUnifiedParserState's shared
+        # Uses a fresh, per-test sync state rather than the shared
         # UnusedSyncState singleton - nb_auto_sync_fallback mutates the sync arrays in place, and
         # the singleton is shared module-wide, so touching it here would leak init state into
         # every other test that relies on it starting fresh.
-        state = UnifiedParserState(timestamp=TimeParserState(sync=create_default_sync(now_ns=0)))
+        sync = create_default_sync(now_ns=0)
 
-        next_cursor = nb_parse_adb_timestamp_monotonic(
-            _buf(msg), 0, len(msg), out_b, 0, state, EmptyUnifiedParserConfig
-        )
+        next_cursor = nb_parse_adb_timestamp_monotonic(_buf(msg), 0, len(msg), out_b, 0, sync)
 
         # First-ever call through the (disabled-by-default) sync state routes to
         # nb_auto_sync_fallback's init branch, which just anchors and echoes rx_ns back.
@@ -148,9 +142,7 @@ class TestParseAdbTimestampMonotonic:
         msg = "5.5]"
         out_b = _out_bundle()
 
-        result = nb_parse_adb_timestamp_monotonic(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_adb_timestamp_monotonic(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -158,9 +150,7 @@ class TestParseAdbTimestampMonotonic:
         msg = "[5.5]"  # no space anywhere after index 2
         out_b = _out_bundle()
 
-        result = nb_parse_adb_timestamp_monotonic(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_adb_timestamp_monotonic(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -226,17 +216,17 @@ class TestParseAdbLevel:
 
     def test_unmatched_level_char_returns_negative_one(self):
         out_b = _out_bundle()
-        config = UnifiedParserConfig(string_table=self._string_table_for_levels())
+        table = self._string_table_for_levels()
 
-        result = nb_parse_adb_level(_buf("I/Tag"), 0, 5, out_b, 0, EmptyUnifiedParserState, config)
+        result = nb_parse_adb_level(_buf("I/Tag"), 0, 5, out_b, 0, table)
 
         assert result == -1
 
     def test_too_short_buffer_returns_negative_one(self):
         out_b = _out_bundle()
-        config = UnifiedParserConfig(string_table=self._string_table_for_levels())
+        table = self._string_table_for_levels()
 
-        result = nb_parse_adb_level(_buf("I"), 0, 1, out_b, 0, EmptyUnifiedParserState, config)
+        result = nb_parse_adb_level(_buf("I"), 0, 1, out_b, 0, table)
 
         assert result == -1
 
@@ -247,10 +237,7 @@ class TestParseAdbTag:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(string_table=table)
-        state = UnifiedParserState(modules=tracker)
-
-        next_cursor = nb_parse_adb_tag(_buf(msg), 0, len(msg), out_b, 0, state, config)
+        next_cursor = nb_parse_adb_tag(_buf(msg), 0, len(msg), out_b, 0, tracker, table)
 
         assert out_b.modules[0] != 0
         assert next_cursor == len(msg)
@@ -260,10 +247,7 @@ class TestParseAdbTag:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(string_table=table)
-        state = UnifiedParserState(modules=tracker)
-
-        result = nb_parse_adb_tag(_buf(msg), 0, len(msg), out_b, 0, state, config)
+        result = nb_parse_adb_tag(_buf(msg), 0, len(msg), out_b, 0, tracker, table)
 
         assert result == -1
 
@@ -272,10 +256,7 @@ class TestParseAdbTag:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(string_table=table)
-        state = UnifiedParserState(modules=tracker)
-
-        nb_parse_adb_tag(_buf(msg), 0, len(msg), out_b, 0, state, config)
+        nb_parse_adb_tag(_buf(msg), 0, len(msg), out_b, 0, tracker, table)
 
         assert out_b.modules[0] == 0
 
@@ -284,10 +265,7 @@ class TestParseAdbTag:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(string_table=table)
-        state = UnifiedParserState(modules=tracker)
-
-        result = nb_parse_adb_tag(_buf(msg), 0, len(msg), out_b, 0, state, config)
+        result = nb_parse_adb_tag(_buf(msg), 0, len(msg), out_b, 0, tracker, table)
 
         assert out_b.modules[0] != 0
         assert result != -1

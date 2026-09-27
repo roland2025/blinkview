@@ -17,7 +17,7 @@ kernels (`_is_ws` → `nb_is_ws`, `_copy_snapshot_state` → `nb_copy_snapshot_s
 underscore rather than keeping it before `nb_`). This was enforced as a repo-wide rename; keep it
 that way for anything new. When renaming an existing kernel, grep the whole repo (`src/` and
 `tests/`) for the bare name - these functions get imported and called across module boundaries
-constantly (e.g. `ops/pipeline.py` calling into `ops/modules.py`, `ops/codec_adb_long.py`,
+constantly (e.g. `ops/codec_adb_long.py` calling into `ops/modules.py`, `ops/timestamps.py`,
 `ops/strings.py`), so a rename that only touches the definition site will silently break callers.
 
 ## 2. Kernel argument design: bundle related arguments into a NamedTuple, pass it whole
@@ -110,7 +110,7 @@ flows through several independently-constructed batches before it's queryable -
 **parser output batch → Reorder's merge kernel → CentralStorage's segment-copy kernel → a
 model's per-widget extract kernel** - and *each* of those is its own `PooledLogBatch` creation
 site plus its own hand-written "copy these columns" kernel
-(`ops/pipeline.py`/`nb_process_batch_kernel`, `core/reorderer.py`'s `nb_hybrid_merge_and_copy`,
+(`ops/dispatch.py`'s `nb_copy_row`/`nb_finish_frames`, `core/reorderer.py`'s `nb_hybrid_merge_and_copy`,
 `ops/segments.py`'s `nb_copy_batch_to_segment`, `ops/segments.py`'s
 `nb_segment_extract_fields`). Getting a new column correctly parsed at the source but forgetting
 even *one* of these hops silently drops it downstream with zero errors - the column just reads as
@@ -252,11 +252,11 @@ setup verbatim into the new `warmup(helper)` staticmethod, swapping `self.shared
   `NumbaTypeError: Cannot modify readonly array of type: readonly array(uint8, 1d, C)` at typing
   time, not at the write itself. Wrap the source in `bytearray(...)` first:
   `np.frombuffer(bytearray(text), dtype=BYTE)`.
-- Parser-pipeline kernels (`nb_execute_parser_pipeline` and friends) expect a
-  `ParserPipelineBundle`, not the raw `.pipeline` tuple - if you're driving one directly for a
-  test, pull `parser.bundle().pipeline` for `nb_execute_parser_pipeline`'s `parser_bundles` arg,
-  but pass the whole `parser.bundle()` object (not `.pipeline`) to `nb_process_batch_kernel`'s
-  `parser` arg, matching real call sites (`self._frame_parser.bundle()` in `binary_parser.py`).
+- To drive the frame-parser pipeline directly in a test, mirror `BinaryParser.run()`: call the
+  decoder kernel (`codec.kernel(f_state, in_b, p_config, o_config, out_b)` -> `(out_full, n)`),
+  then `section.kernel(out_b, f_state, n)` for each step, then `nb_finish_frames(...)`, where
+  `p_config` is the `ParserConfig` returned by `GenericFrameParser.bundle()` (see
+  `tests/test_ops_dispatch.py`'s `_run_pipeline` and `tests/test_stage_kernels.py`).
 - Short-circuit `and`/`or` work the same as plain Python inside `@app_njit` - `text_needle_len ==
   0 or nb_bytes_contains_ci(...)` will not evaluate (or bounds-check) the right side when the
   needle is empty. Lean on this instead of nested `if`s for optional-feature gating.
@@ -350,7 +350,8 @@ against NamedTuples:
 
 - A **toy** 2-level-nested benchmark (a handful of small sub-NamedTuples, simple field access)
   showed NamedTuple calls costing ~2.1x-4.5x more than plain tuples, both to compile and to call.
-- A **mockup rebuilt to match the real shape exactly** - `SyncState`'s actual 16 fields,
+- A **mockup rebuilt to match the real shape exactly** (of the since-removed unified-signature
+  pipeline) - `SyncState`'s actual 16 fields,
   `UnifiedParserState`'s real 3-level nesting (`state.timestamp.sync.X`), `UnifiedParserConfig`'s
   real 6-field/3-branch shape, a 12-branch dispatcher mirroring `ops/pipeline.py`'s
   `nb_process_bundle` - showed **no meaningful difference** (~1.02x, compile time and call
@@ -367,6 +368,10 @@ everywhere in this investigation was call-boundary argument handling (§11) and 
 (§13 below), never the NamedTuple/tuple choice itself.
 
 ## 13. `inline="always"` on a multi-branch dispatcher inflates *compile* time, not runtime
+
+(Historical: `nb_process_bundle`/`ops/pipeline.py`, `nb_dispatch_frame_decoder`/`ops/frame_dispatch.py`
+and the monolithic `nb_process_batch_kernel` have since been removed in favour of one stage kernel per
+parser step - see `ops/stage_loop.py`. The lesson still applies to any new dispatcher.)
 
 `ops/pipeline.py`'s `nb_process_bundle` dispatches across ~12 `ParserID` branches, each calling a
 distinct, substantial leaf-parser function (`nb_parse_log_level`, `nb_parse_adb_tag`, etc.), and

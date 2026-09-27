@@ -19,8 +19,11 @@ import pytest
 
 from blinkview.core import dtypes
 from blinkview.core.types.log_batch import LogBundle
-from blinkview.core.types.parsing import EmptyUnifiedParserConfig, EmptyUnifiedParserState
-from blinkview.ops.zephyr_timestamp import nb_parse_zephyr_realtime, nb_parse_zephyr_uptime_formatted
+from blinkview.core.types.parsing import UnusedSyncState
+from blinkview.ops.zephyr_timestamp import (
+    nb_parse_zephyr_realtime,
+    nb_parse_zephyr_uptime_formatted,
+)
 
 
 def _out_bundle(capacity=1):
@@ -63,9 +66,7 @@ class TestParseZephyrUptimeFormatted:
         msg = "00:00:05.123,456]"
         out_b = _out_bundle()
 
-        result = nb_parse_zephyr_uptime_formatted(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_zephyr_uptime_formatted(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -73,9 +74,7 @@ class TestParseZephyrUptimeFormatted:
         msg = "[00:00:05.123,456 no bracket"
         out_b = _out_bundle()
 
-        result = nb_parse_zephyr_uptime_formatted(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_zephyr_uptime_formatted(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -83,9 +82,7 @@ class TestParseZephyrUptimeFormatted:
         msg = "[00:0"
         out_b = _out_bundle()
 
-        result = nb_parse_zephyr_uptime_formatted(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_zephyr_uptime_formatted(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -95,9 +92,7 @@ class TestParseZephyrRealtime:
         msg = "[1970x01-01 00:00:00.000,000]"
         out_b = _out_bundle()
 
-        result = nb_parse_zephyr_realtime(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_zephyr_realtime(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -105,9 +100,7 @@ class TestParseZephyrRealtime:
         msg = "[1970-01-01 00:00"
         out_b = _out_bundle()
 
-        result = nb_parse_zephyr_realtime(
-            _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-        )
+        result = nb_parse_zephyr_realtime(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
         assert result == -1
 
@@ -127,15 +120,11 @@ class TestOverflowUnderDisabledNumba:
         out_b = _out_bundle()
 
         with pytest.raises(OverflowError):
-            nb_parse_zephyr_uptime_formatted(
-                _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-            )
+            nb_parse_zephyr_uptime_formatted(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)
 
     def test_realtime_happy_path_overflows_without_jit(self):
         msg = "[1970-01-01 00:00:00.000,000]"
         out_b = _out_bundle()
 
         with pytest.raises(OverflowError):
-            nb_parse_zephyr_realtime(
-                _buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-            )
+            nb_parse_zephyr_realtime(_buf(msg), 0, len(msg), out_b, 0, UnusedSyncState)

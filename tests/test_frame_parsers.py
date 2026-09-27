@@ -7,13 +7,14 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.factory_registry import FactoryRegistry
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.empty import EMPTY_BYTES_RO
 from blinkview.core.types.modules import MODULE_TEMP_ID_BASE
-from blinkview.core.types.parsing import TS_PRECISION_MS, TS_PRECISION_S, ParserID, create_default_sync
+from blinkview.core.types.parsing import TS_PRECISION_MS, TS_PRECISION_S, UnusedSyncState, create_default_sync
 from blinkview.parsers.frame_parsers import (
     Esp32V1IntegerTimestampParser,
     FixedWidthModuleNameParser,
@@ -22,7 +23,6 @@ from blinkview.parsers.frame_parsers import (
     IntegerTimestampParser,
     Iso8601DesktopTimestampParser,
     ModuleNameNormalizer,
-    ModuleNameRSyslogParser,
     SkipWordsParser,
     SyslogTimestampParser,
     ZephyrRealTimeParser,
@@ -66,28 +66,15 @@ class TestGenericFrameParserPipeline:
     def test_bundle_config_resolves_module_and_device_ids(self, id_registry):
         parser, device = make_generic_parser(id_registry, filter_squash_spaces=True, parser_errors_hidden=True)
 
-        bundle = parser.bundle()
+        config = parser.bundle()
 
-        assert bundle.config.level_default == LogLevel.INFO.value
-        assert bundle.config.level_error == LogLevel.ERROR.value
-        assert bundle.config.module_log == device.get_module("log").id
-        assert bundle.config.module_unknown == device.get_module("unknown").id
-        assert bundle.config.device_id == device.id
-        assert bundle.config.report_error is False  # parser_errors_hidden=True
-        assert bundle.config.filter_squash_spaces is True
-
-    def test_bundle_typed_pipeline_length_matches_step_count(self, id_registry):
-        parser, _device = make_generic_parser(
-            id_registry,
-            steps=[
-                {"type": "skip_words", "count": 1},
-                {"type": "timestamp_integer"},
-            ],
-        )
-
-        bundle = parser.bundle()
-
-        assert len(bundle.pipeline) == 2
+        assert config.level_default == LogLevel.INFO.value
+        assert config.level_error == LogLevel.ERROR.value
+        assert config.module_log == device.get_module("log").id
+        assert config.module_unknown == device.get_module("unknown").id
+        assert config.device_id == device.id
+        assert config.report_error is False  # parser_errors_hidden=True
+        assert config.filter_squash_spaces is True
 
     def test_no_post_process_steps_defaults_to_the_noop(self, id_registry):
         parser, _device = make_generic_parser(id_registry, steps=[{"type": "skip_words", "count": 1}])
@@ -136,7 +123,7 @@ class TestModuleNameParserBasePostProcess:
         parser.local = SimpleNamespace(device_id=device, sync_state=create_default_sync(0))
         configure(parser, max_length=8)
 
-        state = parser.tracker_state.modules
+        state = parser.tracker_state
         name = b"wifi"
         state.name_bytes[: len(name)] = np.frombuffer(name, dtype=np.uint8)
         state.starts[0] = 0
@@ -174,22 +161,7 @@ class TestModuleNameParserBasePostProcess:
         batch.release()
 
 
-class TestFixedWidthModuleNameParserBundle:
-    def test_bundle_returns_expected_parser_id_and_config(self, id_registry):
-        parser = FixedWidthModuleNameParser()
-        device = id_registry.get_device("fixed_width_test")
-        parser.shared = make_shared(id_registry)
-        parser.local = SimpleNamespace(device_id=device, sync_state=create_default_sync(0))
-        configure(parser, max_length=16)
-
-        parser_id, state, config = parser.bundle()
-
-        assert parser_id == ParserID.MOD_FIXED_WIDTH
-        assert state is parser.tracker_state
-        assert config.module_config.max_length == 16
-
-
-class TestModuleNameNormalizerBundle:
+class TestModuleNameNormalizerConfig:
     def test_empty_prefix_uses_the_shared_readonly_empty_buffer(self, id_registry):
         parser = ModuleNameNormalizer()
         device = id_registry.get_device("normalizer_test")
@@ -208,34 +180,6 @@ class TestModuleNameNormalizerBundle:
 
         assert bytes(parser.module_config.prefix_bytes) == b"app_"
 
-    def test_bundle_returns_expected_parser_id(self, id_registry):
-        parser = ModuleNameNormalizer()
-        device = id_registry.get_device("normalizer_bundle_test")
-        parser.shared = make_shared(id_registry)
-        parser.local = SimpleNamespace(device_id=device, sync_state=create_default_sync(0))
-        configure(parser)
-
-        parser_id, state, config = parser.bundle()
-
-        assert parser_id == ParserID.MOD_DYNAMIC_SM
-        assert state is parser.tracker_state
-        assert config.module_config is parser.module_config
-
-
-class TestModuleNameRSyslogParserBundle:
-    def test_bundle_returns_expected_parser_id_and_config(self, id_registry):
-        parser = ModuleNameRSyslogParser()
-        device = id_registry.get_device("rsyslog_test")
-        parser.shared = make_shared(id_registry)
-        parser.local = SimpleNamespace(device_id=device, sync_state=create_default_sync(0))
-        configure(parser, max_length=32)
-
-        parser_id, state, config = parser.bundle()
-
-        assert parser_id == ParserID.MOD_RSYSLOG_TAG
-        assert state is parser.tracker_state
-        assert config.module_config.max_length == 32
-
 
 class TestTimestampParsers:
     def _configured(self, cls, id_registry, **overrides):
@@ -244,86 +188,57 @@ class TestTimestampParsers:
         configure(parser, **overrides)
         return parser
 
-    def test_integer_timestamp_parser_bundle(self, id_registry):
+    def test_integer_timestamp_parser_config(self, id_registry):
         parser = self._configured(IntegerTimestampParser, id_registry, precision=TS_PRECISION_S, unix_timestamp=True)
 
-        parser_id, state, config = parser.bundle()
-
-        assert parser_id == ParserID.TS_INTEGER
-        assert state is parser.state
-        assert config.timestamp_precision == TS_PRECISION_S
-        assert config.timestamp_unix is True
+        assert parser._precision == TS_PRECISION_S
+        assert parser._unix is True
 
     def test_integer_timestamp_parser_defaults(self, id_registry):
         parser = self._configured(IntegerTimestampParser, id_registry)
 
-        _parser_id, _state, config = parser.bundle()
+        assert parser._precision == TS_PRECISION_MS
+        assert parser._unix is False
 
-        assert config.timestamp_precision == TS_PRECISION_MS
-        assert config.timestamp_unix is False
+    def test_esp32_v1_parser_never_treats_timestamps_as_unix(self, id_registry):
+        parser = self._configured(
+            Esp32V1IntegerTimestampParser, id_registry, precision=TS_PRECISION_S, unix_timestamp=True
+        )
 
-    def test_esp32_v1_parser_bundle_uses_idf_v1_id(self, id_registry):
-        parser = self._configured(Esp32V1IntegerTimestampParser, id_registry, precision=TS_PRECISION_S)
+        assert parser._precision == TS_PRECISION_S
+        assert parser._unix is False
 
-        parser_id, _state, config = parser.bundle()
+    @pytest.mark.parametrize(
+        "cls",
+        [
+            IntegerTimestampParser,
+            Esp32V1IntegerTimestampParser,
+            ZephyrUptimeFormattedParser,
+            ZephyrRealTimeParser,
+            Iso8601DesktopTimestampParser,
+            SyslogTimestampParser,
+        ],
+    )
+    def test_timestamp_parsers_use_the_device_sync_state(self, cls, id_registry):
+        parser = self._configured(cls, id_registry)
 
-        assert parser_id == ParserID.TS_IDF_V1
-        assert config.timestamp_precision == TS_PRECISION_S
+        assert parser.sync_state is parser.local.sync_state
 
-    def test_zephyr_uptime_formatted_parser_bundle(self, id_registry):
-        parser = self._configured(ZephyrUptimeFormattedParser, id_registry)
+    def test_timestamp_parser_without_a_sync_state_falls_back_to_unused_sync(self, id_registry):
+        parser = IntegerTimestampParser()
+        parser.local = SimpleNamespace(device_id=id_registry.get_device("ts_no_sync_test"))
+        configure(parser)
 
-        parser_id, state, _config = parser.bundle()
+        assert parser.sync_state is UnusedSyncState
 
-        assert parser_id == ParserID.TS_ZEPHYR_UPTIME_FORMATTED
-        assert state is parser.state
-
-    def test_zephyr_realtime_parser_bundle(self, id_registry):
-        parser = self._configured(ZephyrRealTimeParser, id_registry)
-
-        parser_id, state, _config = parser.bundle()
-
-        assert parser_id == ParserID.TS_ZEPHYR_REALTIME
-        assert state is parser.state
-
-    def test_iso8601_desktop_parser_bundle(self, id_registry):
-        parser = self._configured(Iso8601DesktopTimestampParser, id_registry)
-
-        parser_id, state, _config = parser.bundle()
-
-        assert parser_id == ParserID.TS_ISO8601
-        assert state is parser.state
-
-    def test_syslog_parser_bundle_defaults_to_current_year(self, id_registry):
+    def test_syslog_parser_defaults_to_current_year(self, id_registry):
         parser = self._configured(SyslogTimestampParser, id_registry)
 
-        parser_id, state, config = parser.bundle()
-
-        assert parser_id == ParserID.TS_RFC3164
-        assert state is parser.state
         from datetime import datetime
 
-        assert config.syslog_year == datetime.now().year
+        assert parser._year == datetime.now().year
 
-    def test_syslog_parser_bundle_uses_configured_year(self, id_registry):
+    def test_syslog_parser_uses_configured_year(self, id_registry):
         parser = self._configured(SyslogTimestampParser, id_registry, year=1999)
 
-        _parser_id, _state, config = parser.bundle()
-
-        assert config.syslog_year == 1999
-
-    def test_timestamp_parser_sets_utc_offset_on_state(self, id_registry):
-        parser = self._configured(IntegerTimestampParser, id_registry)
-        assert parser.state.timestamp.utc_offset[0] is not None  # populated, not left at default
-
-
-class TestSkipWordsParserBundle:
-    def test_bundle_returns_expected_parser_id_and_count(self, id_registry):
-        parser = SkipWordsParser()
-        parser.local = SimpleNamespace(device_id=id_registry.get_device("skip_words_test"), sync_state=None)
-        configure(parser, count=5)
-
-        parser_id, state, config = parser.bundle()
-
-        assert parser_id == ParserID.SKIP_WORDS
-        assert config.module_config.max_length == 5
+        assert parser._year == 1999

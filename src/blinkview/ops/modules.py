@@ -88,9 +88,7 @@ def nb_normalize_name_inplace(buffer, start_idx, length):
 
 
 @app_njit(inline="always")
-def nb_parse_fixed_width_name_optimized(
-    buffer, start_cursor, end_cursor, out_b, out_idx, tracker, max_length, string_table
-):
+def nb_parse_fixed_width_name(buffer, start_cursor, end_cursor, out_b, out_idx, tracker, max_length, string_table):
     width = max_length
 
     actual_width = width
@@ -170,33 +168,10 @@ FNV_PRIME = np.uint64(1099511628211)
 FNV_BASIS = np.uint64(14695981039346656037)
 
 
-@app_njit(inline="always")
-def nb_parse_fixed_width_name(
-    buffer,
-    start_cursor,
-    end_cursor,  # Inputs
-    out_b,
-    out_idx,  # Outputs
-    state,  # Mutable State
-    config,  # Read-only Config
-):
-    """Unified-struct entry point; the logic lives in nb_parse_fixed_width_name_optimized."""
-    return nb_parse_fixed_width_name_optimized(
-        buffer,
-        start_cursor,
-        end_cursor,
-        out_b,
-        out_idx,
-        state.modules,
-        config.module_config.max_length,
-        config.string_table,
-    )
-
-
 @app_njit()
 def nb_parse_fixed_width_name_stage(out_b0, f_state, n, tracker0, max_length, table0):
     nb_stage_loop_a3(
-        nb_parse_fixed_width_name_optimized,
+        nb_parse_fixed_width_name,
         out_b0,
         f_state,
         n,
@@ -227,9 +202,7 @@ def _put(nc, nb, w, hw, last, h):
 
 
 @app_njit(inline="always")
-def nb_parse_module_tags_statemachine_optimized(
-    buffer, cursor, end_cursor, out_b, out_idx, tracker, config, string_table
-):
+def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx, tracker, config, string_table):
     write_start = np.int64(tracker.bytes_cursor[0])
     nb = tracker.name_bytes
 
@@ -367,20 +340,6 @@ def nb_parse_module_tags_statemachine_optimized(
     return nb_skip_whitespace(buffer, curr, end_cursor)
 
 
-@app_njit(inline="always")
-def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx, state, unified_config):
-    return nb_parse_module_tags_statemachine_optimized(
-        buffer,
-        cursor,
-        end_cursor,
-        out_b,
-        out_idx,
-        state.modules,
-        unified_config.module_config,
-        unified_config.string_table,
-    )
-
-
 @app_njit()
 def nb_parse_module_tags_statemachine_stage(out_b0, f_state, n, tracker0, module_config0, table0):
     out_b = nb_log_bundle_views(out_b0)
@@ -394,9 +353,7 @@ def nb_parse_module_tags_statemachine_stage(out_b0, f_state, n, tracker0, module
     first = out_b.size[0]
     for k in range(n):
         if status[k] == FS_OK:
-            r = nb_parse_module_tags_statemachine_optimized(
-                buffer, cur[k], end[k], out_b, first + k, tracker, config, table
-            )
+            r = nb_parse_module_tags_statemachine(buffer, cur[k], end[k], out_b, first + k, tracker, config, table)
             if r == -1:
                 status[k] = FS_STEP_FAILED
             else:
@@ -404,7 +361,7 @@ def nb_parse_module_tags_statemachine_stage(out_b0, f_state, n, tracker0, module
 
 
 @app_njit(inline="always")
-def nb_parse_rsyslog_tag_optimized(buffer, cursor, end_cursor, out_b, out_idx, tracker, max_length, string_table):
+def nb_parse_rsyslog_tag(buffer, cursor, end_cursor, out_b, out_idx, tracker, max_length, string_table):
     """Parses the classic syslog/rsyslog TAG field: 'tag[pid]: ' or 'tag: ' - a bare
     identifier, an optional numeric PID in brackets, and a terminating colon. The PID
     itself is not captured, only used to validate/skip past the bracketed section."""
@@ -461,33 +418,10 @@ def nb_parse_rsyslog_tag_optimized(buffer, cursor, end_cursor, out_b, out_idx, t
     return nb_skip_whitespace(buffer, curr, end_cursor)
 
 
-@app_njit(inline="always")
-def nb_parse_rsyslog_tag(
-    buffer,
-    cursor,
-    end_cursor,  # Inputs
-    out_b,
-    out_idx,  # Outputs
-    state,  # Mutable State
-    unified_config,  # Read-only Config
-):
-    """Unified-struct entry point; the logic lives in nb_parse_rsyslog_tag_optimized."""
-    return nb_parse_rsyslog_tag_optimized(
-        buffer,
-        cursor,
-        end_cursor,
-        out_b,
-        out_idx,
-        state.modules,
-        unified_config.module_config.max_length,
-        unified_config.string_table,
-    )
-
-
 @app_njit()
 def nb_parse_rsyslog_tag_stage(out_b0, f_state, n, tracker0, max_length, table0):
     nb_stage_loop_a3(
-        nb_parse_rsyslog_tag_optimized,
+        nb_parse_rsyslog_tag,
         out_b0,
         f_state,
         n,

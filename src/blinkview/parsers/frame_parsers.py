@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from typing import List
 
 import numpy as np
-from numba.typed import List as NumbaList
 
 from blinkview.core import dtypes
 from blinkview.core.bindable import bindable
@@ -31,16 +30,8 @@ from blinkview.core.types.parsing import (
     TS_PRECISION_NS,
     TS_PRECISION_S,
     TS_PRECISION_US,
-    EmptyUnifiedParserConfig,
-    EmptyUnifiedParserState,
     ParserConfig,
-    ParserID,
-    ParserPipelineBundle,
-    TimeParserState,
-    UnifiedParserConfig,
-    UnifiedParserState,
     UnusedSyncState,
-    pipeline_bundle_type,
 )
 from blinkview.ops.desktop_timestamp import (
     nb_parse_iso8601_desktop_stage,
@@ -53,12 +44,10 @@ from blinkview.ops.modules import (
     nb_parse_module_tags_statemachine_stage,
     nb_parse_rsyslog_tag_stage,
 )
-from blinkview.ops.stage import nb_stage
 from blinkview.ops.timestamp_idf import nb_parse_int_timestamp_idf_v1_stage
 from blinkview.ops.timestamps import nb_parse_int_timestamp_stage
 from blinkview.ops.zephyr_timestamp import nb_parse_zephyr_realtime_stage, nb_parse_zephyr_uptime_formatted_stage
 from blinkview.utils.log_level import LogLevel
-from blinkview.utils.utc_offset import get_local_utc_offset_seconds
 
 
 @configurable
@@ -84,10 +73,8 @@ class FrameSectionParser(FrameParser):
     def kernel(self, octx, fctx, n):
         """Runs this step over the `n` frames of the current chunk (frame k owns output row `octx.size + k`).
 
-        Default: the generic dispatching stage driven by bundle(). Steps override this with a dedicated stage
-        kernel that takes only what they need."""
-        p_id, state, config = self.bundle()
-        nb_stage(p_id, octx.buffer, fctx.fcur, fctx.fend, fctx.fstatus, int(octx.size[0]), n, octx, state, config)
+        Every step implements this with a dedicated stage kernel that takes only what it needs."""
+        raise NotImplementedError
 
 
 @register_factory_category(FactoryCategory.FRAME_SECTION_PARSER)
@@ -160,7 +147,9 @@ class GenericFrameParser(FrameParser):
 
         return changed
 
-    def bundle(self):
+    def bundle(self) -> ParserConfig:
+        """Builds the ParserConfig the decoder and finish kernels read, and (re)binds post_process to the
+        post_process hooks of the pipeline steps."""
         device_identity = self.local.device_id
 
         p_config = ParserConfig(
@@ -173,10 +162,8 @@ class GenericFrameParser(FrameParser):
             filter_squash_spaces=self.filter_squash_spaces,
         )
 
-        pipe = []
         post_process_steps = []
         for item in self.pipeline:
-            pipe.append(item.bundle())
             pp_fn = getattr(item, "post_process", None)
             if pp_fn and callable(pp_fn):
                 post_process_steps.append(pp_fn)
@@ -235,12 +222,7 @@ class GenericFrameParser(FrameParser):
 
             self.post_process = pp_gen
 
-        # 3. Initialize the typed list safely
-        typed_pipe = NumbaList.empty_list(pipeline_bundle_type)
-        for item in pipe:
-            typed_pipe.append(item)
-        return ParserPipelineBundle(config=p_config, pipeline=typed_pipe)
-        # return ParserPipelineBundle(config=p_config, pipeline=tuple(pipe))
+        return p_config
 
     def no_post_process(self, _):
         return False
@@ -253,23 +235,21 @@ class ModuleNameParserBase(FrameSectionParser):
 
     def __init__(self):
 
-        self.tracker_state = UnifiedParserState(
-            modules=ModuleTrackerState(
-                # Scalars (wrapped in arrays so they are mutable by reference in NJIT)
-                count=np.zeros(1, dtypes.ID_TYPE),
-                bytes_cursor=np.zeros(1, dtypes.OFFSET_TYPE),
-                # Metadata buffers for unresolved names
-                starts=np.empty(self.TRACKER_CAPACITY, dtypes.OFFSET_TYPE),
-                lengths=np.empty(self.TRACKER_CAPACITY, dtypes.LEN_TYPE),
-                hashes=np.zeros(self.TRACKER_CAPACITY, dtypes.HASH_TYPE),
-                # The raw byte scratchpad
-                name_bytes=np.empty(self.TRACKER_CAPACITY * self.AVG_NAME_LEN, dtype=dtypes.BYTE),
-            )
+        self.tracker_state = ModuleTrackerState(
+            # Scalars (wrapped in arrays so they are mutable by reference in NJIT)
+            count=np.zeros(1, dtypes.ID_TYPE),
+            bytes_cursor=np.zeros(1, dtypes.OFFSET_TYPE),
+            # Metadata buffers for unresolved names
+            starts=np.empty(self.TRACKER_CAPACITY, dtypes.OFFSET_TYPE),
+            lengths=np.empty(self.TRACKER_CAPACITY, dtypes.LEN_TYPE),
+            hashes=np.zeros(self.TRACKER_CAPACITY, dtypes.HASH_TYPE),
+            # The raw byte scratchpad
+            name_bytes=np.empty(self.TRACKER_CAPACITY * self.AVG_NAME_LEN, dtype=dtypes.BYTE),
         )
         # Buffers above are fixed-capacity and never reallocated for the parser's lifetime,
         # so the memoryviews (cheaper per-element access than numpy scalar indexing) can be
         # built once here instead of on every post_process() call.
-        modules_state = self.tracker_state.modules
+        modules_state = self.tracker_state
         self._tracker_starts_mv = memoryview(modules_state.starts)
         self._tracker_lengths_mv = memoryview(modules_state.lengths)
         self._tracker_name_bytes_mv = memoryview(modules_state.name_bytes)
@@ -279,17 +259,17 @@ class ModuleNameParserBase(FrameSectionParser):
 
     def make_modules_table_bundle(self):
         """Creates a new StringTableParams bundle for the current module registry."""
-        device_identity = self.local.device_id
-        self.modules_table_bundle = device_identity.modules_table.bundle()
+        bundle = self.modules_table_bundle = self.local.device_id.modules_table.bundle()
+        return bundle
 
     def table_bundle(self):
         """The current module table snapshot, built on first use (self.local is bound after __init__)."""
-        if self.modules_table_bundle is None:
-            self.make_modules_table_bundle()
-        return self.modules_table_bundle
+        if (bundle := self.modules_table_bundle) is None:
+            bundle = self.make_modules_table_bundle()
+        return bundle
 
     def post_process(self, batch: PooledLogBatch) -> bool:
-        state = self.tracker_state.modules
+        state = self.tracker_state
         unresolved_count = state.count[0]
 
         if unresolved_count == 0:
@@ -341,7 +321,7 @@ class ModuleNameParserBase(FrameSectionParser):
         return False
 
 
-# @FrameSectionParserFactory.register("module_name") # TODO: missing bundle function
+# @FrameSectionParserFactory.register("module_name") # TODO: missing kernel
 class ModuleNameParser(ModuleNameParserBase):
     def __init__(self):
         super().__init__()
@@ -364,21 +344,8 @@ class FixedWidthModuleNameParser(ModuleNameParserBase):
     def __init__(self):
         super().__init__()
 
-    def bundle(self):
-        # 1. Build the immutable config snapshot
-        # We pass only the search width and the current module registry
-
-        config = UnifiedParserConfig(
-            string_table=self.local.device_id.modules_table.bundle(),
-            module_config=DynamicWidthConfig(max_length=self.max_length),
-        )
-
-        # 2. Return the universal 3-tuple: (Function, Mutable State, Immutable Config)
-        # self.tracker_state is the flattened state initialized in the base class
-        return ParserID.MOD_FIXED_WIDTH, self.tracker_state, config
-
     def kernel(self, octx, fctx, n):
-        nb_parse_fixed_width_name_stage(octx, fctx, n, self.tracker_state.modules, self.max_length, self.table_bundle())
+        nb_parse_fixed_width_name_stage(octx, fctx, n, self.tracker_state, self.max_length, self.table_bundle())
 
 
 @configuration_property(
@@ -464,23 +431,9 @@ class ModuleNameNormalizer(ModuleNameParserBase):
 
         return changed
 
-    def bundle(self):
-        # 1. Build the IMMUTABLE config snapshot
-        # Note: 'tracker' is removed from here.
-
-        self.make_modules_table_bundle()
-
-        config = UnifiedParserConfig(
-            string_table=self.modules_table_bundle,
-            module_config=self.module_config,
-        )
-
-        # 2. Return the universal 3-tuple: (Function, Mutable State, Immutable Config)
-        return ParserID.MOD_DYNAMIC_SM, self.tracker_state, config
-
     def kernel(self, octx, fctx, n):
         nb_parse_module_tags_statemachine_stage(
-            octx, fctx, n, self.tracker_state.modules, self.module_config, self.table_bundle()
+            octx, fctx, n, self.tracker_state, self.module_config, self.table_bundle()
         )
 
 
@@ -503,33 +456,20 @@ class ModuleNameRSyslogParser(ModuleNameParserBase):
     def __init__(self):
         super().__init__()
 
-    def bundle(self):
-        config = UnifiedParserConfig(
-            string_table=self.local.device_id.modules_table.bundle(),
-            module_config=DynamicWidthConfig(max_length=self.max_length),
-        )
-
-        return ParserID.MOD_RSYSLOG_TAG, self.tracker_state, config
-
     def kernel(self, octx, fctx, n):
-        nb_parse_rsyslog_tag_stage(octx, fctx, n, self.tracker_state.modules, self.max_length, self.table_bundle())
+        nb_parse_rsyslog_tag_stage(octx, fctx, n, self.tracker_state, self.max_length, self.table_bundle())
 
 
 # @FrameSectionParserFactory.register("timestamp")
 class TimestampParser(FrameSectionParser):
     def __init__(self):
         super().__init__()
-        self.state = None
+        self.sync_state = None
 
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
 
-        sync_state = getattr(self.local, "sync_state", UnusedSyncState)
-        self.state = UnifiedParserState(timestamp=TimeParserState(sync=sync_state))
-
-        utc_offset_seconds = get_local_utc_offset_seconds()
-
-        self.state.timestamp.utc_offset[0] = dtypes.TS_TYPE(utc_offset_seconds)
+        self.sync_state = getattr(self.local, "sync_state", UnusedSyncState)
 
         return changed
 
@@ -560,28 +500,19 @@ class IntegerTimestampParser(TimestampParser):
 
     def __init__(self):
         super().__init__()
-        self._bundle = None
+        self._precision = TS_PRECISION_MS
+        self._unix = False
 
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
 
-        config = UnifiedParserConfig(
-            timestamp_precision=getattr(self, "precision", TS_PRECISION_MS),
-            timestamp_unix=getattr(self, "unix_timestamp", False),
-        )
-
-        self._bundle = ParserID.TS_INTEGER, self.state, config
-
-        self._precision = config.timestamp_precision
-        self._unix = config.timestamp_unix
+        self._precision = getattr(self, "precision", TS_PRECISION_MS)
+        self._unix = getattr(self, "unix_timestamp", False)
 
         return changed
 
-    def bundle(self):
-        return self._bundle
-
     def kernel(self, octx, fctx, n):
-        nb_parse_int_timestamp_stage(octx, fctx, n, self.state.timestamp.sync, self._precision, self._unix)
+        nb_parse_int_timestamp_stage(octx, fctx, n, self.sync_state, self._precision, self._unix)
 
 
 @FrameSectionParserFactory.register("timestamp_idf_v1")
@@ -590,24 +521,15 @@ class IntegerTimestampParser(TimestampParser):
 class Esp32V1IntegerTimestampParser(IntegerTimestampParser):
     precision: int
 
-    def __init__(self):
-        super().__init__()
-        self._bundle = None
-
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
 
-        config = UnifiedParserConfig(timestamp_precision=self.precision)
-
-        self._bundle = ParserID.TS_IDF_V1, self.state, config
-
-        self._precision = config.timestamp_precision
-        self._unix = config.timestamp_unix
+        self._unix = False  # ESP-IDF timestamps are uptime, never unix time
 
         return changed
 
     def kernel(self, octx, fctx, n):
-        nb_parse_int_timestamp_idf_v1_stage(octx, fctx, n, self.state.timestamp.sync, self._precision, self._unix)
+        nb_parse_int_timestamp_idf_v1_stage(octx, fctx, n, self.sync_state, self._precision, self._unix)
 
 
 #
@@ -636,14 +558,6 @@ class SkipWordsParser(FrameSectionParser):
     def __init__(self):
         super().__init__()
 
-    def bundle(self):
-        # 1. Prepare the immutable config with the skip count
-        # config = SkipWordsConfig(count=self.count)
-        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=self.count))
-        # 2. Return the universal 3-tuple
-        # We use EMPTY_STATE because we aren't extracting any module IDs
-        return ParserID.SKIP_WORDS, EmptyUnifiedParserState, config
-
     def kernel(self, octx, fctx, n):
         nb_skip_words_parser_stage(octx, fctx, n, self.count)
 
@@ -651,43 +565,15 @@ class SkipWordsParser(FrameSectionParser):
 @FrameSectionParserFactory.register("timestamp_zephyr_uptime_formatted")
 @frame_section_warmup("timestamp_zephyr_uptime_formatted")
 class ZephyrUptimeFormattedParser(TimestampParser):
-    def __init__(self):
-        super().__init__()
-        self._bundle = None
-
-    def apply_config(self, config: dict):
-        changed = super().apply_config(config)
-
-        self._bundle = ParserID.TS_ZEPHYR_UPTIME_FORMATTED, self.state, EmptyUnifiedParserConfig
-
-        return changed
-
-    def bundle(self):
-        return self._bundle
-
     def kernel(self, octx, fctx, n):
-        nb_parse_zephyr_uptime_formatted_stage(octx, fctx, n, self.state.timestamp.sync)
+        nb_parse_zephyr_uptime_formatted_stage(octx, fctx, n, self.sync_state)
 
 
 @FrameSectionParserFactory.register("timestamp_zephyr_realtime")
 @frame_section_warmup("timestamp_zephyr_realtime")
 class ZephyrRealTimeParser(TimestampParser):
-    def __init__(self):
-        super().__init__()
-        self._bundle = None
-
-    def apply_config(self, config: dict):
-        changed = super().apply_config(config)
-
-        self._bundle = ParserID.TS_ZEPHYR_REALTIME, self.state, EmptyUnifiedParserConfig
-
-        return changed
-
-    def bundle(self):
-        return self._bundle
-
     def kernel(self, octx, fctx, n):
-        nb_parse_zephyr_realtime_stage(octx, fctx, n, self.state.timestamp.sync)
+        nb_parse_zephyr_realtime_stage(octx, fctx, n, self.sync_state)
 
 
 @FrameSectionParserFactory.register("timestamp_iso8601_desktop")
@@ -696,22 +582,8 @@ class Iso8601DesktopTimestampParser(TimestampParser):
     """Parses 'YYYY-MM-DD HH:MM:SS[.,]fff' - the common desktop log format used by
     Python's `logging` module, log4j, and plain ISO8601 output (no bracket wrapper)."""
 
-    def __init__(self):
-        super().__init__()
-        self._bundle = None
-
-    def apply_config(self, config: dict):
-        changed = super().apply_config(config)
-
-        self._bundle = ParserID.TS_ISO8601, self.state, EmptyUnifiedParserConfig
-
-        return changed
-
-    def bundle(self):
-        return self._bundle
-
     def kernel(self, octx, fctx, n):
-        nb_parse_iso8601_desktop_stage(octx, fctx, n, self.state.timestamp.sync)
+        nb_parse_iso8601_desktop_stage(octx, fctx, n, self.sync_state)
 
 
 @FrameSectionParserFactory.register("timestamp_rfc3339")
@@ -720,22 +592,8 @@ class Rfc3339TimestampParser(TimestampParser):
     """Parses RFC 3339 'YYYY-MM-DDTHH:MM:SS.uuuuuu(Z|+HH:MM|-HH:MM)' - e.g. journald's
     short-iso-precise output, or Python's `datetime.now().astimezone().isoformat()`."""
 
-    def __init__(self):
-        super().__init__()
-        self._bundle = None
-
-    def apply_config(self, config: dict):
-        changed = super().apply_config(config)
-
-        self._bundle = ParserID.TS_RFC3339, self.state, EmptyUnifiedParserConfig
-
-        return changed
-
-    def bundle(self):
-        return self._bundle
-
     def kernel(self, octx, fctx, n):
-        nb_parse_rfc3339_stage(octx, fctx, n, self.state.timestamp.sync)
+        nb_parse_rfc3339_stage(octx, fctx, n, self.sync_state)
 
 
 @configuration_property(
@@ -757,21 +615,14 @@ class SyslogTimestampParser(TimestampParser):
 
     def __init__(self):
         super().__init__()
-        self._bundle = None
+        self._year = 0
 
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
 
-        assumed_year = self.year if getattr(self, "year", 0) else datetime.now().year
-        ts_config = UnifiedParserConfig(syslog_year=assumed_year)
-
-        self._bundle = ParserID.TS_RFC3164, self.state, ts_config
-        self._year = ts_config.syslog_year
+        self._year = self.year if getattr(self, "year", 0) else datetime.now().year
 
         return changed
 
-    def bundle(self):
-        return self._bundle
-
     def kernel(self, octx, fctx, n):
-        nb_parse_syslog_timestamp_stage(octx, fctx, n, self.state.timestamp.sync, self._year)
+        nb_parse_syslog_timestamp_stage(octx, fctx, n, self.sync_state, self._year)

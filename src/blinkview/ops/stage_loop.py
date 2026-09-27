@@ -9,16 +9,16 @@
 A parser module defines its stage as a thin jitted wrapper around its own per-message step function:
 
     @app_njit()
-    def nb_parse_log_level_stage(out_b0, f_state, n, state0, config0):
-        nb_stage_loop(nb_parse_log_level, out_b0, f_state, n, state0, config0)
+    def nb_skip_words_parser_stage(out_b0, f_state, n, count):
+        nb_stage_loop_a1(nb_skip_words_parser, out_b0, f_state, n, count)
 
 This module has no parser imports so the parser modules can import it.
 """
 
 from blinkview.core.numba_config import app_njit
-from blinkview.ops.views import nb_config_views, nb_log_bundle_views, nb_state_views, nb_view
+from blinkview.ops.views import nb_log_bundle_views, nb_view
 
-# Per-frame status values shared with ops/dispatch.py
+# Per-frame status values shared with ops/decode_loop.py and ops/dispatch.py
 FS_OK = 0
 FS_FRAME_ERR = 1
 FS_PARSER_ERR = 2
@@ -28,33 +28,8 @@ FS_DECODER_ERR = 5  # row already written by nb_report_error
 
 
 @app_njit(inline="always")
-def nb_stage_loop(step, out_b0, f_state, n, state0, config0):
-    """Runs the per-message `step` over frames 0..n-1 (frame k owns output row `first + k`, `first` being the
-    output bundle's current size). Frames whose status is not FS_OK are skipped; a step returning -1 marks its
-    frame FS_STEP_FAILED, otherwise the frame's cursor advances to the returned cursor.
-
-    Like nb_stage, the array-carrying arguments are converted to meminfo-free views here, inside the function
-    that runs the loop."""
-    out_b = nb_log_bundle_views(out_b0)
-    buffer = out_b.buffer
-    state = nb_state_views(state0)
-    config = nb_config_views(config0)
-    cur = nb_view(f_state.fcur)
-    end = nb_view(f_state.fend)
-    status = nb_view(f_state.fstatus)
-    first = out_b.size[0]
-    for k in range(n):
-        if status[k] == FS_OK:
-            r = step(buffer, cur[k], end[k], out_b, first + k, state, config)
-            if r == -1:
-                status[k] = FS_STEP_FAILED
-            else:
-                cur[k] = r
-
-
-@app_njit(inline="always")
 def nb_stage_loop_a0(step, out_b0, f_state, n):
-    """nb_stage_loop for steps that take 0 extra arguments: `step(buffer, cursor, end, out_b, out_idx)`.
+    """The per-step frame loop for steps that take 0 extra arguments: `step(buffer, cursor, end, out_b, out_idx)`.
     The extras must already be meminfo-free views / scalars (build them in the stage function that calls this
     one; this function is inlined, so they are not converted twice). Numba's inliner does not support *args,
     hence one function per arity."""
@@ -75,7 +50,7 @@ def nb_stage_loop_a0(step, out_b0, f_state, n):
 
 @app_njit(inline="always")
 def nb_stage_loop_a1(step, out_b0, f_state, n, x0):
-    """nb_stage_loop for steps that take 1 extra argument: `step(buffer, cursor, end, out_b, out_idx, x0)`.
+    """The per-step frame loop for steps that take 1 extra argument: `step(buffer, cursor, end, out_b, out_idx, x0)`.
     The extras must already be meminfo-free views / scalars (build them in the stage function that calls this
     one; this function is inlined, so they are not converted twice). Numba's inliner does not support *args,
     hence one function per arity."""
@@ -96,7 +71,7 @@ def nb_stage_loop_a1(step, out_b0, f_state, n, x0):
 
 @app_njit(inline="always")
 def nb_stage_loop_a2(step, out_b0, f_state, n, x0, x1):
-    """nb_stage_loop for steps that take 2 extra arguments: `step(buffer, cursor, end, out_b, out_idx, x0, x1)`.
+    """The per-step frame loop for steps that take 2 extra arguments: `step(buffer, cursor, end, out_b, out_idx, x0, x1)`.
     The extras must already be meminfo-free views / scalars (build them in the stage function that calls this
     one; this function is inlined, so they are not converted twice). Numba's inliner does not support *args,
     hence one function per arity."""
@@ -117,7 +92,7 @@ def nb_stage_loop_a2(step, out_b0, f_state, n, x0, x1):
 
 @app_njit(inline="always")
 def nb_stage_loop_a3(step, out_b0, f_state, n, x0, x1, x2):
-    """nb_stage_loop for steps that take 3 extra arguments: `step(buffer, cursor, end, out_b, out_idx, x0, x1, x2)`.
+    """The per-step frame loop for steps that take 3 extra arguments: `step(buffer, cursor, end, out_b, out_idx, x0, x1, x2)`.
     The extras must already be meminfo-free views / scalars (build them in the stage function that calls this
     one; this function is inlined, so they are not converted twice). Numba's inliner does not support *args,
     hence one function per arity."""

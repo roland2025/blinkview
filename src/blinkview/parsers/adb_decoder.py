@@ -10,14 +10,7 @@ from blinkview.core import dtypes
 from blinkview.core.configurable import override_property
 from blinkview.core.frame_warmup_registry import frame_decoder_warmup, frame_section_warmup
 from blinkview.core.id_registry.tables import IndexedStringTable
-from blinkview.core.types.modules import DynamicWidthConfig
-from blinkview.core.types.parsing import (
-    CodecID,
-    EmptyUnifiedParserConfig,
-    EmptyUnifiedParserState,
-    ParserID,
-    UnifiedParserConfig,
-)
+from blinkview.core.types.parsing import CodecID
 from blinkview.ops.codec_adb_long import (
     nb_decode_adb_long_frame,
     nb_decode_frames_adb_long,
@@ -64,57 +57,20 @@ class AdbModuleName(ModuleNameParserBase):
     def __init__(self):
         super().__init__()
 
-    def bundle(self):
-        # 1. Build the IMMUTABLE config snapshot
-        # Note: 'tracker' is removed from here.
-        config = UnifiedParserConfig(
-            string_table=self.local.device_id.modules_table.bundle(),
-            module_config=DynamicWidthConfig(
-                max_length=128,
-                max_depth=3,
-            ),
-        )
-
-        # 2. Return the universal 3-tuple: (Function, Mutable State, Immutable Config)
-        return ParserID.MOD_ADB_LONG, self.tracker_state, config
-
     def kernel(self, octx, fctx, n):
-        nb_parse_adb_tag_stage(octx, fctx, n, self.tracker_state.modules, self.table_bundle())
+        nb_parse_adb_tag_stage(octx, fctx, n, self.tracker_state, self.table_bundle())
 
 
 @FrameSectionParserFactory.register("timestamp_adb_long_frame")
 @frame_section_warmup("timestamp_adb_long_frame")
 class AdbLongTimestamp(TimestampParser):
-    def __init__(self):
-        super().__init__()
-
-        self._bundle = None
-
-    def apply_config(self, config: dict):
-        changed = super().apply_config(config)
-
-        self._bundle = ParserID.TS_ADB_LONG, self.state, EmptyUnifiedParserConfig
-
-        return changed
-
-    def bundle(self):
-        return self._bundle
-
     def kernel(self, octx, fctx, n):
-        nb_parse_adb_timestamp_monotonic_stage(octx, fctx, n, self.state.timestamp.sync)
+        nb_parse_adb_timestamp_monotonic_stage(octx, fctx, n, self.sync_state)
 
 
 @FrameSectionParserFactory.register("process_pid_tid_adb_long_frame")
 @frame_section_warmup("process_pid_tid_adb_long_frame")
 class AdbPidTid(FrameSectionParser):
-    def __init__(self):
-        super().__init__()
-
-        self._bundle = ParserID.PID_TID_ADB_LONG, EmptyUnifiedParserState, EmptyUnifiedParserConfig
-
-    def bundle(self):
-        return self._bundle
-
     def kernel(self, octx, fctx, n):
         nb_parse_adb_pid_tid_stage(octx, fctx, n)
 
@@ -147,15 +103,6 @@ class LevelMap(FrameSectionParser):
             self._table.register_name(i, text, level_val)
 
         self._table_bundle = self._table.bundle()
-        self._bundle = (
-            ParserID.LEVEL_MAP_ADB_LONG,
-            EmptyUnifiedParserState,
-            UnifiedParserConfig(string_table=self._table_bundle),
-        )
-
-    def bundle(self):
-        """Returns the StringTableParams for backend processing."""
-        return self._bundle
 
     def kernel(self, octx, fctx, n):
         nb_parse_adb_level_stage(octx, fctx, n, self._table_bundle)
@@ -165,7 +112,6 @@ class LevelMap(FrameSectionParser):
         if self._table:
             self._table.release()
             self._table = None
-            self._bundle = None
 
     def __del__(self):
         self.release()

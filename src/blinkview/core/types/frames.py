@@ -23,7 +23,7 @@ class FrameStateParams(NamedTuple):
     fcur: np.ndarray  # int64: cursor advanced by the pipeline steps
     fend: np.ndarray  # int64: frame end in the output buffer
     ftotal: np.ndarray  # int64: decoded frame length
-    fstatus: np.ndarray  # int8: per-frame status (see ops/stage.py FS_*)
+    fstatus: np.ndarray  # int8: per-frame status (see ops/stage_loop.py FS_*)
 
 
 class FrameConfig(NamedTuple):

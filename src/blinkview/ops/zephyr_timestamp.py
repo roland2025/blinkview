@@ -23,7 +23,7 @@ from blinkview.ops.views import nb_sync_views
 
 
 @app_njit(inline="always")
-def nb_parse_zephyr_uptime_formatted_optimized(buffer, start_cursor, end_cursor, out_b, out_idx, sync):
+def nb_parse_zephyr_uptime_formatted(buffer, start_cursor, end_cursor, out_b, out_idx, sync):
     if start_cursor + 10 > end_cursor or buffer[start_cursor] != CHAR_LBRACKET:
         return -1
 
@@ -78,29 +78,13 @@ def nb_parse_zephyr_uptime_formatted_optimized(buffer, start_cursor, end_cursor,
     return nb_skip_whitespace(buffer, ts_end + 1, end_cursor)
 
 
-@app_njit(inline="always")
-def nb_parse_zephyr_uptime_formatted(
-    buffer,
-    start_cursor,
-    end_cursor,
-    out_b,
-    out_idx,
-    state,
-    config,
-):
-    """Unified-struct entry point; the logic lives in nb_parse_zephyr_uptime_formatted_optimized."""
-    return nb_parse_zephyr_uptime_formatted_optimized(
-        buffer, start_cursor, end_cursor, out_b, out_idx, state.timestamp.sync
-    )
-
-
 @app_njit()
 def nb_parse_zephyr_uptime_formatted_stage(out_b0, f_state, n, sync0):
-    nb_stage_loop_a1(nb_parse_zephyr_uptime_formatted_optimized, out_b0, f_state, n, nb_sync_views(sync0))
+    nb_stage_loop_a1(nb_parse_zephyr_uptime_formatted, out_b0, f_state, n, nb_sync_views(sync0))
 
 
 @app_njit(inline="always")
-def nb_parse_zephyr_realtime_optimized(buffer, start_cursor, end_cursor, out_b, out_idx, sync):
+def nb_parse_zephyr_realtime(buffer, start_cursor, end_cursor, out_b, out_idx, sync):
     # Minimum valid length for whole timestamp block is 29 characters:
     # e.g., '[1970-01-01 00:00:00.000,000]'
     if start_cursor + 29 > end_cursor or buffer[start_cursor] != CHAR_LBRACKET:
@@ -184,20 +168,6 @@ def nb_parse_zephyr_realtime_optimized(buffer, start_cursor, end_cursor, out_b, 
     return nb_skip_whitespace(buffer, ts_end + 1, end_cursor)
 
 
-@app_njit(inline="always")
-def nb_parse_zephyr_realtime(
-    buffer,
-    start_cursor,
-    end_cursor,
-    out_b,
-    out_idx,
-    state,
-    config,
-):
-    """Unified-struct entry point; the logic lives in nb_parse_zephyr_realtime_optimized."""
-    return nb_parse_zephyr_realtime_optimized(buffer, start_cursor, end_cursor, out_b, out_idx, state.timestamp.sync)
-
-
 @app_njit()
 def nb_parse_zephyr_realtime_stage(out_b0, f_state, n, sync0):
-    nb_stage_loop_a1(nb_parse_zephyr_realtime_optimized, out_b0, f_state, n, nb_sync_views(sync0))
+    nb_stage_loop_a1(nb_parse_zephyr_realtime, out_b0, f_state, n, nb_sync_views(sync0))

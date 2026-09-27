@@ -4,8 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-"""The section-driven path (decoder.kernel -> section.kernel per pipeline step -> nb_finish_frames) must give the
-same rows as the monolithic nb_process_batch_kernel, for every parser family that has a dedicated stage kernel."""
+"""End-to-end runs of the section-driven path (decoder.kernel -> section.kernel per pipeline step -> nb_finish_frames)
+for every parser family that has a dedicated stage kernel."""
 
 import time
 from types import SimpleNamespace
@@ -18,7 +18,7 @@ from blinkview.core.id_registry.registry import IDRegistry
 from blinkview.core.logger import PrintLogger
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.output import OutputConfig
-from blinkview.ops.dispatch import nb_finish_frames, nb_process_batch_kernel
+from blinkview.ops.dispatch import nb_finish_frames
 from blinkview.parsers import adb_decoder  # noqa: F401  (registers the adb_long_frame steps)
 from blinkview.parsers.binary_parser import BinaryParser
 from blinkview.parsers.frame_decoders import FrameDecoderFactory
@@ -39,7 +39,7 @@ def _shared(id_registry):
     )
 
 
-def _rows(decoder, steps, data, split, pid_tid=False):
+def _rows(decoder, steps, data, pid_tid=False):
     """Runs `data` (one input chunk) through a freshly configured parser; returns the output rows."""
     id_registry = IDRegistry(NumpyArrayPool())
     shared = _shared(id_registry)
@@ -58,11 +58,10 @@ def _rows(decoder, steps, data, split, pid_tid=False):
     )
     codec = parser._frame_codec
     frame_parser = parser._frame_parser
-    parser_bundle = frame_parser.bundle()
+    p_config = frame_parser.bundle()
 
     frame_state = FrameState(pool, codec.frame_length_maximum)
     f_state = frame_state.bundle
-    f_config = codec.bundle()
     o_config = OutputConfig(compact_buffer=True)
 
     in_batch = pool.create(PooledLogBatch, 1, len(data))
@@ -74,24 +73,21 @@ def _rows(decoder, steps, data, split, pid_tid=False):
     f_state.in_frame[0] = True
     f_state.offset[0] = 0
     frame_state.reset_batch_trackers()
-    if split:
-        out_full, n = codec.kernel(f_state, in_batch.bundle, parser_bundle.config, o_config, out.bundle)
-        if n:
-            for section in frame_parser.pipeline:
-                section.kernel(out.bundle, f_state, n)
-            nb_finish_frames(
-                f_state.fstart,
-                f_state.fcur,
-                f_state.fend,
-                f_state.ftotal,
-                f_state.fstatus,
-                parser_bundle.config,
-                o_config.compact_buffer,
-                out.bundle,
-                n,
-            )
-    else:
-        out_full = nb_process_batch_kernel(f_config, f_state, in_batch.bundle, parser_bundle, o_config, out.bundle)
+    out_full, n = codec.kernel(f_state, in_batch.bundle, p_config, o_config, out.bundle)
+    if n:
+        for section in frame_parser.pipeline:
+            section.kernel(out.bundle, f_state, n)
+        nb_finish_frames(
+            f_state.fstart,
+            f_state.fcur,
+            f_state.fend,
+            f_state.ftotal,
+            f_state.fstatus,
+            p_config,
+            o_config.compact_buffer,
+            out.bundle,
+            n,
+        )
     assert not out_full
     frame_parser.post_process(out)
 
@@ -172,13 +168,13 @@ CASES = {
         LINE,
         [{"type": "timestamp_zephyr_uptime_formatted"}, {"type": "log_level_zephyr"}],
         b"[00:00:01.234,000] <inf> main: booted\n[00:00:02.000,000] <err> net: failed\n",
-        None,
+        [b"main: booted", b"net: failed"],
     ),
     "zephyr_realtime": (
         LINE,
         [{"type": "timestamp_zephyr_realtime"}, {"type": "log_level_zephyr"}],
         b"[2026-01-15 10:23:01.456,000] <inf> main: booted\n[2026-01-15 10:23:02.000,000] <err> net: failed\n",
-        None,
+        [b"main: booted", b"net: failed"],
     ),
     "adb_long": (
         ADB,
@@ -189,29 +185,26 @@ CASES = {
             {"type": "module_name_adb_long_frame"},
         ],
         b"[ 12.345  1234: 5678 I/Tag ]\nfirst message\n\n[ 13.000  1234: 5678 E/Other ]\nsecond message\n\n[ 14.000  1 :2 I/X ]\n",
-        None,
+        [b"first message", b"second message"],
     ),
 }
 
 
 @pytest.mark.parametrize("name", list(CASES))
-def test_split_path_matches_monolith(name):
+def test_section_pipeline_emits_expected_payloads(name):
     decoder, steps, data, expected_payloads = CASES[name]
 
     pid_tid = any(step["type"] == "process_pid_tid_adb_long_frame" for step in steps)
-    monolith = _rows(decoder, steps, data, split=False, pid_tid=pid_tid)
-    split = _rows(decoder, steps, data, split=True, pid_tid=pid_tid)
+    rows = _rows(decoder, steps, data, pid_tid=pid_tid)
 
-    assert len(monolith) >= 2, f"the monolith produced {len(monolith)} rows"
-    assert split == monolith
-    if expected_payloads is not None:
-        assert [row[0] for row in monolith] == expected_payloads
+    assert [row[0] for row in rows] == expected_payloads
 
 
-def test_split_path_actually_parses_the_fields():
-    """Guards against both paths agreeing on all-error rows: spot-check decoded columns for the ADB long frame."""
+def test_section_pipeline_actually_parses_the_fields():
+    """Guards against payloads matching while every other column is left at its default: spot-check decoded
+    columns for the ADB long frame."""
     decoder, steps, data, _ = CASES["adb_long"]
-    rows = _rows(decoder, steps, data, split=True, pid_tid=True)
+    rows = _rows(decoder, steps, data, pid_tid=True)
 
     assert rows[0][4] == (1234, 5678)  # pid / tid
     assert rows[0][3] != 0  # timestamp

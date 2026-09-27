@@ -23,7 +23,7 @@ from blinkview.ops.views import nb_sync_views
 
 
 @app_njit(inline="always")
-def nb_parse_iso8601_desktop_optimized(buffer, start_cursor, end_cursor, out_b, out_idx, sync):
+def nb_parse_iso8601_desktop(buffer, start_cursor, end_cursor, out_b, out_idx, sync):
     """
     Parses 'YYYY-MM-DD HH:MM:SS[.,]fff' at the cursor - no bracket wrapper,
     accepting either a dot (ISO8601) or comma (Python logging/log4j) fraction
@@ -53,27 +53,13 @@ def nb_parse_iso8601_desktop_optimized(buffer, start_cursor, end_cursor, out_b, 
     return nb_skip_whitespace(buffer, start_cursor + 23, end_cursor)
 
 
-@app_njit(inline="always")
-def nb_parse_iso8601_desktop(
-    buffer,
-    start_cursor,
-    end_cursor,
-    out_b,
-    out_idx,
-    state,
-    config,
-):
-    """Unified-struct entry point; the logic lives in nb_parse_iso8601_desktop_optimized."""
-    return nb_parse_iso8601_desktop_optimized(buffer, start_cursor, end_cursor, out_b, out_idx, state.timestamp.sync)
-
-
 @app_njit()
 def nb_parse_iso8601_desktop_stage(out_b0, f_state, n, sync0):
-    nb_stage_loop_a1(nb_parse_iso8601_desktop_optimized, out_b0, f_state, n, nb_sync_views(sync0))
+    nb_stage_loop_a1(nb_parse_iso8601_desktop, out_b0, f_state, n, nb_sync_views(sync0))
 
 
 @app_njit(inline="always")
-def nb_parse_rfc3339_optimized(buffer, start_cursor, end_cursor, out_b, out_idx, sync):
+def nb_parse_rfc3339(buffer, start_cursor, end_cursor, out_b, out_idx, sync):
     """
     Parses RFC 3339 'YYYY-MM-DDTHH:MM:SS.uuuuuu(Z|+HH:MM|-HH:MM)' at the cursor -
     e.g. journald's short-iso-precise output, or Python's
@@ -105,27 +91,13 @@ def nb_parse_rfc3339_optimized(buffer, start_cursor, end_cursor, out_b, out_idx,
     return nb_skip_whitespace(buffer, start_cursor + consumed, end_cursor)
 
 
-@app_njit(inline="always")
-def nb_parse_rfc3339(
-    buffer,
-    start_cursor,
-    end_cursor,
-    out_b,
-    out_idx,
-    state,
-    config,
-):
-    """Unified-struct entry point; the logic lives in nb_parse_rfc3339_optimized."""
-    return nb_parse_rfc3339_optimized(buffer, start_cursor, end_cursor, out_b, out_idx, state.timestamp.sync)
-
-
 @app_njit()
 def nb_parse_rfc3339_stage(out_b0, f_state, n, sync0):
-    nb_stage_loop_a1(nb_parse_rfc3339_optimized, out_b0, f_state, n, nb_sync_views(sync0))
+    nb_stage_loop_a1(nb_parse_rfc3339, out_b0, f_state, n, nb_sync_views(sync0))
 
 
 @app_njit(inline="always")
-def nb_parse_syslog_timestamp_optimized(buffer, start_cursor, end_cursor, out_b, out_idx, sync, syslog_year):
+def nb_parse_syslog_timestamp(buffer, start_cursor, end_cursor, out_b, out_idx, sync, syslog_year):
     """
     Parses classic RFC3164 syslog timestamps: 'Mon DD HH:MM:SS' (day is
     space- or zero-padded), e.g. "Jan  2 15:04:05". Fixed 15-byte width.
@@ -210,22 +182,6 @@ def nb_parse_syslog_timestamp_optimized(buffer, start_cursor, end_cursor, out_b,
     return nb_skip_whitespace(buffer, start_cursor + 15, end_cursor)
 
 
-@app_njit(inline="always")
-def nb_parse_syslog_timestamp(
-    buffer,
-    start_cursor,
-    end_cursor,
-    out_b,
-    out_idx,
-    state,
-    config,
-):
-    """Unified-struct entry point; the logic lives in nb_parse_syslog_timestamp_optimized."""
-    return nb_parse_syslog_timestamp_optimized(
-        buffer, start_cursor, end_cursor, out_b, out_idx, state.timestamp.sync, config.syslog_year
-    )
-
-
 @app_njit()
 def nb_parse_syslog_timestamp_stage(out_b0, f_state, n, sync0, syslog_year):
-    nb_stage_loop_a2(nb_parse_syslog_timestamp_optimized, out_b0, f_state, n, nb_sync_views(sync0), syslog_year)
+    nb_stage_loop_a2(nb_parse_syslog_timestamp, out_b0, f_state, n, nb_sync_views(sync0), syslog_year)

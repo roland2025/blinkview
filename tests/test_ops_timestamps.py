@@ -9,8 +9,7 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.types.log_batch import LogBundle
 from blinkview.core.types.parsing import (
-    EmptyUnifiedParserState,
-    UnifiedParserConfig,
+    UnusedSyncState,
     create_default_sync,
     prime_sync_state,
 )
@@ -62,43 +61,48 @@ def _buf(msg):
 class TestParseIntTimestamp:
     def test_seconds_precision_unix_mode_writes_raw_seconds_as_ns(self):
         out_b = _out_bundle()
-        config = UnifiedParserConfig(timestamp_precision=0, timestamp_unix=True)
+        precision = 0
+        unix = True
 
-        next_cursor = nb_parse_int_timestamp(_buf("5 rest"), 0, 6, out_b, 0, EmptyUnifiedParserState, config)
+        next_cursor = nb_parse_int_timestamp(_buf("5 rest"), 0, 6, out_b, 0, UnusedSyncState, precision, unix)
 
         assert int(out_b.timestamps[0]) == 5_000_000_000
         assert _buf("5 rest")[next_cursor : next_cursor + 1].tobytes() == b"r"
 
     def test_millis_precision(self):
         out_b = _out_bundle()
-        config = UnifiedParserConfig(timestamp_precision=1, timestamp_unix=True)
+        precision = 1
+        unix = True
 
-        nb_parse_int_timestamp(_buf("1500"), 0, 4, out_b, 0, EmptyUnifiedParserState, config)
+        nb_parse_int_timestamp(_buf("1500"), 0, 4, out_b, 0, UnusedSyncState, precision, unix)
 
         assert int(out_b.timestamps[0]) == 1_500_000_000
 
     def test_no_digits_returns_negative_one(self):
         out_b = _out_bundle()
-        config = UnifiedParserConfig(timestamp_precision=0, timestamp_unix=True)
+        precision = 0
+        unix = True
 
-        result = nb_parse_int_timestamp(_buf("abc"), 0, 3, out_b, 0, EmptyUnifiedParserState, config)
+        result = nb_parse_int_timestamp(_buf("abc"), 0, 3, out_b, 0, UnusedSyncState, precision, unix)
 
         assert result == -1
 
     def test_undefined_precision_returns_negative_one(self):
         out_b = _out_bundle()
-        config = UnifiedParserConfig(timestamp_precision=9, timestamp_unix=True)
+        precision = 9
+        unix = True
 
-        result = nb_parse_int_timestamp(_buf("5"), 0, 1, out_b, 0, EmptyUnifiedParserState, config)
+        result = nb_parse_int_timestamp(_buf("5"), 0, 1, out_b, 0, UnusedSyncState, precision, unix)
 
         assert result == -1
 
     def test_non_unix_mode_projects_through_sync_state(self):
         out_b = _out_bundle()
         out_b.rx_timestamps[0] = 10_000_000_000
-        config = UnifiedParserConfig(timestamp_precision=0, timestamp_unix=False)
+        precision = 0
+        unix = False
 
-        nb_parse_int_timestamp(_buf("1"), 0, 1, out_b, 0, EmptyUnifiedParserState, config)
+        nb_parse_int_timestamp(_buf("1"), 0, 1, out_b, 0, UnusedSyncState, precision, unix)
 
         # timestamp_unix=False routes through nb_project_synced_ns; with the default (disabled)
         # sync state this falls back to nb_auto_sync_fallback, whose first-ever call just

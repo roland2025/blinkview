@@ -6,7 +6,7 @@
 
 It aligns and analyzes logs from multiple sources—such as firmware (UART/RTT), CAN bus, Android, or plain TCP/UDP sockets—in a single, time-synchronized timeline. Trace events across processes and devices to understand real system behavior.
 
-### LogViewer and filter with telemetry table
+## LogViewer and filter with telemetry table
 
 Log Viewer view with one source filtered out, with latest values per module visible in telemetry table.
 
@@ -25,13 +25,15 @@ Ingestion from 2 TCP sources, with a custom watch list example. Latest values fr
 ---
 
 ## The Problem: "Manual Glue"
+
 In complex hardware/software systems, bugs rarely stay in one layer. Investigating a failure often means manually aligning timestamps from a serial terminal, a CAN log, and `adb logcat`.
 
 BlinkView replaces ad-hoc 'log-merger' scripts with a **unified environment** that handles ingestion, time alignment, and visualization in one place.
 
-BlinkView started as an internal tool for debugging real multi-device embedded systems, and has since grown into a general-purpose tool for any high-throughput, multi-source logging problem—hardware or software.
+BlinkView is a from-scratch rewrite of an earlier single-device tool. Real bugs kept crossing device boundaries, so BlinkView was designed from day one around multiple sources on one synchronized timeline—and has since grown into a general-purpose tool for any high-throughput, multi-source logging problem, hardware or software.
 
 ---
+
 ## Example Use Case
 
 Debugging a command across a system:
@@ -42,12 +44,14 @@ Debugging a command across a system:
 - Motor or battery responds
 
 BlinkView lets you see all of this in one timeline:
+
 - Android logcat event
 - Transport messages
 - Firmware logs
 - CAN signals (decoded via DBC)
 
 This makes it possible to:
+
 - trace behavior across components
 - measure delays between steps
 - identify where failures occur
@@ -59,14 +63,17 @@ The same approach applies just as well without any hardware in the loop. Debuggi
 - Multiple backend workers log concurrently under load
 
 BlinkView lets you see all of this in one timeline:
+
 - Client-side log events
 - Backend request/response logs, correlated across workers
 - Structured `key=value` fields extracted from each log line for filtering
 
 This makes it possible to:
+
 - trace a single request across processes
 - spot which worker or service introduced a delay
 - correlate client-observed failures with backend-side causes
+
 ---
 
 ### 🚀 Live Integration Demo
@@ -88,14 +95,17 @@ This demo includes a multi-threaded Qt Client and a headless Backend service—n
 BlinkView manages its dependencies via `uv`, including optional hardware backends and GUI support.
 
 ### Using UV (Recommended)
+
 BlinkView is best installed via `uv` for environment isolation.
 
 **Windows (PowerShell):**
+
 ```bash
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
 **Install from source:**
+
 ```bash
 # Clone the repo
 git clone https://github.com/roland2025/blinkview.git
@@ -113,16 +123,23 @@ uv tool install ".[all]"
 # Go to your project directory
 cd your/project
 
-# Initialize the profile
+# Optional: make this directory a BlinkView project
 blink init
 
 # Launch the tool
 blink
 ```
 
-* **Profiles:** Stored in `./.blinkview/` (can be committed to Git).
-* **Logs:** Saved in `./logs/` (should be ignored in Git).
-* **Global Config:** Set a centralized log directory with `blink config --global log_dir /path/to/logs`.
+`blink init` is optional. It creates a `./.blinkview/` folder, which keeps this project's settings with the project instead of in your home directory:
+
+| | With `blink init` (project mode) | Without it (standalone mode) |
+| --- | --- | --- |
+| **Profiles** (sources, parsers, layout) | `./.blinkview/profiles/` (can be committed to Git) | `~/.blinkview/profiles/` |
+| **Logs** | `./logs/` (add to `.gitignore`) | `~/.blinkview/logs/` |
+
+BlinkView looks for `.blinkview/` in the current directory and its parents, so you can launch `blink` from any subfolder of the project.
+
+To store logs somewhere else, set a log directory with `blink config --global log_dir /path/to/logs`.
 
 ---
 

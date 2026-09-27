@@ -7,8 +7,7 @@
 import numpy as np
 
 from blinkview.core.numba_config import app_njit
-from blinkview.core.types.log_batch import LogBundle
-from blinkview.core.types.parsing import STATE_COMPLETE, STATE_INCOMPLETE, UnifiedParserState
+from blinkview.core.types.parsing import STATE_COMPLETE, STATE_INCOMPLETE
 from blinkview.ops.constants import (
     CHAR_COLON,
     CHAR_CR,
@@ -30,7 +29,7 @@ from blinkview.ops.discovery import nb_resolve_module_id
 from blinkview.ops.modules import nb_normalize_name_inplace
 from blinkview.ops.stage_loop import nb_stage_loop_a0, nb_stage_loop_a1, nb_stage_loop_a2
 from blinkview.ops.strings import nb_skip_whitespace
-from blinkview.ops.timestamps import nb_parse_iso8601_to_ns, nb_project_synced_ns
+from blinkview.ops.timestamps import nb_project_synced_ns
 from blinkview.ops.views import nb_string_table_views, nb_sync_views, nb_tracker_views
 
 
@@ -214,7 +213,7 @@ def nb_decode_adb_long_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
 
 
 @app_njit(inline="always")
-def nb_parse_adb_pid_tid_optimized(buffer, start_cursor, end_cursor, out_b, out_idx):
+def nb_parse_adb_pid_tid(buffer, start_cursor, end_cursor, out_b, out_idx):
     cursor = start_cursor
 
     # --- 1. Parse PID ---
@@ -261,27 +260,13 @@ def nb_parse_adb_pid_tid_optimized(buffer, start_cursor, end_cursor, out_b, out_
     return nb_skip_whitespace(buffer, cursor, end_cursor)
 
 
-@app_njit(inline="always")
-def nb_parse_adb_pid_tid(
-    buffer,
-    start_cursor,
-    end_cursor,
-    out_b,
-    out_idx,
-    state,
-    config,
-):
-    """Unified-struct entry point; the logic lives in nb_parse_adb_pid_tid_optimized."""
-    return nb_parse_adb_pid_tid_optimized(buffer, start_cursor, end_cursor, out_b, out_idx)
-
-
 @app_njit()
 def nb_parse_adb_pid_tid_stage(out_b0, f_state, n):
-    nb_stage_loop_a0(nb_parse_adb_pid_tid_optimized, out_b0, f_state, n)
+    nb_stage_loop_a0(nb_parse_adb_pid_tid, out_b0, f_state, n)
 
 
 @app_njit(inline="always")
-def nb_parse_adb_level_optimized(buffer, start_cursor, end_cursor, out_b, out_idx, table):
+def nb_parse_adb_level(buffer, start_cursor, end_cursor, out_b, out_idx, table):
     if start_cursor + 1 >= end_cursor:
         return -1
 
@@ -303,19 +288,13 @@ def nb_parse_adb_level_optimized(buffer, start_cursor, end_cursor, out_b, out_id
     return -1
 
 
-@app_njit(inline="always")
-def nb_parse_adb_level(buffer, start_cursor, end_cursor, out_b, out_idx, state, unified_config):
-    """Unified-struct entry point; the logic lives in nb_parse_adb_level_optimized."""
-    return nb_parse_adb_level_optimized(buffer, start_cursor, end_cursor, out_b, out_idx, unified_config.string_table)
-
-
 @app_njit()
 def nb_parse_adb_level_stage(out_b0, f_state, n, table0):
-    nb_stage_loop_a1(nb_parse_adb_level_optimized, out_b0, f_state, n, nb_string_table_views(table0))
+    nb_stage_loop_a1(nb_parse_adb_level, out_b0, f_state, n, nb_string_table_views(table0))
 
 
 @app_njit(inline="always")
-def nb_parse_adb_tag_optimized(buffer, start_cursor, end_cursor, out_b, out_idx, tracker, string_table):
+def nb_parse_adb_tag(buffer, start_cursor, end_cursor, out_b, out_idx, tracker, string_table):
     t_bytes = tracker.name_bytes
     write_pos = tracker.bytes_cursor[0]
     s_table = string_table
@@ -404,27 +383,9 @@ def nb_parse_adb_tag_optimized(buffer, start_cursor, end_cursor, out_b, out_idx,
     return nb_skip_whitespace(buffer, header_delimiter_idx + 2, end_cursor)
 
 
-@app_njit(inline="always")
-def nb_parse_adb_tag(
-    buffer,
-    start_cursor,
-    end_cursor,
-    out_b,
-    out_idx,
-    state,
-    config,
-):
-    """Unified-struct entry point; the logic lives in nb_parse_adb_tag_optimized."""
-    return nb_parse_adb_tag_optimized(
-        buffer, start_cursor, end_cursor, out_b, out_idx, state.modules, config.string_table
-    )
-
-
 @app_njit()
 def nb_parse_adb_tag_stage(out_b0, f_state, n, tracker0, table0):
-    nb_stage_loop_a2(
-        nb_parse_adb_tag_optimized, out_b0, f_state, n, nb_tracker_views(tracker0), nb_string_table_views(table0)
-    )
+    nb_stage_loop_a2(nb_parse_adb_tag, out_b0, f_state, n, nb_tracker_views(tracker0), nb_string_table_views(table0))
 
 
 @app_njit(inline="always")
@@ -470,40 +431,7 @@ def nb_parse_monotonic_to_ns(buffer, start, end):
 
 
 @app_njit(inline="always")
-def nb_parse_adb_timestamp_iso(
-    buffer,
-    start_cursor,
-    end_cursor,
-    out_b: LogBundle,
-    out_idx,
-    state: UnifiedParserState,
-    config,
-):
-    # Logcat Long format starts with "[ " (2 bytes) before the Year
-    # Total header check length "[ 2026-04-21 19:53:52.754" is 25 bytes
-    if start_cursor + 25 > end_cursor or buffer[start_cursor] != 91:
-        return -1
-
-    # Call the generic ISO parser
-    # We pass 'start_cursor + 2' to skip the '[ '
-    out_b.timestamps[out_idx] = nb_project_synced_ns(
-        nb_parse_iso8601_to_ns(buffer, start_cursor + 2, state.timestamp.utc_offset[0]), state.timestamp.sync
-    )
-
-    # Move cursor past timestamp (index 25) and skip whitespace to find PID
-    cursor = start_cursor + 25
-    while cursor < end_cursor:
-        b = buffer[cursor]
-        if b == 32 or b == 9 or b == 160:
-            cursor += 1
-        else:
-            break
-
-    return cursor
-
-
-@app_njit(inline="always")
-def nb_parse_adb_timestamp_monotonic_optimized(buffer, start_cursor, end_cursor, out_b, out_idx, sync):
+def nb_parse_adb_timestamp_monotonic(buffer, start_cursor, end_cursor, out_b, out_idx, sync):
     # Basic validation of start
     if start_cursor + 5 > end_cursor or buffer[start_cursor] != 91:
         return -1
@@ -529,25 +457,9 @@ def nb_parse_adb_timestamp_monotonic_optimized(buffer, start_cursor, end_cursor,
     return nb_skip_whitespace(buffer, ts_end, end_cursor)
 
 
-@app_njit(inline="always")
-def nb_parse_adb_timestamp_monotonic(
-    buffer,
-    start_cursor,
-    end_cursor,
-    out_b: LogBundle,
-    out_idx,
-    state: UnifiedParserState,
-    config,
-):
-    """Unified-struct entry point; the logic lives in nb_parse_adb_timestamp_monotonic_optimized."""
-    return nb_parse_adb_timestamp_monotonic_optimized(
-        buffer, start_cursor, end_cursor, out_b, out_idx, state.timestamp.sync
-    )
-
-
 @app_njit()
 def nb_parse_adb_timestamp_monotonic_stage(out_b0, f_state, n, sync0):
-    nb_stage_loop_a1(nb_parse_adb_timestamp_monotonic_optimized, out_b0, f_state, n, nb_sync_views(sync0))
+    nb_stage_loop_a1(nb_parse_adb_timestamp_monotonic, out_b0, f_state, n, nb_sync_views(sync0))
 
 
 @app_njit()

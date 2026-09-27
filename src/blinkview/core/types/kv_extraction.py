@@ -8,9 +8,7 @@
 parsers/multi_rule_key_value.py). See plans/kv-extractor-numba-backend.md.
 
 Every rule type funnels through one flat `KvRuleConfig` shape (unused fields left at their
-default), the same "one config shape fits every step" convention already used by
-`UnifiedParserConfig` (core/types/parsing.py) for the frame-parser pipeline - not because every
-rule needs every field, but because a `numba.typed.List` needs one homogeneous element type, and
+default) - not because every rule needs every field, but because a `numba.typed.List` needs one homogeneous element type, and
 inventing a per-rule-type tuple shape would mean a different list (and a different dispatch
 kernel signature) per rule type instead of one.
 """
@@ -73,6 +71,6 @@ EmptyKvRuleConfig = KvRuleConfig()
 class KvExtractState(NamedTuple):
     # 1-element int64 array: resume cursor into the current input batch. Lets
     # nb_process_kv_batch be called repeatedly against the same input batch (once per output
-    # batch it fills), the same resumable-chunk contract nb_process_batch_kernel already uses -
-    # see ops/dispatch.py / parsers/binary_parser.py's run() loop.
+    # batch it fills), the same resumable-chunk contract the frame decoder kernels use -
+    # see ops/decode_loop.py / parsers/binary_parser.py's run() loop.
     in_idx: np.ndarray

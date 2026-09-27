@@ -7,8 +7,8 @@
 """Numba backend for the multi-rule key-value extractor - see
 core/types/kv_extraction.py's module docstring and plans/kv-extractor-numba-backend.md.
 
-The whole-batch entry point, nb_process_kv_batch, mirrors ops/dispatch.py's
-nb_process_batch_kernel / parsers/binary_parser.py's run() loop: one call processes as much of an
+The whole-batch entry point, nb_process_kv_batch, mirrors ops/decode_loop.py's
+nb_decode_loop / parsers/binary_parser.py's run() loop: one call processes as much of an
 input PooledLogBatch as fits into the current output batch, and reports whether it stopped early
 because the output filled up (so the caller can flush, acquire a fresh output batch, and resume
 the *same* input batch exactly where it left off) - never partially re-emitting a row across that
@@ -38,8 +38,7 @@ CHAR_RBRACE = 125
 CHAR_RBRACKET = 93
 
 # Numba can't type a plain Python class's attribute access (KvRuleID.KEY_VALUE) as a global inside
-# an njit function - extracted to flat module-level int constants instead, same as
-# ops/pipeline.py does for ParserID (e.g. `LEVEL_NAME_MAP = ParserID.LEVEL_NAME_MAP`).
+# an njit function - extracted to flat module-level int constants instead.
 KV_RULE_KEY_VALUE = KvRuleID.KEY_VALUE
 KV_RULE_ANCHOR_WORD = KvRuleID.ANCHOR_WORD
 KV_RULE_JSON_LITE = KvRuleID.JSON_LITE
@@ -482,14 +481,13 @@ def nb_process_kv_batch(
     device_id_int,
 ):
     """Processes in_b (resuming from state.in_idx[0]) against every rule in `rules` (a flat
-    NumbaList of (module_id, rule_id, config) triples - the same shape
-    core/types/parsing.py's ParserPipelineBundle uses for the frame-parser pipeline), in ONE call,
+    NumbaList of (module_id, rule_id, config) triples), in ONE call,
     for as many rows as fit in out_b.
 
     Returns True if out_b filled up before the whole input batch was consumed (state.in_idx left
     at the first not-yet-processed row, so the caller can flush out_b, acquire a fresh one, and
     call this again to resume exactly there - the same resumable-chunk contract
-    ops/dispatch.py's nb_process_batch_kernel uses). Returns False once every row has been
+    ops/decode_loop.py's nb_decode_loop uses). Returns False once every row has been
     handled (state.in_idx reset to 0, ready for the next input batch)."""
     n = in_b.size[0]
     i = state.in_idx[0]

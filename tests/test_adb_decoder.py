@@ -6,9 +6,9 @@
 
 from types import SimpleNamespace
 
-from blinkview.core.types.parsing import CodecID, EmptyUnifiedParserConfig, EmptyUnifiedParserState, ParserID
+from blinkview.core.types.parsing import CodecID, create_default_sync
 from blinkview.ops.codec_adb_long import nb_decode_adb_long_frame
-from blinkview.parsers.adb_decoder import AdbDecoder, AdbLongTimestamp, AdbModuleName, AdbPidTid, LevelMap
+from blinkview.parsers.adb_decoder import AdbDecoder, AdbLongTimestamp, LevelMap
 from blinkview.utils.log_level import LogLevel
 
 
@@ -36,56 +36,17 @@ class TestAdbDecoder:
         assert decoder.decode is nb_decode_adb_long_frame
 
 
-class TestAdbModuleName:
-    def test_bundle_returns_expected_parser_id_and_config(self, id_registry):
-        parser = AdbModuleName()
-        device = id_registry.get_device("adb_module_test")
-        parser.local = SimpleNamespace(device_id=device)
-
-        parser_id, state, config = parser.bundle()
-
-        assert parser_id == ParserID.MOD_ADB_LONG
-        assert state is parser.tracker_state
-        assert config.module_config.max_length == 128
-        assert config.module_config.max_depth == 3
-        assert config.string_table is device.modules_table.bundle()
-
-
 class TestAdbLongTimestamp:
-    def test_bundle_returns_expected_parser_id_and_empty_config(self, id_registry):
+    def test_uses_the_device_sync_state(self, id_registry):
+        sync = create_default_sync(0)
         parser = AdbLongTimestamp()
-        parser.local = SimpleNamespace(device_id=id_registry.get_device("adb_ts_test"), sync_state=None)
+        parser.local = SimpleNamespace(device_id=id_registry.get_device("adb_ts_test"), sync_state=sync)
         configure(parser)
 
-        parser_id, state, config = parser.bundle()
-
-        assert parser_id == ParserID.TS_ADB_LONG
-        assert state is parser.state
-        assert config is EmptyUnifiedParserConfig
-
-
-class TestAdbPidTid:
-    def test_bundle_returns_expected_parser_id_and_empty_state_config(self):
-        parser = AdbPidTid()
-
-        parser_id, state, config = parser.bundle()
-
-        assert parser_id == ParserID.PID_TID_ADB_LONG
-        assert state is EmptyUnifiedParserState
-        assert config is EmptyUnifiedParserConfig
+        assert parser.sync_state is sync
 
 
 class TestLevelMap:
-    def test_bundle_returns_expected_parser_id(self):
-        level_map = LevelMap()
-
-        parser_id, state, config = level_map.bundle()
-
-        assert parser_id == ParserID.LEVEL_MAP_ADB_LONG
-        assert state is EmptyUnifiedParserState
-
-        level_map.release()
-
     def test_registers_all_adb_level_codes_with_correct_values(self):
         level_map = LevelMap()
         table = level_map._table
@@ -106,13 +67,12 @@ class TestLevelMap:
 
         level_map.release()
 
-    def test_release_clears_table_and_bundle(self):
+    def test_release_clears_table(self):
         level_map = LevelMap()
 
         level_map.release()
 
         assert level_map._table is None
-        assert level_map._bundle is None
 
     def test_release_is_idempotent(self):
         level_map = LevelMap()

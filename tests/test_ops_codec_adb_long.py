@@ -48,7 +48,7 @@ def test_nb_parse_adb_pid_tid_writes_parsed_pid_and_tid():
     buf = np.frombuffer(msg.encode("utf-8"), dtype=dtypes.BYTE)
     out_b = make_out_bundle(1)
 
-    next_cursor = nb_parse_adb_pid_tid(buf, 0, len(msg), out_b, 0, 0, 0)
+    next_cursor = nb_parse_adb_pid_tid(buf, 0, len(msg), out_b, 0)
 
     assert int(out_b.pids[0]) == 2680
     assert int(out_b.tids[0]) == 2701
@@ -61,7 +61,7 @@ def test_nb_parse_adb_pid_tid_handles_no_space_after_colon():
     buf = np.frombuffer(msg.encode("utf-8"), dtype=dtypes.BYTE)
     out_b = make_out_bundle(1)
 
-    nb_parse_adb_pid_tid(buf, 0, len(msg), out_b, 0, 0, 0)
+    nb_parse_adb_pid_tid(buf, 0, len(msg), out_b, 0)
 
     assert int(out_b.pids[0]) == 100
     assert int(out_b.tids[0]) == 200
@@ -72,7 +72,7 @@ def test_nb_parse_adb_pid_tid_writes_at_out_idx():
     buf = np.frombuffer(msg.encode("utf-8"), dtype=dtypes.BYTE)
     out_b = make_out_bundle(3)
 
-    nb_parse_adb_pid_tid(buf, 0, len(msg), out_b, 2, 0, 0)
+    nb_parse_adb_pid_tid(buf, 0, len(msg), out_b, 2)
 
     assert int(out_b.pids[2]) == 5
     assert int(out_b.tids[2]) == 6

@@ -9,7 +9,6 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.id_registry.tables import IndexedStringTable
 from blinkview.core.types.log_batch import LogBundle
-from blinkview.core.types.parsing import EmptyUnifiedParserState, UnifiedParserConfig
 from blinkview.ops.levels import nb_parse_log_level
 
 
@@ -48,22 +47,22 @@ def _out_bundle(capacity=1):
     )
 
 
-def _levels_config():
+def _levels_table():
     # Sequential identity_ids (0, 1, ...) matching real level-table usage - nb_parse_log_level
     # iterates range(count) treating that as a direct index into offsets/lens/values.
     table = IndexedStringTable(initial_capacity=4, use_hashes=False, values_dtype=np.uint8)
     table.register_name(0, "INFO", value=1)
     table.register_name(1, "WARN", value=2)
-    return UnifiedParserConfig(string_table=table.bundle())
+    return table.bundle()
 
 
 class TestParseLogLevel:
     def test_matches_first_registered_level_and_skips_trailing_whitespace(self):
         msg = "INFO hello"
         out_b = _out_bundle()
-        config = _levels_config()
+        config = _levels_table()
 
-        next_cursor = nb_parse_log_level(_buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, config)
+        next_cursor = nb_parse_log_level(_buf(msg), 0, len(msg), out_b, 0, config)
 
         assert out_b.levels[0] == 1
         assert bytes(_buf(msg)[next_cursor:]) == b"hello"
@@ -71,26 +70,26 @@ class TestParseLogLevel:
     def test_matches_second_registered_level(self):
         msg = "WARN uh-oh"
         out_b = _out_bundle()
-        config = _levels_config()
+        config = _levels_table()
 
-        nb_parse_log_level(_buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, config)
+        nb_parse_log_level(_buf(msg), 0, len(msg), out_b, 0, config)
 
         assert out_b.levels[0] == 2
 
     def test_unmatched_text_returns_negative_one(self):
         msg = "XXXX hello"
         out_b = _out_bundle()
-        config = _levels_config()
+        config = _levels_table()
 
-        result = nb_parse_log_level(_buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, config)
+        result = nb_parse_log_level(_buf(msg), 0, len(msg), out_b, 0, config)
 
         assert result == -1
 
     def test_empty_buffer_returns_negative_one(self):
         out_b = _out_bundle()
-        config = _levels_config()
+        config = _levels_table()
 
-        result = nb_parse_log_level(_buf(""), 0, 0, out_b, 0, EmptyUnifiedParserState, config)
+        result = nb_parse_log_level(_buf(""), 0, 0, out_b, 0, config)
 
         assert result == -1
 
@@ -99,18 +98,18 @@ class TestParseLogLevel:
         # since there's no third registered name it exhausts the table and returns -1.
         msg = "INFOMAN hello"
         out_b = _out_bundle()
-        config = _levels_config()
+        config = _levels_table()
 
-        result = nb_parse_log_level(_buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, config)
+        result = nb_parse_log_level(_buf(msg), 0, len(msg), out_b, 0, config)
 
         assert result == -1
 
     def test_exact_length_match_at_end_of_buffer_with_no_trailing_char(self):
         msg = "INFO"
         out_b = _out_bundle()
-        config = _levels_config()
+        config = _levels_table()
 
-        next_cursor = nb_parse_log_level(_buf(msg), 0, len(msg), out_b, 0, EmptyUnifiedParserState, config)
+        next_cursor = nb_parse_log_level(_buf(msg), 0, len(msg), out_b, 0, config)
 
         assert out_b.levels[0] == 1
         assert next_cursor == len(msg)

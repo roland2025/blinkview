@@ -22,7 +22,7 @@ from blinkview.core.id_registry.types import StringTableParams
 from blinkview.core.numba_config import NUMBA_DISABLE, app_njit
 from blinkview.core.types.log_batch import LogBundle
 from blinkview.core.types.modules import DynamicWidthConfig, ModuleTrackerState
-from blinkview.core.types.parsing import SyncState, TimeParserState, UnifiedParserConfig, UnifiedParserState
+from blinkview.core.types.parsing import SyncState
 
 if NUMBA_DISABLE:
 
@@ -80,15 +80,6 @@ def nb_tracker_views(m):
 
 
 @app_njit(inline="always")
-def nb_state_views(st):
-    t = st.timestamp
-    return UnifiedParserState(
-        nb_tracker_views(st.modules),
-        TimeParserState(nb_view(t.utc_offset), nb_sync_views(t.sync)),
-    )
-
-
-@app_njit(inline="always")
 def nb_string_table_views(s):
     return StringTableParams(
         nb_view(s.buffer),
@@ -111,19 +102,6 @@ def nb_dynamic_width_views(d):
         nb_view(d.prefix_bytes),
         d.prefix_match,
         d.prefix_remove,
-    )
-
-
-@app_njit(inline="always")
-def nb_config_views(c):
-    return UnifiedParserConfig(
-        c.parser_id,
-        c.parser_config,
-        nb_string_table_views(c.string_table),
-        nb_dynamic_width_views(c.module_config),
-        c.timestamp_precision,
-        c.timestamp_unix,
-        c.syslog_year,
     )
 
 

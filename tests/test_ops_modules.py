@@ -10,7 +10,6 @@ from blinkview.core import dtypes
 from blinkview.core.id_registry.tables import IndexedStringTable
 from blinkview.core.types.log_batch import LogBundle
 from blinkview.core.types.modules import DynamicWidthConfig, MODULE_ID_FULL, ModuleTrackerState
-from blinkview.core.types.parsing import UnifiedParserConfig
 from blinkview.ops.modules import (
     nb_normalize_name_inplace,
     nb_parse_fixed_width_name,
@@ -120,12 +119,8 @@ class TestParseFixedWidthName:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=8), string_table=table)
-        from blinkview.core.types.parsing import UnifiedParserState
-
-        state = UnifiedParserState(modules=tracker)
-
-        next_cursor = nb_parse_fixed_width_name(buf, 0, len(msg), out_b, 0, state, config)
+        module_config = DynamicWidthConfig(max_length=8)
+        next_cursor = nb_parse_fixed_width_name(buf, 0, len(msg), out_b, 0, tracker, module_config.max_length, table)
 
         assert next_cursor == 8
         assert out_b.modules[0] != 0
@@ -136,12 +131,8 @@ class TestParseFixedWidthName:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=0), string_table=table)
-        from blinkview.core.types.parsing import UnifiedParserState
-
-        state = UnifiedParserState(modules=tracker)
-
-        result = nb_parse_fixed_width_name(buf, 0, 1, out_b, 0, state, config)
+        module_config = DynamicWidthConfig(max_length=0)
+        result = nb_parse_fixed_width_name(buf, 0, 1, out_b, 0, tracker, module_config.max_length, table)
 
         assert result == 0
 
@@ -151,12 +142,8 @@ class TestParseFixedWidthName:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=5), string_table=table)
-        from blinkview.core.types.parsing import UnifiedParserState
-
-        state = UnifiedParserState(modules=tracker)
-
-        result = nb_parse_fixed_width_name(buf, 0, 5, out_b, 0, state, config)
+        module_config = DynamicWidthConfig(max_length=5)
+        result = nb_parse_fixed_width_name(buf, 0, 5, out_b, 0, tracker, module_config.max_length, table)
 
         assert result == -1
 
@@ -167,12 +154,8 @@ class TestParseFixedWidthName:
         tiny_name_bytes = np.zeros(2, dtype=dtypes.BYTE)  # too small to hold "wifi"
         tracker = _tracker(name_bytes=tiny_name_bytes)
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=4), string_table=table)
-        from blinkview.core.types.parsing import UnifiedParserState
-
-        state = UnifiedParserState(modules=tracker)
-
-        result = nb_parse_fixed_width_name(buf, 0, 4, out_b, 0, state, config)
+        module_config = DynamicWidthConfig(max_length=4)
+        result = nb_parse_fixed_width_name(buf, 0, 4, out_b, 0, tracker, module_config.max_length, table)
 
         assert result == -1
 
@@ -183,20 +166,15 @@ class TestParseModuleTagsStatemachine:
         defaults.update(overrides)
         return DynamicWidthConfig(**defaults)
 
-    def _state(self, tracker):
-        from blinkview.core.types.parsing import UnifiedParserState
-
-        return UnifiedParserState(modules=tracker)
-
     def test_single_bracketed_tag(self):
         msg = "[wifi] rest of message"
         buf = _buf(msg)
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=self._config(), string_table=table)
+        module_config = self._config()
 
-        next_cursor = nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        next_cursor = nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, tracker, module_config, table)
 
         assert out_b.modules[0] != 0
         assert buf[next_cursor : next_cursor + 4].tobytes() == b"rest"
@@ -207,9 +185,9 @@ class TestParseModuleTagsStatemachine:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=self._config(), string_table=table)
+        module_config = self._config()
 
-        nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, tracker, module_config, table)
 
         assert out_b.modules[0] != 0
 
@@ -219,9 +197,9 @@ class TestParseModuleTagsStatemachine:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=self._config(), string_table=table)
+        module_config = self._config()
 
-        nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, tracker, module_config, table)
 
         mod_id = out_b.modules[0]
         assert mod_id != 0
@@ -234,9 +212,9 @@ class TestParseModuleTagsStatemachine:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=self._config(), string_table=table)
+        module_config = self._config()
 
-        result = nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        result = nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, tracker, module_config, table)
 
         assert result == -1
 
@@ -246,9 +224,9 @@ class TestParseModuleTagsStatemachine:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=self._config(), string_table=table)
+        module_config = self._config()
 
-        result = nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        result = nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, tracker, module_config, table)
 
         assert result == -1
 
@@ -258,9 +236,9 @@ class TestParseModuleTagsStatemachine:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=self._config(max_depth=2), string_table=table)
+        module_config = self._config(max_depth=2)
 
-        result = nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        result = nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, tracker, module_config, table)
 
         assert result == -1
 
@@ -271,11 +249,9 @@ class TestParseModuleTagsStatemachine:
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
         prefix = np.frombuffer(b"Elixir.", dtype=dtypes.BYTE)
-        config = UnifiedParserConfig(
-            module_config=self._config(prefix_bytes=prefix, prefix_remove=True), string_table=table
-        )
+        module_config = self._config(prefix_bytes=prefix, prefix_remove=True)
 
-        nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, tracker, module_config, table)
 
         mod_id = out_b.modules[0]
         assert mod_id != 0
@@ -289,30 +265,23 @@ class TestParseModuleTagsStatemachine:
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
         prefix = np.frombuffer(b"Elixir.", dtype=dtypes.BYTE)
-        config = UnifiedParserConfig(
-            module_config=self._config(prefix_bytes=prefix, prefix_match=True), string_table=table
-        )
+        module_config = self._config(prefix_bytes=prefix, prefix_match=True)
 
-        result = nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        result = nb_parse_module_tags_statemachine(buf, 0, len(msg), out_b, 0, tracker, module_config, table)
 
         assert result == -1
 
 
 class TestParseRSyslogTag:
-    def _state(self, tracker):
-        from blinkview.core.types.parsing import UnifiedParserState
-
-        return UnifiedParserState(modules=tracker)
-
     def test_tag_with_pid(self):
         msg = "sshd[1234]: connection closed"
         buf = _buf(msg)
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=64), string_table=table)
+        module_config = DynamicWidthConfig(max_length=64)
 
-        next_cursor = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        next_cursor = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, tracker, module_config.max_length, table)
 
         assert out_b.modules[0] != 0
         start, length = tracker.starts[0], tracker.lengths[0]
@@ -325,9 +294,9 @@ class TestParseRSyslogTag:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=64), string_table=table)
+        module_config = DynamicWidthConfig(max_length=64)
 
-        next_cursor = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        next_cursor = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, tracker, module_config.max_length, table)
 
         assert out_b.modules[0] != 0
         start, length = tracker.starts[0], tracker.lengths[0]
@@ -340,9 +309,9 @@ class TestParseRSyslogTag:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=64), string_table=table)
+        module_config = DynamicWidthConfig(max_length=64)
 
-        result = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        result = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, tracker, module_config.max_length, table)
 
         assert result == -1
 
@@ -352,9 +321,9 @@ class TestParseRSyslogTag:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=64), string_table=table)
+        module_config = DynamicWidthConfig(max_length=64)
 
-        result = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        result = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, tracker, module_config.max_length, table)
 
         assert result == -1
 
@@ -364,9 +333,9 @@ class TestParseRSyslogTag:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=64), string_table=table)
+        module_config = DynamicWidthConfig(max_length=64)
 
-        result = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        result = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, tracker, module_config.max_length, table)
 
         assert result == -1
 
@@ -376,9 +345,9 @@ class TestParseRSyslogTag:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=64), string_table=table)
+        module_config = DynamicWidthConfig(max_length=64)
 
-        result = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        result = nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, tracker, module_config.max_length, table)
 
         assert result == -1
 
@@ -388,9 +357,9 @@ class TestParseRSyslogTag:
         out_b = _out_bundle()
         tracker = _tracker()
         table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
-        config = UnifiedParserConfig(module_config=DynamicWidthConfig(max_length=4), string_table=table)
+        module_config = DynamicWidthConfig(max_length=4)
 
-        nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, self._state(tracker), config)
+        nb_parse_rsyslog_tag(buf, 0, len(msg), out_b, 0, tracker, module_config.max_length, table)
 
         start, length = tracker.starts[0], tracker.lengths[0]
         assert bytes(tracker.name_bytes[start : start + length]).decode() == "very"
@@ -403,7 +372,6 @@ class TestStatemachineSinglePassNormalization:
     def test_stored_name_and_hash_match_two_pass_result(self):
         import random
 
-        from blinkview.core.types.parsing import UnifiedParserState
         from blinkview.ops.strings import nb_fnv1a_64_fast
 
         rng = random.Random(7)
@@ -427,9 +395,8 @@ class TestStatemachineSinglePassNormalization:
             module_config = DynamicWidthConfig(
                 max_length=64, max_depth=4, enable_brackets=True, enable_dot_separator=True
             )
-            config = UnifiedParserConfig(module_config=module_config, string_table=table)
             result = nb_parse_module_tags_statemachine(
-                _buf(msg), 0, len(msg), _out_bundle(), 0, UnifiedParserState(modules=tracker), config
+                _buf(msg), 0, len(msg), _out_bundle(), 0, tracker, module_config, table
             )
             if result == -1:
                 continue

@@ -164,7 +164,7 @@ def nb_parse_unified_log_ts_ns(buffer, start):
 
 
 @app_njit(inline="always")
-def nb_parse_int_timestamp_optimized(
+def nb_parse_int_timestamp(
     buffer,
     start_cursor,
     end_cursor,
@@ -225,28 +225,6 @@ def nb_parse_int_timestamp_optimized(
     return nb_skip_whitespace(buffer, cursor, end_cursor)
 
 
-@app_njit(inline="always")
-def nb_parse_int_timestamp(
-    buffer,
-    start_cursor,
-    end_cursor,
-    out_b,
-    out_idx,
-    state,
-    config,  # Precision is pulled from here
-):
-    return nb_parse_int_timestamp_optimized(
-        buffer,
-        start_cursor,
-        end_cursor,
-        out_b,
-        out_idx,
-        state.timestamp.sync,
-        config.timestamp_precision,
-        config.timestamp_unix,
-    )
-
-
 @app_njit()
 def nb_parse_int_timestamp_stage(out_b0, f_state, n, sync0, precision, timestamp_unix):
     out_b = nb_log_bundle_views(out_b0)
@@ -258,9 +236,7 @@ def nb_parse_int_timestamp_stage(out_b0, f_state, n, sync0, precision, timestamp
     first = out_b.size[0]
     for k in range(n):
         if status[k] == FS_OK:
-            r = nb_parse_int_timestamp_optimized(
-                buffer, cur[k], end[k], out_b, first + k, sync, precision, timestamp_unix
-            )
+            r = nb_parse_int_timestamp(buffer, cur[k], end[k], out_b, first + k, sync, precision, timestamp_unix)
             if r == -1:
                 status[k] = FS_STEP_FAILED
             else:

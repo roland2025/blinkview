@@ -22,7 +22,7 @@ sections, with **no direct object reference between them**:
   registered as a `DeviceIdentity` at all).
 
 Every row's `LogBundle.devices` value ultimately comes from the **pipeline's** `device_id`
-(`nb_process_batch_kernel` in `ops/dispatch.py` does `out_b.devices[...] = device_id` from
+(`nb_finish_frames` in `ops/dispatch.py` does `out_b.devices[...] = device_id` from
 `p_cfg.device_id`, sourced from the pipeline's `local.device_id`). The source layer never touches
 device identity.
 

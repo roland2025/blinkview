@@ -404,8 +404,7 @@ log rows into synthetic submodules, via a single Numba-JIT kernel call per input
         """Resolves any KEY_VALUE-discovered temp module ids in batch_out into real registry
         ids, via one real get_module() call per *distinct new name*, then a vectorized swap
         across the whole batch - mirrors ModuleNameParserBase.post_process (parsers/
-        frame_parsers.py) exactly, just against the flat tracker this parser owns directly
-        rather than a UnifiedParserState-wrapped one."""
+        frame_parsers.py) exactly, just against the tracker this parser owns directly."""
         state = self._tracker_state
         unresolved_count = state.count[0]
         if unresolved_count == 0:

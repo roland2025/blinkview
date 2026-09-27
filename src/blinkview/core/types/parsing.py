@@ -7,56 +7,8 @@
 from typing import NamedTuple
 
 import numpy as np
-from numba import typeof, types
-from numba.typed import List as NumbaList
 
 from blinkview.core import dtypes
-from blinkview.core.id_registry.types import EmptyStringTableParams, StringTableParams
-from blinkview.core.types.empty import ZERO_UTC_OFFSET
-from blinkview.core.types.modules import (
-    DynamicWidthConfig,
-    EmptyDynamicWidthConfig,
-    EmptyModuleTrackerState,
-    ModuleTrackerState,
-)
-
-
-class ParserID:
-    # --- Temporal ---
-    TS_UNIX_SEC = 0
-    TS_UNIX_MS = 1
-    TS_ISO8601 = 2
-    TS_CUSTOM_STRFTIME = 3
-    TS_ADB_LONG = 4
-    TS_ZEPHYR_UPTIME_FORMATTED = 5
-    TS_INTEGER = 6
-
-    # --- Identity ---
-    MOD_FIXED_WIDTH = 7
-    MOD_DYNAMIC_SM = 8
-    MOD_BRACKETED = 9
-    MOD_ADB_LONG = 10
-    DEVICE_ID_STATIC = 11
-    PID_TID_ADB_LONG = 12
-
-    # --- Classification ---
-    LEVEL_NAME_MAP = 13
-    LEVEL_MAP_ADB_LONG = 14
-
-    # --- Structural ---
-    SKIP_WORDS = 15
-
-    # new
-
-    TS_ZEPHYR_REALTIME = 16
-
-    TS_IDF_V1 = 17
-
-    TS_RFC3164 = 18
-
-    TS_RFC3339 = 19
-
-    MOD_RSYSLOG_TAG = 20
 
 
 class CodecID:
@@ -219,71 +171,7 @@ def prime_sync_state(sync: SyncState, phone_ns: int, pc_ns: int):
     sync.enabled[0] = 1
 
 
-class TimeParserState(NamedTuple):
-    utc_offset: np.ndarray = ZERO_UTC_OFFSET  # int64[:]  # utc seconds
-    sync: SyncState = UnusedSyncState
-
-
-EmptyTimeParserState = TimeParserState()
-
-
-class UnifiedParserState(NamedTuple):
-    modules: ModuleTrackerState = EmptyModuleTrackerState
-    timestamp: TimeParserState = EmptyTimeParserState
-
-
-EmptyUnifiedParserState = UnifiedParserState()
-
-
 TS_PRECISION_S = 0  # Seconds
 TS_PRECISION_MS = 1  # Milliseconds
 TS_PRECISION_US = 2  # Microseconds
 TS_PRECISION_NS = 3  # Nanoseconds
-
-
-class UnifiedParserConfig(NamedTuple):
-    parser_id: int = 0
-
-    # --- Main Config Defaults ---
-    parser_config: ParserConfig = EmptyParserConfig
-
-    # --- StringTable / Level Mapping Defaults ---
-    # We use our 'Immortal' empty arrays as defaults
-    string_table: StringTableParams = EmptyStringTableParams
-
-    # --- Module Name Defaults ---
-    module_config: DynamicWidthConfig = EmptyDynamicWidthConfig
-
-    timestamp_precision: int = TS_PRECISION_MS  # For time parsers, indicates the expected timestamp format/precision
-    timestamp_unix: bool = False  # specifies, it the received timestamp is unix timestamp
-    syslog_year: int = 0  # Assumed year for year-less timestamp formats (e.g. RFC3164 syslog)
-
-
-EmptyUnifiedParserConfig = UnifiedParserConfig()
-
-
-state_type = typeof(EmptyUnifiedParserState)
-
-# (Assuming you create an EmptyUnifiedParserConfig singleton)
-empty_config = UnifiedParserConfig()
-config_type = typeof(empty_config)
-
-# 2. Build the strict Numba Tuple signature
-pipeline_bundle_type = types.Tuple(
-    (
-        types.int64,  # p_id
-        state_type,
-        config_type,
-    )
-)
-
-
-class ParserPipelineBundle(NamedTuple):
-    """
-    The complete, bundled state required for the Parser logic in the Numba kernel.
-    """
-
-    config: ParserConfig
-    # pipeline: Tuple[Tuple[int, UnifiedParserState, UnifiedParserConfig], ...]
-    pipeline: NumbaList
-    # pipeline: Tuple[Tuple[Callable, Any, Any], ...]

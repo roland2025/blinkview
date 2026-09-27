@@ -117,10 +117,10 @@ class TestNameChanged:
 
 
 class TestRunRealIngestion:
-    """Runs BinaryParser.run() for real: real line_decoder framing, real nb_process_batch_kernel
-    dispatch, real (empty) parser pipeline. A throwaway priming frame is sent first on every
-    fresh parser - see tests/test_ops_dispatch.py / the memory note on nb_process_batch_kernel's
-    first-frame-dropped bug - real frames of interest are sent after it."""
+    """Runs BinaryParser.run() for real: real line_decoder framing (nb_decode_loop), real (empty) parser
+    pipeline, real nb_finish_frames. A throwaway priming frame is sent first on every fresh parser - see
+    tests/test_ops_dispatch.py / the memory note on the decoder loop's first-frame-dropped bug - real frames
+    of interest are sent after it."""
 
     def test_decoded_lines_are_distributed_with_default_level_and_module(self, id_registry):
         parser = make_parser(id_registry, delay=20)
