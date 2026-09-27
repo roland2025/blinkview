@@ -222,6 +222,16 @@ class CentralStorage(BaseCentralStorage):
         # needs to happen at this point - see core/cold_archive.py.
         return cold_dir
 
+    def rotate_session(self) -> Optional[Path]:
+        """Session rotation (plans/session-rotation.md) - empties log_pool in place, handing its
+        contents to the ending session. Call only after FileManager.rotate() has switched
+        session_dir, so the new cold-storage directory resolves under the *new* session folder.
+        Returns the old session's persisted cold directory (see CircularLogPool.rotate_session)."""
+        if self.log_pool is None:
+            return None
+        new_cold_dir = self._resolve_cold_storage_dir() if self.log_pool.cold_storage_active else None
+        return self.log_pool.rotate_session(new_cold_dir)
+
     def _should_persist_cold_storage(self) -> bool:
         """cold_storage_persist_on_close only takes effect while this session is actually being
         logged (file_logger is set by BaseDaemon.apply_config iff logging.enabled and not replay) -

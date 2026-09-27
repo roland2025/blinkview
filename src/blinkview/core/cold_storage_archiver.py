@@ -37,6 +37,9 @@ class ColdStorageArchiver:
         self._dir = Path(storage_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._on_archived = on_archived
+        # Held while _on_archived runs, so set_on_archived() can guarantee no call to the
+        # previous callback is still in flight once it returns (see CircularLogPool.rotate_session).
+        self._callback_lock = threading.Lock()
         self._logger = logger
         self._persist = persist
         self._queue: "queue.Queue[PooledLogBatch]" = queue.Queue(maxsize=queue_depth)
@@ -90,6 +93,18 @@ class ColdStorageArchiver:
 
         return highest + 1
 
+    @property
+    def storage_dir(self) -> Path:
+        return self._dir
+
+    def set_on_archived(self, on_archived: Callable[[PooledLogBatch], None]) -> None:
+        """Replaces the archived-segment callback. Once this returns, every later archived
+        segment goes to the new callback and no call to the old one is still running. Must not
+        be called while holding a lock the old callback takes (CircularLogPool._lock), or the
+        two would deadlock."""
+        with self._callback_lock:
+            self._on_archived = on_archived
+
     def archive(self, segment: PooledLogBatch, block: bool = False) -> bool:
         """Takes ownership of `segment`'s caller-held reference (the caller must not touch it
         again after calling this). Returns True if it was queued for background writing, False if
@@ -98,7 +113,7 @@ class ColdStorageArchiver:
         deferred to disk first.
 
         `block=True` waits for queue space instead of dropping (up to ARCHIVE_BLOCK_TIMEOUT_S) -
-        for a caller deliberately persisting a whole tier at once (CircularLogPool.release_all),
+        for a caller deliberately persisting a whole tier at once (CircularLogPool.rotate_session),
         which would otherwise overrun the small queue and drop most of it. Never used on the
         ingestion path, which must not wait on disk."""
         try:
@@ -135,7 +150,8 @@ class ColdStorageArchiver:
                     str(path), header.earliest_ts, header.latest_ts, header.first_seq, header.last_seq
                 )
                 cold_segment = PooledLogBatch.from_memmap(path, metadata=meta)
-                self._on_archived(cold_segment)
+                with self._callback_lock:
+                    self._on_archived(cold_segment)
             except Exception:
                 if self._logger:
                     self._logger.exception("Failed to archive cold segment")

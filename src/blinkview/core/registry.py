@@ -234,6 +234,10 @@ class Registry:
         # the session's metadata.json is missing/incomplete.
         self.replay_session_bounds_ns: Optional[tuple[int, int]] = None
 
+        # Bumped at the end of every rotate_session() - views poll it (via
+        # core/session_generation.py) to drop data fetched from the previous session.
+        self.session_generation = 0
+
         self.module_value_tracker: LatestModuleValueTracker = None
 
         self._subscribers = []
@@ -474,6 +478,47 @@ class Registry:
                     self.replay_session_bounds_ns = (start_ts_ns, end_ts_ns)
 
         self.playback_clock.enter_replay_when_ready(default_start_ts_ns)
+
+    def rotate_session(self, display_name: Optional[str] = None) -> tuple[Path, Path]:
+        """Ends the current session and starts a new one at runtime - sources, pipelines and the
+        id registry keep running (see plans/session-rotation.md). Returns (old_dir, new_dir).
+
+        Mirrors what startup/stop write for a session's config: the registry config's `final`
+        snapshot goes into the old folder, `start` into the new one, and later autosaves follow
+        to the new folder. GUI state isn't touched here - collecting it walks live widgets, so
+        the UI thread saves it before calling this (MainWindow)."""
+        if self.replay_mode:
+            raise RuntimeError("Session rotation is not available in replay mode")
+
+        fm = self.file_manager
+        self.config.save_full_config(fm.get_session_path(suffix="final"))
+
+        old_dir, new_dir = fm.rotate(display_name)
+
+        self.config.autosave_path = fm.get_session_path(suffix="autosave")
+        self.config.save_full_config(fm.get_session_path(suffix="start"))
+
+        # In-memory data: the pool is emptied in place (after FileManager switched folders, so a
+        # new cold dir lands under the new session), its contents persisted into the old
+        # session's cold storage when that's enabled - same finishing steps as stop().
+        if self.central is not None:
+            old_cold_dir = self.central.rotate_session()
+            if old_cold_dir is not None:
+                self._dump_id_registry(old_cold_dir)
+                self._compress_persisted_cold_storage(old_cold_dir)
+
+        if self.module_value_tracker is not None:
+            self.module_value_tracker.reset()
+
+        # Named ranges belong to the old session's data; they're already saved there on every
+        # change (_save_playback_ranges). Clearing writes an empty file into the new session.
+        if self.playback_ranges is not None:
+            self.playback_ranges.clear()
+
+        self.session_generation += 1
+
+        self.logger.info("[System] Session rotated: %s -> %s", old_dir.name, new_dir.name)
+        return old_dir, new_dir
 
     def stop(self, on_progress: Optional[Callable[[int, int, str], None]] = None):
         """Cleanly tear down the session.

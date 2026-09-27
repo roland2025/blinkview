@@ -224,6 +224,11 @@ class CircularLogPool:
     def latest_sequence(self):
         return self.sequence
 
+    @property
+    def cold_storage_active(self) -> bool:
+        """True while a cold-storage archiver is attached (cold storage enabled with a dir)."""
+        return self._archiver is not None
+
     def freeze_cold_storage_from_now(self):
         """Marks every row appended from this point on as ineligible for cold-storage archival.
         Called once a replay session's historical backfill has fully landed in log_pool (either
@@ -532,6 +537,86 @@ class CircularLogPool:
         if self._archiver is not None:
             self._archiver.cleanup()
             self._archiver = None
+
+    def rotate_session(self, new_cold_storage_dir=None) -> Optional[Path]:
+        """Session rotation (plans/session-rotation.md): hands everything currently in the pool
+        over to the session that's ending and continues empty, in place - PlaybackClock,
+        LatestModuleValueTracker and the UI all hold this object, so it's never replaced.
+
+        The swap itself (under self._lock, so atomic with batch_append) is quick: the hot and cold
+        tiers are detached, a fresh active segment starts, and - if cold storage is on - a new
+        archiver takes over at `new_cold_storage_dir`. `self.sequence` is deliberately *not*
+        reset (unlike clear()): every consumer's forward watermark stays valid, and the new
+        session's rows simply continue the numbering.
+
+        The old tiers are then finished outside the lock, on the calling thread (slow for a big
+        hot tier - callers run this off the UI thread): with persist_cold_storage, every hot
+        segment is written into the old archiver's directory (blocking, so none are dropped) and
+        all cold files are kept; otherwise everything is released and the old directory deleted.
+        Returns the old cold directory if it was persisted (the caller dumps the id registry
+        there and compresses it), else None."""
+        from blinkview.core.cold_storage_archiver import ColdStorageArchiver
+
+        old_archiver = self._archiver
+        old_cold: list[PooledLogBatch] = []
+        old_cold_lock = Lock()
+
+        def _collect_old(cold_segment: PooledLogBatch):
+            with old_cold_lock:
+                old_cold.append(cold_segment)
+
+        # Before taking self._lock (see set_on_archived's docstring): from here on, anything the
+        # old archiver finishes writing - including hot segments evicted by batch_append in the
+        # gap before the swap below - belongs to the old session.
+        if old_archiver is not None:
+            old_archiver.set_on_archived(_collect_old)
+
+        with self._lock:
+            hot = [seg for seg in self.segments if seg.size > 0]
+            empty = [seg for seg in self.segments if seg.size == 0]
+            with old_cold_lock:
+                old_cold.extend(self.cold_segments)
+            self.segments.clear()
+            self.cold_segments.clear()
+            self.active_segment = None
+
+            self._archiver = None
+            if old_archiver is not None and new_cold_storage_dir is not None:
+                self._archiver = ColdStorageArchiver(
+                    new_cold_storage_dir,
+                    on_archived=self._handle_archived,
+                    logger=self._logger,
+                    persist=self._persist_cold_storage,
+                )
+            self._rotate_segment()
+
+        for seg in empty:
+            seg.release()
+
+        persist = old_archiver is not None and self._persist_cold_storage
+        for seg in hot:
+            if persist:
+                old_archiver.archive(seg, block=True)
+            else:
+                seg.release()
+
+        if old_archiver is None:
+            return None
+
+        # Drain completely (timeout=None) - every hot segment handed over above must be on disk
+        # and collected before the old tier is released.
+        old_archiver.stop(timeout=None)
+        with old_cold_lock:
+            to_release = list(old_cold)
+            old_cold.clear()
+        for cold_segment in to_release:
+            if persist:
+                cold_segment.release()  # file stays - it's the old session's archive now
+            else:
+                self._evict_cold_segment(cold_segment)
+        old_archiver.cleanup()  # no-op when persisting, removes the directory otherwise
+
+        return old_archiver.storage_dir if persist else None
 
     def batch_append(self, batch: PooledLogBatch):
         if (size := batch.size) == 0:

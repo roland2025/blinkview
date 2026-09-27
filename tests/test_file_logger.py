@@ -291,6 +291,49 @@ class TestCloseAndCompressFinalPart:
         assert logger.part_index == 0  # never bumped - nothing was archived
 
 
+# ---------------------------------------------------------------------------
+# Session rotation handshake (FileManager.rotate - see plans/session-rotation.md)
+# ---------------------------------------------------------------------------
+
+
+class AccumulatingProcessor:
+    """Batch processor whose get_data() hands out (and clears) exactly the bytes processed since
+    the last flush - unlike FakeBatchProcessor's fixed payload - so file contents can be matched
+    to which batches landed where."""
+
+    extension = "bin"
+
+    def __init__(self):
+        self._pending = bytearray()
+        self.flushes = 0
+
+    def process(self, batch):
+        self._pending += batch.payload
+
+    def get_data(self):
+        data = bytes(self._pending)
+        self._pending.clear()
+        if data:
+            self.flushes += 1
+        return memoryview(data)
+
+
+class FakeBatch:
+    size = 1
+
+    def __init__(self, payload: bytes):
+        self.payload = payload
+
+    def __len__(self):
+        return 1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 def _wait_until(predicate, timeout=5.0):
     import time
 
@@ -305,6 +348,61 @@ def _archive_bytes(path):
     from blinkview.core.zstd_file_compression import decompress_file_to_buffer
 
     return bytes(decompress_file_to_buffer(path.with_name(path.name + ".zst")))
+
+
+class TestSessionRotation:
+    def test_not_running_logger_resets_to_part_zero_with_nothing_to_wait_for(self, file_manager):
+        logger, _ = make_file_logger(file_manager)
+        logger.part_index = 3
+
+        assert logger.request_session_rotation() is None
+        assert logger.part_index == 0
+
+    def test_running_logger_closes_in_the_old_folder_and_reopens_in_the_new_one(self, tmp_path):
+        old_dir, new_dir = tmp_path / "old", tmp_path / "new"
+        old_dir.mkdir()
+        new_dir.mkdir()
+        file_manager = FakeFileManager(old_dir)
+        processor = AccumulatingProcessor()
+        logger, _ = make_file_logger(file_manager, processor, enabled=True, flush_interval=0)
+        logger.start()
+        try:
+            logger.put(FakeBatch(b"before\n"))
+            _wait_until(lambda: processor.flushes >= 1)
+
+            request = logger.request_session_rotation()
+            assert request.closed.wait(5)
+            assert logger.file_handle is None
+
+            # Queued while the logger is parked between close and resume: it isn't lost, and
+            # goes to the new session's part (queues are deliberately left alone).
+            logger.put(FakeBatch(b"queued\n"))
+
+            file_manager.tmp_path = new_dir  # FileManager switches session_dir...
+            request.resume.set()  # ...then releases the logger
+
+            logger.put(FakeBatch(b"after\n"))
+            _wait_until(lambda: processor.flushes >= 2 and b"after" in (new_dir / "log-1_0.bin").read_bytes())
+        finally:
+            logger.stop()
+
+        # Old part: compressed in the old folder at hand-over (off-thread via run_task).
+        assert _archive_bytes(old_dir / "log-1_0.bin") == b"before\n"
+        assert not (old_dir / "log-1_0.bin").exists()
+        # New session restarts at part 0; compressed at stop() like any final part.
+        assert _archive_bytes(new_dir / "log-1_0.bin") == b"queued\nafter\n"
+
+    def test_logger_reopens_even_if_never_released(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(FileLogger, "ROTATION_RESUME_TIMEOUT_S", 0.05)
+        file_manager = FakeFileManager(tmp_path)
+        logger, _ = make_file_logger(file_manager, AccumulatingProcessor(), enabled=True, flush_interval=0)
+        logger.start()
+        try:
+            request = logger.request_session_rotation()
+            assert request.closed.wait(5)
+            _wait_until(lambda: logger.file_handle is not None)
+        finally:
+            logger.stop()
 
 
 # ---------------------------------------------------------------------------

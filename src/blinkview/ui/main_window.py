@@ -102,6 +102,29 @@ class _ShutdownWorker(QObject):
         self.finished.emit()
 
 
+class _SessionRotationWorker(QObject):
+    """Runs Registry.rotate_session() on a background QThread - it waits for every FileLogger to
+    hand over its part, persists and compresses the old session's in-memory data, and so can take
+    seconds (see plans/session-rotation.md). Same signal-marshalling reasoning as
+    _ShutdownWorker: finished/failed are delivered to the main-thread receiver as queued calls."""
+
+    finished = Signal(str)  # new session folder name
+    failed = Signal(str)  # error message
+
+    def __init__(self, registry, display_name: Optional[str]):
+        super().__init__()
+        self.registry = registry
+        self.display_name = display_name
+
+    def run(self):
+        try:
+            _old_dir, new_dir = self.registry.rotate_session(self.display_name)
+        except Exception as e:
+            self.failed.emit(str(e))
+            return
+        self.finished.emit(new_dir.name)
+
+
 class _ReplayLoadBridge(QObject):
     """Marshals UnifiedLogReplay's on_part_progress/on_finished callbacks (invoked on its own
     background thread - see UnifiedLogReplay.start()) onto the main/UI thread, the same reasoning
@@ -207,6 +230,22 @@ class BlinkMainWindow(QMainWindow):
             lambda _: self.create_widget(WidgetName.TELEMETRY_TABLE, "Live Telemetry")
         )
         self.toolbar.addAction(self.btn_open_telemetry)
+
+        # --- Clear: starts a new session (plans/session-rotation.md) ---
+        # A QToolButton rather than a QAction - it needs a right-click handler (name the new
+        # session first). Nothing keeps running in the old session: logs, in-memory data and
+        # snapshots are finished there, and every view starts over in the new one.
+        self.clear_button = QToolButton()
+        self.clear_button.setText("Clear")
+        self.clear_button.clicked.connect(lambda: self.start_session_rotation())
+        self.clear_button.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.clear_button.customContextMenuRequested.connect(self._prompt_session_rotation_name)
+        if registry.replay_mode:
+            self.clear_button.setEnabled(False)
+            self.clear_button.setToolTip("Not available while replaying a session")
+        else:
+            self.clear_button.setToolTip("Start a new session - right-click to name it")
+        self.toolbar.addWidget(self.clear_button)
 
         self.toolbar.addSeparator()
 
@@ -380,6 +419,12 @@ class BlinkMainWindow(QMainWindow):
         self._shutdown_toast = None
         self._shutdown_thread: Optional[QThread] = None
         self._shutdown_worker: Optional[_ShutdownWorker] = None
+
+        # Session rotation in progress (see start_session_rotation) - same keep-alive reasoning.
+        self._session_rotation_thread: Optional[QThread] = None
+        self._session_rotation_worker: Optional[_SessionRotationWorker] = None
+        self._session_rotation_toast = None
+        self._close_after_rotation = False
 
         # Replay-load progress state (see start_replay) - same "keep it alive / dismissable"
         # reasoning as the shutdown-toast state above.
@@ -876,6 +921,85 @@ class BlinkMainWindow(QMainWindow):
         print(f"\n[BlinkView] Received signal {signum}. Initiating graceful shutdown...")
         self.close()
 
+    # --- Session rotation (Clear button) ----------------------------------------------------
+
+    def _prompt_session_rotation_name(self, _pos=None):
+        """Right-click on Clear: name the new session before starting it."""
+        if not self.clear_button.isEnabled():
+            return
+        current = self.gui_context.registry.file_manager.session_display_name
+        name, ok = QInputDialog.getText(self, "New session", "Session name:", text=current)
+        if ok and name.strip():
+            self.start_session_rotation(name.strip())
+
+    def start_session_rotation(self, display_name: Optional[str] = None) -> bool:
+        """Ends the current session and starts a new one (Registry.rotate_session) without
+        blocking the UI. Returns False if one can't start now (replay mode, already rotating,
+        shutting down).
+
+        Order matters: state that's otherwise only written at close - GUI layout/tabs/widget
+        state and GUI config - is saved into the old session *here*, on the UI thread, because
+        collecting it walks live widgets. The rotation itself then runs on a worker thread, and
+        _on_session_rotated finishes the new session's GUI snapshots back on the UI thread."""
+        registry = self.gui_context.registry
+        if registry.replay_mode or self._session_rotation_thread is not None or self.gui_context.is_shutting_down:
+            return False
+
+        registry.file_manager.save_gui()  # workspace copies + the old session's `final` snapshots
+
+        self.clear_button.setEnabled(False)
+        self._session_rotation_toast = ToastManager.show_persistent("Starting new session...", parent=self)
+
+        thread = QThread(self)
+        worker = _SessionRotationWorker(registry, display_name)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_session_rotated)
+        worker.failed.connect(self._on_session_rotation_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        self._session_rotation_thread = thread
+        self._session_rotation_worker = worker
+        thread.start()
+        return True
+
+    @Slot(str)
+    def _on_session_rotated(self, new_session_name: str):
+        fm = self.gui_context.registry.file_manager
+        # GUI config autosaves follow to the new session folder, which also gets its `start`
+        # snapshots (copies of the workspace files saved in start_session_rotation).
+        gui_config = self.gui_context.gui_config
+        if gui_config is not None:
+            gui_config.autosave_path = fm.get_session_path("gui", suffix="autosave")
+        fm.snapshot_gui_start()
+
+        self._finish_session_rotation()
+        ToastManager.show(f"New session: {new_session_name}", ToastType.SUCCESS, 3, parent=self)
+
+    @Slot(str)
+    def _on_session_rotation_failed(self, error: str):
+        print(f"[MainWindow] Session rotation failed: {error}")
+        self._finish_session_rotation()
+        ToastManager.show(f"Could not start a new session: {error}", ToastType.ERROR, 5, parent=self)
+
+    def _finish_session_rotation(self):
+        if self._session_rotation_toast is not None:
+            self._session_rotation_toast.dismiss()
+            self._session_rotation_toast = None
+        if self._session_rotation_thread is not None:
+            # quit() directly, not only via the worker.finished -> thread.quit connection: the
+            # QThread object lives on this (main) thread, so that connection is queued behind this
+            # very slot - wait() would otherwise block until its timeout.
+            self._session_rotation_thread.quit()
+            self._session_rotation_thread.wait(5000)
+        self._session_rotation_thread = None
+        self._session_rotation_worker = None
+        self.clear_button.setEnabled(not self.gui_context.registry.replay_mode)
+
+        if self._close_after_rotation:
+            self._close_after_rotation = False
+            self.close()
+
     def closeEvent(self, event):
         """Clean up all resources when the Main Window closes.
 
@@ -898,6 +1022,13 @@ class BlinkMainWindow(QMainWindow):
 
         if self.gui_context.is_shutting_down:
             # Shutdown already in progress on the background thread - nothing to do yet.
+            event.ignore()
+            return
+
+        if self._session_rotation_thread is not None:
+            # Registry.stop() must not race a rotation still moving files between sessions -
+            # close as soon as it finishes instead (see _finish_session_rotation).
+            self._close_after_rotation = True
             event.ignore()
             return
 

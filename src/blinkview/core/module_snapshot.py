@@ -209,6 +209,33 @@ class LatestModuleValueTracker:
         self._first_seen_seq = np.zeros(initial_capacity, dtype=dtypes.SEQ_TYPE)
         self._first_seen_coverage_ts = dtypes.TS_UNSPECIFIED
 
+    def reset(self) -> None:
+        """Forgets every tracked value, as if freshly constructed - for session rotation
+        (plans/session-rotation.md), after the log pool has been emptied in place. The next
+        update() rescans the (new, small) pool from scratch rather than resuming from
+        last_known_seq, so rows that arrived between the pool's rotation and this call are picked
+        up too. Snapshots already handed out stay valid until their holders release them."""
+        with self._update_lock:
+            m_bundle = self._module_table.bundle()
+            capacity = max(1024, m_bundle.count)
+
+            old_snapshot = self._current_snapshot
+            self._current_snapshot = self._allocate_snapshot(capacity, m_bundle.count, 0)
+            self._current_snapshot.bundle().sequence_ids[:] = 0
+            old_snapshot.release()
+
+            if self._scrub_cache is not None:
+                self._scrub_cache.release()
+            self._scrub_cache = None
+            self._scrub_cache_ts_ns = None
+
+            self._first_seen_ts = np.zeros(capacity, dtype=dtypes.TS_TYPE)
+            self._first_seen_seq = np.zeros(capacity, dtype=dtypes.SEQ_TYPE)
+            self._first_seen_coverage_ts = dtypes.TS_UNSPECIFIED
+
+            self._initialized = False
+            self.last_known_seq = dtypes.SEQ_TYPE(0)
+
     @staticmethod
     @register_warmup
     def warmup(helper: "NumbaWarmupHelper"):

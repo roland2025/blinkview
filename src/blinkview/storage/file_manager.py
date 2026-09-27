@@ -11,6 +11,8 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock, RLock
+from time import monotonic
 from typing import Any, Callable, Dict, Optional
 
 from blinkview import __version__ as blinkview_version
@@ -37,6 +39,12 @@ def get_session_identity(config_path) -> str:
         except ValueError:
             pass
     return config_path.stem
+
+
+# How long FileManager.rotate() waits for every running FileLogger to close its current part
+# before switching session_dir anyway - a logger thread only notices the request between batches
+# (FileLogger.QUEUE_POLL_TIMEOUT_S), plus one flush.
+ROTATION_ACK_TIMEOUT_S = 10.0
 
 
 class FileManager:
@@ -134,8 +142,24 @@ class FileManager:
         self.session_dir = self._create_session_dir(create=not replay_mode)
         print(f"[FileManager] session_dir={self.session_dir}")
 
+        # Guards session_dir/metadata against FileLogger threads writing their stats while
+        # rotate() swaps both over to a new session folder.
+        self._lock = RLock()
+        # Serializes whole rotations (a second Clear while one is still waiting on loggers).
+        self._rotation_lock = Lock()
+
         # Write initial metadata
-        self.metadata = {
+        self.metadata = self._build_metadata()
+
+        if not replay_mode:
+            self.write_metadata()
+
+        self._file_loggers = []
+
+    def _build_metadata(self) -> dict:
+        """Fresh metadata.json content for the current session_dir - used at construction and
+        again for each new session started by rotate()."""
+        return {
             "session_id": self.session_dir.name,  # Unique ID based on timestamp
             "status": "active",
             "created_at": datetime.now(timezone.utc).isoformat() + "Z",
@@ -163,10 +187,19 @@ class FileManager:
             "loggers": {},
         }
 
-        if not replay_mode:
-            self.write_metadata()
+    def _finalize_metadata(self, finished_time: datetime):
+        """Marks the in-memory metadata as finished (status, finished_at, duration) - shared by
+        stop() and rotate(). Doesn't write it; callers decide whether/where to."""
+        # We parse the 'created_at' string back into a datetime object
+        try:
+            start_time = datetime.fromisoformat(self.metadata["created_at"].rstrip("Z")).replace(tzinfo=timezone.utc)
+            duration = (finished_time - start_time).total_seconds()
+        except Exception:
+            duration = 0
 
-        self._file_loggers = []
+        self.metadata["status"] = "finished"
+        self.metadata["finished_at"] = finished_time.isoformat() + "Z"
+        self.metadata["duration_seconds"] = round(duration, 3)
 
     def _sanitize(self, name: str) -> str:
         # Allow alphanumeric and underscores, replace everything else with '_'
@@ -181,6 +214,12 @@ class FileManager:
 
     def set_gui_context(self, gui_context):
         self.gui_context = gui_context
+        self.snapshot_gui_start()
+
+    def snapshot_gui_start(self):
+        """Copies the workspace GUI config/state into the current session folder as its `start`
+        record - at startup, and for each new session after rotate() (the caller saves the
+        workspace copies first, see MainWindow's session rotation)."""
         self._snapshot_master_to_session("gui_config")
         self._snapshot_master_to_session("gui_state")
 
@@ -199,6 +238,19 @@ class FileManager:
         if create:
             path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def _create_unique_session_dir(self) -> Path:
+        """Like _create_session_dir(), but never reuses an existing folder - the name only has
+        one-second resolution, and mkdir(exist_ok=True) would silently merge two sessions rotated
+        within the same second. Appends _2, _3, ... on collision."""
+        base = self._create_session_dir(create=False)
+        candidate = base
+        n = 2
+        while candidate.exists():
+            candidate = base.with_name(f"{base.name}_{n}")
+            n += 1
+        candidate.mkdir(parents=True)
+        return candidate
 
     def _get_git_info(self) -> Dict[str, Any]:
         """Captures basic git metadata."""
@@ -221,11 +273,12 @@ class FileManager:
         """Writes or updates the metadata.json file in the session folder. Never called while
         replaying (see __init__/replay_mode) - this is always *this run's own* bookkeeping
         folder, never the original session being replayed."""
-        self._ensure_session_dir()
-        meta_file = self.session_dir / "metadata.json"
+        with self._lock:
+            self._ensure_session_dir()
+            meta_file = self.session_dir / "metadata.json"
 
-        with meta_file.open("w") as f:
-            json.dump(self.metadata, f, indent=4)
+            with meta_file.open("w") as f:
+                json.dump(self.metadata, f, indent=4)
 
     def _ensure_session_dir(self):
         """Materializes the (possibly not-yet-created, in replay mode) session folder on first
@@ -353,20 +406,7 @@ class FileManager:
                 on_progress(logger.local.logging_id)
 
         # Finalize Manifest
-        finished_time = datetime.now(timezone.utc)
-
-        # Calculate duration
-        # We parse the 'created_at' string back into a datetime object
-        try:
-            start_time = datetime.fromisoformat(self.metadata["created_at"].rstrip("Z")).replace(tzinfo=timezone.utc)
-            duration = (finished_time - start_time).total_seconds()
-        except Exception:
-            duration = 0
-
-        # Update the metadata dictionary
-        self.metadata["status"] = "finished"
-        self.metadata["finished_at"] = finished_time.isoformat() + "Z"
-        self.metadata["duration_seconds"] = round(duration, 3)
+        self._finalize_metadata(datetime.now(timezone.utc))
 
         # Replay runs never get their own metadata.json - writing one would make this run itself
         # show up as a selectable entry in the Load Session menu (session_lister.list_sessions
@@ -374,6 +414,76 @@ class FileManager:
         # to avoid. The in-memory dict above is still finalized for anything that inspects it.
         if not self.replay_mode:
             self.write_metadata()
+
+    def rotate(self, display_name: Optional[str] = None) -> tuple[Path, Path]:
+        """Ends the current session folder and starts a new one, without stopping anything -
+        see plans/session-rotation.md. Returns (old_session_dir, new_session_dir).
+
+        Every running FileLogger is asked to close its current part (on its own thread) and to
+        wait; once all have acknowledged (or ROTATION_ACK_TIMEOUT_S passes), the old metadata is
+        finalized in the old folder, session_dir switches to a new uniquely-named folder with
+        fresh metadata, and the loggers are released to reopen at part 0 there. Data still
+        queued for a logger at that moment simply goes to the new session.
+
+        `display_name`, if given, renames the session from here on (new folder name and
+        metadata display_name). Snapshots of config/GUI state are the caller's job - they need
+        the registry/UI thread (see Registry.rotate_session)."""
+        if self.replay_mode or self.replay_source_dir is not None:
+            raise RuntimeError("Session rotation is not available while replaying")
+
+        with self._rotation_lock:
+            requests = []
+            for file_logger in list(self._file_loggers):
+                request = file_logger.request_session_rotation()
+                if request is not None:
+                    requests.append(request)
+
+            try:
+                deadline = monotonic() + ROTATION_ACK_TIMEOUT_S
+                for request in requests:
+                    remaining = max(0.0, deadline - monotonic())
+                    if not request.closed.wait(remaining):
+                        print("[FileManager] rotate: a file logger did not close its part in time")
+
+                with self._lock:
+                    old_dir = self.session_dir
+                    old_session_id = self.metadata.get("session_id", old_dir.name)
+
+                    if display_name:
+                        self.session_display_name = self._sanitize(display_name)
+                    new_dir = self._create_unique_session_dir()
+
+                    self._finalize_metadata(datetime.now(timezone.utc))
+                    self.metadata["next_session_id"] = new_dir.name
+                    self.write_metadata()
+
+                    self.session_dir = new_dir
+                    self.metadata = self._build_metadata()
+                    self.metadata["previous_session_id"] = old_session_id
+                    # Every logger restarts at part 0 in the new folder (FileLogger resets its own
+                    # part_index on its thread once released - see FileLogger._rotate_session).
+                    for file_logger in self._file_loggers:
+                        entry = self._new_logger_entry(file_logger)
+                        entry["last_part"] = 0
+                        self.metadata["loggers"][file_logger.local.logging_id] = entry
+                    self.write_metadata()
+            finally:
+                # Always release the loggers, even if something above failed - otherwise they'd
+                # sit blocked until their own resume timeout.
+                for request in requests:
+                    request.resume.set()
+
+        print(f"[FileManager] Rotated session: {old_dir.name} -> {new_dir.name}")
+        return old_dir, new_dir
+
+    @staticmethod
+    def _new_logger_entry(file_logger: FileLogger) -> dict:
+        return {
+            "processor": file_logger.batch_processor.__class__.__name__,
+            "extension": file_logger.batch_processor.extension,
+            "last_part": file_logger.part_index,
+            "total_bytes": 0,
+        }
 
     def add_file_logger(self, file_logger: FileLogger):
         logger_id = file_logger.local.logging_id
@@ -389,12 +499,7 @@ class FileManager:
             print(f"[FileManager] Restored logger {logger_id} to part {new_part}")
         else:
             # INITIALIZE NEW ENTRY:
-            self.metadata["loggers"][logger_id] = {
-                "processor": file_logger.batch_processor.__class__.__name__,
-                "extension": file_logger.batch_processor.extension,
-                "last_part": file_logger.part_index,
-                "total_bytes": 0,
-            }
+            self.metadata["loggers"][logger_id] = self._new_logger_entry(file_logger)
         self.write_metadata()
 
         if file_logger not in self._file_loggers:
@@ -407,14 +512,15 @@ class FileManager:
     def update_logger_stats(self, file_logger: FileLogger, bytes_written: int, absolute: bool = False):
         """Updates the byte tally. If absolute is True, replaces the value."""
         logger_id = file_logger.local.logging_id
-        if logger_id in self.metadata["loggers"]:
-            if absolute:
-                self.metadata["loggers"][logger_id]["total_bytes"] = bytes_written
-            else:
-                current_total = self.metadata["loggers"][logger_id].get("total_bytes", 0)
-                self.metadata["loggers"][logger_id]["total_bytes"] = current_total + bytes_written
+        with self._lock:
+            if logger_id in self.metadata["loggers"]:
+                if absolute:
+                    self.metadata["loggers"][logger_id]["total_bytes"] = bytes_written
+                else:
+                    current_total = self.metadata["loggers"][logger_id].get("total_bytes", 0)
+                    self.metadata["loggers"][logger_id]["total_bytes"] = current_total + bytes_written
 
-            self.write_metadata()
+                self.write_metadata()
 
     def _get_gui_dir(self) -> Path:
         """Helper to ensure gui directory exists."""

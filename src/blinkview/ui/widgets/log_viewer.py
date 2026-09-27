@@ -21,6 +21,7 @@ from blinkview.core.playback_follow import (
     FollowState,
     PlaybackFollowMachine,
 )
+from blinkview.core.session_generation import session_generation_of
 from blinkview.core.types.formatting import FormattingConfig
 from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
@@ -56,6 +57,8 @@ class LogViewerWidget(QWidget):
         super().__init__(parent)
 
         self.gui_context: GUIContext = gui_context
+        # Last seen Registry.session_generation - see _sync_session_generation().
+        self._session_generation = session_generation_of(self.gui_context.registry)
 
         self.setStyleSheet("""QToolButton {
     border-radius: 4px;
@@ -687,6 +690,9 @@ QToolButton[filterEnabled="true"] {
         now_ns = self.gui_context.registry.now_ns
         t_start = now_ns()
 
+        if self._sync_session_generation():
+            return
+
         clock = self._clock()
 
         self._sync_force_live_visibility(clock)
@@ -786,6 +792,19 @@ QToolButton[filterEnabled="true"] {
 
                 if len(result.seqs):
                     self._live_seqs.extend(result.seqs.tolist())
+
+    def _sync_session_generation(self) -> bool:
+        """After a session rotation (main window Clear) the pool holds only the new session's
+        rows - rebuild from its tail and drop any per-tab Clear floor, which pointed into the
+        previous session. Returns True if this tick was consumed by the rebuild."""
+        generation = session_generation_of(self.gui_context.registry)
+        if generation == self._session_generation:
+            return False
+        self._session_generation = generation
+        self.latest_seq_manual = SEQ_NONE
+        self._last_followed_ts_ns = None
+        self._redraw_history()
+        return True
 
     def _refresh_view(self):
         """Reapplies the current filter/level/kv/search/column-visibility settings to whatever's

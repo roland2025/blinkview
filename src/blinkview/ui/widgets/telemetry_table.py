@@ -40,6 +40,7 @@ from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
 from blinkview.core.module_snapshot import MAX_MSG_BYTES, LatestModuleValueTracker
 from blinkview.core.playback_clock import PlaybackMode
 from blinkview.core.playback_follow import ClockSnapshot, FollowActionKind, FollowEvent, PlaybackFollowMachine
+from blinkview.core.session_generation import session_generation_of
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.telemetry_table import nb_initialize_new_modules, nb_update_visible_state
 from blinkview.ui.constants import WidgetName
@@ -104,6 +105,11 @@ class TelemetryTableModel(QAbstractTableModel):
         # always follows, so it only ever occupies LIVE or FOLLOWING (see
         # plans/playback-follow-state-machine.md).
         self._playback = PlaybackFollowMachine(supports_freeze=False)
+
+        # Last seen Registry.session_generation - a rotation resets the value tracker, whose
+        # cleared values the kernels below paint back to empty; the layout then needs re-deriving
+        # so hide_empty drops them.
+        self._session_generation = session_generation_of(self.context.registry)
 
         # Sort settings
         self.sort_column = TelemetryCol.DEVICE
@@ -536,6 +542,10 @@ class TelemetryTableModel(QAbstractTableModel):
         else:
             snapshot_ctx = tracker.get_snapshot()
 
+        generation = session_generation_of(self.context.registry)
+        session_rotated = generation != self._session_generation
+        self._session_generation = generation
+
         with snapshot_ctx as snap:
             b = snap.bundle()
             sequences = b.sequence_ids
@@ -567,6 +577,8 @@ class TelemetryTableModel(QAbstractTableModel):
                     self._insert_visible_module(newly_active_ids[i])
 
             if len(self.visible_mod_ids) == 0:
+                if session_rotated:
+                    self.refresh_layout()
                 return
 
             # Execute Numba kernel computation and perform state updates in-place
@@ -609,6 +621,9 @@ class TelemetryTableModel(QAbstractTableModel):
 
                 # Emit ONE signal. Qt will clip this to the visible viewport automatically.
                 data_changed_emit(top_idx, bottom_idx, [Qt.DisplayRole, Qt.BackgroundRole, Qt.ForegroundRole])
+
+        if session_rotated:
+            self.refresh_layout()
 
         end_time = perf_counter_ns()
 

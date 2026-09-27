@@ -21,6 +21,7 @@ from blinkview.core.numpy_log import (
     get_telemetry_anchor,
 )
 from blinkview.core.playback_clock import PlaybackMode
+from blinkview.core.session_generation import session_generation_of
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.telemetry import (
     PLOT_INTERPOLATION_MODE_DISCRETE,
@@ -110,6 +111,8 @@ class TelemetryPlotter(QWidget):
         pg.setConfigOptions(enableExperimental=True)
 
         self.gui_context: GUIContext = gui_context
+        # Last seen Registry.session_generation - see _sync_session_generation().
+        self._session_generation = session_generation_of(self.gui_context.registry)
 
         self.logger = None
         self.logger_apply = None
@@ -526,6 +529,14 @@ class TelemetryPlotter(QWidget):
         registry = self.gui_context.registry
         now_ns_func = registry.now_ns
         now_ns = now_ns_func()
+
+        # After a session rotation the pool holds only the new session's rows - re-seed every
+        # buffer from scratch (SEQ_NONE refetches the newest max_points) and redraw.
+        generation = session_generation_of(registry)
+        if generation != self._session_generation:
+            self._session_generation = generation
+            self._reset_buffers(SEQ_NONE)
+            force = True
 
         clock = self._clock()
         if clock is not None and clock.mode is PlaybackMode.LIVE:
@@ -1142,23 +1153,27 @@ class TelemetryPlotter(QWidget):
         self._apply_view_range(now_sec - self.view_duration, now_sec)
 
     def clear(self):
-        # 1. Fetch the absolute latest sequence from the pool
+        # Reset every buffer to the absolute latest sequence in the pool - only newer rows show.
         log_pool = self.gui_context.registry.central.log_pool
-        current_pool_tail = log_pool.latest_sequence()
+        self._reset_buffers(log_pool.latest_sequence())
 
-        # 2. Synchronize the plotter's global pointer
-        self.log_seq = current_pool_tail
-        self.latest_seq = current_pool_tail
+    def _reset_buffers(self, floor_seq: int):
+        """Empties every live and REPLAY buffer, with `floor_seq` as the new forward-fetch
+        watermark: the pool's latest sequence for a Clear (only newer rows show), SEQ_NONE after
+        a session rotation (refetch everything the new session already has)."""
+        # 1. Synchronize the plotter's global pointer
+        self.log_seq = floor_seq
+        self.latest_seq = floor_seq
 
-        # 3. Reset all individual module buffers to this new tail
+        # 2. Reset all individual module buffers to this new watermark
         for buf in self.buffers.values():
-            buf.last_seq = current_pool_tail
+            buf.last_seq = floor_seq
             buf.head = 0
             buf.size = 0
             buf.ptr = 0
             buf.is_dirty = True  # Force a redraw of the empty state
 
-        # 3b. Also reset any REPLAY scrub windows - otherwise, while clock.mode is REPLAY,
+        # 2b. Also reset any REPLAY scrub windows - otherwise, while clock.mode is REPLAY,
         # _active_buffer() would keep serving the untouched ReplayWindowBuffer and a Clear click
         # would appear to do nothing.
         for replay_buf in self.replay_buffers.values():
@@ -1166,8 +1181,9 @@ class TelemetryPlotter(QWidget):
             replay_buf.is_dirty = True  # Force a redraw of the empty state
             replay_buf.is_dirty_overview = True
         self._last_followed_ts_ns = None  # force the next follow tick to re-fetch, not skip
+        self._replay_prev_fetch_ns = 0  # ...and don't let the follow-fetch throttle swallow it
 
-        # 4. Clear visual curves
+        # 3. Clear visual curves
         for series in self.series_list:
             if series.curve:
                 series.curve.setData([], [])
@@ -1176,7 +1192,7 @@ class TelemetryPlotter(QWidget):
 
         self.plot_range_states.clear()
 
-        # 5. Refresh both components
+        # 4. Refresh both components
         self._update_plots()
         self._update_overview()
 

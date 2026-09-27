@@ -436,3 +436,100 @@ class TestPersistColdStorageOnClose:
         all_last_seqs = sorted(read_cold_segment_header(p).last_seq for p in tmp_path.glob("segment_*.blkseg"))
         # Original seq 1,2 preserved untouched, plus new seq 3,4 from the resumed session.
         assert all_last_seqs == [1, 2, 3, 4]
+
+
+class TestRotateSession:
+    """CircularLogPool.rotate_session (plans/session-rotation.md): the pool empties in place,
+    its contents going to the ending session, and keeps numbering rows where it left off."""
+
+    def _pool(self, global_pool, cold_dir, *, max_pieces=8, persist=True):
+        pool = CircularLogPool(
+            global_pool,
+            max_pieces=max_pieces,
+            cold_max_pieces=64,
+            cold_storage_dir=str(cold_dir),
+            final_buffer_bytes=1024,
+            persist_cold_storage=persist,
+        )
+        pool.segment_capacity = 1
+        pool._optimized = True
+        pool.clear()
+        return pool
+
+    @staticmethod
+    def _dir_last_seqs(folder):
+        from blinkview.core.cold_segment import read_cold_segment_header
+
+        return sorted(read_cold_segment_header(p).last_seq for p in Path(folder).glob("segment_*.blkseg"))
+
+    def test_persisting_rotation_writes_every_row_to_the_old_dir(self, global_pool, tmp_path):
+        old_dir, new_dir = tmp_path / "old" / "cold", tmp_path / "new" / "cold"
+        pool = self._pool(global_pool, old_dir)
+        try:
+            # 12 one-row segments with 8 hot slots: 4 already cold, 8 still hot - more hot
+            # segments than the archiver's queue depth (4), so the hand-off has to block rather
+            # than drop.
+            push_rows(pool, global_pool, 12, ts_start=100)
+            assert wait_for(lambda: len(pool.cold_segments) >= 4)
+
+            returned = pool.rotate_session(new_dir)
+
+            assert returned == old_dir
+            assert self._dir_last_seqs(old_dir) == list(range(1, 13))
+            assert snapshot_seqs(pool) == []
+            assert int(pool.sequence) == 12  # continues, unlike clear()
+            assert pool.cold_storage_active
+        finally:
+            pool.release_all()
+
+    def test_new_session_rows_continue_numbering_and_archive_into_the_new_dir(self, global_pool, tmp_path):
+        old_dir, new_dir = tmp_path / "old" / "cold", tmp_path / "new" / "cold"
+        pool = self._pool(global_pool, old_dir, max_pieces=2)
+        try:
+            push_rows(pool, global_pool, 3, ts_start=100)
+            pool.rotate_session(new_dir)
+
+            push_rows(pool, global_pool, 5, ts_start=500)
+            assert wait_for(lambda: len(self._dir_last_seqs(new_dir)) >= 3)
+
+            assert self._dir_last_seqs(old_dir) == [1, 2, 3]
+            assert all(seq > 3 for seq in self._dir_last_seqs(new_dir))
+            assert all(seq > 3 for seq in snapshot_seqs(pool))
+        finally:
+            pool.release_all()
+
+    def test_without_persistence_the_old_dir_is_discarded(self, global_pool, tmp_path):
+        old_dir, new_dir = tmp_path / "old" / "cold", tmp_path / "new" / "cold"
+        pool = self._pool(global_pool, old_dir, max_pieces=2, persist=False)
+        try:
+            push_rows(pool, global_pool, 5, ts_start=100)
+            assert wait_for(lambda: len(pool.cold_segments) >= 1)
+
+            assert pool.rotate_session(new_dir) is None
+            assert not old_dir.exists()
+            assert snapshot_seqs(pool) == []
+        finally:
+            pool.release_all()
+
+    def test_pool_without_cold_storage_just_empties(self, global_pool):
+        pool = CircularLogPool(global_pool, max_pieces=4, final_buffer_bytes=1024)
+        try:
+            push_rows(pool, global_pool, 3, ts_start=100)
+
+            assert pool.rotate_session() is None
+            assert snapshot_seqs(pool) == []
+            push_rows(pool, global_pool, 1, ts_start=500)
+            assert snapshot_seqs(pool) == [4]
+        finally:
+            pool.release_all()
+
+    def test_a_snapshot_taken_before_rotation_stays_readable(self, global_pool, tmp_path):
+        pool = self._pool(global_pool, tmp_path / "old" / "cold", max_pieces=4)
+        try:
+            push_rows(pool, global_pool, 3, ts_start=100)
+            with pool.get_snapshot() as segments:
+                pool.rotate_session(tmp_path / "new" / "cold")
+                seqs = [int(s) for seg in segments for s in seg.bundle.sequences[: seg.size]]
+            assert seqs == [1, 2, 3]
+        finally:
+            pool.release_all()

@@ -204,6 +204,7 @@ def test_apply_updates_replay_to_live_exit_resets_follow_state_and_goes_live():
         _clock=lambda: FakeClock(mode=PlaybackMode.LIVE),
         _go_live=lambda: calls["go_live"].append(True),
         _sync_force_live_visibility=lambda clock: None,
+        _sync_session_generation=lambda: False,
     )
 
     LogTableViewerWidget.apply_updates(stub)
@@ -234,6 +235,7 @@ def test_apply_updates_is_paused_blocks_replay_to_live_exit():
         _go_live=lambda: calls["go_live"].append(True),
         _poll_history_tail=lambda: None,
         _sync_force_live_visibility=lambda clock: None,
+        _sync_session_generation=lambda: False,
     )
 
     LogTableViewerWidget.apply_updates(stub)
@@ -256,6 +258,7 @@ def test_apply_updates_follows_clock_when_replay_and_following():
         _clock=lambda: FakeClock(mode=PlaybackMode.REPLAY, is_playing=True, current_ts_ns=999),
         _reanchor_history=lambda **kw: calls["reanchor"].append(kw),
         _sync_force_live_visibility=lambda clock: None,
+        _sync_session_generation=lambda: False,
     )
 
     LogTableViewerWidget.apply_updates(stub)
@@ -279,6 +282,7 @@ def test_apply_updates_follow_skips_refetch_when_paused_and_ts_unchanged():
         _clock=lambda: FakeClock(mode=PlaybackMode.REPLAY, is_playing=False, current_ts_ns=999),
         _reanchor_history=lambda **kw: calls["reanchor"].append(kw),
         _sync_force_live_visibility=lambda clock: None,
+        _sync_session_generation=lambda: False,
     )
 
     LogTableViewerWidget.apply_updates(stub)

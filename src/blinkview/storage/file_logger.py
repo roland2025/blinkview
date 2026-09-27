@@ -5,8 +5,9 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from pathlib import Path
+from threading import Event
 from time import perf_counter
-from typing import Callable
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -43,6 +44,17 @@ def _compress_and_delete_log_part(path: Path, logger=None) -> bool:
         if logger:
             logger.warning("Failed to compress log part %s: %s", path, e)
         return False
+
+
+class SessionRotationRequest:
+    """Handshake between FileManager.rotate() and one FileLogger thread - see
+    FileLogger.request_session_rotation()."""
+
+    __slots__ = ("closed", "resume")
+
+    def __init__(self):
+        self.closed = Event()  # set by the logger thread once its current part is closed
+        self.resume = Event()  # set by FileManager once session_dir points at the new folder
 
 
 class BaseFileLogger(BaseSubscriber):
@@ -86,6 +98,13 @@ class FileLogger(BaseFileLogger):
     flush_interval: float
     max_file_size: int  # MiB
 
+    # How long run() blocks waiting for a batch before re-checking its flags - bounds how long a
+    # quiet logger takes to notice a session rotation request (and, as a side effect, lets the
+    # flush_interval deadline fire even when no new batch arrives).
+    QUEUE_POLL_TIMEOUT_S = 0.5
+    # Safety net for a rotation whose FileManager side never releases this logger.
+    ROTATION_RESUME_TIMEOUT_S = 30.0
+
     def __init__(self):
         super().__init__()
 
@@ -97,6 +116,9 @@ class FileLogger(BaseFileLogger):
         self.process_batch = None
 
         self.part_index = 0  # Track current chunk
+
+        # Pending FileManager.rotate() handshake, picked up by run() between batches.
+        self._rotation_request: Optional[SessionRotationRequest] = None
 
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
@@ -134,6 +156,44 @@ class FileLogger(BaseFileLogger):
         self.shared.registry.file_manager.update_logger_stats(self, current_file_size, absolute=True)
         self.logger.info("FileLogger '%s' will log to: %s", self.name, self.file_path)
         return current_file_size
+
+    def request_session_rotation(self) -> Optional[SessionRotationRequest]:
+        """Called by FileManager.rotate(). A running logger closes its current part on its own
+        thread (it owns the file handle), sets `closed`, then blocks until FileManager sets
+        `resume` and reopens at part 0 in the new session folder. A logger that isn't running
+        has no open part to hand over - it's just reset to part 0 here and None is returned
+        (nothing to wait for)."""
+        if not self.is_running:
+            self.part_index = 0
+            self.file_path = None
+            return None
+        request = SessionRotationRequest()
+        self._rotation_request = request
+        return request
+
+    def _rotate_session(self, request: SessionRotationRequest) -> int:
+        """run()'s half of the rotation handshake - see request_session_rotation(). Returns the
+        new part's size, like open_file()."""
+        self._flush()
+        if self.file_handle:
+            self.file_handle.close()
+            self.file_handle = None
+
+        old_path = self.file_path
+        self.file_path = None
+        self._rotation_request = None
+        request.closed.set()
+
+        # The closed part belongs to the old session and is never appended to again - compress
+        # it off-thread, same as a size-based part rotation.
+        if old_path is not None and old_path.exists() and old_path.stat().st_size > 0:
+            self.shared.tasks.run_task(_compress_and_delete_log_part, old_path, self.logger)
+
+        if not request.resume.wait(self.ROTATION_RESUME_TIMEOUT_S):
+            self.logger.warning("FileLogger '%s': session rotation never released, reopening anyway", self.name)
+
+        self.part_index = 0
+        return self.open_file()
 
     def set_batch_processor(self, batch_processor):
         self.batch_processor = batch_processor
@@ -182,8 +242,15 @@ class FileLogger(BaseFileLogger):
 
         try:
             while not stop_is_set():
-                batch = queue_get(timeout=120)
+                batch = queue_get(timeout=self.QUEUE_POLL_TIMEOUT_S)
                 now = perf_counter()
+
+                # Session rotation (FileManager.rotate) - checked before processing, so a batch
+                # dequeued now already goes to the new session's part.
+                if (request := self._rotation_request) is not None:
+                    bytes_total = self._rotate_session(request)
+                    last_flush_ts = now
+                    buffered_rows = 0
 
                 if batch is not None:
                     # using 'with' auto-releases the batch back to the NumpyArrayPool

@@ -18,6 +18,7 @@ from qtpy.QtWidgets import (
 )
 
 from blinkview.core.playback_clock import PlaybackMode
+from blinkview.core.session_generation import session_generation_of
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widgets.jog_wheel_button import JogWheelButton
 from blinkview.utils.time_utils import ConsoleTimestampFormatter
@@ -178,6 +179,8 @@ class PlaybackControlWidget(QWidget):
         self._ranges_combo_ids = []  # tracks what's currently populated, to avoid rebuilding
         # (and losing the user's current selection) on every heartbeat when nothing changed
         self._active_range_id = None  # range currently shown zoomed-in on the second row, if any
+        # Last seen Registry.session_generation - see apply_updates().
+        self._session_generation = session_generation_of(self.gui_context.registry)
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -306,7 +309,18 @@ class PlaybackControlWidget(QWidget):
         if clock is None:
             return
 
-        if clock.tick(self.gui_context.registry.now_ns()):
+        generation = session_generation_of(self.gui_context.registry)
+        rotated = generation != self._session_generation
+        if rotated:
+            # Session rotation (main window Clear): the pool now holds only the new session, so
+            # a REPLAY position or a pending mark-in from the old one means nothing any more.
+            # Done here rather than in Registry.rotate_session(), which runs off the UI thread -
+            # the clock is only ever mutated from the UI thread.
+            self._session_generation = generation
+            self._pending_mark_in_ts = None
+            clock.go_live()
+
+        if clock.tick(self.gui_context.registry.now_ns()) or rotated:
             self._sync_from_clock()
 
     def _sync_from_clock(self):

@@ -38,6 +38,7 @@ from blinkview.core.playback_follow import (
     FollowState,
     PlaybackFollowMachine,
 )
+from blinkview.core.session_generation import session_generation_of
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.formatting import nb_format_local_timestamp
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
@@ -1051,6 +1052,8 @@ class LogTableViewerWidget(QWidget):
         super().__init__(parent)
 
         self.gui_context: GUIContext = gui_context
+        # Last seen Registry.session_generation - see _sync_session_generation().
+        self._session_generation = session_generation_of(self.gui_context.registry)
 
         # Same Pause button highlight scheme as LogViewerWidget, so both viewers present
         # auto vs. manual pausing identically.
@@ -1401,6 +1404,9 @@ QToolButton[manualPaused="true"] {
         now_ns = self.gui_context.registry.now_ns
         t_start = now_ns()
 
+        if self._sync_session_generation():
+            return
+
         clock = self._clock()
 
         self._sync_force_live_visibility(clock)
@@ -1457,6 +1463,18 @@ QToolButton[manualPaused="true"] {
 
         if self.model.mode == LogViewMode.HISTORY:
             self._poll_history_tail()
+
+    def _sync_session_generation(self) -> bool:
+        """Mirrors LogViewerWidget._sync_session_generation: after a session rotation, refetch
+        from the (new-session-only) pool. Returns True if this tick was consumed by it."""
+        generation = session_generation_of(self.gui_context.registry)
+        if generation == self._session_generation:
+            return False
+        self._session_generation = generation
+        self._last_followed_ts_ns = None
+        self.view.selected_seq = None
+        self._go_live()
+        return True
 
     def _poll_history_tail(self):
         """Mirrors LogViewerWidget._poll_history_tail (qt-log-table-viewer skill Sec 9): a sparse

@@ -7,6 +7,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock, RLock
 from types import SimpleNamespace
 
 from blinkview.storage import file_manager as file_manager_module
@@ -53,6 +54,8 @@ def make_manager(tmp_path, **overrides):
         "created_at": datetime.now(timezone.utc).isoformat() + "Z",
     }
     fm._file_loggers = []
+    fm._lock = RLock()
+    fm._rotation_lock = Lock()
     for key, value in overrides.items():
         setattr(fm, key, value)
     return fm
@@ -525,3 +528,132 @@ class TestFileLoggerCount:
 
         fm.remove_file_logger(fm._file_loggers[0])
         assert fm.file_logger_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Session rotation (see plans/session-rotation.md)
+# ---------------------------------------------------------------------------
+
+
+class RotatableFakeFileLogger(FakeFileLogger):
+    """A FakeFileLogger that takes part in FileManager.rotate()'s handshake. `running=False`
+    mirrors FileLogger.request_session_rotation's not-running branch (returns None);
+    `ack=False` simulates a logger thread that never closes its part."""
+
+    def __init__(self, *args, running=True, ack=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.running = running
+        self.ack = ack
+        self.request = None
+
+    def request_session_rotation(self):
+        from blinkview.storage.file_logger import SessionRotationRequest
+
+        if not self.running:
+            self.part_index = 0
+            return None
+        self.request = SessionRotationRequest()
+        if self.ack:
+            self.request.closed.set()
+        return self.request
+
+
+def make_rotatable_manager(tmp_path, **overrides):
+    fm = make_manager(tmp_path, standalone_mode=False, _workspace_dir=tmp_path, **overrides)
+    fm.metadata = fm._build_metadata()
+    fm.write_metadata()
+    return fm
+
+
+def _read_metadata(folder):
+    return json.loads((folder / "metadata.json").read_text())
+
+
+class TestRotate:
+    def test_finalizes_the_old_session_and_starts_a_linked_new_one(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+
+        old_dir, new_dir = fm.rotate()
+
+        assert old_dir == tmp_path / "session"
+        assert fm.session_dir == new_dir != old_dir
+        assert new_dir.parent == tmp_path / "logs" / "proj"
+
+        old_meta = _read_metadata(old_dir)
+        assert old_meta["status"] == "finished"
+        assert "finished_at" in old_meta and "duration_seconds" in old_meta
+        assert old_meta["next_session_id"] == new_dir.name
+
+        new_meta = _read_metadata(new_dir)
+        assert new_meta["status"] == "active"
+        assert new_meta["session_id"] == new_dir.name
+        assert new_meta["previous_session_id"] == old_meta["session_id"]
+        assert fm.metadata == new_meta
+
+    def test_every_logger_restarts_at_part_zero_in_the_new_metadata(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+        running = RotatableFakeFileLogger("src_a", part_index=4)
+        idle = RotatableFakeFileLogger("session", part_index=2, running=False)
+        fm.add_file_logger(running)
+        fm.add_file_logger(idle)
+
+        _, new_dir = fm.rotate()
+
+        loggers = _read_metadata(new_dir)["loggers"]
+        assert loggers["src_a"]["last_part"] == 0 and loggers["src_a"]["total_bytes"] == 0
+        assert loggers["session"]["last_part"] == 0
+        assert idle.part_index == 0
+        # Loggers stay registered across the rotation.
+        assert fm.file_logger_count == 2
+
+    def test_running_loggers_are_always_released(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+        logger = RotatableFakeFileLogger()
+        fm.add_file_logger(logger)
+
+        fm.rotate()
+
+        assert logger.request.resume.is_set()
+
+    def test_a_logger_that_never_acknowledges_does_not_block_rotation(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(file_manager_module, "ROTATION_ACK_TIMEOUT_S", 0.05)
+        fm = make_rotatable_manager(tmp_path)
+        stuck = RotatableFakeFileLogger(ack=False)
+        fm.add_file_logger(stuck)
+
+        _, new_dir = fm.rotate()
+
+        assert fm.session_dir == new_dir
+        assert stuck.request.resume.is_set()
+
+    def test_display_name_renames_the_new_session(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+
+        _, new_dir = fm.rotate("Motor test #2")
+
+        assert new_dir.name.endswith("_profile_Motor_test_2")
+        assert _read_metadata(new_dir)["project"]["display_name"] == "Motor_test_2"
+
+    def test_without_a_display_name_the_current_one_is_kept(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+        _, new_dir = fm.rotate()
+        assert new_dir.name.endswith("_profile_Untitled")
+
+    def test_two_rotations_never_share_a_folder(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+        fixed = tmp_path / "logs" / "proj" / "20260927_120000_profile_Untitled"
+        fm._create_session_dir = lambda create=True: fixed  # same second for every rotation
+
+        _, first = fm.rotate()
+        _, second = fm.rotate()
+
+        assert first == fixed
+        assert second == fixed.with_name(fixed.name + "_2")
+        assert _read_metadata(first)["next_session_id"] == second.name
+
+    def test_refuses_to_rotate_while_replaying(self, tmp_path):
+        import pytest
+
+        fm = make_rotatable_manager(tmp_path, replay_source_dir=tmp_path / "recorded")
+        with pytest.raises(RuntimeError):
+            fm.rotate()
