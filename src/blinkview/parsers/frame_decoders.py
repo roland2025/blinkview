@@ -95,6 +95,15 @@ class FrameDecoderFactory(BaseFactory[FrameDecoderBase]):
     description="When enabled, this option trims trailing carriage return characters (ASCII 13) from the end of each frame after splitting. This is particularly useful for handling logs from Windows environments, where lines often end with a carriage return followed by a newline (\\r\\n). Enabling this option helps clean up log entries by removing these extraneous characters, ensuring that the resulting frames contain only the intended log content.",
 )
 @configuration_property("frame_errors_hidden", type="boolean", title="Hide frame errors", required=True, default=False)
+@configuration_property(
+    "frame_resync_on_start",
+    type="boolean",
+    title="Discard data before first delimiter",
+    default=True,
+    required=True,
+    ui_order=38,
+    description="When enabled, everything received before the first frame delimiter is discarded, because the stream may have been joined in the middle of a frame (e.g. UART). Disable for sources that always start on a frame boundary (e.g. TCP, files, ADB), so the first frame is not lost.",
+)
 class FrameDecoder(FrameDecoderBase):
     frame_delimiter: int
     filter_ansi: bool
@@ -105,6 +114,7 @@ class FrameDecoder(FrameDecoderBase):
     frame_length_maximum: int
     frame_length_minimum: int
     frame_errors_hidden: bool
+    frame_resync_on_start: bool
 
     def __init__(self):
         from blinkview.ops.codecs import nb_decode_frames_passthrough, nb_parser_noop

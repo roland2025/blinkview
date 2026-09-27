@@ -15,9 +15,13 @@ MAX_FRAMES_PER_CALL = 8192
 
 
 class FrameState:
-    __slots__ = ("_pool_handle", "_ts_handle", "bundle")
+    __slots__ = ("_pool_handle", "_ts_handle", "bundle", "_start_synced")
 
-    def __init__(self, pool, size_bytes=4096, max_frames=MAX_FRAMES_PER_CALL):
+    def __init__(self, pool, size_bytes=4096, max_frames=MAX_FRAMES_PER_CALL, start_synced=False):
+        """start_synced: whether the stream is assumed to begin on a frame boundary. False makes the
+        decoder discard everything up to the first delimiter (resync - needed for sources like UART that
+        can be joined mid-frame); True emits the first frame too (sources that start on a boundary)."""
+        self._start_synced = start_synced
         self._pool_handle = pool.acquire(size_bytes, dtype=dtypes.BYTE)
 
         self._ts_handle = pool.acquire(size_bytes, dtype=dtypes.TS_TYPE)
@@ -30,7 +34,7 @@ class FrameState:
             offset=np.zeros(1, dtype=np.int64),
             in_idx=np.zeros(1, dtype=np.int64),
             in_offset=np.zeros(1, dtype=np.int64),
-            in_frame=np.zeros(1, dtype=np.bool_),
+            in_frame=np.full(1, start_synced, dtype=np.bool_),
             fstart=np.empty(max_frames, dtype=np.int64),
             fcur=np.empty(max_frames, dtype=np.int64),
             fend=np.empty(max_frames, dtype=np.int64),
@@ -47,7 +51,7 @@ class FrameState:
     def clear_stitch_state(self):
         """Clears state using walrus to minimize attribute access overhead."""
         if b := self.bundle:
-            b.in_frame[0] = False
+            b.in_frame[0] = self._start_synced
             b.offset[0] = 0
 
     def release(self):

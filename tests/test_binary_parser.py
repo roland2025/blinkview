@@ -46,6 +46,10 @@ def make_parser(id_registry, device_name="binary_parser_test", **config_override
     return parser
 
 
+# a line decoder that starts synced, so the first frame is delivered (no resync discard)
+SYNCED_LINE_DECODER = {"type": "line_decoder", "frame_resync_on_start": False}
+
+
 class QueueParser:
     def __init__(self):
         self.queue: "queue.Queue[bytes]" = queue.Queue()
@@ -74,7 +78,10 @@ def make_rsyslog_parser(id_registry, device_name="rsyslog_parser_test", **config
     parser.local = SimpleNamespace(device_id=id_registry.get_device(device_name))
     config = {"delay": 20}
     config.update(config_overrides)
-    parser.apply_config(parser.hydrate_config(config))
+    hydrated = parser.hydrate_config(config)
+    # set on the hydrated preset: a partial frame_decoder override would replace the preset's decoder settings
+    hydrated["frame_decoder"]["frame_resync_on_start"] = False
+    parser.apply_config(hydrated)
     return parser
 
 
@@ -118,12 +125,38 @@ class TestNameChanged:
 
 class TestRunRealIngestion:
     """Runs BinaryParser.run() for real: real line_decoder framing (nb_decode_loop), real (empty) parser
-    pipeline, real nb_finish_frames. A throwaway priming frame is sent first on every fresh parser - see
-    tests/test_ops_dispatch.py / the memory note on the decoder loop's first-frame-dropped bug - real frames
-    of interest are sent after it."""
+    pipeline, real nb_finish_frames. Apart from the test of the default, the decoder runs with
+    frame_resync_on_start=False so the first frame is delivered too."""
+
+    def _run_lines(self, id_registry, lines, **decoder_config):
+        parser = make_parser(id_registry, delay=20, frame_decoder={"type": "line_decoder", **decoder_config})
+        parser.enabled = True
+
+        subscriber = QueueParser()
+        parser.subscribe(subscriber)
+
+        batch = parser.shared.array_pool.create(PooledLogBatch, 8, 256)
+        for line in lines:
+            batch.insert(1000, 1000, line)
+        parser.put(batch)
+
+        parser.start()
+        try:
+            rows = drain(subscriber.queue, count=len(lines), timeout=2.0)
+        finally:
+            parser.stop()
+        return [msg for msg, *_r in rows]
+
+    def test_resync_on_start_discards_the_first_frame_by_default(self, id_registry):
+        assert self._run_lines(id_registry, [b"partial\n", b"line2\n", b"line3\n"]) == [b"line2", b"line3"]
+
+    def test_disabling_resync_on_start_delivers_the_first_frame(self, id_registry):
+        rows = self._run_lines(id_registry, [b"line1\n", b"line2\n", b"line3\n"], frame_resync_on_start=False)
+
+        assert rows == [b"line1", b"line2", b"line3"]
 
     def test_decoded_lines_are_distributed_with_default_level_and_module(self, id_registry):
-        parser = make_parser(id_registry, delay=20)
+        parser = make_parser(id_registry, delay=20, frame_decoder=SYNCED_LINE_DECODER)
         parser.enabled = True
         device = parser.local.device_id
 
@@ -131,7 +164,6 @@ class TestRunRealIngestion:
         parser.subscribe(subscriber)
 
         batch = parser.shared.array_pool.create(PooledLogBatch, 8, 256)
-        batch.insert(1000, 1000, b"__priming__\n")
         batch.insert(1000, 1000, b"hello world\n")
         batch.insert(1000, 1000, b"second line\n")
         parser.put(batch)
@@ -147,18 +179,17 @@ class TestRunRealIngestion:
             assert level == LogLevel.INFO.value
             assert module == device.get_module("log").id
 
-    def test_multiple_batches_after_priming_all_get_delivered(self, id_registry):
-        parser = make_parser(id_registry, delay=20)
+    def test_multiple_batches_all_get_delivered(self, id_registry):
+        parser = make_parser(id_registry, delay=20, frame_decoder=SYNCED_LINE_DECODER)
         parser.enabled = True
 
         subscriber = QueueParser()
         parser.subscribe(subscriber)
 
         pool = parser.shared.array_pool
-        priming = pool.create(PooledLogBatch, 8, 256)
-        priming.insert(1000, 1000, b"__priming__\n")
-        priming.insert(1000, 1000, b"first batch line\n")
-        parser.put(priming)
+        first_batch = pool.create(PooledLogBatch, 8, 256)
+        first_batch.insert(1000, 1000, b"first batch line\n")
+        parser.put(first_batch)
 
         parser.start()
         try:
@@ -189,7 +220,6 @@ class TestRsyslogFileFormatParser:
         parser.subscribe(subscriber)
 
         batch = parser.shared.array_pool.create(PooledLogBatch, 8, 256)
-        batch.insert(1000, 1000, b"2026-09-20T10:23:01.456789+00:00 myhost __priming__[1]: x\n")
         batch.insert(
             1000,
             1000,

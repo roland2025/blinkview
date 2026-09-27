@@ -30,6 +30,10 @@ class TestAdbDecoder:
         assert bundle.delimiter == 10  # CHAR_LF
         assert bundle.length_max == 32 * 1024
 
+    def test_keeps_the_first_frame_by_default(self):
+        """logcat output always starts on a line boundary, so there is nothing to resync past."""
+        assert configure(AdbDecoder()).frame_resync_on_start is False
+
     def test_uses_the_adb_long_codec_id_and_kernel(self):
         decoder = AdbDecoder()
         assert decoder.codec_id == CodecID.ADB_LONG

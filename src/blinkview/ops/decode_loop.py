@@ -128,7 +128,8 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
                             target_end = curr_write
                             process_frame = True
                         else:
-                            in_frame = False
+                            # oversized: drop it; its delimiter was just found, so we are still on a boundary
+                            curr_write = 0
                     else:
                         in_frame = True
                         curr_write = 0

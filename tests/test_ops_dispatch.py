@@ -102,57 +102,98 @@ def _run_kernel(pool, frame_state, lines, frame_config=None):
     return messages
 
 
-class TestFirstFrameDroppedOnFreshState:
-    """Regression test documenting a real data-loss bug (not an edge case): the very first
-    newline-delimited frame processed against a brand-new FrameState is silently discarded rather
-    than emitted, because the frame decoder loop's (ops/decode_loop.py) state machine starts with
-    in_frame=False - the first delimiter match only flips in_frame=True and advances read_offset
-    past it (priming the "we're mid-frame" state), without ever setting process_frame=True. Only
-    the *second* delimiter match actually copies bytes to the output, and by then read_offset has
-    already skipped past the first frame's content - it is gone, not merely delayed.
+class TestStartupResync:
+    """A fresh FrameState either resyncs (default, start_synced=False: everything up to the first
+    delimiter is discarded, since a UART-like stream may have been joined mid-frame) or assumes the
+    stream starts on a frame boundary (start_synced=True: the first frame is emitted too). Driven by
+    the frame decoder's `frame_resync_on_start` setting via BinaryParser.run()."""
 
-    Confirmed with a real BinkParser thread end-to-end (2026-07-26): a batch of "line1\n",
-    "line2\n", "line3\n" fed through a fresh parser produces only "line2" and "line3" downstream -
-    "line1" never reaches any subscriber. This reproduces the same loss directly against the
-    kernel, isolated from the rest of the parser pipeline.
-
-    Practical impact: on every new device connection, reconnect, or parser restart (anything that
-    allocates a fresh FrameState), the first log line/frame from that source is silently lost.
-    """
-
-    def test_first_of_three_newline_frames_is_silently_dropped(self):
+    def test_resync_discards_everything_before_the_first_delimiter(self):
         pool = NumpyArrayPool()
         frame_state = FrameState(pool, size_bytes=4096)
 
-        messages = _run_kernel(pool, frame_state, [b"line1\n", b"line2\n", b"line3\n"])
+        messages = _run_kernel(pool, frame_state, [b"tail of a partial line\n", b"line2\n", b"line3\n"])
 
-        # This asserts the CURRENT (buggy) behavior, not the desired one - if this test starts
-        # failing because "line1" is now included, the kernel bug has been fixed and this test
-        # (and the memory note describing it) should be updated/removed accordingly.
         assert messages == [b"line2", b"line3"]
 
         frame_state.release()
 
-    def test_a_single_frame_on_fresh_state_produces_no_output_at_all(self):
+    def test_resync_swallows_a_lone_first_frame(self):
         pool = NumpyArrayPool()
         frame_state = FrameState(pool, size_bytes=4096)
 
-        messages = _run_kernel(pool, frame_state, [b"only line\n"])
-
-        assert messages == []  # the sole frame is entirely swallowed by the priming pass
+        assert _run_kernel(pool, frame_state, [b"only line\n"]) == []
 
         frame_state.release()
 
-    def test_a_throwaway_priming_frame_unblocks_all_real_frames_afterward(self):
-        """The practical workaround other tests in this session use: feed one disposable frame
-        first (on a fresh FrameState) so real frames of interest land on the second-and-later
-        delimiter matches, which do get processed correctly."""
+    def test_start_synced_emits_the_first_frame(self):
         pool = NumpyArrayPool()
-        frame_state = FrameState(pool, size_bytes=4096)
+        frame_state = FrameState(pool, size_bytes=4096, start_synced=True)
 
-        messages = _run_kernel(pool, frame_state, [b"__priming__\n", b"real one\n", b"real two\n"])
+        messages = _run_kernel(pool, frame_state, [b"line1\n", b"line2\n", b"line3\n"])
 
-        assert messages == [b"real one", b"real two"]
+        assert messages == [b"line1", b"line2", b"line3"]
+
+        frame_state.release()
+
+    def test_start_synced_skips_a_leading_empty_frame(self):
+        """A stream that opens with a delimiter (e.g. SLIP's leading END byte) yields an empty first
+        frame, which produces no row."""
+        pool = NumpyArrayPool()
+        frame_state = FrameState(pool, size_bytes=4096, start_synced=True)
+
+        assert _run_kernel(pool, frame_state, [b"\nline1\n"]) == [b"line1"]
+
+        frame_state.release()
+
+    def test_start_synced_still_resyncs_after_an_oversized_frame(self):
+        pool = NumpyArrayPool()
+        frame_state = FrameState(pool, size_bytes=4096, start_synced=True)
+
+        messages = _run_kernel(
+            pool, frame_state, [b"x" * 20 + b"\n", b"ok\n"], frame_config=_line_decoder_config(length_max=8)
+        )
+
+        assert messages == [b"ok"]
+
+        frame_state.release()
+
+    def test_oversized_frame_does_not_take_the_next_frame_with_it(self):
+        """The oversized frame's own delimiter ends it, so the decoder is still on a boundary afterwards."""
+        pool = NumpyArrayPool()
+        frame_state = FrameState(pool, size_bytes=4096, start_synced=True)
+
+        messages = _run_kernel(
+            pool,
+            frame_state,
+            [b"x" * 20 + b"\n", b"ok\n", b"ok2\n"],
+            frame_config=_line_decoder_config(length_max=8),
+        )
+
+        assert messages == [b"ok", b"ok2"]
+
+        frame_state.release()
+
+    def test_oversized_frame_split_across_rows_resyncs_at_its_delimiter(self):
+        pool = NumpyArrayPool()
+        frame_state = FrameState(pool, size_bytes=4096, start_synced=True)
+
+        messages = _run_kernel(
+            pool, frame_state, [b"x" * 10, b"y" * 10 + b"\n", b"ok\n"], frame_config=_line_decoder_config(length_max=8)
+        )
+
+        assert messages == [b"ok"]
+
+        frame_state.release()
+
+    def test_clear_stitch_state_restores_the_start_mode(self):
+        pool = NumpyArrayPool()
+        frame_state = FrameState(pool, size_bytes=4096, start_synced=True)
+        frame_state.bundle.in_frame[0] = False
+
+        frame_state.clear_stitch_state()
+
+        assert frame_state.bundle.in_frame[0]
 
         frame_state.release()
 
@@ -197,12 +238,12 @@ def _parser_config(report_error=True, squash=False):
 
 
 class _Rig:
-    """Drives the pipeline like BinaryParser.run(): feeds `lines` after a priming frame, and keeps running it
-    with a fresh output batch while the decoder reports out_full."""
+    """Drives the pipeline like BinaryParser.run(): feeds `lines` to a FrameState that starts synced (no resync
+    discard), and keeps running it with a fresh output batch while the decoder reports out_full."""
 
     def __init__(self, *, steps=(), report_error=True, squash=False, compact=True, frame_config=None, has_pids=False):
         self.pool = NumpyArrayPool()
-        self.frame_state = FrameState(self.pool, size_bytes=4096)
+        self.frame_state = FrameState(self.pool, size_bytes=4096, start_synced=True)
         self.steps = tuple(steps)
         self.p_config = _parser_config(report_error, squash)
         self.o_cfg = OutputConfig(compact_buffer=compact)
@@ -276,11 +317,11 @@ class _Rig:
         self.frame_state.release()
 
 
-def _rows(prime=b"__prime__\n", lines=(), **rig_kwargs):
+def _rows(lines=(), **rig_kwargs):
     feed_kwargs = {k: rig_kwargs.pop(k) for k in ("out_capacity", "out_bytes") if k in rig_kwargs}
     rig = _Rig(**rig_kwargs)
     try:
-        return rig.feed([prime + b"".join(lines)], **feed_kwargs), rig
+        return rig.feed([b"".join(lines)], **feed_kwargs), rig
     finally:
         rig.close()
 
@@ -390,9 +431,9 @@ class TestStageMajorPipeline:
     def test_scratch_capacity_caps_frames_per_call_and_resumes(self):
         lines = [b"%d msg%d\n" % (i + 1, i) for i in range(50)]
         rig = _Rig(steps=[_ts_step])
-        rig.frame_state = FrameState(rig.pool, size_bytes=4096, max_frames=8)
+        rig.frame_state = FrameState(rig.pool, size_bytes=4096, max_frames=8, start_synced=True)
         try:
-            rows = rig.feed([b"__prime__\n" + b"".join(lines)], out_capacity=64)
+            rows = rig.feed([b"".join(lines)], out_capacity=64)
         finally:
             rig.close()
 
@@ -402,7 +443,7 @@ class TestStageMajorPipeline:
     def test_frames_split_across_input_chunks(self):
         rig = _Rig(steps=[_ts_step])
         try:
-            rows = rig.feed([b"__prime__\n1 hel", b"lo wor", b"ld\n2 second\n3 thi", b"rd\n"])
+            rows = rig.feed([b"1 hel", b"lo wor", b"ld\n2 second\n3 thi", b"rd\n"])
         finally:
             rig.close()
 
@@ -411,7 +452,7 @@ class TestStageMajorPipeline:
     def test_pre_framed_input(self):
         rig = _Rig(steps=[_ts_step], frame_config=_line_decoder_config(decode_id=0))
         try:
-            rows = rig.feed([b"__prime__", b"1 alpha", b"bad", b"2 beta"])
+            rows = rig.feed([b"1 alpha", b"bad", b"2 beta"])
         finally:
             rig.close()
 

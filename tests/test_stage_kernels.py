@@ -51,7 +51,7 @@ def _rows(decoder, steps, data, pid_tid=False):
     parser.local = SimpleNamespace(device_id=id_registry.get_device("stage_kernels"))
     parser.apply_config(
         {
-            "frame_decoder": decoder,
+            "frame_decoder": {**decoder, "frame_resync_on_start": False},
             "frame_parser": {"type": "default", "steps": steps},
             "delay": 20,
         }
@@ -60,7 +60,7 @@ def _rows(decoder, steps, data, pid_tid=False):
     frame_parser = parser._frame_parser
     p_config = frame_parser.bundle()
 
-    frame_state = FrameState(pool, codec.frame_length_maximum)
+    frame_state = FrameState(pool, codec.frame_length_maximum, start_synced=not codec.frame_resync_on_start)
     f_state = frame_state.bundle
     o_config = OutputConfig(compact_buffer=True)
 
@@ -70,8 +70,6 @@ def _rows(decoder, steps, data, pid_tid=False):
         PooledLogBatch, 64, 4096, has_levels=True, has_modules=True, has_devices=True, has_pids=True, has_tids=True
     )
 
-    f_state.in_frame[0] = True
-    f_state.offset[0] = 0
     frame_state.reset_batch_trackers()
     out_full, n = codec.kernel(f_state, in_batch.bundle, p_config, o_config, out.bundle)
     if n:

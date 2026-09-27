@@ -64,6 +64,12 @@ class TestFrameDecoderDefaults:
         assert bundle.filter_printable is True
         assert bundle.filter_trim_r is False
 
+    def test_frame_resync_on_start_defaults_on(self):
+        assert configure(LineDecoder()).frame_resync_on_start is True
+
+    def test_frame_resync_on_start_can_be_disabled(self):
+        assert configure(LineDecoder(), frame_resync_on_start=False).frame_resync_on_start is False
+
     def test_bundle_is_none_before_apply_config(self):
         decoder = LineDecoder()
         assert decoder.bundle() is None
