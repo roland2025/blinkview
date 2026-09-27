@@ -215,6 +215,56 @@ class TestApplyConfig:
         finally:
             storage.log_pool.release_all()
 
+    def test_cold_storage_not_persisted_while_logging_disabled(self):
+        """Regression test: with central's logging disabled, closing the app still left the
+        whole session on disk as cold-archive/*.blkseg.zst, because cold_storage_persist_on_close
+        was honored regardless of logging - see CentralStorage._should_persist_cold_storage."""
+        storage = make_storage(cold_storage_persist_on_close=True)
+        try:
+            assert storage.file_logger is None
+            assert storage.log_pool._persist_cold_storage is False
+            assert storage.log_pool._archiver._persist is False
+        finally:
+            storage.log_pool.release_all()
+
+    def test_cold_storage_persist_follows_logging_being_toggled_live(self):
+        storage = make_storage(cold_storage_persist_on_close=True)
+        try:
+            # Stand-in for BaseDaemon.apply_config having built a file logger (logging.enabled).
+            storage.file_logger = object()
+            storage.apply_config({})
+            assert storage.log_pool._persist_cold_storage is True
+            assert storage.log_pool._archiver._persist is True
+
+            storage.file_logger = None
+            storage.apply_config({})
+            assert storage.log_pool._persist_cold_storage is False
+            assert storage.log_pool._archiver._persist is False
+        finally:
+            storage.log_pool.release_all()
+
+    def test_cold_storage_persisted_in_replay_even_without_logging(self, tmp_path):
+        """A replay never builds a file logger (BaseDaemon.apply_config skips it in replay_mode),
+        but its cold dir belongs to the already-logged session being replayed, so persisting
+        there is still wanted."""
+        old_session_dir = tmp_path / "old_session"
+        old_session_dir.mkdir()
+        storage = CentralStorage()
+        storage.logger = PrintLogger("test.central_storage")
+        file_manager = SimpleNamespace(session_dir=tmp_path / "live", replay_source_dir=old_session_dir)
+        storage.shared = SimpleNamespace(
+            array_pool=NumpyArrayPool(),
+            registry=SimpleNamespace(file_manager=file_manager, replay_mode=True),
+            tasks=FakeTasks(),
+        )
+        storage.apply_config({"cold_storage_persist_on_close": True})
+        try:
+            assert storage.file_logger is None
+            assert storage.log_pool._persist_cold_storage is True
+        finally:
+            storage.log_pool.set_persist_cold_storage(False)
+            storage.log_pool.release_all()
+
     def test_reapplying_config_can_grow_cold_max_pieces_live(self, tmp_path):
         storage = make_storage(cold_storage_enabled=True, cold_max_pieces=2, cold_storage_dir=str(tmp_path))
 

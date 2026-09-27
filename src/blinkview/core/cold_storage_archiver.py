@@ -130,6 +130,9 @@ class ColdStorageArchiver:
             finally:
                 segment.release()
 
+    def set_persist(self, persist: bool) -> None:
+        self._persist = persist
+
     def stop(self, timeout: Optional[float] = 5.0) -> None:
         self._stop_event.set()
         self._thread.join(timeout=timeout)

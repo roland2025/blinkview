@@ -617,7 +617,12 @@ class BlinkMainWindow(QMainWindow):
         If this window is already running in replay_mode, picking one loads it in-place via
         UnifiedLogReplay. Otherwise replay_mode is fixed at Registry construction time, so
         picking one relaunches the app as a new process in replay mode targeting that session."""
-        from blinkview.utils.session_lister import list_sessions, resolve_log_root, unified_log_parts
+        from blinkview.utils.session_lister import (
+            format_session_label,
+            list_sessions,
+            resolve_log_root,
+            unified_log_parts,
+        )
 
         log_dir, project_name = resolve_log_root()
         sessions = [s for s in list_sessions(log_dir, project_name) if unified_log_parts(s)]
@@ -630,8 +635,7 @@ class BlinkMainWindow(QMainWindow):
         already_replaying = getattr(self.gui_context.registry, "replay_mode", False)
 
         for session_info in sessions[:25]:
-            label = f"{session_info.display_name} ({session_info.profile}) - {session_info.created_at or '?'}"
-            act = load_menu.addAction(label)
+            act = load_menu.addAction(format_session_label(session_info))
             if already_replaying:
                 act.triggered.connect(lambda checked=False, s=session_info: self.start_replay(s))
             else:

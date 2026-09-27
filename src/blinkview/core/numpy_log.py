@@ -482,6 +482,14 @@ class CircularLogPool:
                     first_ts = int(ts[0])
                 return first_ts
 
+    def set_persist_cold_storage(self, persist: bool) -> None:
+        """Switches whether cold storage survives release_all()/process exit. Adjustable live,
+        unlike the cold tier's enabled/dir - only consulted at teardown (release_all() and the
+        archiver's atexit cleanup)."""
+        self._persist_cold_storage = persist
+        if self._archiver is not None:
+            self._archiver.set_persist(persist)
+
     def release_all(self):
         if self._archiver is not None and self._persist_cold_storage:
             # Flush the hot tier to disk too, instead of just dropping it on release() below -

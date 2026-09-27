@@ -11,6 +11,7 @@
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -140,6 +141,39 @@ def resolve_session(
             return s
 
     return None
+
+
+def _format_duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "unfinished"
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
+def format_session_label(session_info: SessionInfo) -> str:
+    """Human-readable menu label: 'YYYY-MM-DD HH:MM (duration)  display_name [profile]'.
+    created_at is stored as UTC ISO 8601 (FileManager appends a trailing 'Z' after an
+    already-offset isoformat()), shown here in local time."""
+    started = "????-??-?? ??:??"
+    if session_info.created_at:
+        try:
+            dt = datetime.fromisoformat(session_info.created_at.rstrip("Z"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            started = dt.astimezone().strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            started = session_info.created_at
+
+    label = f"{started} ({_format_duration(session_info.duration_seconds)})  {session_info.display_name}"
+    if session_info.profile:
+        label += f" [{session_info.profile}]"
+    return label
 
 
 def unified_log_parts(session_info: SessionInfo) -> list[Path]:

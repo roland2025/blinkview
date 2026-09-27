@@ -100,7 +100,8 @@ class CentralFactory(BaseFactory[BaseCentralStorage]):
     description="Keep cold-storage segment files on disk when the app closes, instead of deleting "
     "them, and flush the hot (RAM) tier to disk too so the whole session is archived - not just "
     "what already got evicted. Reopening the same session (live or replay) later remounts these "
-    "files directly instead of re-parsing/re-ingesting from scratch. Only applies to the default "
+    "files directly instead of re-parsing/re-ingesting from scratch. Ignored (files deleted on close) "
+    "while this storage's logging is disabled, except in replay. Only applies to the default "
     "cold_storage_dir (a fixed <session>/cold/ folder) - an overridden cold_storage_dir always "
     "gets a fresh uniquely-named subdirectory per run, so there's nothing stable to reopen.",
     ui_order=16,
@@ -221,6 +222,18 @@ class CentralStorage(BaseCentralStorage):
         # needs to happen at this point - see core/cold_archive.py.
         return cold_dir
 
+    def _should_persist_cold_storage(self) -> bool:
+        """cold_storage_persist_on_close only takes effect while this session is actually being
+        logged (file_logger is set by BaseDaemon.apply_config iff logging.enabled and not replay) -
+        otherwise closing a session the user chose not to log would still leave its full contents
+        on disk as cold-archive/ files. A replay is exempt: its cold dir belongs to the session
+        being replayed (see _resolve_cold_storage_dir), which was logged, and persisting there is
+        what lets a later replay skip re-ingesting it."""
+        if not self.cold_storage_persist_on_close:
+            return False
+        replay_mode = getattr(self.shared.registry, "replay_mode", False)
+        return replay_mode or self.file_logger is not None
+
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
         if self.log_pool is None:
@@ -235,10 +248,12 @@ class CentralStorage(BaseCentralStorage):
                 final_buffer_bytes=buffer_bytes,
                 cold_max_pieces=cold_max_pieces,
                 cold_storage_dir=cold_storage_dir,
-                persist_cold_storage=self.cold_storage_persist_on_close,
+                persist_cold_storage=self._should_persist_cold_storage(),
                 logger=self.logger,
             )
         else:
+            self.log_pool.set_persist_cold_storage(self._should_persist_cold_storage())
+
             # Runtime dynamic updates
             self.log_pool.update_max_pieces(self.max_pieces)
 
