@@ -264,23 +264,39 @@ class BaseBatchProcessor:
         self.clear()
 
     def _ensure_capacity(self, required_bytes: int):
-        """Checks if the current buffer can hold the data; grows if necessary."""
+        """Makes the buffer hold at least `required_bytes` in total, growing it if necessary.
+        Bytes already written but not yet handed out by get_data() are carried over to the new
+        buffer - FileLogger processes several batches between flushes, and every one of them
+        must reach the file."""
         if self._buffer is None or required_bytes > self._buffer_size:
-            # We preserve the tracking variable to calculate growth,
-            # even though clear() nullifies the handle.
-            old_size = self._buffer_size
-            self.clear()
+            old_handle = self._buffer
+            old_out = self._out_buffer
+            kept = self._written_bytes
 
             # Grow by 1.5x or exactly required
-            new_size = max(required_bytes, int(old_size * 1.5))
+            new_size = max(required_bytes, int(self._buffer_size * 1.5))
 
             # Since 0 results in the minimum block (1 KiB), simple floor division works.
-            self._buffer = self.shared.array_pool.get(new_size, dtypes.BYTE)
-            self._out_buffer = self._buffer.array
-            self._buffer_size = self._buffer.capacity
+            new_handle = self.shared.array_pool.get(new_size, dtypes.BYTE)
+            if kept:
+                new_handle.array[:kept] = old_out[:kept]
+
+            self._buffer = new_handle
+            self._out_buffer = new_handle.array
+            self._buffer_size = new_handle.capacity
+            if old_handle is not None:
+                old_handle.release()
+
+    def _append_space(self, required_bytes: int) -> np.ndarray:
+        """Ensures room for `required_bytes` more after what's already written, and returns the
+        writable tail of the buffer to format into - a contiguous view, so the formatting kernels
+        see the same array type as before (no extra Numba specialization)."""
+        self._ensure_capacity(self._written_bytes + required_bytes)
+        return self._out_buffer[self._written_bytes :]
 
     def process(self, batch: PooledLogBatch):
-        """Implemented by subclasses."""
+        """Implemented by subclasses. Must append after `_written_bytes` (see _append_space),
+        never overwrite from the start - get_data() hands out everything since the last call."""
         pass
 
     def get_data(self) -> memoryview:
@@ -311,10 +327,10 @@ class BinaryBatchProcessor(BaseBatchProcessor):
 
         # 1. Binary Overhead (Strict 16 bytes for the protocol header)
         required = nb_estimate_batch_capacity(bundle, 16)
-        self._ensure_capacity(required)
+        out = self._append_space(required)
 
-        # 2. Binary Serialization Kernel
-        self._written_bytes = nb_format_binary_batch(self._out_buffer, bundle)
+        # 2. Binary Serialization Kernel - appended after anything not yet flushed
+        self._written_bytes += nb_format_binary_batch(out, bundle)
 
 
 @BatchProcessorFactory.register("log_row")
@@ -337,12 +353,10 @@ class LogRowBatchProcessor(BaseBatchProcessor):
 
         # 1. Text Overhead (approx 120 bytes for TS, IDs, and delimiters)
         required = nb_estimate_batch_capacity(bundle, 120)
-        self._ensure_capacity(required)
+        out = self._append_space(required)
 
         # 2. Registry state (SoA bundle)
         registry = self.shared.id_registry.bundle()
 
-        # 3. Text Serialization Kernel
-        self._written_bytes = nb_format_log_row_batch(
-            self._out_buffer, bundle, registry, self._sec_state, self._ts_cache
-        )
+        # 3. Text Serialization Kernel - appended after anything not yet flushed
+        self._written_bytes += nb_format_log_row_batch(out, bundle, registry, self._sec_state, self._ts_cache)

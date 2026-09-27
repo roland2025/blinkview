@@ -289,3 +289,135 @@ class TestCloseAndCompressFinalPart:
         assert empty_path.exists()  # left as a plain empty file, not compressed
         assert not empty_path.with_name(empty_path.name + ".zst").exists()
         assert logger.part_index == 0  # never bumped - nothing was archived
+
+
+def _wait_until(predicate, timeout=5.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not met in time")
+        time.sleep(0.01)
+
+
+def _archive_bytes(path):
+    from blinkview.core.zstd_file_compression import decompress_file_to_buffer
+
+    return bytes(decompress_file_to_buffer(path.with_name(path.name + ".zst")))
+
+
+# ---------------------------------------------------------------------------
+# End-to-end behaviour with the real batch processors
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def id_registry():
+    from blinkview.core.array_pool import NumpyArrayPool
+    from blinkview.core.id_registry.registry import IDRegistry
+
+    return IDRegistry(NumpyArrayPool())
+
+
+def _real_processor(kind, id_registry):
+    """A real registered batch processor ("log_row" = the unified log's text format, "binary" =
+    raw source logs), wired with just the shared context it reads."""
+    from blinkview.core.array_pool import NumpyArrayPool
+    from blinkview.storage.file_logger import BinaryBatchProcessor, LogRowBatchProcessor
+
+    processor = {"log_row": LogRowBatchProcessor, "binary": BinaryBatchProcessor}[kind]()
+    processor.shared = SimpleNamespace(array_pool=NumpyArrayPool(), id_registry=id_registry)
+    return processor
+
+
+def _row_batch(id_registry, marker: bytes, ts: int):
+    """A one-row PooledLogBatch like the ones central storage / sources hand to a FileLogger."""
+    from blinkview.core.array_pool import NumpyArrayPool
+    from blinkview.core.numpy_batch_manager import PooledLogBatch
+
+    module = id_registry.get_device("fldev").get_module("mod")
+    batch = NumpyArrayPool().create(PooledLogBatch, 1, 256, has_levels=True, has_modules=True, has_devices=True)
+    batch.insert_any(ts, ts, marker, level=0, module=module.id, device=module.device.id)
+    return batch
+
+
+def _assert_markers_in_order(data: bytes, markers):
+    positions = [data.find(m) for m in markers]
+    missing = [m for m, pos in zip(markers, positions) if pos < 0]
+    assert not missing, f"missing from the log file: {missing}"
+    assert positions == sorted(positions), "rows written out of order"
+
+
+MARKERS = [f"marker-{i}".encode() for i in range(5)]
+PROCESSOR_KINDS = ["log_row", "binary"]
+
+
+@pytest.mark.parametrize("kind", PROCESSOR_KINDS)
+class TestWithRealProcessors:
+    """FileLogger's contract with a real batch processor: every row of every batch it's given
+    reaches the file - regardless of how many batches get processed between two flushes
+    (run() only flushes every max_batch rows or flush_interval seconds). Fakes elsewhere in this
+    file accumulate on their own, so they can't catch a processor that loses data."""
+
+    def test_every_batch_processed_before_a_flush_is_written(self, kind, file_manager, id_registry):
+        logger, _ = make_file_logger(file_manager, _real_processor(kind, id_registry))
+        logger.open_file()
+
+        for i, marker in enumerate(MARKERS):
+            with _row_batch(id_registry, marker, ts=1_700_000_000_000_000_000 + i) as batch:
+                logger.process_batch(batch)
+        logger._flush()
+        logger.file_handle.close()
+
+        _assert_markers_in_order(logger.file_path.read_bytes(), MARKERS)
+
+    def test_flushing_between_batches_writes_each_batch_once(self, kind, file_manager, id_registry):
+        logger, _ = make_file_logger(file_manager, _real_processor(kind, id_registry))
+        logger.open_file()
+
+        for i, marker in enumerate(MARKERS):
+            with _row_batch(id_registry, marker, ts=1_700_000_000_000_000_000 + i) as batch:
+                logger.process_batch(batch)
+            logger._flush()
+        logger.file_handle.close()
+
+        data = logger.file_path.read_bytes()
+        _assert_markers_in_order(data, MARKERS)
+        assert all(data.count(m) == 1 for m in MARKERS), "a flushed batch was written again"
+
+    def test_unflushed_bytes_survive_the_buffer_growing(self, kind, file_manager, id_registry):
+        """Many large rows before one flush force the processor's buffer to grow (repeatedly)
+        while it still holds unflushed rows - those must be carried over, not dropped."""
+        processor = _real_processor(kind, id_registry)
+        logger, _ = make_file_logger(file_manager, processor)
+        logger.open_file()
+
+        markers = [f"big-{i:02d}-".encode() + b"x" * 200 for i in range(40)]
+        sizes = set()
+        for i, marker in enumerate(markers):
+            with _row_batch(id_registry, marker, ts=1_700_000_000_000_000_000 + i) as batch:
+                logger.process_batch(batch)
+            sizes.add(processor._buffer_size)
+        logger._flush()
+        logger.file_handle.close()
+
+        assert len(sizes) > 1, "buffer never grew - test doesn't exercise the growth path"
+        _assert_markers_in_order(logger.file_path.read_bytes(), markers)
+
+    def test_running_logger_writes_every_queued_batch_by_stop(self, kind, file_manager, id_registry):
+        """The real thread path: batches arrive faster than max_batch/flush_interval would ever
+        trigger a flush, so everything is written by run()'s final flush at stop()."""
+        logger, _ = make_file_logger(
+            file_manager, _real_processor(kind, id_registry), enabled=True, flush_interval=3600
+        )
+        logger.start()
+        try:
+            for i, marker in enumerate(MARKERS):
+                with _row_batch(id_registry, marker, ts=1_700_000_000_000_000_000 + i) as batch:
+                    logger.put(batch)
+            _wait_until(lambda: logger.input_queue.get_stats()["total"] == 0)
+        finally:
+            logger.stop()
+
+        _assert_markers_in_order(_archive_bytes(logger.file_path.with_name("log-1_0.bin")), MARKERS)
