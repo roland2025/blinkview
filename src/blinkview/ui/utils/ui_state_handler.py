@@ -39,6 +39,8 @@ class UIStateHandler:
             "window_state": b64encode(self.window.saveState().data()).decode("utf-8"),
             "sources_visible": self.window.sources_dock.isVisible(),
             "pipelines_visible": self.window.pipelines_dock.isVisible(),
+            # Plain layout widget, not a dock/toolbar, so saveState() doesn't cover it
+            "playback_visible": self.window.action_view_playback.isChecked(),
             "open_tabs": open_tabs,
             "floating_windows": self.window.window_manager.get_windows_state(),
             "current_tab_index": self.window.central_tabs.currentIndex(),
@@ -139,6 +141,9 @@ class UIStateHandler:
                 self.window.sources_dock.setVisible(data["sources_visible"])
             if "pipelines_visible" in data:
                 self.window.pipelines_dock.setVisible(data["pipelines_visible"])
+            if "playback_visible" in data:
+                # Goes through the action so its checked state and the widget stay in sync
+                self.window.action_view_playback.setChecked(data["playback_visible"])
 
             # --- Restore Central Tabs ---
             if "open_tabs" in data:

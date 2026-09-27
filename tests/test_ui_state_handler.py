@@ -44,6 +44,7 @@ class FakeWindow:
         self.restored_state = None
         self.sources_dock = _FakeDock()
         self.pipelines_dock = _FakeDock()
+        self.action_view_playback = _FakeCheckableAction(True)
         self.central_tabs = _FakeTabs()
         self.create_widget_calls = []
         self._create_widget_result = create_widget_result if create_widget_result is not None else _FakeFloatingWindow
@@ -63,6 +64,17 @@ class _FakeDock:
 
     def setVisible(self, value):
         self.visible = value
+
+
+class _FakeCheckableAction:
+    def __init__(self, checked):
+        self.checked = checked
+
+    def isChecked(self):
+        return self.checked
+
+    def setChecked(self, value):
+        self.checked = value
 
 
 class _FakeTabs:
@@ -178,6 +190,7 @@ class TestLoadUiStateDocksAndTabs:
                     "window_state": encoded_state,
                     "sources_visible": False,
                     "pipelines_visible": True,
+                    "playback_visible": False,
                     "open_tabs": [{"class": "LogViewerWidget", "name": "Log", "params": {"tab_name": "Log"}}],
                     "current_tab_index": 0,
                     "floating_windows": [],
@@ -191,6 +204,7 @@ class TestLoadUiStateDocksAndTabs:
         assert window.restored_state == b"fakestate"
         assert window.sources_dock.visible is False
         assert window.pipelines_dock.visible is True
+        assert window.action_view_playback.checked is False
         assert window.central_tabs.block_calls == [True, False]
         assert window.central_tabs.current_index == 0
         assert window.create_widget_calls == [
@@ -356,6 +370,7 @@ class TestGetData:
                 )
                 self.sources_dock = _FakeVisibleDock(True)
                 self.pipelines_dock = _FakeVisibleDock(False)
+                self.action_view_playback = _FakeCheckableAction(False)
                 self.window_manager = FakeWindowManager()
 
             def saveState(self):
@@ -374,6 +389,7 @@ class TestGetData:
         ]
         assert data["sources_visible"] is True
         assert data["pipelines_visible"] is False
+        assert data["playback_visible"] is False
         assert data["floating_windows"] == [{"class": "Floating", "name": "F"}]
         assert data["current_tab_index"] == 1
         assert data["window_geometry"] == {"frame_pos": [1, 2]}
