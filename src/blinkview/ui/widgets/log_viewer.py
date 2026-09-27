@@ -796,7 +796,7 @@ QToolButton[filterEnabled="true"] {
                     self._live_seqs.extend(result.seqs.tolist())
 
     def _sync_session_generation(self) -> bool:
-        """After a session rotation (main window Clear) the pool holds only the new session's
+        """After a session rotation (main window Rotate) the pool holds only the new session's
         rows - rebuild from its tail and drop any per-tab Clear floor, which pointed into the
         previous session. Returns True if this tick was consumed by the rebuild."""
         generation = session_generation_of(self.gui_context.registry)

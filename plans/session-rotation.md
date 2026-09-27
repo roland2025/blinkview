@@ -1,10 +1,10 @@
-# Runtime session rotation (main window Clear)
+# Runtime session rotation (main window Rotate)
 
 ## Status: phases 1-3 implemented (2026-09-27)
 
 Phase 3 as built:
 
-- **Clear button** (`BlinkMainWindow.clear_button`, a `QToolButton`):
+- **Rotate button** (`BlinkMainWindow.rotate_button`, a `QToolButton`):
   - Left click → `start_session_rotation()`. Right click → `_prompt_session_rotation_name()`
     (`QInputDialog`, prefilled with the current name; a cancelled or blank name does nothing).
   - Disabled in replay mode, and while a rotation runs (a second request is refused).
@@ -250,7 +250,7 @@ makes the cut atomic with respect to ingestion.
 ## Phases
 
 1. **FileManager + FileLogger rotation, pool untouched.** Rotation of metadata, logs and
-   config snapshots. Not user-facing yet: the Clear button only lands in phase 3, once the
+   config snapshots. Not user-facing yet: the Rotate button only lands in phase 3, once the
    pool rotates too.
 2. **Pool + cold storage rotation** (§3), the tracker reset, and the ID-registry dump.
 3. **UI wiring** (§4), plus replay verification (§5).
@@ -270,7 +270,7 @@ makes the cut atomic with respect to ingestion.
 - Close-time saves: with a real MainWindow and a tab open, rotate. The old session folder then
   has `gui_state.final`/`gui_config.final`/config `final` snapshots matching the current
   layout, and the new folder has the `start` snapshots.
-- The Clear button: left click rotates with the unchanged name; right click → a monkeypatched
+- The Rotate button: left click rotates with the unchanged name; right click → a monkeypatched
   `QInputDialog.getText` returning a name → the new folder and metadata carry the sanitized
   name; a cancelled dialog → no rotation.
 - A stress test with ingestion running while rotating: every row lands in exactly one of the

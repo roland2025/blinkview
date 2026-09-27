@@ -80,12 +80,12 @@ class TestClearButton:
         fm = registry.file_manager
         old_dir = fm.session_dir
 
-        main_window.clear_button.click()
-        assert not main_window.clear_button.isEnabled()  # disabled while rotating
+        main_window.rotate_button.click()
+        assert not main_window.rotate_button.isEnabled()  # disabled while rotating
         _wait_rotation_done(qtbot, main_window)
 
         assert fm.session_dir != old_dir
-        assert main_window.clear_button.isEnabled()
+        assert main_window.rotate_button.isEnabled()
         assert registry.session_generation == 1
         assert fm.session_display_name == "rotation_ui_test"  # left click keeps the name
 
@@ -171,7 +171,7 @@ def test_clear_is_unavailable_in_replay_mode(qapp, qtbot, registry):
     w = BlinkMainWindow(registry)
     qtbot.addWidget(w)
 
-    assert not w.clear_button.isEnabled()
+    assert not w.rotate_button.isEnabled()
     assert w.start_session_rotation() is False
 
 

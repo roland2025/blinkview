@@ -312,7 +312,7 @@ class PlaybackControlWidget(QWidget):
         generation = session_generation_of(self.gui_context.registry)
         rotated = generation != self._session_generation
         if rotated:
-            # Session rotation (main window Clear): the pool now holds only the new session, so
+            # Session rotation (main window Rotate): the pool now holds only the new session, so
             # a REPLAY position or a pending mark-in from the old one means nothing any more.
             # Done here rather than in Registry.rotate_session(), which runs off the UI thread -
             # the clock is only ever mutated from the UI thread.

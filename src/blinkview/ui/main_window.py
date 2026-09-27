@@ -231,21 +231,25 @@ class BlinkMainWindow(QMainWindow):
         )
         self.toolbar.addAction(self.btn_open_telemetry)
 
-        # --- Clear: starts a new session (plans/session-rotation.md) ---
+        # --- Rotate: starts a new session (plans/session-rotation.md) ---
         # A QToolButton rather than a QAction - it needs a right-click handler (name the new
         # session first). Nothing keeps running in the old session: logs, in-memory data and
         # snapshots are finished there, and every view starts over in the new one.
-        self.clear_button = QToolButton()
-        self.clear_button.setText("Clear")
-        self.clear_button.clicked.connect(lambda: self.start_session_rotation())
-        self.clear_button.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.clear_button.customContextMenuRequested.connect(self._prompt_session_rotation_name)
+        self.rotate_button = QToolButton()
+        self.rotate_button.setText("Rotate")
+        self.rotate_button.clicked.connect(lambda: self.start_session_rotation())
+        self.rotate_button.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.rotate_button.customContextMenuRequested.connect(self._prompt_session_rotation_name)
         if registry.replay_mode:
-            self.clear_button.setEnabled(False)
-            self.clear_button.setToolTip("Not available while replaying a session")
+            self.rotate_button.setEnabled(False)
+            self.rotate_button.setToolTip("Not available while replaying a session")
         else:
-            self.clear_button.setToolTip("Start a new session - right-click to name it")
-        self.toolbar.addWidget(self.clear_button)
+            self.rotate_button.setToolTip(
+                "Rotate session: finish the current session (log files, stored data and snapshots are "
+                "closed there) and start a fresh one - every view starts over empty.\n"
+                "Right-click to name the new session first."
+            )
+        self.toolbar.addWidget(self.rotate_button)
 
         self.toolbar.addSeparator()
 
@@ -921,11 +925,11 @@ class BlinkMainWindow(QMainWindow):
         print(f"\n[BlinkView] Received signal {signum}. Initiating graceful shutdown...")
         self.close()
 
-    # --- Session rotation (Clear button) ----------------------------------------------------
+    # --- Session rotation (Rotate button) ---------------------------------------------------
 
     def _prompt_session_rotation_name(self, _pos=None):
-        """Right-click on Clear: name the new session before starting it."""
-        if not self.clear_button.isEnabled():
+        """Right-click on Rotate: name the new session before starting it."""
+        if not self.rotate_button.isEnabled():
             return
         current = self.gui_context.registry.file_manager.session_display_name
         name, ok = QInputDialog.getText(self, "New session", "Session name:", text=current)
@@ -947,7 +951,7 @@ class BlinkMainWindow(QMainWindow):
 
         registry.file_manager.save_gui()  # workspace copies + the old session's `final` snapshots
 
-        self.clear_button.setEnabled(False)
+        self.rotate_button.setEnabled(False)
         self._session_rotation_toast = ToastManager.show_persistent("Starting new session...", parent=self)
 
         thread = QThread(self)
@@ -994,7 +998,7 @@ class BlinkMainWindow(QMainWindow):
             self._session_rotation_thread.wait(5000)
         self._session_rotation_thread = None
         self._session_rotation_worker = None
-        self.clear_button.setEnabled(not self.gui_context.registry.replay_mode)
+        self.rotate_button.setEnabled(not self.gui_context.registry.replay_mode)
 
         if self._close_after_rotation:
             self._close_after_rotation = False
