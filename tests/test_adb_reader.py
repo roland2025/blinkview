@@ -31,12 +31,16 @@ class FakeStream:
     def __init__(self, chunks=()):
         self._chunks = list(chunks)
         self.written = bytearray()
+        self.closed = False
 
     def write(self, data: bytes):
         self.written.extend(data)
 
     def flush(self):
         pass
+
+    def close(self):
+        self.closed = True
 
     def read1(self, _size):
         if self._chunks:
@@ -373,12 +377,9 @@ class TestCleanupProcess:
         assert proc.terminated is True
         assert reader._process is None
 
-    def test_polite_exit_write_fails_silently_but_termination_still_happens(self):
-        # Real _shell.stdin is a binary-mode pipe (Popen(..., text=False)) - writing the str
-        # "exit\n" to it raises TypeError, swallowed by the surrounding except-Exception:pass, so
-        # the "polite" exit never actually reaches the shell. Harmless because terminate()/wait()
-        # unconditionally follow regardless - documenting the real (silently-broken) behavior
-        # rather than asserting on a write that never lands.
+    def test_polite_exit_writes_bytes_and_closes_stdin_before_termination(self):
+        # Real _shell.stdin is a binary-mode pipe (Popen(..., text=False)) - FakeStream's
+        # bytearray.extend() rejects str the same way, so this fails if the write regresses to str.
         reader = make_reader()
         shell = FakeShell()
         shell.pid = 999
@@ -388,7 +389,29 @@ class TestCleanupProcess:
 
         reader._cleanup_process()
 
-        assert shell.stdin.written == bytearray()  # the str write never actually landed
+        assert shell.stdin.written == bytearray(b"exit\n")
+        assert shell.stdin.closed is True
+        assert shell.terminated is True
+        assert reader._shell is None
+
+    def test_still_terminates_when_shell_ignores_polite_exit(self):
+        reader = make_reader()
+        shell = FakeShell()
+        shell.pid = 999
+        shell.terminate = lambda: setattr(shell, "terminated", True)
+        waits = []
+
+        def wait(timeout=None):
+            waits.append(timeout)
+            if len(waits) == 1:
+                raise subprocess.TimeoutExpired("adb shell", timeout)
+
+        shell.wait = wait
+        reader._shell = shell
+
+        reader._cleanup_process()
+
+        assert waits[0] == 0.5
         assert shell.terminated is True
         assert reader._shell is None
 

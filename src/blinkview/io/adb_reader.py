@@ -317,11 +317,14 @@ ensuring high throughput without pipeline stalls."""
         # 2. Handle the Persistent Shell
         if self._shell is not None:
             self.logger.debug("Terminating persistent ADB shell...")
-            # Try to be polite and exit the shell first
+            # Try to be polite and exit the shell first (stdin is a binary pipe, so bytes).
+            # Give it a brief chance to close the remote session before force-terminating.
             try:
                 if self._shell.stdin:
-                    self._shell.stdin.write("exit\n")
+                    self._shell.stdin.write(b"exit\n")
                     self._shell.stdin.flush()
+                    self._shell.stdin.close()
+                self._shell.wait(timeout=0.5)
             except Exception:
                 pass
 
