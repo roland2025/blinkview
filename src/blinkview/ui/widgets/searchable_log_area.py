@@ -44,6 +44,8 @@ class SearchableLogArea(QWidget):
         self._pin_timer.setSingleShot(True)
         self._pin_timer.setInterval(0)
         self._pin_timer.timeout.connect(self.scroll_to_end)
+        # True while scroll_to_end() moves the scrollbar - see is_programmatic_scroll.
+        self._pinning = False
 
         # The Find Bar (Hidden by default)
         self.find_bar = QWidget()
@@ -238,6 +240,7 @@ class SearchableLogArea(QWidget):
         scrollbar.setValue(scroll_value)
 
     def clear(self):
+        self._pin_timer.stop()  # a pending pin belongs to the content being thrown away
         self.editor.clear()
         self.editor.setExtraSelections([])
 
@@ -263,6 +266,7 @@ class SearchableLogArea(QWidget):
         return self.editor.verticalScrollBar()
 
     def setPlainText(self, text):
+        self._pin_timer.stop()  # a pending pin belongs to the content being replaced
         self.editor.setPlainText(text)
 
     def set_max_block_count(self, maxlen):
@@ -276,7 +280,20 @@ class SearchableLogArea(QWidget):
         resize while pinned to the tail can otherwise leave the view sitting above the new
         bottom."""
         scrollbar = self.editor.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        self._pinning = True
+        try:
+            scrollbar.setValue(scrollbar.maximum())
+        finally:
+            self._pinning = False
+
+    @property
+    def is_programmatic_scroll(self) -> bool:
+        """True while scroll_to_end() is moving the scrollbar. valueChanged listeners must ignore
+        the scroll then: the value they see can be off the bottom (e.g. long lines toggling the
+        horizontal scrollbar shrink the viewport mid-setValue), and treating it as a user scroll
+        rebuilds the document (setPlainText) re-entrantly inside QScrollBar.setValue - Qt then
+        continues on the discarded layout and crashes natively (access violation)."""
+        return self._pinning
 
     def scroll_to_block(self, block_number):
         """Scrolls so `block_number` becomes the first visible line. Valid because the editor

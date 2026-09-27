@@ -1138,7 +1138,7 @@ QToolButton[filterEnabled="true"] {
             self._reanchor_history(self.history_newest_seq)
 
     def _on_scroll_value_changed(self, value):
-        if self._programmatic_scroll:
+        if self._programmatic_scroll or self.text_area.is_programmatic_scroll:
             return
 
         scrollbar = self.text_area.verticalScrollBar()

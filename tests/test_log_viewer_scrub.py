@@ -39,6 +39,8 @@ class FakeScrollbar:
 
 
 class FakeTextArea:
+    is_programmatic_scroll = False
+
     def __init__(self, scrollbar):
         self._scrollbar = scrollbar
 
