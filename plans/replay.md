@@ -40,7 +40,7 @@ New component, e.g. `parsers/unified_log_replay.py` (name TBD at implementation 
 - Playback/scrub/seek controls (VCR-style speed/pause) — this pass is "load it all in," not paced/time-accurate playback.
 - Interleaving multiple replayed sessions or replaying alongside a live capture in the same window.
 - UI polish beyond a minimal trigger (e.g. a menu action to pick a unified log file and kick off the reader) — reuse existing menu/dialog patterns (`populate_main_menu` in `ui/main_window.py`) rather than designing new UI chrome now.
-- Confirming/fixing `storage/raw_logger.py`'s apparent staleness — noted as a discrepancy, not addressed here since replay doesn't depend on it.
+- ~~Confirming/fixing `storage/raw_logger.py`'s apparent staleness~~ — resolved 2026-09-27: `RawLogger` was confirmed dead and deleted.
 
 ## Verification
 - Unit test the line tokenizer against known-good sample lines produced by the actual `format_log_row_batch` writer (round-trip: format a synthetic bundle, then parse the output back and confirm timestamp/level/device/module/message match the originals).
