@@ -7,6 +7,9 @@
 from pathlib import Path
 from time import sleep
 
+import numpy as np
+
+from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
@@ -22,12 +25,6 @@ from blinkview.utils.throughput import Speedometer
     ui_type="file",
     ui_file_filter="Binary Files (*.bin *.dat *.raw);;All Files (*)",
     description="Path to the binary file to stream. Supports relative paths via resolve_config_path.",
-)
-@configuration_property(
-    "read_mode",
-    required=True,
-    enum=["stream", "memory"],
-    description="Mode of reading: 'stream' (read from disk continuously) or 'memory' (preload entire file to RAM).",
 )
 @configuration_property(
     "chunk_size", type="integer", default=8, description="Number of bytes to read per injection 'tick'."
@@ -46,12 +43,11 @@ class BinaryFileReader(BaseReader):
 
 * Mimics a live data source by injecting file content at a fixed frequency.
 * Generates 'Now' timestamps for un-timestamped raw data.
-* Supports streaming directly from disk or preloading to memory.
+* Memory-maps the file read-only (np.memmap); each tick is a zero-copy slice of the mapping.
 * Uses pathlib for robust cross-platform path handling.
 """
 
     file_path: str
-    read_mode: str
     chunk_size: int
     frequency: int
     delay: int
@@ -72,18 +68,30 @@ class BinaryFileReader(BaseReader):
         # Convert delay (ms) to nanoseconds for comparison with time_ns()
         delay_ns = self.delay * 1_000_000
         chunk_size = self.chunk_size
-        delay_s = self.delay / 1000.0
 
         logger.info(
-            "Starting Binary Reader: %s (@%sHz, %sms batching, mode: %s)",
+            "Starting Binary Reader: %s (@%sHz, %sms batching)",
             path,
             self.frequency,
             self.delay,
-            self.read_mode,
         )
 
         if not path.exists():
             logger.error("Binary file not found: %s", path)
+            return
+
+        try:
+            file_size = path.stat().st_size
+            if file_size == 0:
+                # np.memmap refuses to map an empty file
+                logger.warning("Binary file is empty: %s", path)
+                return
+            # Plain read-only ndarray view over the mapping: slices are zero-copy. Push them via
+            # insert_view() - its read-only-array nb_bundle_push_len variant is already warmed
+            # (binary_parser); insert() would compile a new read-only-array nb_bundle_push.
+            data_map = np.memmap(path, dtype=dtypes.BYTE, mode="r").view(np.ndarray)
+        except Exception as e:
+            logger.error("Failed to memory-map binary file %s: %s", path, e)
             return
 
         buffer_bytes = self.frequency * chunk_size * (self.delay + 30) // 1000
@@ -95,58 +103,7 @@ class BinaryFileReader(BaseReader):
             return pool_create(PooledLogBatch, buffer_chunks, buffer_bytes)
 
         batch = None
-
-        # Setup reader abstractions based on read_mode
-        # Setup reader abstractions based on read_mode
-        if self.read_mode.lower() == "memory":
-            try:
-                logger.debug("Preloading entire file to memory: %s", path.name)
-                with path.open("rb") as mem_f:
-                    # Wrap the loaded bytes in a memoryview for zero-copy slicing
-                    in_memory_data = memoryview(mem_f.read())
-                memory_length = len(in_memory_data)
-                memory_offset = 0
-            except Exception as e:
-                logger.error("Failed to load file to memory: %s", e)
-                return
-
-            def _read_chunk(size: int):
-                nonlocal memory_offset
-                if memory_offset >= memory_length:
-                    return b""  # The main loop's `if not data:` handles this perfectly
-
-                end = memory_offset + size
-                # Because in_memory_data is a memoryview, this slice is zero-copy
-                # and returns another memoryview
-                chunk = in_memory_data[memory_offset:end]
-                memory_offset = end
-                return chunk
-
-            def _reset_source():
-                nonlocal memory_offset
-                memory_offset = 0
-
-            def _cleanup():
-                nonlocal in_memory_data
-                # Explicitly release the memoryview buffer
-                in_memory_data.release()
-                logger.debug("Released memory buffer for: %s", path.name)
-
-        else:  # stream mode
-            f = path.open("rb")
-            _f_read = f.read
-            _f_seek = f.seek
-
-            def _read_chunk(size: int) -> bytes:
-                return _f_read(size)
-
-            def _reset_source():
-                _f_seek(0)
-
-            def _cleanup():
-                if f:
-                    f.close()
-                    logger.info("Binary file closed: %s", path.name)
+        offset = 0
 
         stats = Speedometer(logger=self.logger.child("stats"))
 
@@ -156,14 +113,10 @@ class BinaryFileReader(BaseReader):
                 if batch is None:
                     batch = batch_acquire()
 
-                # 2. Read the next raw chunk
-                ts_data = time_ns()
-                data = _read_chunk(chunk_size)
-
-                # 3. Handle End of File
-                if not data:
+                # 2. Handle End of File
+                if offset >= file_size:
                     if self.loop:
-                        _reset_source()
+                        offset = 0
                         logger.debug("Replay loop: Resetting %s", path.name)
                         continue
                     else:
@@ -179,8 +132,15 @@ class BinaryFileReader(BaseReader):
                         logger.info("Binary replay finished: %s", path.name)
                         break
 
+                # 3. Take the next raw chunk (zero-copy view into the mapping)
+                ts_data = time_ns()
+                end = offset + chunk_size
+                data = data_map[offset:end]
+                offset = end
+
                 # 4. Add data to the current batch
-                if not batch.insert(ts_data, ts_data, data):
+                data_len = len(data)
+                if not batch.insert_view(ts_data, ts_data, data, data_len):
                     # Batch capacity or buffer is full, flush it
                     with batch:
                         self.distribute(batch)
@@ -189,7 +149,7 @@ class BinaryFileReader(BaseReader):
 
                     # Acquire new batch and immediately append the skipped data
                     batch = batch_acquire()
-                    batch.insert(ts_data, ts_data, data)
+                    batch.insert_view(ts_data, ts_data, data, data_len)
 
                 # 5. Check if the batching window has elapsed
                 if (time_ns() - batch.start_ts) >= delay_ns:
@@ -211,4 +171,7 @@ class BinaryFileReader(BaseReader):
             # Guarantee we don't leak the batch on unexpected errors
             if batch is not None:
                 batch.release()
-            _cleanup()
+            # Drop the last references so the mapping (and the Windows file lock) is released
+            data = None
+            data_map = None
+            logger.info("Binary file unmapped: %s", path.name)

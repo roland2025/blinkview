@@ -64,7 +64,7 @@ def run_and_collect(reader, timeout=5.0, expected_len=None):
 
 class TestDefaults:
     def test_default_config_values(self):
-        reader = make_reader(file_path="x.bin", read_mode="stream", loop=False)
+        reader = make_reader(file_path="x.bin", loop=False)
         assert reader.chunk_size == 8
         assert reader.frequency == 100
         assert reader.delay == 30
@@ -77,7 +77,7 @@ class TestStreamMode:
         f = tmp_path / "data.bin"
         f.write_bytes(content)
 
-        reader = make_reader(file_path=str(f), read_mode="stream", chunk_size=4, frequency=1000, delay=5, loop=False)
+        reader = make_reader(file_path=str(f), chunk_size=4, frequency=1000, delay=5, loop=False)
         reader.enabled = True
 
         received = run_and_collect(reader, timeout=5.0, expected_len=len(content))
@@ -86,7 +86,7 @@ class TestStreamMode:
 
     def test_missing_file_logs_error_and_returns_without_hanging(self, tmp_path):
         missing = tmp_path / "does_not_exist.bin"
-        reader = make_reader(file_path=str(missing), read_mode="stream", loop=False)
+        reader = make_reader(file_path=str(missing), loop=False)
         reader.enabled = True
         reader.shared = SimpleNamespace(array_pool=NumpyArrayPool(), time_ns=time.time_ns)
 
@@ -106,7 +106,7 @@ class TestStreamMode:
         f = tmp_path / "loop.bin"
         f.write_bytes(content)
 
-        reader = make_reader(file_path=str(f), read_mode="stream", chunk_size=4, frequency=1000, delay=5, loop=True)
+        reader = make_reader(file_path=str(f), chunk_size=4, frequency=1000, delay=5, loop=True)
         reader.enabled = True
 
         # With loop=True the reader never stops on its own - collect more bytes than the
@@ -117,15 +117,47 @@ class TestStreamMode:
         assert len(received) >= len(content) * 3
 
 
-class TestMemoryMode:
-    def test_reads_file_content_and_stops_when_loop_is_false(self, tmp_path):
-        content = b"in-memory replay data"
-        f = tmp_path / "mem.bin"
+class TestMemoryMapping:
+    def test_partial_last_chunk_is_delivered(self, tmp_path):
+        # 10 bytes with chunk_size=4 -> the final tick is a 2-byte tail slice of the mapping.
+        content = b"0123456789"
+        f = tmp_path / "tail.bin"
         f.write_bytes(content)
 
-        reader = make_reader(file_path=str(f), read_mode="memory", chunk_size=4, frequency=1000, delay=5, loop=False)
+        reader = make_reader(file_path=str(f), chunk_size=4, frequency=1000, delay=5, loop=False)
         reader.enabled = True
 
         received = run_and_collect(reader, timeout=5.0, expected_len=len(content))
 
         assert received == content
+
+    def test_empty_file_returns_without_hanging(self, tmp_path):
+        f = tmp_path / "empty.bin"
+        f.write_bytes(b"")
+        reader = make_reader(file_path=str(f), loop=True)
+        reader.enabled = True
+        reader.shared = SimpleNamespace(array_pool=NumpyArrayPool(), time_ns=time.time_ns)
+
+        reader.start()
+        try:
+            deadline = time.time() + 2.0
+            while reader.is_running and time.time() < deadline:
+                time.sleep(0.02)
+            assert not reader.is_running
+        finally:
+            reader.stop()
+
+    def test_mapping_is_released_after_stop(self, tmp_path):
+        # On Windows a live mapping locks the file against deletion - stop() must release it.
+        content = b"abcdefgh"
+        f = tmp_path / "locked.bin"
+        f.write_bytes(content)
+
+        reader = make_reader(file_path=str(f), chunk_size=4, frequency=1000, delay=5, loop=True)
+        reader.enabled = True
+
+        received = run_and_collect(reader, timeout=2.0, expected_len=len(content))
+        assert received.startswith(content)
+
+        f.unlink()
+        assert not f.exists()
