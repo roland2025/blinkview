@@ -213,6 +213,20 @@ class TestLoadUiStateDocksAndTabs:
         # floating_windows is empty, so completion fires synchronously in the same call.
         assert calls == [True]
 
+    def test_replay_mode_forces_playback_visible_despite_saved_state(self, tmp_path):
+        from types import SimpleNamespace
+
+        window = FakeWindow()
+        window.action_view_playback = _FakeCheckableAction(False)
+        window.gui_context = SimpleNamespace(registry=SimpleNamespace(replay_mode=True))
+        handler = UIStateHandler(window)
+        state_file = tmp_path / "gui_state.json"
+        state_file.write_text(json.dumps({"playback_visible": False}))
+
+        handler.load_ui_state(state_file)
+
+        assert window.action_view_playback.checked is True
+
 
 class TestLoadUiStateFloatingWindows:
     def test_restores_all_floating_windows_and_completes_once_after_the_last_one(self, tmp_path, monkeypatch):

@@ -142,8 +142,11 @@ class UIStateHandler:
             if "pipelines_visible" in data:
                 self.window.pipelines_dock.setVisible(data["pipelines_visible"])
             if "playback_visible" in data:
-                # Goes through the action so its checked state and the widget stay in sync
-                self.window.action_view_playback.setChecked(data["playback_visible"])
+                # Goes through the action so its checked state and the widget stay in sync.
+                # Replay mode always shows it, regardless of what the profile saved.
+                registry = getattr(getattr(self.window, "gui_context", None), "registry", None)
+                replay_mode = getattr(registry, "replay_mode", False)
+                self.window.action_view_playback.setChecked(bool(data["playback_visible"] or replay_mode))
 
             # --- Restore Central Tabs ---
             if "open_tabs" in data:

@@ -325,10 +325,15 @@ class BlinkMainWindow(QMainWindow):
         # One global playback control widget per session (mirrors registry.playback_clock's
         # one-per-session lifecycle), shared by every log-viewer tab rather than embedded per-tab.
         self.playback_control = PlaybackControlWidget(self.gui_context)
+        # Hidden by default outside replay; setChecked() below runs before toggled is connected,
+        # so set visibility explicitly. A saved profile restores it via ui_state_handler - except
+        # in replay mode, where it's always shown (scrubbing is the point of a replay).
+        show_playback = bool(getattr(registry, "replay_mode", False))
+        self.playback_control.setVisible(show_playback)
 
         self.action_view_playback = QAction("Playback", self)
         self.action_view_playback.setCheckable(True)
-        self.action_view_playback.setChecked(True)
+        self.action_view_playback.setChecked(show_playback)
         self.action_view_playback.toggled.connect(self.playback_control.setVisible)
         self.toolbar.addAction(self.action_view_playback)
 
