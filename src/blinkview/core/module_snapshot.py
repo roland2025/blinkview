@@ -347,6 +347,11 @@ class LatestModuleValueTracker:
             # docstring on why an over-reported coverage watermark would be unsafe.
             pool_newest_at_scan_start = self._log_pool.get_time_bounds()[0]
 
+            # lks is a SEQ_TYPE on the first tick but a plain int (segment.last_sequence_id's
+            # cache) afterwards - pin the kernel arg to one type so warmup's single update()
+            # covers the only specialization.
+            lks_kernel = dtypes.SEQ_TYPE(lks)
+
             # 4. Process logs into the newly acquired arrays. get_reversed_snapshot_since (not
             # get_reversed_snapshot) since this is an incremental "what's new since last tick"
             # query - already-consumed cold segments can never contribute a row newer than lks
@@ -372,7 +377,7 @@ class LatestModuleValueTracker:
                         seg_b,
                         new_b,
                         current_count,
-                        lks,
+                        lks_kernel,
                         initialized,
                         self._first_seen_ts,
                         self._first_seen_seq,

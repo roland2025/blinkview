@@ -1616,6 +1616,9 @@ class TelemetryPlotter(QWidget):
                 # backward/forward, via fetch_telemetry_window) - separate code path from the
                 # forward-watermark fetch above, exercised here so REPLAY-mode scrubbing doesn't
                 # hit a live JIT compile on the GUI thread the first time a user scrubs.
+                # plus_one=True like the real call sites - also required to reach the forward
+                # kernel at all: the warmup data all sits before anchor_ts_ns, so without an edge
+                # row to look for, the after-loop's no-overlap skip never calls it.
                 with fetch_telemetry_window(
                     helper.array_pool,
                     helper.log_pool,
@@ -1627,6 +1630,7 @@ class TelemetryPlotter(QWidget):
                     after_span_ns=60_000_000_000,
                     before_cap=64,
                     after_cap=64,
+                    plus_one=True,
                 ):
                     pass
 
