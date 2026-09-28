@@ -26,6 +26,7 @@ class SourcesManager:
 
     def apply_config(self, config: dict) -> bool:
         print(f"[SourcesManager] Applying config: {config}")
+        config = config or {}  # profile JSON without a "sources" key
         changed = self.apply_base_config(config)
 
         registry = self.shared.registry

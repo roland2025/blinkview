@@ -33,6 +33,7 @@ class PipelineManager:
     # ==========================================
 
     def apply_config(self, config: dict) -> bool:
+        config = config or {}  # profile JSON without a "pipelines" key
         changed = self.apply_base_config(config)
 
         registry = self.shared.registry
@@ -51,17 +52,12 @@ class PipelineManager:
             if hasattr(item, "clear_all_links"):
                 item.clear_all_links()
 
-            # Unsubscribe from config updates
-            if hasattr(registry.config, "unsubscribe"):
-                registry.config.unsubscribe(f"/pipelines/{item_id}", item)
-
         # --- HANDLE ADDITIONS AND UPDATES ---
         for item_id, item_config in config.items():
             try:
                 item = self.pipelines.get(item_id)
 
                 name = item_config.get("name", item_id)
-                enabled = item_config.get("enabled", False)
                 if item is None:
                     # Logic for creating a brand new pipeline
                     self.logger.info("Creating new pipeline: '%s' (%s)", name, item_id)
@@ -75,10 +71,11 @@ class PipelineManager:
                     item = factories.build(FactoryCategory.PARSER, item_config, self.shared, local_ctx)
                     self.pipelines[item_id] = item
                     item.reference_id = item_id
-                    # Register for individual config updates
-                    registry.config.subscribe(f"/pipelines/{item_id}", item)
+                    # No per-item "/pipelines/<id>" config subscription: this manager already
+                    # applies each item's config below. A second subscriber applying it first
+                    # left the old/new link diff empty, so re-pointing sources_ never rewired.
 
-                    if not self.needs_delayed_init and enabled:
+                    if not self.needs_delayed_init and item.enabled:
                         self.apply_target(item_id, item)
                         item.start()
 
@@ -86,15 +83,17 @@ class PipelineManager:
 
                     print(f"[PipelineManager] apply_config: {self.pipelines.keys()}")
                 else:
-                    # Update existing pipeline and check for changes
+                    # Update existing pipeline and check for changes.
+                    # A disabled pipeline holds no links, so enable/disable rewires too.
+                    old_sources = self._get_link_set(item, "sources_") if item.enabled else set()
+                    old_targets = self._get_link_set(item, "targets_") if item.enabled else set()
 
-                    old_sources = self._get_link_set(item, "sources_")
-                    old_targets = self._get_link_set(item, "targets_")
-                    config_changed = item.apply_config(item_config)
+                    hydrate = getattr(item, "hydrate_config", None)
+                    config_changed = item.apply_config(hydrate(item_config) if hydrate else item_config)
 
                     if config_changed:
-                        new_sources = self._get_link_set(item, "sources_")
-                        new_targets = self._get_link_set(item, "targets_")
+                        new_sources = self._get_link_set(item, "sources_") if item.enabled else set()
+                        new_targets = self._get_link_set(item, "targets_") if item.enabled else set()
 
                         self.logger.info("Pipeline '%s' config changed; rebuilding topology.", item_id)
 
@@ -108,11 +107,10 @@ class PipelineManager:
                                 upstream.unsubscribe(item)
 
                         # Add new sources
-                        if enabled:
-                            for s_id in new_sources - old_sources:
-                                upstream = registry.get_reference_target(s_id)
-                                if upstream:
-                                    upstream.subscribe(item)
+                        for s_id in new_sources - old_sources:
+                            upstream = registry.get_reference_target(s_id)
+                            if upstream:
+                                upstream.subscribe(item)
 
                         # 4. Reconcile Targets (Downstream)
                         # Remove targets no longer present
@@ -122,11 +120,10 @@ class PipelineManager:
                                 item.unsubscribe(downstream)
 
                         # Add new targets
-                        if enabled:
-                            for t_id in new_targets - old_targets:
-                                downstream = registry.get_reference_target(t_id)
-                                if downstream:
-                                    item.subscribe(downstream)
+                        for t_id in new_targets - old_targets:
+                            downstream = registry.get_reference_target(t_id)
+                            if downstream:
+                                item.subscribe(downstream)
 
                         # Handle potential thread restart if specific fields changed
                         if getattr(item, "thread_needs_restart", False):

@@ -92,11 +92,11 @@ class FakePipeline:
 
     def apply_config(self, config):
         self.applied_configs.append(config)
-        old_sources, old_targets = set(self.sources_), set(self.targets_)
+        old_sources, old_targets, old_enabled = set(self.sources_), set(self.targets_), self.enabled
         self.sources_ = config.get("sources_", self.sources_)
         self.targets_ = config.get("targets_", self.targets_)
         self.enabled = config.get("enabled", self.enabled)
-        return set(self.sources_) != old_sources or set(self.targets_) != old_targets
+        return set(self.sources_) != old_sources or set(self.targets_) != old_targets or self.enabled != old_enabled
 
     def get_config_schema(self):
         return {"schema": "for-" + str(self.reference_id)}
@@ -163,13 +163,15 @@ class TestApplyConfigCreatesPipelines:
         manager.apply_config({"dev1": {"name": "dev1", "enabled": True}})
         assert manager.needs_delayed_init is False
 
-    def test_new_pipeline_gets_reference_id_and_registers_for_config_updates(self):
+    def test_new_pipeline_gets_reference_id_but_no_per_item_config_subscription(self):
+        """The manager applies each item's config itself; a second "/pipelines/<id>"
+        subscriber applied it first and hid the sources_ change from the manager's diff."""
         manager, registry, factories = make_manager()
         manager.apply_config({"dev1": {"name": "dev1", "enabled": True}})
 
         pipeline = manager.pipelines["dev1"]
         assert pipeline.reference_id == "dev1"
-        assert (f"/pipelines/dev1", pipeline) in registry.config.subscribed
+        assert registry.config.subscribed == []
 
     def test_second_apply_starts_newly_added_enabled_pipeline(self):
         manager, registry, factories = make_manager()
@@ -201,7 +203,6 @@ class TestApplyConfigRemovesPipelines:
         assert "dev1" not in manager.pipelines
         assert pipeline.stopped is True
         assert pipeline.cleared_links is True
-        assert ("/pipelines/dev1", pipeline) in registry.config.unsubscribed
 
 
 class TestApplyConfigUpdatesPipelines:
@@ -243,6 +244,38 @@ class TestApplyConfigUpdatesPipelines:
 
         assert downstream_old in pipeline.unsubscribed
         assert downstream_new in pipeline.subscribed
+
+    def test_enabling_a_disabled_pipeline_subscribes_its_unchanged_sources(self):
+        manager, registry, factories = make_manager()
+        upstream = FakeTarget("src")
+        registry._targets["src"] = upstream
+
+        manager.apply_config({"dev1": {"name": "dev1", "enabled": False, "sources_": ["src"]}})
+        pipeline = manager.pipelines["dev1"]
+        assert pipeline not in upstream.subscribed
+
+        manager.apply_config({"dev1": {"name": "dev1", "enabled": True, "sources_": ["src"]}})
+
+        assert pipeline in upstream.subscribed
+
+    def test_disabling_a_pipeline_unsubscribes_its_sources(self):
+        manager, registry, factories = make_manager()
+        upstream = FakeTarget("src")
+        registry._targets["src"] = upstream
+
+        manager.apply_config({"dev1": {"name": "dev1", "enabled": True, "sources_": ["src"]}})
+        pipeline = manager.pipelines["dev1"]
+
+        manager.apply_config({"dev1": {"name": "dev1", "enabled": False, "sources_": ["src"]}})
+
+        assert pipeline in upstream.unsubscribed
+
+    def test_none_config_is_treated_as_empty(self):
+        """A profile JSON without a "pipelines" key passes None; must not crash the manager."""
+        manager, registry, factories = make_manager()
+        manager.apply_config(None)
+        assert manager.pipelines == {}
+        assert manager.needs_delayed_init is False
 
     def test_thread_needs_restart_triggers_restart_on_change(self):
         manager, registry, factories = make_manager()
