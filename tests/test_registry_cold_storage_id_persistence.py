@@ -35,9 +35,10 @@ class TestDumpIdRegistry:
             reg._dump_id_registry(cold_dir)
 
             dumped = json.loads((cold_dir / "id_registry.json").read_text())
-            assert ["device", "mydevice"] in dumped
-            assert ["module", "mydevice", "sensor"] in dumped
-            assert ["module", "mydevice", "sensor.temp"] in dumped
+            assert ["device", "mydevice", True] in dumped
+            assert ["module", "mydevice", "sensor", True] in dumped
+            assert ["module", "mydevice", "sensor.temp", True] in dumped
+            assert ["device", "system", False] in dumped
         finally:
             reg.stop()
 

@@ -343,25 +343,43 @@ class IDRegistry:
 
     def dump_discovery_log(self) -> List[list]:
         """JSON-serializable form of discovery_log - see its own docstring in __init__. Each
-        entry is `["device", name]` or `["module", device_name, full_path]`."""
-        return [list(event) for event in self.discovery_log]
+        entry is `["device", name, default_essential]` or `["module", device_name, full_path,
+        is_essential]`. The essential flags are the *current* ones (not creation-time), since
+        loggers flip a module's flag via set_essential() after it was created - without them a
+        replayed SYSTEM device would come back essential and its logs would ignore Show Hidden."""
+        dumped = []
+        for event in self.discovery_log:
+            if event[0] == "device":
+                dumped.append([*event, bool(self.device_lookup[event[1]].default_essential)])
+            else:
+                module = self.device_lookup[event[1]].path_lookup[event[2]]
+                dumped.append([*event, bool(self._essential_array[module.id])])
+        return dumped
 
     def replay_discovery_log(self, log: List[list]) -> None:
         """Reconstructs device/module ids on a fresh IDRegistry by replaying a previously
         dump_discovery_log()'d event list through the same public get_device/get_module API,
         in the same order - see discovery_log's docstring for why this reproduces identical ids.
-        Root-module events (`path == ""`) are skipped: DeviceIdentity's own constructor always
-        creates its root module as a side effect of get_device(), so replaying it explicitly
-        would be redundant (get_module("") isn't even a valid call - "" doesn't match
-        DeviceIdentity._VALID_NAME_REGEX)."""
+        Root-module events (`path == ""`) aren't created explicitly: DeviceIdentity's own
+        constructor always creates its root module as a side effect of get_device() (and
+        get_module("") isn't even a valid call - "" doesn't match
+        DeviceIdentity._VALID_NAME_REGEX) - only their essential flag is restored.
+
+        Legacy dumps (written before essential flags were recorded) carry no flag: devices fall
+        back to get_device()'s default, except "system", which is always created non-essential
+        by Registry and would otherwise leak its logs past Show Hidden on replay."""
         for event in log:
             kind = event[0]
             if kind == "device":
-                self.get_device(event[1])
+                name = event[1]
+                essential = event[2] if len(event) > 2 else name != "system"
+                self.get_device(name, essential=essential)
             elif kind == "module":
-                _kind, device_name, path = event
-                if path:
-                    self.get_device(device_name).get_module(path)
+                device_name, path = event[1], event[2]
+                device = self.get_device(device_name, essential=device_name != "system")
+                module = device.get_module(path) if path else device.root
+                if len(event) > 3:
+                    module.set_essential(bool(event[3]))
 
 
 def create_mock_modules(iterations=1_000):

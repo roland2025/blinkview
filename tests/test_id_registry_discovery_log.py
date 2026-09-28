@@ -140,3 +140,56 @@ class TestDumpAndReplay:
         assert device.name == "client"
         assert module.name == "ui.generator.rng"
         assert device.id != replayed.get_device("system").id
+
+
+class TestEssentialFlagPersistence:
+    """Replaying a session rehydrates the id registry *before* Registry.__init__ asks for
+    get_device("SYSTEM", essential=False) - so without persisted flags the replayed SYSTEM device
+    came back essential and its logs ignored the log viewer's Show Hidden toggle."""
+
+    def test_replay_restores_non_essential_system_device(self):
+        reg = make_registry()
+        system = reg.get_device("system", essential=False)
+        system.get_module("source.nrf_rtt")
+        system.get_module("source.nrf_rtt.link").set_essential(True)
+        log = reg.dump_discovery_log()
+
+        replayed = make_registry()
+        replayed.replay_discovery_log(log)
+
+        # What Registry.__init__ does afterwards - must return the already-replayed device.
+        replayed_system = replayed.get_device("system", essential=False)
+        assert replayed_system.default_essential is False
+        for path, module in system.path_lookup.items():
+            replayed_module = replayed_system.path_lookup[path]
+            assert replayed.is_module_essential(replayed_module.id) == reg.is_module_essential(module.id), path
+
+    def test_replay_keeps_user_devices_essential(self):
+        reg = make_registry()
+        reg.get_device("nrf").get_module("app.main")
+        log = reg.dump_discovery_log()
+
+        replayed = make_registry()
+        replayed.replay_discovery_log(log)
+
+        module = replayed.get_device("nrf").get_module("app.main")
+        assert replayed.is_module_essential(module.id)
+
+    def test_legacy_dump_without_flags_still_makes_system_non_essential(self):
+        legacy_log = [
+            ["module", "system", ""],
+            ["device", "system"],
+            ["module", "system", "source"],
+            ["module", "system", "source.nrf_rtt"],
+            ["module", "nrf", ""],
+            ["device", "nrf"],
+            ["module", "nrf", "app"],
+        ]
+
+        replayed = make_registry()
+        replayed.replay_discovery_log(legacy_log)
+
+        system = replayed.get_device("system", essential=False)
+        assert system.default_essential is False
+        assert not replayed.is_module_essential(system.get_module("source.nrf_rtt").id)
+        assert replayed.is_module_essential(replayed.get_device("nrf").get_module("app").id)
