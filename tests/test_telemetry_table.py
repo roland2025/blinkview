@@ -395,3 +395,41 @@ class TestShowContextMenu:
 
         assert len(captured) == 1
         assert any("ctxmod" in a.text() for a in captured[0].actions() if a.text())
+
+
+class TestFlashClears:
+    def test_repaint_is_emitted_on_the_first_tick_after_the_flash_ends(self, qapp, registry, monkeypatch):
+        # Regression: the flash-end repaint window used to be a fixed 20ms, narrower than the
+        # ~100ms apply throttle, so with no new data the tick after the fade usually emitted
+        # nothing and the solid flash stayed painted indefinitely.
+        import blinkview.ui.widgets.telemetry_table as tt_mod
+
+        clock = [1000.0]
+        monkeypatch.setattr(tt_mod, "perf_counter", lambda: clock[0])
+
+        gui_context = make_real_gui_context(registry)
+        model = TelemetryTableModel(gui_context)
+        fade = gui_context.theme.fade_duration
+        stale = gui_context.theme.stale_threshold
+        assert stale > fade + 1.0  # keep the stale window out of the way of this test
+
+        device = registry.id_registry.get_device("flash_dev")
+        module = device.get_module("m")
+        _emit(registry, device, module, "v=1")
+
+        model.apply_updates(force=True)
+        assert module.id in model.visible_mod_ids.tolist()
+        change_time = clock[0]
+
+        emitted = []
+        model.dataChanged.connect(lambda *a: emitted.append(clock[0]))
+
+        # Tick at a steady ~9Hz until well past the fade, no new data in between.
+        step = 0.11
+        while clock[0] < change_time + fade + 5 * step:
+            clock[0] += step
+            model.apply_updates()
+
+        after_fade = [t for t in emitted if t - change_time >= fade]
+        assert after_fade, f"no repaint after the {fade}s flash ended; emits at {emitted}"
+        assert after_fade[0] - change_time < fade + step + 1e-9

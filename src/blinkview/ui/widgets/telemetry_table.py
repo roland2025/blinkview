@@ -508,7 +508,8 @@ class TelemetryTableModel(QAbstractTableModel):
     def apply_updates(self, force: bool = False):
         """High-frequency vectorized pull from the module_value_tracker."""
         now = perf_counter()
-        if not force and now - self.prev_apply < 0.1:  # Target ~10Hz limit
+        tick_gap = now - self.prev_apply
+        if not force and tick_gap < 0.1:  # Target ~10Hz limit
             return
         self.prev_apply = now
 
@@ -523,7 +524,11 @@ class TelemetryTableModel(QAbstractTableModel):
         fade_dur = theme.fade_duration
         stale_limit = theme.stale_threshold
         data_changed_emit = self.dataChanged.emit
-        buffer_time = 0.02
+        # The flash-end / stale-start repaint windows must be at least one tick wide, or the
+        # ~10Hz throttle can step right over them - leaving the flash painted (or the stale color
+        # unpainted) until unrelated new data happens to trigger a repaint of that row. Not capped:
+        # after a long stall every row whose fade ended during it still needs that one repaint.
+        buffer_time = tick_gap + 0.02
 
         newly_active_ids = np.zeros(len(self.modules), dtype=np.int32)
 
