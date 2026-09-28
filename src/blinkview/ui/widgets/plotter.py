@@ -285,6 +285,11 @@ class TelemetryPlotter(QWidget):
         self.toolbar.addAction("Clear", self.clear)
 
         self.graph_view = pg.GraphicsLayoutWidget()
+        # QGraphicsView accepts dragEnter via its scene but then ignores every dragMove (no scene
+        # item takes drops), so drags over the plot area show "forbidden" and never reach our
+        # dropEvent. Opt it out so drag events propagate up to this widget.
+        self.graph_view.setAcceptDrops(False)
+        self.graph_view.viewport().setAcceptDrops(False)
 
         self.layout.addWidget(self.graph_view)
 
@@ -646,47 +651,30 @@ class TelemetryPlotter(QWidget):
         self._update_playhead_lines()
         self._sync_autoscroll_button()
 
+        in_replay = clock is not None and clock.mode is PlaybackMode.REPLAY
+        follow_half_span_ns = max(1, int(self.view_duration * 1_000_000_000 / 2))
+        replay_pending_drawn = False
+
         if playhead_active and (now_ns - self._replay_prev_fetch_ns) >= self.REPLAY_FOLLOW_UPDATE_INTERVAL_NS:
             self._replay_prev_fetch_ns = now_ns
-            half_span_ns = max(1, int(self.view_duration * 1_000_000_000 / 2))
-
-            for module in self.modules:
-                live_buf = self.buffers.get(module)
-                if live_buf is None:
-                    continue  # not yet discovered on the live edge - nothing to fetch/plot
-                if len(self.series_list) > 0 and not any(s.visible for s in self.series_list if s.module == module):
-                    continue
-
-                replay_buf = self.replay_buffers.get(module)
-                if replay_buf is None:
-                    replay_buf = ReplayWindowBuffer(
-                        # +2: room for fetch_telemetry_window's plus_one edge samples, on top of
-                        # the before_cap+after_cap budget - see plus_one's docstring for why.
-                        capacity=self.REPLAY_FETCH_CAP * 2 + 2,
-                        num_channels=live_buf.num_channels,
-                    )
-                    self.replay_buffers[module] = replay_buf
-
-                # See the fetch_telemetry_arrays call above - no effective_mask passed here
-                # either, same permissive-default/no-behavior-change reasoning. plus_one=True so
-                # the line always reaches the left/right edge of the view (see its docstring),
-                # regardless of how sparse the data is - unlike a fixed-time fetch-span padding.
-                with fetch_telemetry_window(
-                    array_pool,
-                    log_pool,
-                    module.id,
-                    num_channels=live_buf.num_channels,
-                    temp_floats=replay_buf.temp_floats,
-                    anchor_ts_ns=current_ts_ns,
-                    before_span_ns=half_span_ns,
-                    after_span_ns=half_span_ns,
-                    before_cap=self.REPLAY_FETCH_CAP,
-                    after_cap=self.REPLAY_FETCH_CAP,
-                    plus_one=True,
-                ) as batch:
-                    if replay_buf.update(batch):
-                        updated = True
-                    replay_buf.last_fetch_ns = now_ns
+            if self._fetch_replay_windows(self.modules, current_ts_ns, follow_half_span_ns, now_ns):
+                updated = True
+        elif in_replay:
+            # A module discovered while the playhead is stationary (e.g. dropped in while paused,
+            # or while browsing a manually-panned window) would otherwise never get a replay
+            # window - the follow fetch above only runs while the playhead moves, and the browse
+            # fetch only on pan/zoom. One-shot fetch just those modules for the current view.
+            pending = [m for m in self.modules if m in self.buffers and m not in self.replay_buffers]
+            if pending:
+                view_range = None if following else self._current_view_range_s()
+                if view_range is not None:
+                    anchor_ts_ns = int(round((view_range[0] + view_range[1]) / 2.0 * 1_000_000_000))
+                    half_span_ns = max(1, int(round((view_range[1] - view_range[0]) / 2.0 * 1_000_000_000)))
+                else:
+                    anchor_ts_ns, half_span_ns = current_ts_ns, follow_half_span_ns
+                self._fetch_replay_windows(pending, anchor_ts_ns, half_span_ns, now_ns)
+                replay_pending_drawn = True
+                updated = True
 
         # 1. Handle Auto-Scroll (Moves the camera)
 
@@ -720,9 +708,9 @@ class TelemetryPlotter(QWidget):
             # path below (which still redraws on a timer even absent a fresh fetch), skip the
             # full _update_plots() pass entirely rather than repainting the same frame at 10Hz.
             if following:
-                should_redraw = force or playhead_active
+                should_redraw = force or playhead_active or replay_pending_drawn
             else:
-                should_redraw = force or time_since_data >= self.data_update_interval_ns
+                should_redraw = force or replay_pending_drawn or time_since_data >= self.data_update_interval_ns
             if should_redraw:
                 graph_view.setUpdatesEnabled(False)
                 self._update_plots()
@@ -1367,6 +1355,10 @@ class TelemetryPlotter(QWidget):
         if event.mimeData().hasText():
             event.acceptProposedAction()
 
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+
     def dropEvent(self, event):
         raw_text = event.mimeData().text().strip()
         if not raw_text:
@@ -1422,30 +1414,40 @@ class TelemetryPlotter(QWidget):
         REPLAY_FETCH_CAP as a raw-sample safety bound; the span itself is exactly the requested
         range rather than a separate fixed "browse span" constant, so a manual zoom-out just
         fetches proportionally more without a hardcoded ceiling on how far the user can look."""
+        anchor_ts_ns = int(round((t_min_s + t_max_s) / 2.0 * 1_000_000_000))
+        half_span_ns = max(1, int(round((t_max_s - t_min_s) / 2.0 * 1_000_000_000)))
+        self._fetch_replay_windows(self.modules, anchor_ts_ns, half_span_ns)
+
+    def _fetch_replay_windows(self, modules, anchor_ts_ns: int, half_span_ns: int, now_ns: int = 0) -> bool:
+        """Fetches a [anchor - half_span, anchor + half_span] telemetry window into each given
+        (already discovered, visible) module's ReplayWindowBuffer, creating it on first use.
+        Returns True if any buffer received new data."""
         registry = self.gui_context.registry
         log_pool = registry.central.log_pool
         array_pool = registry.system_ctx.array_pool
+        updated = False
 
-        anchor_ts_ns = int(round((t_min_s + t_max_s) / 2.0 * 1_000_000_000))
-        half_span_ns = max(1, int(round((t_max_s - t_min_s) / 2.0 * 1_000_000_000)))
-
-        for module in self.modules:
+        for module in modules:
             live_buf = self.buffers.get(module)
             if live_buf is None:
-                continue
+                continue  # not yet discovered on the live edge - nothing to fetch/plot
             if len(self.series_list) > 0 and not any(s.visible for s in self.series_list if s.module == module):
                 continue
 
             replay_buf = self.replay_buffers.get(module)
             if replay_buf is None:
-                # +2: see apply_updates' matching ReplayWindowBuffer construction for why.
                 replay_buf = ReplayWindowBuffer(
-                    capacity=self.REPLAY_FETCH_CAP * 2 + 2, num_channels=live_buf.num_channels
+                    # +2: room for fetch_telemetry_window's plus_one edge samples, on top of
+                    # the before_cap+after_cap budget - see plus_one's docstring for why.
+                    capacity=self.REPLAY_FETCH_CAP * 2 + 2,
+                    num_channels=live_buf.num_channels,
                 )
                 self.replay_buffers[module] = replay_buf
 
-            # No effective_mask passed - see apply_updates' fetch_telemetry_arrays call for why.
-            # plus_one=True - see apply_updates' fetch_telemetry_window call for why.
+            # See apply_updates' fetch_telemetry_arrays call - no effective_mask passed here
+            # either, same permissive-default/no-behavior-change reasoning. plus_one=True so
+            # the line always reaches the left/right edge of the view (see its docstring),
+            # regardless of how sparse the data is - unlike a fixed-time fetch-span padding.
             with fetch_telemetry_window(
                 array_pool,
                 log_pool,
@@ -1459,7 +1461,19 @@ class TelemetryPlotter(QWidget):
                 after_cap=self.REPLAY_FETCH_CAP,
                 plus_one=True,
             ) as batch:
-                replay_buf.update(batch)
+                if replay_buf.update(batch):
+                    updated = True
+                replay_buf.last_fetch_ns = now_ns
+
+        return updated
+
+    def _current_view_range_s(self):
+        """The primary plot's visible x-range in seconds, or None if there's no plot yet."""
+        if self.series_list and self.series_list[0].plot_item is not None:
+            (x_min, x_max), _ = self.series_list[0].plot_item.getViewBox().viewRange()
+            if x_max > x_min:
+                return x_min, x_max
+        return None
 
     def _on_region_changed(self):
         if self._is_system_updating or not self.region:

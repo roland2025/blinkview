@@ -417,6 +417,40 @@ class TestDragAndDrop:
         plotter.dragEnterEvent(event)
         assert event.accepted is True
 
+    def test_real_drag_over_plot_area_reaches_plotter_and_plots(self, plotter, qtbot, registry):
+        """Real Qt drag events aimed at the pyqtgraph viewport (where the user actually drops).
+        QGraphicsView used to accept dragEnter but ignore every dragMove, so the OS showed a
+        'forbidden' cursor and the drop never reached TelemetryPlotter.dropEvent."""
+        from qtpy.QtCore import QMimeData, QPoint, QPointF, Qt
+        from qtpy.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+        from qtpy.QtWidgets import QApplication
+
+        device = registry.id_registry.get_device("drop_real_device")
+        module = device.get_module("nested.value")
+        _push_samples(registry, module, device)
+
+        plotter.show()
+        qtbot.waitExposed(plotter)
+        target = plotter.graph_view.viewport()
+        mime = QMimeData()
+        mime.setText(module.name_with_device())
+        pos = QPoint(target.width() // 2, target.height() // 2)
+
+        enter = QDragEnterEvent(pos, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(target, enter)
+        move = QDragMoveEvent(pos, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(target, move)
+        drop = QDropEvent(QPointF(pos), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(target, drop)
+
+        assert enter.isAccepted()
+        assert move.isAccepted()
+        assert drop.isAccepted()
+        assert module in plotter.modules
+
+        plotter.apply_updates(force=True)
+        assert any(s.module == module for s in plotter.series_list)
+
 
 class TestApplyHysteresisToPlot:
     def test_zero_height_viewbox_is_a_noop(self, plotter):

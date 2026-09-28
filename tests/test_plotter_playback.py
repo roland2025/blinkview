@@ -317,3 +317,62 @@ def test_returning_to_live_resets_follow_playback_for_the_next_replay_session(pl
     plotter.apply_updates(force=True)
 
     assert plotter.follow_playback is True
+
+
+class _FakeDrop:
+    def __init__(self, text):
+        self._text = text
+
+    def mimeData(self):
+        return self
+
+    def text(self):
+        return self._text
+
+    def acceptProposedAction(self):
+        pass
+
+
+def _push_second_module(plotter, base_ts_ns):
+    registry = plotter.gui_context.registry
+    device = registry.id_registry.get_device("plottertest")
+    module = device.get_module("dropped")
+    src = registry.system_ctx.array_pool.create(
+        PooledLogBatch, 20, 4096, has_levels=True, has_modules=True, has_devices=True
+    )
+    with src:
+        for i in range(20):
+            ts = base_ts_ns + i * 100_000_000
+            src.insert_any(ts, ts, f"{float(i)}".encode("ascii"), level=0, module=module.id, device=device.id)
+        registry.central.log_pool.batch_append(src)
+    return module
+
+
+@pytest.mark.parametrize("browsing", [False, True], ids=["paused_following", "browsing_panned_window"])
+def test_module_dropped_during_stationary_replay_gets_replay_data(plotter, browsing):
+    """Dropping a module onto the plotter while REPLAY is stationary used to add it to the legend
+    (live-edge discovery) but never fetch its replay window: the follow fetch only runs while the
+    playhead moves and the browse fetch only on pan/zoom, so its curve stayed empty."""
+    for _ in range(3):
+        plotter.apply_updates(force=True)
+
+    clock = plotter.gui_context.registry.playback_clock
+    clock.enter_replay(clock.bounds_min_ns + 1_000_000_000)
+    plotter.apply_updates(force=True)
+    if browsing:
+        plotter._on_main_plot_range_changed()
+        assert plotter.follow_playback is False
+    assert clock.is_playing is False
+
+    module = _push_second_module(plotter, clock.bounds_min_ns)
+    plotter.dropEvent(_FakeDrop(module.name_with_device()))
+    assert module in plotter.modules
+
+    for _ in range(2):
+        plotter._last_update_ns = 0  # let each tick past the throttle gate, clock untouched
+        plotter.apply_updates(force=False)
+
+    assert any(s.module == module for s in plotter.series_list)
+    replay_buf = plotter._active_buffer(module)
+    assert replay_buf is not None
+    assert replay_buf.size > 0
