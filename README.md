@@ -175,6 +175,9 @@ To store logs somewhere else, set a log directory with `blink config --global lo
   * **Automatic Hot/Cold Sizing:** The in-memory ("hot") tier can grow to use most of whatever system RAM is actually free, and shrink automatically the moment free memory gets tight elsewhere on the machine—reacting to real system pressure instead of a static size picked once at startup, with a configurable floor so recent scrollback never becomes disk-latency-bound.
   * **Compressed at Rest:** Both the disk-tier ("cold") segments and the raw session/source log files are zstd-compressed once they're done being written, shrinking a recording's on-disk footprint with no change to how it's read back. A progress toast tracks the final compression pass on app close, so the app never exits mid-write.
 * **Session Persistence:** Automatically remembers window positions and active log filter settings. Pick up exactly where you left off without re-configuring your workspace.
+  * **Layout Presets:** Save any number of named window layouts from the **View** menu (e.g. "desk, 4 screens", "desk, plotting" and "laptop only") and switch between them at any time. Applying a preset only moves, floats, or docks your views back into place—it never resets what's inside them.
+  * **Monitor Changes:** When monitors are turned off and back on, windows tend to get shuffled around. BlinkView notices the screen setup change and offers the preset saved for that exact setup in a toast—one click puts everything back.
+  * **Multiple Instances:** Every window and dialog title starts with `project / profile`, so windows from several running BlinkView instances are easy to tell apart.
 * **Watch / Command List:** 
   * Monitor specific variables and latest state values.
   * Send structured commands back to the device.
