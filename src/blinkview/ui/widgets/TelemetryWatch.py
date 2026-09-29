@@ -13,7 +13,7 @@ from typing import List, Optional
 from PySide6.QtCore import QRect
 from PySide6.QtGui import QColor, QCursor, QPen
 from PySide6.QtWidgets import QToolTip
-from qtpy.QtCore import QMimeData, Qt, QTimer, Signal
+from qtpy.QtCore import QMimeData, QSize, Qt, QTimer, Signal
 from qtpy.QtGui import QAction, QDrag, QFont, QPainter, QPalette, QPixmap
 from qtpy.QtWidgets import (
     QApplication,
@@ -152,6 +152,17 @@ class FlashLabel(QLabel):
         self._tooltip_timer.setSingleShot(True)
         self._tooltip_timer.timeout.connect(self._show_delayed_tooltip)
 
+    # Report a tiny width hint so a very long value can't widen the grid column (and force a
+    # horizontal scrollbar on the watch); the column stretch hands us the available width and
+    # paintEvent elides whatever doesn't fit.
+    _MIN_HINT_WIDTH = 20
+
+    def sizeHint(self):
+        return QSize(self._MIN_HINT_WIDTH, super().sizeHint().height())
+
+    def minimumSizeHint(self):
+        return QSize(self._MIN_HINT_WIDTH, super().minimumSizeHint().height())
+
     def paintEvent(self, event):
         painter = QPainter(self)
         try:
@@ -164,7 +175,8 @@ class FlashLabel(QLabel):
 
             # 5px horizontal padding to match the table view look
             rect = self.contentsRect().adjusted(5, 0, -5, 0)
-            painter.drawText(rect, self.alignment(), self.text())
+            text = self.fontMetrics().elidedText(self.text(), Qt.ElideRight, rect.width())
+            painter.drawText(rect, self.alignment(), text)
         finally:
             painter.end()
 
@@ -592,6 +604,7 @@ class TelemetryWatch(QWidget):
         # Create the Scroll Area for the container
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
         self.scroll_area.setWidget(self.container)
 
