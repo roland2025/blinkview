@@ -32,11 +32,12 @@ def show_feature_teaser(parent, feature_name, issue_no=None):
     from qtpy.QtWidgets import QMessageBox, QStyle
 
     from blinkview.ui.native_dark_mode import set_native_dark_mode
+    from blinkview.ui.utils.window_title import titled
 
     msg = QMessageBox(parent)
 
     # Shorten the window title (keeps the OS taskbar/header clean)
-    msg.setWindowTitle("Work in Progress")
+    msg.setWindowTitle(titled("Work in Progress"))
 
     # This prevents the "squashed" look for long feature names.
     msg.setStyleSheet("QLabel{min-width: 450px;}")

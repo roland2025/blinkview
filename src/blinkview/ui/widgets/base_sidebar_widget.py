@@ -16,6 +16,8 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from blinkview.ui.utils.window_title import titled
+
 
 class BaseSidebarWidget(QWidget):
     types_fetched = Signal(list)
@@ -109,7 +111,7 @@ class BaseSidebarWidget(QWidget):
 
     def add_item(self, item_type: str):
         """Prompts for a name and updates the list widget."""
-        name, ok = QInputDialog.getText(self, self.input_title, f"Enter a name for the new '{item_type}':")
+        name, ok = QInputDialog.getText(self, titled(self.input_title), f"Enter a name for the new '{item_type}':")
         name = name.strip()
 
         if not ok or not name:

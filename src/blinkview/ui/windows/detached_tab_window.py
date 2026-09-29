@@ -10,6 +10,7 @@ from shiboken6 import isValid
 
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.native_dark_mode import set_native_dark_mode
+from blinkview.ui.utils.window_title import titled
 
 
 class DetachedTabWindow(QMainWindow):
@@ -21,7 +22,7 @@ class DetachedTabWindow(QMainWindow):
         self._force_destroy = False
         self.reattach_on_close = reattach
 
-        self.setWindowTitle(f"{title} - BlinkView")
+        self.setWindowTitle(titled(f"{title} - BlinkView"))
         self.resize(800, 600)
         # Force it to be an independent OS window, even though it has a parent
         self.setWindowFlags(

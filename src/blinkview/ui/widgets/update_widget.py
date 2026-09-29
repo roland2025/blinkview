@@ -24,6 +24,7 @@ from blinkview import __version__
 from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.update_checker import check_post_update
+from blinkview.ui.utils.window_title import titled
 from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.message_box import MessageBox
 from blinkview.utils.updater import UpdateError, Updater
@@ -323,7 +324,7 @@ class UpdateWidget(QWidget):
         )
 
         while True:
-            selected = QFileDialog.getExistingDirectory(None, "Select BlinkView Source Repository", path_str)
+            selected = QFileDialog.getExistingDirectory(None, titled("Select BlinkView Source Repository"), path_str)
 
             if not selected:
                 return False  # User canceled

@@ -20,6 +20,7 @@ from qtpy.QtWidgets import (
 from blinkview.core.playback_clock import PlaybackMode
 from blinkview.core.session_generation import session_generation_of
 from blinkview.ui.gui_context import GUIContext
+from blinkview.ui.utils.window_title import titled
 from blinkview.ui.widgets.jog_wheel_button import JogWheelButton
 from blinkview.utils.time_utils import ConsoleTimestampFormatter
 
@@ -478,7 +479,7 @@ class PlaybackControlWidget(QWidget):
         if clock is None or store is None or self._pending_mark_in_ts is None:
             return
 
-        name, ok = QInputDialog.getText(self, "Name range", "Range name:")
+        name, ok = QInputDialog.getText(self, titled("Name range"), "Range name:")
         if not ok or not name:
             self._pending_mark_in_ts = None
             self.mark_out_button.setEnabled(False)

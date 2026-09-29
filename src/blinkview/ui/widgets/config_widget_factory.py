@@ -23,6 +23,8 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from blinkview.ui.utils.window_title import titled
+
 
 def get_portable_path(absolute_path: str, max_up_levels: int = 2) -> str:
     """
@@ -339,7 +341,7 @@ class WidgetFactory:
             title = schema.get("title", "Select File")
 
             # getOpenFileName returns (path, selected_filter)
-            abs_path, _ = QFileDialog.getOpenFileName(container, title, line_edit.text(), file_filter)
+            abs_path, _ = QFileDialog.getOpenFileName(container, titled(title), line_edit.text(), file_filter)
 
             if abs_path:
                 # Use pathlib to make it portable before showing it in the UI

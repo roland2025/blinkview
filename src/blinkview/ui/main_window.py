@@ -40,6 +40,7 @@ from blinkview.ui.utils.ui_state_handler import UIStateHandler
 from blinkview.ui.utils.update_checker import check_for_updates_silently
 from blinkview.ui.utils.view_presets import ViewPresetStore, current_screen_fingerprint, screens_match
 from blinkview.ui.utils.window_manager import WindowManager
+from blinkview.ui.utils.window_title import set_title_prefix, titled
 from blinkview.ui.widget_registry import build_widget_factory_map
 
 # Each of these registers a widget class (@register_widget_factory(...)) as an import-time side
@@ -181,9 +182,9 @@ class BlinkMainWindow(QMainWindow):
         fm = self.gui_context.registry.file_manager
         # Standalone is indicated at the end only if necessary
         mode_suffix = " (Standalone)" if fm.standalone_mode else ""
-        self.setWindowTitle(
-            f"{fm.project_name} / {fm.profile_name} - {QCoreApplication.applicationName()}{mode_suffix} - {blinkview_version}"
-        )
+        # Every other window/dialog title gets the same "{project} / {profile} - " prefix via titled().
+        set_title_prefix(fm.project_name, fm.profile_name)
+        self.setWindowTitle(titled(f"{QCoreApplication.applicationName()}{mode_suffix} - {blinkview_version}"))
 
         self.gui_context.registry.configure_system()
 
@@ -782,7 +783,7 @@ class BlinkMainWindow(QMainWindow):
     def save_view_preset_as(self):
         screens = current_screen_fingerprint()
         default = f"{len(screens)} screen{'s' if len(screens) != 1 else ''}"
-        name, ok = QInputDialog.getText(self, "Save layout", "Layout name:", text=default)
+        name, ok = QInputDialog.getText(self, titled("Save layout"), "Layout name:", text=default)
         name = name.strip()
         if not ok or not name:
             return
@@ -801,7 +802,7 @@ class BlinkMainWindow(QMainWindow):
         ToastManager.show(f"Layout '{name}' saved", ToastType.SUCCESS, 3, parent=self)
 
     def rename_view_preset(self, name: str):
-        new_name, ok = QInputDialog.getText(self, "Rename layout", "New name:", text=name)
+        new_name, ok = QInputDialog.getText(self, titled("Rename layout"), "New name:", text=name)
         new_name = new_name.strip()
         if not ok or not new_name or new_name == name:
             return
@@ -1118,7 +1119,7 @@ class BlinkMainWindow(QMainWindow):
         if not self.rotate_button.isEnabled():
             return
         current = self.gui_context.registry.file_manager.session_display_name
-        name, ok = QInputDialog.getText(self, "New session", "Session name:", text=current)
+        name, ok = QInputDialog.getText(self, titled("New session"), "Session name:", text=current)
         if ok and name.strip():
             self.start_session_rotation(name.strip())
 
@@ -1418,7 +1419,7 @@ class BlinkMainWindow(QMainWindow):
         # watches = self.watches_node.config
         node = self.watches_node
         if watch_id is None:
-            name, ok = QInputDialog.getText(self, "New Watch", "Enter a name for this watch:", text="New Watch")
+            name, ok = QInputDialog.getText(self, titled("New Watch"), "Enter a name for this watch:", text="New Watch")
 
             # If user clicks 'Cancel' or gives an empty string, abort creation
             if not ok or not name.strip():

@@ -31,9 +31,10 @@ class MessageBox:
         from qtpy.QtWidgets import QMessageBox
 
         from blinkview.ui.native_dark_mode import set_native_dark_mode
+        from blinkview.ui.utils.window_title import titled
 
         msg = QMessageBox(parent)
-        msg.setWindowTitle(title)
+        msg.setWindowTitle(titled(title))
         msg.setText(text)
 
         # Resolve the Icon from the string/enum

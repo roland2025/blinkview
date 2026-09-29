@@ -25,6 +25,7 @@ from qtpy.QtWidgets import (
 )
 
 from blinkview.ui.constants import WidgetName
+from blinkview.ui.utils.window_title import titled
 from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.config_widget_factory import WidgetFactory
 
@@ -213,13 +214,13 @@ class DynamicConfigWidget(QWidget):
 
     def _on_apply_clicked(self):
         if self.applying_config:
-            QMessageBox.warning(self, "Please Wait", "Configuration is already being applied. Please wait.")
+            QMessageBox.warning(self, titled("Please Wait"), "Configuration is already being applied. Please wait.")
             return
 
         is_valid, error_msg = self.validate_current()
 
         if not is_valid:
-            QMessageBox.critical(self, "Validation Error", f"Cannot apply configuration:\n\n{error_msg}")
+            QMessageBox.critical(self, titled("Validation Error"), f"Cannot apply configuration:\n\n{error_msg}")
             return
 
         self.applying_config = True

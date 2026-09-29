@@ -8,6 +8,8 @@ from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtGui import QCursor
 from qtpy.QtWidgets import QInputDialog, QMenu, QToolButton
 
+from blinkview.ui.utils.window_title import titled
+
 
 class BaseToolButtonWidget(QToolButton):
     types_fetched = Signal(list)
@@ -127,7 +129,7 @@ class BaseToolButtonWidget(QToolButton):
             action.triggered.connect(lambda checked=False, dtype=dev_type: self.add_item(dtype))
 
     def add_item(self, item_type: str):
-        name, ok = QInputDialog.getText(self, self.input_title, f"Enter name for '{item_type}':")
+        name, ok = QInputDialog.getText(self, titled(self.input_title), f"Enter name for '{item_type}':")
         name = name.strip()
         if not ok or not name:
             return
@@ -142,7 +144,7 @@ class BaseToolButtonWidget(QToolButton):
         """Prompts the operator for text data and hands it to the background task executor."""
         cmd_text, ok = QInputDialog.getText(
             self,
-            "Execute Runtime Target Command",
+            titled("Execute Runtime Target Command"),
             f"Deliver message payload directly to '{name}':",
         )
 

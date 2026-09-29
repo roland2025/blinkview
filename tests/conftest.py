@@ -30,3 +30,13 @@ def array_pool():
 @pytest.fixture
 def log_filter(id_registry):
     return LogFilter(id_registry, log_level=LogLevel.ALL.name_conf)
+
+
+@pytest.fixture(autouse=True)
+def _reset_window_title_prefix():
+    """BlinkMainWindow sets a process-wide "{project} / {profile} - " title prefix
+    (ui/utils/window_title.py); don't let one test's main window leak it into another's titles."""
+    from blinkview.ui.utils import window_title
+
+    yield
+    window_title._prefix = ""
