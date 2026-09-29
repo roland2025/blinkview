@@ -571,6 +571,12 @@ class FileManager:
             return self._redirect_to_replay_scratch(original, filename)
         return original
 
+    def get_profile_path(self, type_name: str) -> Path:
+        """Like get_config_path(), but always the live workspace profile - never redirected into
+        a replay scratch folder. For user-owned data that isn't tied to a session (view layout
+        presets), so saving one while replaying still lands in the profile."""
+        return self.config_dir / f"{self.config_file_name}.{type_name}.json"
+
     def get_session_path(self, type_name: str = None, suffix: str = None) -> Path:
         """Brands session files with the profile context. While replaying, redirected into the
         original session's `replay/` scratch subfolder instead of that session's own top-level

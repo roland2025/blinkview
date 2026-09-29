@@ -6,10 +6,20 @@
 
 import json
 from base64 import b64decode, b64encode
+from copy import deepcopy
 
 from qtpy.QtCore import QByteArray, QTimer
+from shiboken6 import isValid
 
 from blinkview.ui.utils.window_manager import get_window_geometry_data, restore_window_geometry_safe
+
+
+def _is_alive(obj) -> bool:
+    """False once a Qt object's C++ side is deleted. Non-Qt stand-ins (tests) count as alive."""
+    try:
+        return isValid(obj)
+    except TypeError:
+        return True
 
 
 class UIStateHandler:
@@ -128,25 +138,7 @@ class UIStateHandler:
         try:
             data = json.loads(file_path.read_text())
 
-            if "window_state" in data:
-                self.window.restoreState(QByteArray(b64decode(data["window_state"])))
-            #
-            # frame_pos = data.get("frame_pos")
-            # # Reapply exact frame position
-            # if frame_pos:
-            #     self.window.move(QPoint(frame_pos[0], frame_pos[1]))
-
-            # Explicitly sync dock visibility (if saveState didn't catch it)
-            if "sources_visible" in data:
-                self.window.sources_dock.setVisible(data["sources_visible"])
-            if "pipelines_visible" in data:
-                self.window.pipelines_dock.setVisible(data["pipelines_visible"])
-            if "playback_visible" in data:
-                # Goes through the action so its checked state and the widget stay in sync.
-                # Replay mode always shows it, regardless of what the profile saved.
-                registry = getattr(getattr(self.window, "gui_context", None), "registry", None)
-                replay_mode = getattr(registry, "replay_mode", False)
-                self.window.action_view_playback.setChecked(bool(data["playback_visible"] or replay_mode))
+            self._restore_docks(data)
 
             # --- Restore Central Tabs ---
             if "open_tabs" in data:
@@ -165,12 +157,8 @@ class UIStateHandler:
                     self.window.central_tabs.setCurrentIndex(data["current_tab_index"])
 
             # --- Restore Floating Windows ---
-            floating_data = data.get("floating_windows", [])
-            windows_to_restore = len(floating_data)
-            if windows_to_restore == 0:
-                self.on_ui_restoration_complete()
-                return
-            for win_info in floating_data:
+            placements = []
+            for win_info in data.get("floating_windows", []):
                 params = win_info.get("params", {})
                 tab_name = params.get("tab_name") or win_info.get("name", "Floating Tool")
 
@@ -183,35 +171,12 @@ class UIStateHandler:
                     reattach_on_close=win_info.get("reattach_on_close", False),
                 )
 
-                if not new_win:
-                    # Skip unknown widgets - still counts as "resolved" so windows_to_restore
-                    # reaches 0 and on_ui_restoration_complete() fires even when a saved
-                    # floating window references a widget class that no longer exists.
-                    windows_to_restore -= 1
-                    if windows_to_restore <= 0:
-                        self.on_ui_restoration_complete()
-                    continue
+                # Unknown widget classes (removed/renamed since the layout was saved) are just
+                # skipped - they must not hold up on_ui_restoration_complete().
+                if new_win:
+                    placements.append((new_win, win_info.get("window_geometry", {})))
 
-                # Ghost Mode
-                new_win.setWindowOpacity(0.0)
-                new_win.show()
-
-                # Create the closure.
-                def restore_this_window(win=new_win, info=win_info):
-                    nonlocal windows_to_restore
-                    geo_dict = info.get("window_geometry", {})
-                    if geo_dict:
-                        restore_window_geometry_safe(win, geo_dict)
-
-                    win.raise_()
-                    win.activateWindow()
-                    win.setWindowOpacity(1.0)
-                    windows_to_restore -= 1
-                    if windows_to_restore <= 0:
-                        self.on_ui_restoration_complete()
-
-                # Give the OS 100ms
-                QTimer.singleShot(100, restore_this_window)
+            self._place_floating_windows(placements, self.on_ui_restoration_complete)
 
         except Exception:
             print("Could not restore UI state")
@@ -221,6 +186,180 @@ class UIStateHandler:
             print(traceback.format_exc())
 
             self.on_ui_restoration_complete()
+
+    def _restore_docks(self, data: dict):
+        """Dock/toolbar layout plus the visibility flags saveState() doesn't reliably cover."""
+        if "window_state" in data:
+            self.window.restoreState(QByteArray(b64decode(data["window_state"])))
+
+        # Explicitly sync dock visibility (if saveState didn't catch it)
+        if "sources_visible" in data:
+            self.window.sources_dock.setVisible(data["sources_visible"])
+        if "pipelines_visible" in data:
+            self.window.pipelines_dock.setVisible(data["pipelines_visible"])
+        if "playback_visible" in data:
+            # Goes through the action so its checked state and the widget stay in sync.
+            # Replay mode always shows it, regardless of what the profile saved.
+            registry = getattr(getattr(self.window, "gui_context", None), "registry", None)
+            replay_mode = getattr(registry, "replay_mode", False)
+            self.window.action_view_playback.setChecked(bool(data["playback_visible"] or replay_mode))
+
+    @staticmethod
+    def _place_floating_windows(placements, on_complete):
+        """Shows each (window, geometry dict) invisibly ("ghost mode"), then moves it into place
+        after giving the OS 100ms, so it doesn't visibly jump. on_complete fires once every window
+        is placed (immediately if there are none)."""
+        remaining = len(placements)
+        if remaining == 0:
+            on_complete()
+            return
+
+        for win, geo_dict in placements:
+            win.setWindowOpacity(0.0)
+            win.show()
+
+            def place_this_window(win=win, geo_dict=geo_dict):
+                nonlocal remaining
+                # The window may have been closed (WA_DeleteOnClose) during the 100ms wait.
+                if _is_alive(win):
+                    if geo_dict:
+                        restore_window_geometry_safe(win, geo_dict)
+
+                    win.raise_()
+                    win.activateWindow()
+                    win.setWindowOpacity(1.0)
+                remaining -= 1
+                if remaining <= 0:
+                    on_complete()
+
+            QTimer.singleShot(100, place_this_window)
+
+    # --- Layout presets (plans/view-layout-presets.md) ---
+
+    def apply_layout(self, state: dict, on_complete=None):
+        """Applies a saved layout (same structure as get_data()) to the live UI without closing
+        anything: views are matched by name and only moved - floated, docked back into tabs,
+        reordered, repositioned - so their contents stay as they are now. Preset views that aren't
+        open are created from the preset's params; open views the preset doesn't mention are left
+        where they are."""
+        done = on_complete or (lambda: None)
+
+        def after_main_window():
+            try:
+                self._restore_docks(state)
+                placements = self._arrange_views(state)
+            except Exception:
+                import traceback
+
+                print("Could not apply layout preset")
+                print(traceback.format_exc())
+                placements = []
+            self._place_floating_windows(placements, done)
+
+        geo_dict_window = state.get("window_geometry")
+        if geo_dict_window:
+            # Same settle-retry as startup: DWM can ignore a move across screens, especially for
+            # a maximized window.
+            self._restore_geometry_until_settled(geo_dict_window, attempts_left=20, on_complete=after_main_window)
+        else:
+            after_main_window()
+
+    @staticmethod
+    def _entry_name(entry: dict):
+        return (entry.get("params") or {}).get("tab_name") or entry.get("name")
+
+    def _tab_index(self, name) -> int:
+        tabs = self.window.central_tabs
+        for i in range(tabs.count()):
+            if tabs.tabText(i) == name:
+                return i
+        return -1
+
+    def _arrange_views(self, state: dict) -> list:
+        """Docks/floats/creates views to match `state`. Returns the floating windows still to be
+        positioned, as (window, geometry dict) pairs for _place_floating_windows()."""
+        win = self.window
+        tabs = win.central_tabs
+        window_manager = win.window_manager
+
+        # --- Tabs ---
+        wanted_tabs = []
+        tabs.blockSignals(True)
+        try:
+            for entry in state.get("open_tabs", []):
+                name = self._entry_name(entry)
+                if not name:
+                    continue
+                wanted_tabs.append(name)
+                if self._tab_index(name) != -1:
+                    continue
+
+                found = window_manager.find(name)
+                if found is not None:
+                    floating = found[0]
+                    # Deregister now rather than on `destroyed` (deleteLater), so the floating pass
+                    # below can't find this soon-to-be-dead shell under the same name.
+                    window_manager.deregister(floating)
+                    floating.reattach_to_main()
+                else:
+                    win.create_widget(
+                        cls_name=entry.get("class"),
+                        name=name,
+                        as_window=False,
+                        params=deepcopy(entry.get("params", {})),
+                    )
+
+            # Preset tabs first, in preset order; tabs the preset doesn't know keep their relative
+            # order after them.
+            target = 0
+            for name in wanted_tabs:
+                index = self._tab_index(name)
+                if index == -1:
+                    continue
+                if index != target:
+                    tabs.tabBar().moveTab(index, target)
+                target += 1
+        finally:
+            tabs.blockSignals(False)
+
+        current = state.get("current_tab_index")
+        open_tabs = state.get("open_tabs", [])
+        if isinstance(current, int) and 0 <= current < len(open_tabs):
+            index = self._tab_index(self._entry_name(open_tabs[current]))
+            if index != -1:
+                tabs.setCurrentIndex(index)
+
+        # --- Floating windows ---
+        placements = []
+        for entry in state.get("floating_windows", []):
+            name = self._entry_name(entry)
+            if not name:
+                continue
+
+            found = window_manager.find(name)
+            if found is not None:
+                floating = found[0]
+            else:
+                index = self._tab_index(name)
+                if index != -1:
+                    floating = win.detach_tab(index)
+                else:
+                    floating = win.create_widget(
+                        cls_name=entry.get("class"),
+                        name=name,
+                        as_window=True,
+                        show=False,
+                        params=deepcopy(entry.get("params", {})),
+                        reattach_on_close=entry.get("reattach_on_close", False),
+                    )
+
+            if not floating:
+                continue
+            if hasattr(floating, "reattach_on_close"):
+                floating.reattach_on_close = entry.get("reattach_on_close", False)
+            placements.append((floating, entry.get("window_geometry", {})))
+
+        return placements
 
     def on_ui_restoration_complete(self):
         """This is your callback method."""

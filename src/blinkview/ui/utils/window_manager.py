@@ -109,6 +109,17 @@ class WindowManager:
 
         return False
 
+    def find(self, name):
+        """Returns (window, content) for the floating window showing `name`, or None."""
+        for window, content in self._windows.items():
+            try:
+                content_name = getattr(content, "tab_name", None)
+            except RuntimeError:  # C++ object already deleted
+                continue
+            if content_name == name or getattr(window, "title", None) == name:
+                return window, content
+        return None
+
     def register(self, window, content_widget):
         """
         Adds a window to the manager.

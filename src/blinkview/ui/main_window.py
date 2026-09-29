@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 from qtpy.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
-from qtpy.QtGui import QAction, QFont
+from qtpy.QtGui import QAction, QFont, QGuiApplication
 from qtpy.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -25,6 +25,7 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
 
 from blinkview import __version__ as blinkview_version
 from blinkview.core.batch_queue import BatchQueue
@@ -37,6 +38,7 @@ from blinkview.ui.utils.config_node_manager import ConfigNodeManager
 from blinkview.ui.utils.in_development import set_as_in_development
 from blinkview.ui.utils.ui_state_handler import UIStateHandler
 from blinkview.ui.utils.update_checker import check_for_updates_silently
+from blinkview.ui.utils.view_presets import ViewPresetStore, current_screen_fingerprint, screens_match
 from blinkview.ui.utils.window_manager import WindowManager
 from blinkview.ui.widget_registry import build_widget_factory_map
 
@@ -49,6 +51,7 @@ from blinkview.ui.widgets.config_tool_button_widget import SourcesToolButton
 from blinkview.ui.widgets.device_sidebar import DeviceSidebarWidget
 from blinkview.ui.widgets.log_table_viewer import LogTableViewerWidget as LogTableViewerWidget
 from blinkview.ui.widgets.log_viewer import LogViewerWidget as LogViewerWidget
+from blinkview.ui.widgets.message_box import MessageBox
 from blinkview.ui.widgets.pipelines_sidebar import PipelinesSidebarWidget
 from blinkview.ui.widgets.playback_control import PlaybackControlWidget
 from blinkview.ui.widgets.plotter import TelemetryPlotter as TelemetryPlotter
@@ -76,6 +79,12 @@ from blinkview.utils.used_modules import print_used_modules
 #
 #
 # gc.callbacks.append(gc_callback)
+
+
+# Layout presets (plans/view-layout-presets.md): how long the screen set must stay unchanged before
+# a matching preset is offered, and how long that offer stays up.
+SCREEN_CHANGE_SETTLE_MS = 2000
+SCREEN_CHANGE_PROMPT_SECONDS = 20.0
 
 
 class _ShutdownWorker(QObject):
@@ -205,6 +214,30 @@ class BlinkMainWindow(QMainWindow):
         self.main_menu_btn.setMenu(self.app_menu)
         self.toolbar.addWidget(self.main_menu_btn)
 
+        # --- View: Playback toggle + saved layout presets (plans/view-layout-presets.md) ---
+        self.view_btn = QToolButton()
+        self.view_btn.setText("View")
+        self.view_btn.setPopupMode(QToolButton.InstantPopup)
+        self.view_menu = QMenu(self)
+        self.view_menu.aboutToShow.connect(self.populate_view_menu)
+        self.view_btn.setMenu(self.view_menu)
+        self.toolbar.addWidget(self.view_btn)
+        self.view_presets = ViewPresetStore(registry.file_manager.get_profile_path("view_presets"))
+        # Presets can't be applied until the startup restore (load_ui_state) has finished -
+        # applying one mid-way would race _restore_docks_and_tabs.
+        self._layout_restored = False
+
+        # Offer a matching preset when monitors come back. Waking monitors fire a burst of
+        # add/remove events, so wait for the screen set to settle before looking.
+        self._last_screens = current_screen_fingerprint()
+        self._screen_change_prompt = None
+        self._screen_change_timer = QTimer(self)
+        self._screen_change_timer.setSingleShot(True)
+        self._screen_change_timer.setInterval(SCREEN_CHANGE_SETTLE_MS)
+        self._screen_change_timer.timeout.connect(self._on_screens_settled)
+        QGuiApplication.instance().screenAdded.connect(self._on_screens_changed)
+        QGuiApplication.instance().screenRemoved.connect(self._on_screens_changed)
+
         self.btn_open_logs = QAction("Live Logs", self)
         self.btn_open_logs.triggered.connect(lambda _: self.create_widget(WidgetName.LOG_VIEWER, "Live Logs"))
         self.toolbar.addAction(self.btn_open_logs)
@@ -249,9 +282,10 @@ class BlinkMainWindow(QMainWindow):
                 "closed there) and start a fresh one - every view starts over empty.\n"
                 "Right-click to name the new session first."
             )
-        self.toolbar.addWidget(self.rotate_button)
-
-        self.toolbar.addSeparator()
+        # Toolbar order: Menu, View, Rotate, Playback, Devices | Live Logs, System Logs, Telemetry, Watch | rate.
+        # Rotate/Playback/Devices are created further down than the log buttons, so they're inserted
+        # in front of Live Logs rather than appended.
+        self.rotate_tool_action = self.toolbar.insertWidget(self.btn_open_logs, self.rotate_button)
 
         self.watch_button = QToolButton()
         self.watch_button.setText("Watch")
@@ -274,21 +308,19 @@ class BlinkMainWindow(QMainWindow):
 
         self.pipelines_dock.setVisible(False)
 
-        self.toolbar.addSeparator()
-
-        # --- Sources Toggle Button with Dynamic Context Menu ---
+        # --- Devices Toggle: shows/hides the Sources and Pipelines docks together ---
+        # Right-click keeps the Sources context menu (add/edit/enable sources, send commands).
         self.sources_tool_btn = SourcesToolButton(
             self.gui_context.config_manager.create_node("/sources"), self.gui_context
         )
-        self.sources_tool_btn.setChecked(not self.sources_dock.isHidden())
-        self.sources_tool_btn.clicked.connect(lambda checked: self.sources_dock.setVisible(checked))
-        self.sources_dock.visibilityChanged.connect(self.sources_tool_btn.setChecked)
-        self.toolbar.addWidget(self.sources_tool_btn)
-
-        # Pipelines Toggle
-        self.action_view_pipelines = self.pipelines_dock.toggleViewAction()
-        self.action_view_pipelines.setText("Pipelines")
-        self.toolbar.addAction(self.action_view_pipelines)
+        self.sources_tool_btn.setText("Devices")
+        self.sources_tool_btn.setToolTip("Show/hide the Sources and Pipelines sidebars.\nRight-click to manage sources.")
+        self.sources_tool_btn.clicked.connect(self._set_device_docks_visible)
+        self.sources_dock.visibilityChanged.connect(self._sync_device_docks_button)
+        self.pipelines_dock.visibilityChanged.connect(self._sync_device_docks_button)
+        self._sync_device_docks_button()
+        self.devices_tool_action = self.toolbar.insertWidget(self.btn_open_logs, self.sources_tool_btn)
+        self.toolbar.insertSeparator(self.btn_open_logs)
 
         self.toolbar.addSeparator()
 
@@ -335,7 +367,7 @@ class BlinkMainWindow(QMainWindow):
         self.action_view_playback.setCheckable(True)
         self.action_view_playback.setChecked(show_playback)
         self.action_view_playback.toggled.connect(self.playback_control.setVisible)
-        self.toolbar.addAction(self.action_view_playback)
+        self.toolbar.insertAction(self.devices_tool_action, self.action_view_playback)
 
         if use_frameless:
             self.main_container = QWidget()
@@ -511,6 +543,7 @@ class BlinkMainWindow(QMainWindow):
         )
 
     def _start_registry(self):
+        self._layout_restored = True
         self.gui_context.registry.start()
         self._start_timers()
 
@@ -544,6 +577,16 @@ class BlinkMainWindow(QMainWindow):
         ToastManager.show(message, toast_type, duration, parent=self)
 
         QTimer.singleShot(1000, lambda: check_for_updates_silently(self.gui_context, parent=self))
+
+    def _set_device_docks_visible(self, visible: bool):
+        self.sources_dock.setVisible(visible)
+        self.pipelines_dock.setVisible(visible)
+
+    def _sync_device_docks_button(self, _visible=None):
+        """Button stays checked while either dock is open, so closing one dock via its own X
+        doesn't untick it - a click then hides the other one too."""
+        either_open = not self.sources_dock.isHidden() or not self.pipelines_dock.isHidden()
+        self.sources_tool_btn.setChecked(either_open)
 
     def register_log_target(self, target):
         """Adds a target that expects a 'process_log_batch(list)' method."""
@@ -665,6 +708,144 @@ class BlinkMainWindow(QMainWindow):
         menu.addSeparator()
         exit_act = menu.addAction("Quit")
         exit_act.triggered.connect(self.close)
+
+    # --- View menu / layout presets (plans/view-layout-presets.md) ---
+
+    def populate_view_menu(self):
+        menu = self.view_menu
+        menu.clear()
+
+        names = self.view_presets.names()
+        current_screens = current_screen_fingerprint()
+        ready = self._layout_restored
+
+        if names:
+            for name in names:
+                preset = self.view_presets.get(name) or {}
+                saved_screens = preset.get("screens") or []
+                label = f"{name}  ({len(saved_screens)} screen{'s' if len(saved_screens) != 1 else ''})"
+                if not screens_match(saved_screens, current_screens):
+                    label += "  - different screens"
+                act = menu.addAction(label)
+                act.setEnabled(ready)
+                act.triggered.connect(lambda checked=False, n=name: self.apply_view_preset(n))
+        else:
+            empty_act = menu.addAction("(no saved layouts)")
+            empty_act.setEnabled(False)
+
+        menu.addSeparator()
+        save_act = menu.addAction("Save Current Layout As...")
+        save_act.setEnabled(ready)
+        save_act.triggered.connect(self.save_view_preset_as)
+
+        if names:
+            update_menu = menu.addMenu("Update with Current Layout")
+            update_menu.setEnabled(ready)
+            rename_menu = menu.addMenu("Rename")
+            delete_menu = menu.addMenu("Delete")
+            for name in names:
+                update_menu.addAction(name).triggered.connect(lambda checked=False, n=name: self._store_view_preset(n))
+                rename_menu.addAction(name).triggered.connect(lambda checked=False, n=name: self.rename_view_preset(n))
+                delete_menu.addAction(name).triggered.connect(lambda checked=False, n=name: self.delete_view_preset(n))
+
+        menu.addSeparator()
+
+        offer_act = menu.addAction("Offer Layout When Screens Change")
+        offer_act.setCheckable(True)
+        offer_act.setChecked(self.view_presets.offer_on_screen_change)
+        offer_act.setToolTip("When monitors are connected or disconnected, offer the saved layout matching them")
+        offer_act.toggled.connect(lambda on: setattr(self.view_presets, "offer_on_screen_change", on))
+
+    def apply_view_preset(self, name: str):
+        preset = self.view_presets.get(name)
+        if not preset:
+            return
+
+        saved_screens = preset.get("screens") or []
+        current_screens = current_screen_fingerprint()
+        if not screens_match(saved_screens, current_screens):
+            answer = MessageBox.question(
+                self,
+                "Apply layout",
+                f"'{name}' was saved with {len(saved_screens)} screen(s) in a different arrangement "
+                f"than the {len(current_screens)} connected now.\n"
+                "Windows meant for a missing screen will be docked back as tabs.\n\nApply anyway?",
+            )
+            if answer != MessageBox.Btn.Yes:
+                return
+
+        self.gui_context.gui_state.apply_layout(
+            preset.get("state", {}),
+            on_complete=lambda: ToastManager.show(f"Layout '{name}' applied", ToastType.SUCCESS, 3, parent=self),
+        )
+
+    def save_view_preset_as(self):
+        screens = current_screen_fingerprint()
+        default = f"{len(screens)} screen{'s' if len(screens) != 1 else ''}"
+        name, ok = QInputDialog.getText(self, "Save layout", "Layout name:", text=default)
+        name = name.strip()
+        if not ok or not name:
+            return
+        if name in self.view_presets:
+            answer = MessageBox.question(self, "Save layout", f"A layout named '{name}' already exists. Overwrite it?")
+            if answer != MessageBox.Btn.Yes:
+                return
+        self._store_view_preset(name)
+
+    def _store_view_preset(self, name: str):
+        try:
+            self.view_presets.save(name, self.gui_context.gui_state.get_data(), current_screen_fingerprint())
+        except Exception as e:
+            ToastManager.show(f"Could not save layout: {e}", ToastType.ERROR, 5, parent=self)
+            return
+        ToastManager.show(f"Layout '{name}' saved", ToastType.SUCCESS, 3, parent=self)
+
+    def rename_view_preset(self, name: str):
+        new_name, ok = QInputDialog.getText(self, "Rename layout", "New name:", text=name)
+        new_name = new_name.strip()
+        if not ok or not new_name or new_name == name:
+            return
+        try:
+            self.view_presets.rename(name, new_name)
+        except (KeyError, ValueError) as e:
+            ToastManager.show(f"Could not rename layout: {e}", ToastType.ERROR, 5, parent=self)
+
+    def delete_view_preset(self, name: str):
+        answer = MessageBox.question(self, "Delete layout", f"Delete layout '{name}'?")
+        if answer == MessageBox.Btn.Yes:
+            self.view_presets.delete(name)
+
+    def _on_screens_changed(self, _screen=None):
+        # (Re)start the settle timer - only the last event of a burst leads to a check.
+        self._screen_change_timer.start()
+
+    def _on_screens_settled(self):
+        """Screens stopped changing: if the setup really is different now and a preset was saved
+        for exactly this setup, offer it in a toast."""
+        screens = current_screen_fingerprint()
+        if screens_match(self._last_screens, screens):
+            return  # e.g. a monitor flickered off and on again
+        self._last_screens = screens
+
+        # A previous offer is for a screen setup that no longer exists.
+        prompt, self._screen_change_prompt = self._screen_change_prompt, None
+        if prompt is not None and isValid(prompt):
+            prompt.dismiss()
+
+        if not self._layout_restored or not self.view_presets.offer_on_screen_change:
+            return
+        name = self.view_presets.best_match(screens)
+        if name is None:
+            return
+
+        self._screen_change_prompt = ToastManager.show(
+            f"Screens changed. Apply layout '{name}'?",
+            ToastType.INFO,
+            SCREEN_CHANGE_PROMPT_SECONDS,
+            action_text="Apply",
+            action_callback=lambda: self.apply_view_preset(name),
+            parent=self,
+        )
 
     def _populate_replay_menu(self, load_menu):
         """Populates 'Load Session...' with one action per past run in this project.
@@ -1133,7 +1314,7 @@ class BlinkMainWindow(QMainWindow):
         if action == detach_action:
             self.detach_tab(tab_index)
 
-    def detach_tab(self, index: int):
+    def detach_tab(self, index: int) -> DetachedTabWindow:
         """Removes the widget from the tab and wraps it in a floating window."""
         self.central_tabs.setUpdatesEnabled(False)
 
@@ -1151,6 +1332,7 @@ class BlinkMainWindow(QMainWindow):
             floating_win.show()
         finally:
             self.central_tabs.setUpdatesEnabled(True)
+        return floating_win
 
     def reattach_tab(self, widget, title: str):
         """Triggered by the floating window when it is closed."""
