@@ -46,6 +46,71 @@ class TestToastWidgetConstruction:
         assert toast.close_btn.toolTip() == "Dismiss"
 
 
+class TestToastSizing:
+    """The toast used to be a fixed 300px wide; with an action button the word-wrapped label got so
+    narrow that "Screens changed. Apply layout '4 screens'?" needed 3 lines but only got room for
+    2, clipping the last one."""
+
+    LONG = (
+        "Could not save layout: [Errno 13] Permission denied: 'C:/Users/someone/projects/x/default.view_presets.json'"
+    )
+
+    def _assert_text_not_clipped(self, toast):
+        label = toast.msg_label
+        assert label.height() >= label.heightForWidth(label.width())
+
+    @pytest.mark.parametrize(
+        "message, action",
+        [
+            ("Screens changed. Apply layout '4 screens'?", "Apply"),
+            ("Saved", None),
+            (LONG, None),
+            (LONG, "Apply"),
+            ("line one\nline two is longer", None),
+        ],
+    )
+    def test_whole_message_fits(self, qapp, qtbot, message, action):
+        toast = ToastWidget(message, action_text=action, action_callback=(lambda: None) if action else None)
+        qtbot.addWidget(toast)
+
+        self._assert_text_not_clipped(toast)
+        assert ToastWidget.MIN_WIDTH <= toast.width() <= ToastWidget.MAX_WIDTH
+
+    @staticmethod
+    def _lines(toast):
+        label = toast.msg_label
+        return round(label.height() / label.fontMetrics().lineSpacing())
+
+    def test_message_that_fits_under_max_width_grows_the_toast_instead_of_wrapping(self, qapp, qtbot):
+        """Font-independent (the offscreen test platform has much wider glyphs than Windows): any
+        message whose measured width fits the room left at MAX_WIDTH must stay on one line."""
+        toast = ToastWidget("Apply layout 'A'?", action_text="Apply", action_callback=lambda: None)
+        qtbot.addWidget(toast)
+        label = toast.msg_label
+        text_width = label.fontMetrics().horizontalAdvance(label.text())
+        room_at_max = ToastWidget.MAX_WIDTH - (toast.width() - label.width())
+        assert text_width < room_at_max, "test message too long for this platform's font"
+
+        assert self._lines(toast) == 1
+        assert label.width() >= text_width
+
+    def test_long_message_wraps_at_max_width(self, qapp, qtbot):
+        toast = ToastWidget(self.LONG)
+        qtbot.addWidget(toast)
+
+        assert toast.width() == ToastWidget.MAX_WIDTH
+        assert self._lines(toast) >= 2
+
+    def test_set_message_resizes_to_the_new_text(self, qapp, qtbot):
+        toast = ToastWidget("short", persistent=True)
+        qtbot.addWidget(toast)
+
+        toast.set_message(self.LONG)
+
+        self._assert_text_not_clipped(toast)
+        assert toast.width() == ToastWidget.MAX_WIDTH
+
+
 class TestToastWidgetInteraction:
     def test_mouse_press_triggers_click_callback_and_hides(self, qapp, qtbot):
         from qtpy.QtCore import Qt

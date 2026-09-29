@@ -66,6 +66,9 @@ class ToastIcon(QLabel):
 
 
 class ToastWidget(QWidget):
+    MIN_WIDTH = 300
+    MAX_WIDTH = 520  # longer messages wrap onto more lines instead
+
     def __init__(
         self,
         message,
@@ -80,8 +83,6 @@ class ToastWidget(QWidget):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.ToolTip | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-
-        self.setFixedWidth(300)
 
         self.is_hovered = False
 
@@ -170,6 +171,8 @@ class ToastWidget(QWidget):
 
         layout.addWidget(self.bg_frame)
 
+        self._fit_to_content()
+
         # --- Animations ---
         # Master Timer & Progress Ring
         self.prog_anim = QVariantAnimation(self)
@@ -249,8 +252,37 @@ class ToastWidget(QWidget):
         new one for each, which would flicker and re-trigger _reposition_toasts churn every
         time."""
         self.msg_label.setText(text)
-        self.adjustSize()
+        self._fit_to_content()
         ToastManager._reposition_toasts()
+
+    def _fit_to_content(self):
+        """Sizes the toast to its message: as wide as the text needs (between MIN_WIDTH and
+        MAX_WIDTH), then exactly as tall as the wrapped text. A word-wrapped QLabel inside a
+        top-level widget doesn't get its height-for-width honoured by adjustSize(), so a fixed
+        width used to clip the last line whenever the action button left the label too narrow."""
+        self.ensurePolished()
+        self.msg_label.ensurePolished()  # picks up the stylesheet's font-size before measuring
+
+        frame_layout = self.bg_frame.layout()
+        margins = frame_layout.contentsMargins()
+        others = [w for w in (self.icon_widget, getattr(self, "action_btn", None), self.close_btn) if w is not None]
+        chrome_width = (
+            margins.left()
+            + margins.right()
+            + sum(w.sizeHint().width() for w in others)
+            + frame_layout.spacing() * len(others)
+        )
+
+        metrics = self.msg_label.fontMetrics()
+        text_width = max(metrics.horizontalAdvance(line) for line in (self.msg_label.text() or " ").split("\n")) + 2
+
+        total_width = max(self.MIN_WIDTH, min(self.MAX_WIDTH, chrome_width + text_width))
+        label_width = total_width - chrome_width
+        self.msg_label.setFixedWidth(label_width)
+        self.msg_label.setFixedHeight(self.msg_label.heightForWidth(label_width))
+
+        self.setFixedWidth(total_width)
+        self.adjustSize()
 
     def dismiss(self):
         """Clearer-named alias for hide_toast(), for external callers (e.g. once the work a
@@ -273,7 +305,7 @@ class ToastManager:
         parent=None,
     ):
         print(f"[ToastManager]: show: {message}")
-        cls._show(message, toast_type, duration, action_text, action_callback, click_callback, parent, False)
+        return cls._show(message, toast_type, duration, action_text, action_callback, click_callback, parent, False)
 
     @classmethod
     def show_persistent(cls, message, toast_type=ToastType.INFO, duration=60.0, parent=None):
