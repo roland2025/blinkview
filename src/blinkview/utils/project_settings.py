@@ -5,6 +5,8 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import os
+import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -122,6 +124,43 @@ def switch_profile(name, create=False):
         print(f"Switched to profile '{name}' within project '{project_root.name}'")
 
 
+def get_active_profile_name() -> str:
+    try:
+        return ProjectSettings().get("active_profile", "default") or "default"
+    except Exception:
+        return "default"
+
+
+def duplicate_profile(source: str, new_name: str) -> Path:
+    """Copies profile `source` to a new profile `new_name`. Profile files are named after their
+    profile (`<name>.json`, `<name>.gui_state.json`, ...), so those prefixes are renamed too -
+    otherwise FileManager would not find them under the new profile. Does not switch to it."""
+    # FileManager sanitizes profile names the same way; a name that sanitizes to something else
+    # would be copied into one folder and then loaded from another.
+    clean = re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9_]", "_", new_name)).strip("_")
+    if not clean or clean != new_name:
+        raise ValueError(f"Invalid profile name '{new_name}' (only letters, digits and '_' allowed; try '{clean}')")
+
+    profiles_path = get_workspace_dir() / "profiles"
+    src_dir = profiles_path / source
+    dst_dir = profiles_path / new_name
+
+    if not src_dir.is_dir():
+        raise FileNotFoundError(f"Profile '{source}' does not exist at {src_dir.resolve()}")
+    if dst_dir.exists():
+        raise FileExistsError(f"Profile '{new_name}' already exists at {dst_dir.resolve()}")
+
+    shutil.copytree(src_dir, dst_dir)
+
+    prefix = f"{source}."
+    for f in dst_dir.iterdir():
+        if f.is_file() and f.name.startswith(prefix):
+            f.rename(dst_dir / f"{new_name}.{f.name[len(prefix) :]}")
+
+    print(f"Duplicated profile '{source}' to '{new_name}' at {dst_dir.resolve()}")
+    return dst_dir
+
+
 def setup_project_parser(parser):
     """Adds profile-related arguments to the command-line parser."""
     # We use nargs="?" so --list can work without providing a name
@@ -131,6 +170,12 @@ def setup_project_parser(parser):
     )
     parser.add_argument(
         "-c", "--create", action="store_true", help="Create the profile if it doesn't exist (used with profile name)."
+    )
+    parser.add_argument(
+        "--copy",
+        metavar="NEW_NAME",
+        type=str,
+        help="Copy the given profile (or the active one if omitted) to a new profile named NEW_NAME.",
     )
 
 
@@ -148,15 +193,21 @@ def handle_profile_args(args):
         profiles = [p.name for p in profiles_path.iterdir() if p.is_dir()]
 
         # Try to identify the active profile for the UI
-        try:
-            active = ProjectSettings().get("active_profile", "default")
-        except:
-            active = "default"
+        active = get_active_profile_name()
 
         print("--- Available Profiles ---")
         for p in sorted(profiles):
             indicator = "*" if p == active else " "
             print(f"{indicator} {p}")
+        return
+
+    # Handle --copy
+    if args.copy:
+        try:
+            duplicate_profile(args.profile or get_active_profile_name(), args.copy)
+        except (ValueError, FileNotFoundError, FileExistsError) as e:
+            print(f"Error: {e}")
+            raise SystemExit(1)
         return
 
     # Handle Switch/Create
