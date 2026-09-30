@@ -613,7 +613,9 @@ class Registry:
         try:
             path = self._id_registry_dump_path(cold_dir)
             path.write_text(json.dumps(self.id_registry.dump_discovery_log()))
-        except OSError as e:
+        except Exception as e:
+            # Best-effort side file - never let it abort the rest of stop() (compression, file
+            # loggers' final parts).
             self.logger.warning("Failed to persist id_registry alongside cold storage: %s", e)
 
     def _compress_persisted_cold_storage(self, cold_dir, on_progress=None) -> None:

@@ -10,7 +10,7 @@ import pytest
 from qtpy.QtWidgets import QWidget
 
 from blinkview.ui.constants import WidgetName
-from blinkview.ui.main_window import BlinkMainWindow
+from blinkview.ui.main_window import BlinkMainWindow, _ShutdownWorker
 from blinkview.utils.session_lister import SessionInfo
 from tests.fakes.real_registry import make_real_registry
 
@@ -540,6 +540,23 @@ class TestCloseEvent:
 
         assert event.accepted is True
         assert event.ignored is False
+
+
+class TestShutdownWorker:
+    def test_emits_finished_even_when_stop_raises(self, qapp):
+        """Regression: a KeyError inside Registry.stop() skipped finished.emit(), so closeEvent
+        kept ignoring the close and the window hung on "Compressing files..." forever."""
+
+        def failing_stop(on_progress=None):
+            raise KeyError("RTT")
+
+        worker = _ShutdownWorker(SimpleNamespace(stop=failing_stop))
+        emitted = []
+        worker.finished.connect(lambda: emitted.append(True))
+
+        worker.run()
+
+        assert emitted == [True]
 
 
 class TestSignalHandler:

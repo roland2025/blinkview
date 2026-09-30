@@ -84,6 +84,7 @@ class DeviceIdentity:
     __slots__ = (
         "id",
         "name",
+        "key",
         "root",
         "modules",
         "path_lookup",
@@ -101,6 +102,9 @@ class DeviceIdentity:
     def __init__(self, device_id: int, name: str, id_registry: "IDRegistry", device_ref=None, default_essential=True):
         self.id = device_id
         self.name = name
+        # Immutable IDRegistry.device_lookup/discovery_log key - `name` is display-only and can be
+        # changed later through IDRegistry.rename_device().
+        self.key = name
         self.device_ref = device_ref
         self.id_registry = id_registry
 

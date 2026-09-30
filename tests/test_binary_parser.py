@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.factory_registry import FactoryRegistry
+from blinkview.core.id_registry import IDRegistry
 from blinkview.core.logger import PrintLogger
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.parsers.binary_parser import BinaryParser, RsyslogFileFormatParser
@@ -121,6 +122,38 @@ class TestNameChanged:
         )
 
         assert device.name == "renamed-device"
+
+    def test_uppercase_name_keeps_discovery_log_dumpable(self, id_registry):
+        """Regression: PipelineManager creates the device via get_device("RTT") (stored under
+        "rtt"), then applying the config's name set device.name = "RTT" directly. Modules
+        discovered afterwards were logged under "RTT", and Registry.stop()'s
+        dump_discovery_log() raised KeyError: 'RTT', leaving "Compressing files..." hung."""
+        parser = make_parser(id_registry, device_name="RTT", name="RTT")
+        device = parser.local.device_id
+        module = device.get_module("nrf_ble_gatt")
+
+        assert device.name == "RTT"
+        assert id_registry.get_device("RTT") is device
+        # exported/rendered names (Numba string table) stay lowercase - only .name carries case
+        assert id_registry.devices_table.get_string(device.id) == "rtt"
+        dumped = id_registry.dump_discovery_log()
+
+        replayed = IDRegistry(NumpyArrayPool())
+        replayed.replay_discovery_log(dumped)
+        assert replayed.get_device("RTT").id == device.id
+        assert replayed.get_device("RTT").get_module("nrf_ble_gatt").id == module.id
+
+    def test_renamed_device_stays_reachable_and_dumpable(self, id_registry):
+        parser = make_parser(id_registry, device_name="old_name")
+        device = parser.local.device_id
+        device.get_module("before")
+
+        parser.apply_config({"frame_decoder": {"type": "line_decoder"}, "name": "New_Name"})
+        device.get_module("after")
+
+        assert id_registry.get_device("new_name") is device
+        assert id_registry.get_device("old_name") is device
+        assert [e[1] for e in id_registry.dump_discovery_log()] == ["old_name"] * 4
 
 
 class TestRunRealIngestion:

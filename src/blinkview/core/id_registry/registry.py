@@ -171,7 +171,7 @@ class IDRegistry:
                 # 1. Update Global List/Map
                 self.modules[module.id] = module
                 self.module_list.append(module)
-                self.discovery_log.append(("module", module.device.name, module.name))
+                self.discovery_log.append(("module", module.device.key, module.name))
 
                 # 2. Update Table (using the name string already on the module)
                 self.modules_table.register_name(module.id, module.name)
@@ -221,6 +221,21 @@ class IDRegistry:
             self.logger_device.info("id=%s tm_ms=%.4f name=%s", new_id, (end_time - start_time) / 1_000_000, name)
 
             return new_device
+
+    def rename_device(self, device: "DeviceIdentity", new_name: str) -> None:
+        """Changes a device's display name. Its key (the lowercased creation name) stays in
+        device_lookup and the discovery log, so ids and a persisted dump stay consistent; the new
+        name is only added as an extra lookup alias, unless another device already owns it."""
+        with self._lock:
+            device.name = new_name
+            alias = new_name.lower()
+            owner = self.device_lookup.get(alias)
+            if owner is None:
+                self.device_lookup[alias] = device
+            elif owner is not device:
+                self.logger.warning(
+                    "Device '%s' renamed to '%s', which is already another device's name", device.key, new_name
+                )
 
     def get_all_devices(self) -> List["DeviceIdentity"]:
         """Lock-free access to all registered hardware devices."""

@@ -6,6 +6,7 @@
 
 import signal
 import sys
+import traceback
 from time import perf_counter, time
 from types import SimpleNamespace
 from typing import Optional
@@ -108,8 +109,14 @@ class _ShutdownWorker(QObject):
         self.registry = registry
 
     def run(self):
-        self.registry.stop(on_progress=lambda i, total, label: self.progress.emit(i, total, label))
-        self.finished.emit()
+        # finished must fire even if stop() raises - closeEvent ignores every close until it does,
+        # so a failed stop() would otherwise leave the window stuck on "Compressing files..."
+        try:
+            self.registry.stop(on_progress=lambda i, total, label: self.progress.emit(i, total, label))
+        except Exception:
+            traceback.print_exc()
+        finally:
+            self.finished.emit()
 
 
 class _SessionRotationWorker(QObject):

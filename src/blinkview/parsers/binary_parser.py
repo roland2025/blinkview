@@ -134,7 +134,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         self.logger.info("Device name changed from '%s' to '%s'", old, name)
         # If the device name changes, we may want to update the device identity in the assembler
         dev_id: "DeviceIdentity" = self.local.device_id
-        dev_id.name = name
+        dev_id.id_registry.rename_device(dev_id, name)
 
     def run(self):
         try:
