@@ -6,6 +6,8 @@
 
 import os
 
+import pytest
+
 from blinkview import __version__
 from blinkview.core import numba_setup
 
@@ -22,6 +24,20 @@ class FakeSettings:
 
 def setup_function(_):
     numba_setup.IS_CACHE_WARM = False
+
+
+@pytest.fixture(autouse=True)
+def restore_numba_cache_dir():
+    """export_numba_cache() writes os.environ["NUMBA_CACHE_DIR"] directly, and the tests'
+    monkeypatch.delenv(raising=False) on an unset variable records nothing to undo - so the
+    tmp_path value used to leak into every later test, and into the subprocesses they start (a
+    `blink` child then compiled every Numba kernel cold into a dead tmp dir and timed out)."""
+    saved = os.environ.get("NUMBA_CACHE_DIR")
+    yield
+    if saved is None:
+        os.environ.pop("NUMBA_CACHE_DIR", None)
+    else:
+        os.environ["NUMBA_CACHE_DIR"] = saved
 
 
 def test_creates_versioned_cache_dir_and_sets_env_var(tmp_path, monkeypatch):

@@ -72,6 +72,9 @@ def test_blink_gui_subprocess_starts_and_reaches_registry_start(tmp_path):
     # print() sits in the child's internal buffer and never reaches us until it fills or the
     # process exits, so the polling loop below would see nothing until far too late.
     env["PYTHONUNBUFFERED"] = "1"
+    # Let the child resolve its own Numba cache from update.path (this repo's warm cache) - an
+    # inherited NUMBA_CACHE_DIR may point at another test's tmp dir and force a cold compile.
+    env.pop("NUMBA_CACHE_DIR", None)
 
     proc = subprocess.Popen(
         [
