@@ -178,6 +178,7 @@ To store logs somewhere else, set a log directory with `blink config --global lo
   * **Layout Presets:** Save any number of named window layouts from the **View** menu (e.g. "desk, 4 screens", "desk, plotting" and "laptop only") and switch between them at any time. Applying a preset only moves, floats, or docks your views back into place—it never resets what's inside them.
   * **Monitor Changes:** When monitors are turned off and back on, windows tend to get shuffled around. BlinkView notices the screen setup change and offers the preset saved for that exact setup in a toast—one click puts everything back.
   * **Multiple Instances:** Every window and dialog title starts with `project / profile`, so windows from several running BlinkView instances are easy to tell apart.
+* **Several Identical Devices:** One profile for several identical boards. Each run fills in its own J-Link serial number, COM port and so on, while parsers, rules and watches are kept and changed in one place. See [Several Identical Devices](#several-identical-devices-profile-parameters).
 * **Watch / Command List:** 
   * Monitor specific variables and latest state values.
   * Send structured commands back to the device.
@@ -189,9 +190,40 @@ To store logs somewhere else, set a log directory with `blink config --global lo
 
 ---
 
+## Several Identical Devices: Profile Parameters
+
+When several boards share one configuration and differ only in, say, the J-Link serial number or COM port, keep **one** profile and give each run its own values.
+
+```bash
+# Declare which config fields can vary (the current value stays as the default)
+blink switch rtt --add-param rtt_serial /sources/src_1eb62594/serial_number
+blink switch rtt --add-param com_port /sources/src_ab12cd34/port
+
+# Save one parameter set per board (rtt.params.left.json next to the profile)
+blink switch rtt --save-params left  --param rtt_serial=51024923 --param com_port=COM7
+blink switch rtt --save-params right --param rtt_serial=51099999 --param com_port=COM9
+blink switch rtt --show-params
+
+# One BlinkView per board
+blink -p rtt --params left
+blink -p rtt --params right
+```
+
+* `--params` also accepts a path to any `.json` file of `name: value` pairs, e.g. for machine-specific values you don't want in the repo. It can be repeated; later files win. `--param NAME=VALUE` overrides a single value for one run.
+* Parameter values are never written to the profile, so the profile file stays the same for every board. Session logs and `metadata.json` record the values each run actually used.
+* The set name appears in the window title (`project / rtt [left]`) and is the default session name. A set can store its own session name (`--save-params left ... --session "Left board"`); `-s` on the command line still wins.
+* Each set keeps its own window layout (`rtt.gui_state.left.json`), starting from the profile's normal layout until it is first saved.
+* Several instances can run the same profile at once. An edit made in one is saved without undoing the others' edits, and the others offer to **Reload** it (a notification, or **Reload Profile from Disk** in the main menu).
+* **Main menu → Profile Parameters...** shows the values in use and where they came from. Change a value and press **Apply** to use it right away, without restarting and without changing the profile. **Save to Set** / **Save as New Set...** store the values for the next start, and **Copy Launch Command** gives the matching `blink ...` command line.
+* In the config editor, right-click a field's label and choose **Make profile parameter...**, so you don't have to look up the config path.
+
+---
+
 ## Architecture & Performance
 
-BlinkView is designed for high-throughput telemetry. It utilizes a multi-threaded ingestion pipeline where data sources run in isolated threads to prevent cross-source blocking.
+BlinkView is designed for high throughput and low overhead. In synthetic benchmarks the pipeline handles about **5 million messages per second per thread** (roughly 300 MB/s of raw input), and the message reordering thread tops out at **12 million messages per second** on the same system. A typical real-world load of 10,000 messages per second barely registers in CPU usage. Ingestion is multi-threaded: each data source runs in its own thread, so a slow or bursty source never blocks the others.
+
+<sub>Benchmarks measured on an AMD Ryzen 9 5950X.</sub>
 
 *   **Numba JIT Compilation:** Core parsing, filtering, and reordering logic is compiled to machine code for near-native performance.
   * Minor caveat, the first run after installation needs to run LLVM compilation
