@@ -157,3 +157,88 @@ class TestScreenChangeSupport:
         store = ViewPresetStore(tmp_path / "p.json")
         store.save("legacy", {}, [])
         assert store.best_match(SCREENS_3) is None
+
+
+class TestSharedBetweenInstances:
+    """Two BlinkView instances on one profile (one per board, see --params) share
+    <profile>.view_presets.json: each mutation changes only its own preset, and reads pick up the
+    other instance's changes without a restart."""
+
+    SCREENS = [{"x": 0, "y": 0, "width": 1920, "height": 1080}]
+
+    @pytest.fixture
+    def two(self, tmp_path):
+        path = tmp_path / "p.view_presets.json"
+        return ViewPresetStore(path), ViewPresetStore(path), path
+
+    def test_saves_from_both_instances_survive(self, two):
+        a, b, path = two
+        a.save("desk", {"open_tabs": ["a"]}, self.SCREENS)
+        b.save("laptop", {"open_tabs": ["b"]}, [])
+
+        on_disk = json.loads(path.read_text())["presets"]
+        assert set(on_disk) == {"desk", "laptop"}
+        assert a.names() == ["desk", "laptop"]
+        assert b.names() == ["desk", "laptop"]
+        assert b.get("desk")["state"] == {"open_tabs": ["a"]}
+        assert "laptop" in a
+
+    def test_rename_and_delete_see_the_other_instances_presets(self, two):
+        a, b, _ = two
+        a.save("desk", {}, [])
+        a.save("lab", {}, [])
+
+        with pytest.raises(ValueError):
+            b.rename("desk", "lab")  # "lab" exists only because A saved it
+        b.rename("desk", "office")
+        b.delete("lab")
+        assert a.names() == ["office"]
+        with pytest.raises(KeyError):
+            a.rename("desk", "x")
+
+    def test_toggle_keeps_presets_and_is_shared(self, two):
+        a, b, _ = two
+        a.save("desk", {}, [])
+        b.offer_on_screen_change = False
+        assert a.offer_on_screen_change is False
+        assert b.names() == ["desk"]
+        a.save("laptop", {}, [])
+        assert b.offer_on_screen_change is False  # A's save didn't revert B's toggle
+
+    def test_best_match_sees_other_instances_preset(self, two):
+        a, b, _ = two
+        a.save("desk", {}, self.SCREENS)
+        assert b.best_match(self.SCREENS) == "desk"
+
+    def test_unchanged_file_is_not_re_read(self, two, monkeypatch):
+        a, b, _ = two
+        a.save("desk", {}, [])
+        b.names()
+        reads = []
+        real_read = ViewPresetStore._read
+        monkeypatch.setattr(ViewPresetStore, "_read", lambda self: reads.append(1) or real_read(self))
+        for _ in range(5):
+            b.names()
+            b.get("desk")
+        assert reads == []
+
+    def test_delete_of_missing_preset_writes_nothing(self, two):
+        a, _, path = two
+        a.save("desk", {}, [])
+        before = path.read_text()
+        a.delete("nope")
+        assert path.read_text() == before
+
+    def test_broken_file_on_refresh_keeps_known_presets(self, two):
+        a, _, path = two
+        a.save("desk", {}, [])
+        path.write_text("{broken")
+        assert a.names() == ["desk"]
+        assert path.read_text() == "{broken"  # only a fresh load moves it to .bak
+
+    def test_broken_file_on_save_falls_back_to_known_presets(self, two):
+        a, _, path = two
+        a.save("desk", {}, [])
+        path.write_text("{broken")
+        a.save("laptop", {}, [])
+        assert set(json.loads(path.read_text())["presets"]) == {"desk", "laptop"}
