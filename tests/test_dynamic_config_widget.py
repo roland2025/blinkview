@@ -455,3 +455,180 @@ class TestGetSubSchema:
     def test_invalid_path_returns_empty_dict(self, widget):
         _load(widget)
         assert widget._get_sub_schema(["does_not_exist"]) == {}
+
+
+class TestProfileParamBoundFields:
+    """A field set by --param/--params for this run is shown read-only with a hint - editing it
+    would only change this run, never the profile (see core/profile_params.py)."""
+
+    @pytest.fixture
+    def bound_widget(self, qapp, qtbot, gui_context):
+        from types import SimpleNamespace
+
+        from qtpy.QtWidgets import QLabel
+
+        seen = []
+
+        def get_param_binding(path):
+            seen.append(path)
+            return {"/sources/src_a/name": "dev_name", "/sources/src_a/level": "dev_level"}.get(path)
+
+        # The real ConfigNodeManager wraps the backend ConfigManager as `.manager`.
+        gui_context.config_manager.manager = SimpleNamespace(get_param_binding=get_param_binding)
+        w = DynamicConfigWidget(gui_context, state={"path": "/sources/src_a"})
+        qtbot.addWidget(w)
+        _load(w)
+        labels = [lbl.text() for lbl in w.findChildren(QLabel)]
+        return w, labels, seen
+
+    def test_required_bound_field_is_disabled_with_hint(self, bound_widget):
+        w, labels, seen = bound_widget
+        assert "/sources/src_a/name" in seen
+        assert w._widget_registry["name"]["widget"].isEnabled() is False
+        assert any("'dev_name'" in t and "not saved to the profile" in t for t in labels)
+
+    def test_optional_bound_field_disables_its_override_toggle(self, bound_widget):
+        w, _, _ = bound_widget
+        entry = w._widget_registry["level"]
+        assert entry["toggle"].isEnabled() is False
+        assert entry["widget"].isEnabled() is False
+
+    def test_nested_paths_are_absolute(self, bound_widget):
+        _, _, seen = bound_widget
+        assert "/sources/src_a/nested/sub_field" in seen
+        assert "/sources/src_a/items_list/0/name" in seen
+
+    def test_unbound_fields_stay_editable(self, bound_widget):
+        w, _, _ = bound_widget
+        assert w._widget_registry["enabled"]["widget"].isEnabled() is True
+
+    def test_manager_without_params_support_changes_nothing(self, widget):
+        _load(widget)
+        assert widget._widget_registry["name"]["widget"].isEnabled() is True
+
+
+class FakeParamBackend:
+    """The ConfigManager surface the editor's profile-parameter menu uses."""
+
+    def __init__(self, declared=None, bound=None, error=None):
+        self.declared = dict(declared or {})  # path -> name
+        self.bound = dict(bound or {})
+        self.error = error
+        self.calls = []
+
+    def get_param_binding(self, path):
+        return self.bound.get(path)
+
+    def get_param_declaration(self, path):
+        return self.declared.get(path)
+
+    def declare_param(self, name, path, description=None):
+        if self.error:
+            raise self.error
+        self.calls.append(("declare", name, path))
+
+    def remove_param(self, path):
+        self.calls.append(("remove", path))
+
+
+class TestProfileParamMenu:
+    """Right-click a field label: Make / Remove profile parameter, Copy config path."""
+
+    @pytest.fixture
+    def make_widget(self, qapp, qtbot, gui_context):
+        def make(supports_params=True, **backend_kwargs):
+            backend = FakeParamBackend(**backend_kwargs)
+            gui_context.config_manager.manager = backend
+            gui_context.config_manager.supports_params = supports_params
+            w = DynamicConfigWidget(gui_context, state={"path": "/sources/src_a"})
+            qtbot.addWidget(w)
+            _load(w)
+            return w, backend
+
+        return make
+
+    @staticmethod
+    def action_texts(menu):
+        return [a.text() for a in menu.actions()]
+
+    def test_row_labels_offer_the_menu(self, make_widget):
+        from qtpy.QtCore import Qt
+        from qtpy.QtWidgets import QLabel
+
+        w, _ = make_widget()
+        labels = [lbl for lbl in w.findChildren(QLabel) if "/sources/src_a/level" in (lbl.toolTip() or "")]
+        assert len(labels) == 1
+        assert labels[0].contextMenuPolicy() == Qt.CustomContextMenu
+
+    def test_no_menu_or_hint_when_params_unsupported(self, make_widget):
+        from qtpy.QtCore import Qt
+        from qtpy.QtWidgets import QLabel
+
+        w, _ = make_widget(supports_params=False, declared={"/sources/src_a/level": "lvl"})
+        assert not [lbl for lbl in w.findChildren(QLabel) if lbl.contextMenuPolicy() == Qt.CustomContextMenu]
+        assert not w.findChildren(QLabel, "ProfileParamHint")
+
+    def test_declared_field_shows_hint(self, make_widget):
+        from qtpy.QtWidgets import QLabel
+
+        w, _ = make_widget(declared={"/sources/src_a/level": "lvl"})
+        hints = [lbl.text() for lbl in w.findChildren(QLabel, "ProfileParamHint")]
+        assert hints == ["Profile parameter 'lvl' - can be set per run with --param / --params"]
+        assert w._widget_registry["level"]["toggle"].isEnabled() is True  # declared, not set this run
+
+    def test_make_parameter_declares_with_key_as_default_name(self, make_widget, monkeypatch):
+        w, backend = make_widget()
+        asked = []
+        monkeypatch.setattr(w, "_ask_param_name", lambda path, default: asked.append(default) or ("lvl", True))
+
+        menu = w._build_param_menu("/sources/src_a/level", "level")
+        assert self.action_texts(menu) == ["Make profile parameter...", "", "Copy config path"]
+        menu.actions()[0].trigger()
+
+        assert asked == ["level"]
+        assert backend.calls == [("declare", "lvl", "/sources/src_a/level")]
+
+    def test_cancel_or_empty_name_does_nothing(self, make_widget, monkeypatch):
+        w, backend = make_widget()
+        for answer in [("x", False), ("  ", True)]:
+            monkeypatch.setattr(w, "_ask_param_name", lambda path, default, a=answer: a)
+            w._make_param("/sources/src_a/level", "level")
+        assert backend.calls == []
+
+    def test_unapplied_edits_block_declaring(self, make_widget, monkeypatch):
+        w, backend = make_widget()
+        warnings = []
+        monkeypatch.setattr(module.MessageBox, "warning", lambda *a: warnings.append(a[-1]))
+        monkeypatch.setattr(w, "_ask_param_name", lambda path, default: ("lvl", True))
+        w._widget_registry["name"]["widget"].setText("edited")
+        assert w.btn_apply.isEnabled()
+
+        w._make_param("/sources/src_a/level", "level")
+        w._remove_param("/sources/src_a/level")
+
+        assert backend.calls == []
+        assert warnings == ["Apply or revert your unsaved changes first."] * 2
+
+    def test_declare_error_is_shown(self, make_widget, monkeypatch):
+        from blinkview.core.profile_params import ProfileParamError
+
+        w, _ = make_widget(error=ProfileParamError("Path '/x' already belongs to parameter 'y'"))
+        warnings = []
+        monkeypatch.setattr(module.MessageBox, "warning", lambda *a: warnings.append(a[-1]))
+        monkeypatch.setattr(w, "_ask_param_name", lambda path, default: ("lvl", True))
+
+        w._make_param("/sources/src_a/level", "level")
+        assert warnings == ["Path '/x' already belongs to parameter 'y'"]
+
+    def test_declared_field_offers_remove(self, make_widget):
+        w, backend = make_widget(declared={"/sources/src_a/level": "lvl"})
+        menu = w._build_param_menu("/sources/src_a/level", "level")
+        assert self.action_texts(menu)[0] == "Remove profile parameter 'lvl'"
+        menu.actions()[0].trigger()
+        assert backend.calls == [("remove", "/sources/src_a/level")]
+
+    def test_copy_config_path(self, make_widget, qapp):
+        w, _ = make_widget()
+        menu = w._build_param_menu("/sources/src_a/level", "level")
+        menu.actions()[-1].trigger()
+        assert qapp.clipboard().text() == "/sources/src_a/level"

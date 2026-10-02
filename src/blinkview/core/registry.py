@@ -20,6 +20,7 @@ from blinkview.core.logger import PrintLogger, SystemLogger
 from blinkview.core.module_snapshot import LatestModuleValueTracker
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.plugin_manager import PluginManager
+from blinkview.core.profile_params import ProfileParamError, load_params_files, params_label, parse_param_args
 from blinkview.core.settings_manager import SettingsManager
 from blinkview.core.sources import SourcesManager
 from blinkview.core.system_context import SystemContext
@@ -75,6 +76,21 @@ def _import_registerable_modules():
 _import_registerable_modules()
 
 
+def _param_field_type(factories, data: dict, path: str):
+    """JSON-schema type of a source/pipeline field, from that item's factory schema (by its
+    "type") - for profile parameters on fields the profile leaves null or unset."""
+    from blinkview.core.profile_params import get_pointer, schema_field_type
+
+    parts = path.strip("/").split("/")
+    category = {"sources": FactoryCategory.SOURCE, "pipelines": FactoryCategory.PARSER}.get(parts[0])
+    if category is None or len(parts) < 3:
+        return None
+    item_type = get_pointer(data, f"/{parts[0]}/{parts[1]}/type", None)
+    if not isinstance(item_type, str):
+        return None
+    return schema_field_type(factories.get_schema(category, item_type), parts[2:])
+
+
 class Registry:
     def __init__(
         self,
@@ -85,6 +101,8 @@ class Registry:
         settings=None,
         replay_mode: bool = False,
         replay_source_dir: Optional[Path] = None,
+        param_args: Optional[list] = None,
+        params_files: Optional[list] = None,
     ):
         # ==========================================
         # LAYER 1: Core Services
@@ -116,8 +134,13 @@ class Registry:
 
         factories = build_system_factory_registry()
 
+        # Profile parameters (one profile, several identical boards - see core/profile_params.py).
+        # The label ("left") names the session when -s isn't given, so instances are told apart.
+        cli_params = parse_param_args(param_args)
+        params_label_ = params_label(params_files, cli_params)
+
         self.file_manager = FileManager(
-            session_name=session_name,
+            session_name=session_name or params_label_,
             profile_name=profile_name,
             log_dir=log_dir,
             config_path=config_path,
@@ -140,9 +163,28 @@ class Registry:
             "reorder": {"enabled": True, "type": "default"},
             "central": {"enabled": True, "type": "default"},
         }
-        self.config = ConfigManager(
-            self.file_manager.get_config_path(), self.file_manager.get_session_path(suffix="autosave"), default_config
-        )
+        try:
+            loaded = load_params_files(params_files, self.file_manager.config_dir, self.file_manager.config_file_name)
+            params = {**loaded.values, **cli_params}
+            resolved_params_files = loaded.paths
+            if loaded.session_name and not session_name:
+                # A params file's default session name ("Left board") - an explicit -s still wins.
+                self.file_manager.rename_new_session(loaded.session_name)
+            self.config = ConfigManager(
+                self.file_manager.get_config_path(),
+                self.file_manager.get_session_path(suffix="autosave"),
+                default_config,
+                params=params,
+                param_type_of=lambda data, path: _param_field_type(factories, data, path),
+            )
+        except ProfileParamError:
+            self.file_manager.discard_empty_session()
+            raise
+        if params:
+            origins = {**loaded.origins, **dict.fromkeys(cli_params, "--param")}
+            self.file_manager.record_params(
+                self.config.param_values, resolved_params_files, params_label_, loaded.session_name, origins
+            )
         self.config.save_full_config(self.file_manager.get_session_path(suffix="start"))
         self.config.get_schema_by_path = self.get_schema_by_path
 

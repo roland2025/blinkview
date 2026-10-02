@@ -4,18 +4,22 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import re
 from copy import deepcopy
 
 from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtWidgets import (
+    QApplication,
     QCheckBox,
     QFormLayout,
     QFrame,
     QGraphicsOpacityEffect,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -28,6 +32,7 @@ from blinkview.ui.constants import WidgetName
 from blinkview.ui.utils.window_title import titled
 from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.config_widget_factory import WidgetFactory
+from blinkview.ui.widgets.message_box import MessageBox
 
 
 @register_widget_factory(WidgetName.DYNAMIC_CONFIG)
@@ -882,6 +887,27 @@ class DynamicConfigWidget(QWidget):
         field_layout.setSpacing(2)
         field_layout.addWidget(widget)
 
+        # Profile parameters (core/profile_params.py). A field set by --param/--params for this
+        # run is read-only: an edit would not reach the profile (ConfigManager keeps the profile's
+        # own value). A declared-but-unset field just says so.
+        abs_path = self._abs_path(current_path + [key])
+        param_name = self._param_binding_for(abs_path)
+        declared_name = param_name or self._param_declaration_for(abs_path)
+        if param_name:
+            hint = f"Set by profile parameter '{param_name}' for this run (not saved to the profile)"
+            hint_style = "color: #d39e00; font-size: 11px;"
+        elif declared_name:
+            hint = f"Profile parameter '{declared_name}' - can be set per run with --param / --params"
+            hint_style = "color: #888; font-size: 11px;"
+        if declared_name:
+            param_label = QLabel(hint)
+            param_label.setObjectName("ProfileParamHint")
+            param_label.setWordWrap(True)
+            param_label.setStyleSheet(hint_style)
+            field_layout.addWidget(param_label)
+
+        row_label = self._make_row_label(title, abs_path, key)
+
         if description:
             desc_label = QLabel(description)
             desc_label.setWordWrap(True)
@@ -894,7 +920,9 @@ class DynamicConfigWidget(QWidget):
         field_layout.addStretch()
         if is_required:
             registry[key] = {"type": "primitive", "widget": widget, "is_required": True}
-            layout.addRow(title, field_layout)
+            layout.addRow(row_label, field_layout)
+            if param_name:
+                widget.setEnabled(False)
         else:
             opt_layout = QHBoxLayout()
             opt_layout.setContentsMargins(0, 0, 0, 0)
@@ -921,7 +949,117 @@ class DynamicConfigWidget(QWidget):
             update_visuals(has_value)
 
             registry[key] = {"type": "primitive", "widget": widget, "is_required": False, "toggle": toggle_cb}
-            layout.addRow(title, opt_layout)
+            layout.addRow(row_label, opt_layout)
+            if param_name:
+                toggle_cb.setEnabled(False)
+                widget.setEnabled(False)
+
+    # --- Profile parameters ---
+
+    def _abs_path(self, rel_path: list) -> str:
+        base = (self.node.active_path or "/").rstrip("/")
+        return base + "/" + "/".join(str(p) for p in rel_path)
+
+    def _backend_config(self):
+        """The backend ConfigManager behind this widget's node, or None (test doubles, or a
+        node manager that doesn't wrap one)."""
+        try:
+            return getattr(getattr(self.node, "manager", None), "manager", None)
+        except ReferenceError:  # node.manager is a weakref proxy
+            return None
+
+    def _params_supported(self) -> bool:
+        """Only the profile config takes parameters - not e.g. the GUI config (watches)."""
+        try:
+            return getattr(getattr(self.node, "manager", None), "supports_params", False) is True
+        except ReferenceError:
+            return False
+
+    def _param_binding_for(self, abs_path: str):
+        """Name of the --param bound to this field for this run, or None."""
+        try:
+            name = getattr(self._backend_config(), "get_param_binding", lambda _p: None)(abs_path)
+        except ReferenceError:
+            return None
+        return name if isinstance(name, str) else None
+
+    def _param_declaration_for(self, abs_path: str):
+        """Name of the profile parameter declared for this field, or None."""
+        if not self._params_supported():
+            return None
+        try:
+            name = getattr(self._backend_config(), "get_param_declaration", lambda _p: None)(abs_path)
+        except ReferenceError:
+            return None
+        return name if isinstance(name, str) else None
+
+    def _make_row_label(self, title: str, abs_path: str, key: str) -> QLabel:
+        label = QLabel(title)
+        if self._params_supported():
+            label.setToolTip(f"{abs_path}\nRight-click: profile parameter options")
+            label.setContextMenuPolicy(Qt.CustomContextMenu)
+            label.customContextMenuRequested.connect(
+                lambda pos, lbl=label, path=abs_path, k=key: self._show_param_menu(lbl.mapToGlobal(pos), path, k)
+            )
+        return label
+
+    def _build_param_menu(self, abs_path: str, key: str) -> QMenu:
+        menu = QMenu(self)
+        declared = self._param_declaration_for(abs_path)
+        if declared:
+            act = menu.addAction(f"Remove profile parameter '{declared}'")
+            act.triggered.connect(lambda _=False: self._remove_param(abs_path))
+        else:
+            act = menu.addAction("Make profile parameter...")
+            act.triggered.connect(lambda _=False: self._make_param(abs_path, key))
+        menu.addSeparator()
+        copy_act = menu.addAction("Copy config path")
+        copy_act.triggered.connect(lambda _=False: QApplication.clipboard().setText(abs_path))
+        return menu
+
+    def _show_param_menu(self, global_pos, abs_path: str, key: str):
+        self._build_param_menu(abs_path, key).exec(global_pos)
+
+    def _ask_param_name(self, abs_path: str, default: str):
+        """(name, ok) - a seam for tests, like QInputDialog.getText."""
+        return QInputDialog.getText(
+            self,
+            titled("Make profile parameter"),
+            f"Parameter name for\n{abs_path}\n\nThen run e.g.  blink -p <profile> --param NAME=VALUE",
+            text=default,
+        )
+
+    def _param_change_blocked(self) -> bool:
+        """Declaring re-fetches and rebuilds this form - don't throw away unapplied edits."""
+        if self.btn_apply.isEnabled():
+            MessageBox.warning(self, "Profile parameter", "Apply or revert your unsaved changes first.")
+            return True
+        return False
+
+    def _make_param(self, abs_path: str, key: str):
+        if self._param_change_blocked():
+            return
+        name, ok = self._ask_param_name(abs_path, re.sub(r"[^A-Za-z0-9_]", "_", str(key)))
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        self._run_param_change(lambda cfg: cfg.declare_param(name, abs_path))
+
+    def _remove_param(self, abs_path: str):
+        if self._param_change_blocked():
+            return
+        self._run_param_change(lambda cfg: cfg.remove_param(abs_path))
+
+    def _run_param_change(self, change):
+        from blinkview.core.profile_params import ProfileParamError
+
+        config = self._backend_config()
+        if config is None:
+            return
+        try:
+            change(config)
+        except (ProfileParamError, ReferenceError) as e:
+            MessageBox.warning(self, "Profile parameter", str(e))
 
     def _apply_timeout(self):
         if self.applying_config:

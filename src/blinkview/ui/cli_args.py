@@ -17,6 +17,26 @@ def setup_gui_parser(parser):
         "-s", "--session", type=str, help="Session name for this run (used in file organization)", default=None
     )
     parser.add_argument("-l", "--logdir", type=str, help="Override base log directory", default=None)
+    add_param_arguments(parser)
+
+
+def add_param_arguments(parser):
+    """--params/--param: fill in the profile's declared parameters (see core/profile_params.py)."""
+    parser.add_argument(
+        "--params",
+        metavar="SET_OR_FILE",
+        action="append",
+        default=None,
+        help="Load profile parameter values from a named set (<profile>.params.SET.json next to the profile) "
+        "or a .json file path. Repeatable; later files win.",
+    )
+    parser.add_argument(
+        "--param",
+        metavar="NAME=VALUE",
+        action="append",
+        default=None,
+        help="Set one profile parameter for this run (overrides --params). Repeatable.",
+    )
 
 
 def setup_replay_parser(parser):

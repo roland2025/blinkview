@@ -150,6 +150,13 @@ class FileManager:
         # Serializes whole rotations (a second Clear while one is still waiting on loggers).
         self._rotation_lock = Lock()
 
+        # This run's profile parameters (see record_params / core/profile_params.py).
+        self.params: Dict[str, Any] = {}
+        self.params_files: list = []
+        self.params_label: Optional[str] = None
+        self.params_session: Optional[str] = None  # the params file's "session", if any
+        self.param_origins: Dict[str, str] = {}  # parameter -> "set 'left'" / "--param" / ...
+
         # Write initial metadata
         self.metadata = self._build_metadata()
 
@@ -177,6 +184,8 @@ class FileManager:
                 "source_file": str(self.get_config_path()),
                 "source_hash": _get_file_hash(self.get_config_path()),
                 "log_dir": str(self.log_dir.resolve()),
+                "params": dict(self.params),
+                "params_files": [str(p) for p in self.params_files],
             },
             "environment": {
                 "cwd": str(Path.cwd().resolve()),
@@ -203,6 +212,61 @@ class FileManager:
         self.metadata["finished_at"] = finished_time.isoformat() + "Z"
         self.metadata["duration_seconds"] = round(duration, 3)
 
+    def record_params(
+        self,
+        params: Dict[str, Any],
+        params_files=None,
+        label: Optional[str] = None,
+        session_name: Optional[str] = None,
+        origins: Optional[Dict[str, str]] = None,
+    ):
+        """Stores this run's effective profile parameters in metadata.json (kept across rotate())."""
+        self.params = dict(params or {})
+        self.params_files = list(params_files or [])
+        self.params_label = label
+        self.params_session = session_name
+        self.param_origins = dict(origins or {})
+        self.metadata["config"]["params"] = dict(self.params)
+        self.metadata["config"]["params_files"] = [str(p) for p in self.params_files]
+        if not self.replay_mode:
+            self.write_metadata()
+
+    def rename_new_session(self, display_name: str) -> bool:
+        """Gives the just-created session a different display name (and folder) - for a name
+        that is only known once the profile's files can be read, e.g. a params file's
+        "session". Only while nothing but metadata.json was written; returns False otherwise."""
+        clean = self._sanitize(display_name)
+        if clean == self.session_display_name:
+            return True
+        if self.replay_mode:
+            return False
+        try:
+            if any(f.name != "metadata.json" for f in self.session_dir.iterdir()):
+                return False
+        except OSError:
+            return False
+
+        self.discard_empty_session()
+        self.session_display_name = clean
+        self.session_dir = self._create_unique_session_dir()
+        self.metadata = self._build_metadata()
+        self.write_metadata()
+        return True
+
+    def discard_empty_session(self):
+        """Removes the just-created session folder if nothing but metadata.json was written to it -
+        for a startup that is aborted before anything ran (e.g. a bad --param)."""
+        try:
+            if not self.session_dir.is_dir():
+                return
+            contents = list(self.session_dir.iterdir())
+            if all(f.is_file() and f.name == "metadata.json" for f in contents):
+                for f in contents:
+                    f.unlink()
+                self.session_dir.rmdir()
+        except OSError as e:
+            print(f"[FileManager] Could not remove empty session folder {self.session_dir}: {e}")
+
     def _sanitize(self, name: str) -> str:
         # Allow alphanumeric and underscores, replace everything else with '_'
         # Then squeeze multiple underscores into one
@@ -223,7 +287,7 @@ class FileManager:
         record - at startup, and for each new session after rotate() (the caller saves the
         workspace copies first, see MainWindow's session rotation)."""
         self._snapshot_master_to_session("gui_config")
-        self._snapshot_master_to_session("gui_state")
+        self._snapshot_master_to_session("gui_state", self.get_gui_state_path(for_load=True))
 
     def _create_session_dir(self, create: bool = True) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -559,7 +623,7 @@ class FileManager:
 
         # Workspace (Live Master) - Skip if session_only is requested
         if not session_only:
-            atomic_json_dump(data, self.get_config_path("gui_state"))
+            atomic_json_dump(data, self.get_gui_state_path())
 
         # Session (Historical Archive) - Always save
         atomic_json_dump(data, self.get_session_path("gui_state", suffix))
@@ -579,6 +643,20 @@ class FileManager:
             return self._redirect_to_replay_scratch(original, filename)
         return original
 
+    def get_gui_state_path(self, for_load: bool = False) -> Path:
+        """The window layout file. An instance started with --params/--param keeps its own
+        (`<profile>.gui_state.<label>.json`, e.g. one per board) so several instances of one
+        profile don't overwrite each other's layout on exit. Until that file is first saved,
+        loading falls back to the shared `<profile>.gui_state.json`."""
+        shared = self.get_config_path("gui_state")
+        label = getattr(self, "params_label", None)
+        if not label:
+            return shared
+        own = self.get_config_path(f"gui_state.{self._sanitize(label)}")
+        if for_load and not own.exists():
+            return shared
+        return own
+
     def get_profile_path(self, type_name: str) -> Path:
         """Like get_config_path(), but always the live workspace profile - never redirected into
         a replay scratch folder. For user-owned data that isn't tied to a session (view layout
@@ -595,12 +673,12 @@ class FileManager:
             return self._redirect_to_replay_scratch(self.replay_source_dir / filename, filename)
         return self.session_dir / filename
 
-    def _snapshot_master_to_session(self, type_name: str):
+    def _snapshot_master_to_session(self, type_name: str, master_path: Optional[Path] = None):
         """
-        Copies the live workspace file to the session folder as a '.start' record.
-        Preserves original timestamps and permissions.
+        Copies the live workspace file (or `master_path`) to the session folder as a '.start'
+        record. Preserves original timestamps and permissions.
         """
-        master_path = self.get_config_path(type_name)
+        master_path = master_path or self.get_config_path(type_name)
         session_start_path = self.get_session_path(type_name, suffix="start")
 
         if master_path.exists():
