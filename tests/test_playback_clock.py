@@ -287,3 +287,77 @@ def test_step_rows_clamps_like_seek():
 
     clock.step_rows(1000)  # would overshoot far past bounds_max_ns
     assert clock.current_ts_ns == BASE + 10_000_000_000
+
+
+class TestEnterReplayFollowingEnd:
+    """enter_replay_following_end() is the `blink replay` entry: the recording streams in over
+    many ticks, so the cursor must track the loading edge (not resolve on the first batch, like
+    enter_replay_when_ready) until stop_following_end() pins it to the recording's last row."""
+
+    def test_follows_the_growing_edge_while_loading(self):
+        pool = FakeLogPool((0, 0))
+        clock = PlaybackClock(pool)
+        clock.enter_replay_following_end()
+        assert clock.mode is PlaybackMode.REPLAY
+
+        pool.bounds = (BASE, BASE + 1_000_000_000)
+        clock.tick(0)
+        assert clock.current_ts_ns == BASE + 1_000_000_000
+
+        pool.bounds = (BASE, BASE + 5_000_000_000)
+        clock.tick(1)
+        assert clock.current_ts_ns == BASE + 5_000_000_000
+        assert clock.mode is PlaybackMode.REPLAY
+
+    def test_already_loaded_data_lands_on_the_end_immediately(self):
+        clock = make_clock((BASE, BASE + 10_000_000_000))
+        clock.enter_replay_following_end()
+        assert clock.current_ts_ns == BASE + 10_000_000_000
+
+    def test_stop_pins_to_the_given_end_and_ignores_later_growth(self):
+        """Later growth = this process's own self-logging after the replay finished loading -
+        the cursor must stay on the recording's last row, not drift with it."""
+        pool = FakeLogPool((BASE, BASE + 5_000_000_000))
+        clock = PlaybackClock(pool)
+        clock.enter_replay_following_end()
+
+        clock.stop_following_end(BASE + 5_000_000_000)
+        pool.bounds = (BASE, BASE + 9_000_000_000)
+        clock.tick(0)
+
+        assert clock.current_ts_ns == BASE + 5_000_000_000
+        assert clock.mode is PlaybackMode.REPLAY
+
+    def test_stop_without_a_target_uses_the_pools_current_end(self):
+        pool = FakeLogPool((BASE, BASE + 5_000_000_000))
+        clock = PlaybackClock(pool)
+        clock.enter_replay_following_end()
+        pool.bounds = (BASE, BASE + 7_000_000_000)  # not ticked yet - stop must refresh bounds
+
+        clock.stop_following_end()
+
+        assert clock.current_ts_ns == BASE + 7_000_000_000
+
+    def test_user_seek_during_loading_wins_over_stop(self):
+        pool = FakeLogPool((BASE, BASE + 5_000_000_000))
+        clock = PlaybackClock(pool)
+        clock.enter_replay_following_end()
+
+        clock.seek(BASE + 1_000_000_000)
+        pool.bounds = (BASE, BASE + 9_000_000_000)
+        clock.tick(0)
+        assert clock.current_ts_ns == BASE + 1_000_000_000
+
+        clock.stop_following_end(BASE + 9_000_000_000)
+        assert clock.current_ts_ns == BASE + 1_000_000_000
+
+    def test_scrub_or_play_during_loading_stops_following(self):
+        for take_over in (lambda c: c.begin_scrub(), lambda c: c.play()):
+            pool = FakeLogPool((BASE, BASE + 5_000_000_000))
+            clock = PlaybackClock(pool)
+            clock.enter_replay_following_end()
+            take_over(clock)
+
+            clock.stop_following_end(BASE + 2_000_000_000)
+
+            assert clock.current_ts_ns == BASE + 5_000_000_000

@@ -479,6 +479,7 @@ class BlinkMainWindow(QMainWindow):
         # reasoning as the shutdown-toast state above.
         self._replay_load_toast = None
         self._replay_load_bridge: Optional[_ReplayLoadBridge] = None
+        self._replay_end_ts_ns: Optional[int] = None  # set by start_replay's on_finished
 
         print("[BlinkMainWindow] Initialization complete.")
 
@@ -921,6 +922,13 @@ class BlinkMainWindow(QMainWindow):
                 session_info.session_id,
             )
             log_pool.freeze_cold_storage_from_now()
+            # Captured before load_replay_session opens the self-logging gate, so the cursor
+            # lands on the recording's own last row rather than on this process's later logging.
+            recording_end_ts_ns = log_pool.get_time_bounds()[1]
+            registry.load_replay_session(session_info.path)
+            if registry.playback_clock is not None:
+                registry.playback_clock.stop_following_end(recording_end_ts_ns or None)
+            return
         else:
             parts = unified_log_parts(session_info)
             if not parts:
@@ -940,6 +948,9 @@ class BlinkMainWindow(QMainWindow):
                 # is plain Python/threading state, not a Qt call, so it's safe to do directly
                 # here rather than marshaling it through the bridge too.
                 registry.central.log_pool.freeze_cold_storage_from_now()
+                # The recording's last row, read while ingest is still paused - once it resumes,
+                # this process's own queued self-logging lands after it and moves the pool's end.
+                self._replay_end_ts_ns = registry.central.log_pool.get_time_bounds()[1] or None
                 registry.central.resume_ingest()
                 bridge.finished.emit()
 
@@ -967,6 +978,13 @@ class BlinkMainWindow(QMainWindow):
             self._replay_load_toast.dismiss()
             self._replay_load_toast = None
         self._replay_load_bridge = None
+
+        # The cursor has been following the end of the data while it streamed in (see
+        # Registry.load_replay_session) - pin it to the recording's last row now that it's known.
+        clock = self.gui_context.registry.playback_clock
+        if clock is not None:
+            clock.stop_following_end(self._replay_end_ts_ns)
+        self._replay_end_ts_ns = None
 
     def _relaunch_as_replay(self, session_info):
         """Spawns `blink replay <session_id>` as a new process. Called from a normal (non-replay)

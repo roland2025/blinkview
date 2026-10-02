@@ -421,8 +421,9 @@ class Registry:
         the main seek bar can pin to it (see playback_control.py's _seek_bar_bounds) rather than
         growing unbounded from the app's own background self-logging - not added as a selectable
         named range, since the seek bar already covers "the whole recording" by default, and
-        switches PlaybackClock into REPLAY (deferred via enter_replay_when_ready() until real
-        data exists).
+        switches PlaybackClock into REPLAY with the cursor following the end of the data as it
+        streams in (enter_replay_following_end() - the caller pins it to the recording's last
+        row via stop_following_end() once loading finishes).
 
         Only called explicitly by MainWindow.start_replay() - the production "Load Session..."
         menu / `blink replay` CLI path - once it already knows the session's folder
@@ -459,7 +460,6 @@ class Registry:
             if ranges_path.exists():
                 self.playback_ranges.load_from_file(ranges_path, replace=False)
 
-        default_start_ts_ns = None
         metadata_path = session_dir / "metadata.json"
         if metadata_path.exists() and self.playback_ranges is not None:
             import json
@@ -474,10 +474,9 @@ class Registry:
                 start_ts_ns = self._parse_iso_utc_to_epoch_ns(metadata.get("created_at"))
                 end_ts_ns = self._parse_iso_utc_to_epoch_ns(metadata.get("finished_at"))
                 if start_ts_ns is not None and end_ts_ns is not None and end_ts_ns > start_ts_ns:
-                    default_start_ts_ns = start_ts_ns
                     self.replay_session_bounds_ns = (start_ts_ns, end_ts_ns)
 
-        self.playback_clock.enter_replay_when_ready(default_start_ts_ns)
+        self.playback_clock.enter_replay_following_end()
 
     def rotate_session(self, display_name: Optional[str] = None) -> tuple[Path, Path]:
         """Ends the current session and starts a new one at runtime - sources, pipelines and the

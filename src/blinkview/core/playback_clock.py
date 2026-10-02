@@ -49,6 +49,10 @@ class PlaybackClock:
         self._pending_seek_ts_ns: Optional[int] = None
         self._has_pending_seek = False
 
+        # See enter_replay_following_end(): while set, every tick() pins current_ts_ns to
+        # bounds_max_ns, so a replay that's still streaming in shows its newest loaded data.
+        self._following_end = False
+
         self._refresh_bounds()
         self.current_ts_ns = self.bounds_max_ns
 
@@ -61,6 +65,7 @@ class PlaybackClock:
         clobber a real seek/go_live/etc. that happened to land first."""
         self._has_pending_seek = False
         self._pending_seek_ts_ns = None
+        self._following_end = False
 
     def go_live(self):
         self.mode = PlaybackMode.LIVE
@@ -89,7 +94,32 @@ class PlaybackClock:
             self._pending_seek_ts_ns = at_ts_ns
             self._has_pending_seek = True
 
+    def enter_replay_following_end(self):
+        """Switches to REPLAY with the cursor tracking the end of whatever has loaded so far -
+        the `blink replay` / "Load Session..." entry, where the recording streams in over many
+        ticks and the target ("the end of the recording") isn't known until it's done. Unlike
+        enter_replay_when_ready(), this doesn't resolve on the first tick with data (that would
+        land on the end of the first loaded batch); it keeps following until
+        stop_following_end() is called once loading finishes, or until any user action that
+        moves the cursor itself (seek/step/play/scrub/go_live) cancels it."""
+        self.mode = PlaybackMode.REPLAY
+        self._cancel_pending_seek()
+        self._following_end = True
+        if self.bounds_max_ns > 0:
+            self.current_ts_ns = self.bounds_max_ns
+
+    def stop_following_end(self, at_ts_ns: Optional[int] = None):
+        """Ends enter_replay_following_end()'s tracking, landing on at_ts_ns (the recording's
+        last row, captured before anything else could append after it) or on the pool's current
+        end if None. A no-op if the user already took over the cursor in the meantime."""
+        if not self._following_end:
+            return
+        self._following_end = False
+        self._refresh_bounds()
+        self.current_ts_ns = self._clamp(at_ts_ns if at_ts_ns is not None else self.bounds_max_ns)
+
     def play(self, speed: Optional[float] = None):
+        self._following_end = False
         if self.mode is not PlaybackMode.REPLAY:
             self.enter_replay()
         if speed is not None:
@@ -127,6 +157,7 @@ class PlaybackClock:
         seek() calls - nor trigger the is_playing auto-pause-at-rewind-bound/auto-go-live-at-
         forward-bound side effects partway through a drag the user hasn't released yet."""
         self.is_scrubbing = True
+        self._following_end = False
 
     def end_scrub(self):
         """Ends a manual scrub-bar drag - tick()'s auto-advance resumes from here."""
@@ -150,6 +181,9 @@ class PlaybackClock:
             self.current_ts_ns = self._clamp(target)
             self._has_pending_seek = False
             self._pending_seek_ts_ns = None
+
+        if self._following_end and self.mode is PlaybackMode.REPLAY:
+            self.current_ts_ns = self.bounds_max_ns
 
         if self.mode is PlaybackMode.LIVE:
             self.current_ts_ns = self.bounds_max_ns

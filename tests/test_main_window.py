@@ -360,10 +360,25 @@ class TestStartReplay:
         assert resume_calls == []
         assert freeze_calls == []
 
+        # The cursor follows the loading edge (what the real load_replay_session sets up) - once
+        # loading finishes it must pin to the recording's last row, read while ingest was still
+        # paused, not to whatever this process's own self-logging appends after resume.
+        recording_end_ns = 5_000_000_000
+        later_end_ns = 9_000_000_000
+        bounds = {"value": (1_000_000_000, recording_end_ns)}
+        monkeypatch.setattr(registry.central.log_pool, "get_time_bounds", lambda: bounds["value"])
+        monkeypatch.setattr(
+            registry.central,
+            "resume_ingest",
+            lambda: (resume_calls.append(True), bounds.update(value=(1_000_000_000, later_end_ns))),
+        )
+        registry.playback_clock.enter_replay_following_end()
+
         created["on_finished"]()
 
         assert resume_calls == [True]
         assert freeze_calls == [True]
+        assert registry.playback_clock.current_ts_ns == recording_end_ns
 
     def test_skips_unified_log_replay_when_already_resumed_from_cold_storage(self, main_window, monkeypatch, tmp_path):
         """A previous run with cold_storage_persist_on_close enabled may have already archived
@@ -381,14 +396,23 @@ class TestStartReplay:
             lambda parts, central, on_part_progress=None, on_finished=None: constructed.append(parts),
         )
 
+        registry = main_window.gui_context.registry
         load_calls = []
-        monkeypatch.setattr(main_window.gui_context.registry, "load_replay_session", lambda d: load_calls.append(d))
+
+        def fake_load(d):
+            load_calls.append(d)
+            registry.playback_clock.enter_replay_following_end()
+
+        monkeypatch.setattr(registry, "load_replay_session", fake_load)
+        monkeypatch.setattr(registry.central.log_pool, "get_time_bounds", lambda: (1_000_000_000, 5_000_000_000))
 
         main_window.start_replay(session)
 
         assert constructed == []
         assert load_calls == [tmp_path]
-        assert main_window.gui_context.registry.central.log_pool.frozen_since_sequence_id is not None
+        assert registry.central.log_pool.frozen_since_sequence_id is not None
+        # Everything is already resident, so the cursor lands on the recording's end right away.
+        assert registry.playback_clock.current_ts_ns == 5_000_000_000
 
 
 class TestRelaunchAsReplay:

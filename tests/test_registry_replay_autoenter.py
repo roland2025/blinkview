@@ -188,10 +188,11 @@ class TestLoadReplaySession:
         finally:
             second_replay.stop()
 
-    def test_playhead_lands_on_the_metadata_derived_start_once_data_streams_in(self, tmp_path):
-        """End-to-end: the deferred seek (PlaybackClock.enter_replay_when_ready) resolves to the
-        metadata-derived start on the first real tick() after data actually arrives in the pool -
-        not before, and not at bounds_min_ns of whatever real data happens to land first."""
+    def test_playhead_follows_the_loading_edge_then_pins_to_the_recordings_end(self, tmp_path):
+        """End-to-end: `blink replay` opens at the end of the recording. While data streams in,
+        the cursor tracks the newest loaded row (PlaybackClock.enter_replay_following_end); once
+        loading is done MainWindow pins it via stop_following_end, after which later rows (this
+        process's own self-logging) must not drag it along."""
         original = make_real_registry(tmp_path, "original_e")
         session_dir = original.file_manager.session_dir
         original.file_manager.stop()
@@ -200,34 +201,44 @@ class TestLoadReplaySession:
         import json
 
         metadata = json.loads((session_dir / "metadata.json").read_text())
-        expected_start_ns = _epoch_ns(metadata["created_at"])
+        base_ts = _epoch_ns(metadata["created_at"]) + 5_000_000_000
 
         replay = make_real_registry(tmp_path, "replay_e")
         try:
             replay.load_replay_session(session_dir)
-
-            # No data ingested yet - the seek must still be pending, current_ts_ns untouched.
-            assert replay.playback_clock.current_ts_ns == 0
+            clock = replay.playback_clock
 
             device = replay.id_registry.get_device("replaytest")
             module = device.get_module("floats")
             array_pool = replay.system_ctx.array_pool
             log_pool = replay.central.log_pool
-            # Real rows land well after expected_start_ns - a stand-in for "the file's rows are
-            # slightly after the session's created_at timestamp", which is fine: seeking to
-            # expected_start_ns just clamps up to bounds_min_ns once it's below the real data.
-            base_ts = expected_start_ns + 5_000_000_000
-            src = array_pool.create(PooledLogBatch, 5, 4096, has_levels=True, has_modules=True, has_devices=True)
-            with src:
-                for i in range(5):
-                    ts = base_ts + i * 100_000_000
-                    src.insert_any(ts, ts, f"{float(i)}".encode("ascii"), level=0, module=module.id, device=device.id)
-                log_pool.batch_append(src)
 
-            replay.playback_clock.tick(replay.now_ns())
+            def append_rows(first_ts, n):
+                src = array_pool.create(PooledLogBatch, n, 4096, has_levels=True, has_modules=True, has_devices=True)
+                with src:
+                    for i in range(n):
+                        ts = first_ts + i * 100_000_000
+                        src.insert_any(
+                            ts, ts, f"{float(i)}".encode("ascii"), level=0, module=module.id, device=device.id
+                        )
+                    log_pool.batch_append(src)
+                return first_ts + (n - 1) * 100_000_000
 
-            assert replay.playback_clock.mode is PlaybackMode.REPLAY
-            assert replay.playback_clock.current_ts_ns == replay.playback_clock.bounds_min_ns
+            first_batch_end = append_rows(base_ts, 5)
+            clock.tick(replay.now_ns())
+            assert clock.mode is PlaybackMode.REPLAY
+            assert clock.current_ts_ns == first_batch_end
+
+            recording_end = append_rows(first_batch_end + 100_000_000, 5)
+            clock.tick(replay.now_ns())
+            assert clock.current_ts_ns == recording_end
+
+            clock.stop_following_end(log_pool.get_time_bounds()[1])
+            append_rows(recording_end + 1_000_000_000, 3)
+            clock.tick(replay.now_ns())
+
+            assert clock.mode is PlaybackMode.REPLAY
+            assert clock.current_ts_ns == recording_end
         finally:
             replay.stop()
 
