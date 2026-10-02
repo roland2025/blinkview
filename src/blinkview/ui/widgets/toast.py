@@ -202,13 +202,18 @@ class ToastWidget(QWidget):
     def enterEvent(self, event):
         """Pause the countdown when the user hovers over the toast."""
         self.is_hovered = True
-        self.prog_anim.pause()
+        # Guard on state: enter/leave aren't guaranteed to pair up (toast spawned under the
+        # cursor, or hovered during the fade-out after hide_toast() stopped prog_anim), and Qt
+        # warns on pausing/resuming an animation that isn't Running/Paused respectively.
+        if self.prog_anim.state() == QVariantAnimation.Running:
+            self.prog_anim.pause()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         """Resume the countdown when the mouse leaves."""
         self.is_hovered = False
-        self.prog_anim.resume()
+        if self.prog_anim.state() == QVariantAnimation.Paused:
+            self.prog_anim.resume()
         super().leaveEvent(event)
 
         ToastManager._reposition_toasts()
