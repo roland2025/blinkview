@@ -48,6 +48,9 @@ def make_manager(tmp_path, **overrides):
     fm.config_dir = tmp_path / "config"
     fm.config_dir.mkdir(parents=True, exist_ok=True)
     fm.config_file_name = "myconfig"
+    fm.params = {}
+    fm.params_files = []
+    fm.params_label = None
     fm.metadata = {
         "loggers": {},
         "status": "active",

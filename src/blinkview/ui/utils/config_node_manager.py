@@ -27,6 +27,9 @@ class ConfigNodeManager(QObject):
         super().__init__(parent)
         self.gui_context = context
         self.manager: ConfigManager = config_manager or self.gui_context.registry.config
+        # Profile parameters (--param/--params) only exist for the profile config itself - not
+        # for e.g. the GUI config (watches), which is passed in explicitly.
+        self.supports_params = config_manager is None
 
         self.signal_received_config_schema.connect(self._broadcast)
 

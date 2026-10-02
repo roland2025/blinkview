@@ -88,6 +88,9 @@ from blinkview.utils.used_modules import print_used_modules
 SCREEN_CHANGE_SETTLE_MS = 2000
 SCREEN_CHANGE_PROMPT_SECONDS = 20.0
 
+# How often to check whether the profile files were saved by someone else (one stat() each).
+PROFILE_WATCH_INTERVAL_MS = 2000
+
 
 class _ShutdownWorker(QObject):
     """Runs Registry.stop() on a background QThread so shutdown-time compression (cold storage
@@ -190,7 +193,7 @@ class BlinkMainWindow(QMainWindow):
         # Standalone is indicated at the end only if necessary
         mode_suffix = " (Standalone)" if fm.standalone_mode else ""
         # Every other window/dialog title gets the same "{project} / {profile} - " prefix via titled().
-        set_title_prefix(fm.project_name, fm.profile_name)
+        set_title_prefix(fm.project_name, fm.profile_name, getattr(fm, "params_label", None))
         self.setWindowTitle(titled(f"{QCoreApplication.applicationName()}{mode_suffix} - {blinkview_version}"))
 
         self.gui_context.registry.configure_system()
@@ -205,6 +208,15 @@ class BlinkMainWindow(QMainWindow):
 
         self.gui_context.set_gui_config_handler(gui_config)
         self.gui_context.set_gui_config_manager(ConfigNodeManager(self.gui_context, gui_config))
+
+        # Another BlinkView instance on the same profile (one per board, see --params) - or a
+        # text editor - may save the profile files while we run. Offer to reload when it does.
+        self._profile_reload_offered = False
+        self._profile_watch_timer = QTimer(self)
+        self._profile_watch_timer.setInterval(PROFILE_WATCH_INTERVAL_MS)
+        self._profile_watch_timer.timeout.connect(self._poll_profile_changes)
+        if not getattr(self.gui_context.registry, "replay_mode", False):
+            self._profile_watch_timer.start()
 
         self.gui_context.set_widget_factory(self.create_widget)
 
@@ -496,7 +508,7 @@ class BlinkMainWindow(QMainWindow):
         9. check for updates
         """
         self.gui_context.gui_state.restore_window_geometry(
-            self.gui_context.registry.file_manager.get_config_path("gui_state"),
+            self.gui_context.registry.file_manager.get_gui_state_path(for_load=True),
             self._on_window_positioned,
         )
 
@@ -547,7 +559,7 @@ class BlinkMainWindow(QMainWindow):
 
     def _restore_docks_and_tabs(self):
         self.gui_context.gui_state.load_ui_state(
-            self.gui_context.registry.file_manager.get_config_path("gui_state"),
+            self.gui_context.registry.file_manager.get_gui_state_path(for_load=True),
             self._start_registry,
         )
 
@@ -683,6 +695,15 @@ class BlinkMainWindow(QMainWindow):
         plugins_act = menu.addAction("Plugins")
         plugins_act.triggered.connect(lambda: self.gui_context.config_manager.show("/plugins", "Plugins"))
 
+        params_act = menu.addAction("Profile Parameters...")
+        params_act.setToolTip("This instance's profile parameters: change them live, save them as a set")
+        params_act.triggered.connect(self.show_profile_params_dialog)
+
+        changed = any(m.poll_external_change() for m in self._profile_config_managers())
+        reload_act = menu.addAction("Reload Profile from Disk" + (" (changed)" if changed else ""))
+        reload_act.setToolTip("Apply changes saved to this profile by another BlinkView instance or an editor")
+        reload_act.triggered.connect(self.reload_profile_from_disk)
+
         menu.addSeparator()
 
         # Dynamic Content: Context-Aware Actions
@@ -717,6 +738,49 @@ class BlinkMainWindow(QMainWindow):
         menu.addSeparator()
         exit_act = menu.addAction("Quit")
         exit_act.triggered.connect(self.close)
+
+    def show_profile_params_dialog(self):
+        from blinkview.ui.native_dark_mode import set_native_dark_mode
+        from blinkview.ui.widgets.profile_params_dialog import ProfileParamsDialog
+
+        dialog = getattr(self, "_profile_params_dialog", None)
+        if dialog is None:
+            dialog = self._profile_params_dialog = ProfileParamsDialog(self.gui_context, self)
+            set_native_dark_mode(dialog)
+        dialog.refresh()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
+    # --- Profile changed on disk (another instance / an editor) ---
+
+    def _profile_config_managers(self) -> list:
+        managers = [self.gui_context.registry.config, self.gui_context.gui_config]
+        return [m for m in managers if m is not None and hasattr(m, "poll_external_change")]
+
+    def _poll_profile_changes(self):
+        """Offers a reload once per pending change (the menu action stays available)."""
+        if self._profile_reload_offered:
+            return
+        if not any(m.poll_external_change() for m in self._profile_config_managers()):
+            return
+        self._profile_reload_offered = True
+        ToastManager.show(
+            "This profile was changed on disk (another BlinkView instance or an editor).",
+            ToastType.INFO,
+            duration=15,
+            action_text="Reload",
+            action_callback=self.reload_profile_from_disk,
+            parent=self,
+        )
+
+    def reload_profile_from_disk(self):
+        """Applies the on-disk profile (and GUI config, e.g. watches) to this running instance.
+        Runs off the UI thread like any config edit - pipelines may restart."""
+        self._profile_reload_offered = False
+        managers = self._profile_config_managers()
+        return self.gui_context.registry.system_ctx.tasks.run_task(lambda: [m.reload_from_disk() for m in managers])
 
     # --- View menu / layout presets (plans/view-layout-presets.md) ---
 

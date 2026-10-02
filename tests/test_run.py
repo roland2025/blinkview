@@ -182,7 +182,21 @@ class TestNormalLaunch:
             "settings": reg.kwargs["settings"],
             "replay_mode": False,
             "replay_source_dir": None,
+            "param_args": None,
+            "params_files": None,
         }
+
+    def test_passes_profile_params_through(self):
+        args = make_args()
+        args.param = ["rtt_serial=1"]
+        args.params = ["left"]
+
+        with pytest.raises(SystemExit):
+            run_module.run(args)
+
+        kwargs = FakeRegistry.instances[0].kwargs
+        assert kwargs["param_args"] == ["rtt_serial=1"]
+        assert kwargs["params_files"] == ["left"]
 
     def test_does_not_set_replay_source_dir_when_not_replaying(self):
         args = make_args()

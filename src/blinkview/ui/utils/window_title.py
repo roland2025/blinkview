@@ -13,9 +13,12 @@ BlinkMainWindow at startup; one process only ever runs one project/profile."""
 _prefix = ""
 
 
-def set_title_prefix(project_name: str, profile_name: str):
+def set_title_prefix(project_name: str, profile_name: str, params_label: str = None):
+    """`params_label` (e.g. "left" from `--params left`) tells apart several instances of one
+    profile, one per device: "proj / rtt [left] - "."""
     global _prefix
-    _prefix = f"{project_name} / {profile_name} - "
+    suffix = f" [{params_label}]" if params_label else ""
+    _prefix = f"{project_name} / {profile_name}{suffix} - "
 
 
 def titled(title: str) -> str:

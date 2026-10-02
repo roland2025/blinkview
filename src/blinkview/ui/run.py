@@ -146,6 +146,7 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
         cache_path = export_numba_cache(settings)
         print(f"Numba cache exported to: {cache_path}")
 
+        from blinkview.core.profile_params import ProfileParamError
         from blinkview.core.registry import Registry
 
         # Passed straight into the constructor (not set on registry.file_manager afterward) so
@@ -153,15 +154,21 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
         # FileManager._redirect_to_replay_scratch) and IDRegistry (rehydrating itself from any
         # persisted cold storage under this same session - see IDRegistry.__init__) see it from
         # their own construction, not as a later side effect.
-        registry = Registry(
-            session_name=args.session,
-            profile_name=args.profile,
-            log_dir=args.logdir,
-            config_path=args.config,
-            settings=settings,
-            replay_mode=replay_mode,
-            replay_source_dir=Path(replay_session_info.path) if replay_session_info is not None else None,
-        )
+        try:
+            registry = Registry(
+                session_name=args.session,
+                profile_name=args.profile,
+                log_dir=args.logdir,
+                config_path=args.config,
+                settings=settings,
+                replay_mode=replay_mode,
+                replay_source_dir=Path(replay_session_info.path) if replay_session_info is not None else None,
+                param_args=getattr(args, "param", None),
+                params_files=getattr(args, "params", None),
+            )
+        except ProfileParamError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(2)
 
         from blinkview.ui.main_window import BlinkMainWindow
 
