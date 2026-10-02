@@ -33,6 +33,23 @@ def run_daemon(args):
     print(f"🔌 Starting Daemon on port: {args.port}")
 
 
+def apply_session_profile(args, session_info):
+    """Replays with the profile the session was recorded with (metadata.json config.profile)
+    unless --profile/--config was given explicitly. Only if that profile still exists in this
+    workspace - FileManager creates a missing profile dir on the fly, so a renamed/deleted
+    profile would otherwise silently open as a brand-new empty one."""
+    if args.profile is not None or args.config is not None or not session_info.profile:
+        return
+
+    from blinkview.utils.project_settings import get_workspace_dir
+
+    if (get_workspace_dir() / "profiles" / session_info.profile).is_dir():
+        args.profile = session_info.profile
+        print(f"Using session's profile '{session_info.profile}'.")
+    else:
+        print(f"Session's profile '{session_info.profile}' not found in this workspace - using the active profile.")
+
+
 def run_replay(args):
     # utils/session_lister.py deliberately avoids importing anything from blinkview.storage/
     # blinkview.parsers (the numba/id_registry cluster, ~600 modules) so --list stays fast.
@@ -58,6 +75,8 @@ def run_replay(args):
     if not parts:
         print(f"Session '{session_info.session_id}' has no unified log to replay.")
         sys.exit(1)
+
+    apply_session_profile(args, session_info)
 
     from blinkview.ui.run import run as run_gui
 
