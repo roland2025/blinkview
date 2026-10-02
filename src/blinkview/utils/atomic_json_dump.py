@@ -6,7 +6,14 @@
 
 import json
 import os
+import time
+import uuid
 from pathlib import Path
+
+# os.replace onto a file another process has open (Windows) fails with PermissionError -
+# typically another BlinkView instance re-reading the same profile at that moment.
+REPLACE_ATTEMPTS = 5
+REPLACE_RETRY_DELAY_S = 0.02
 
 
 def atomic_json_dump(data: dict, target_path: str | Path, indent: int = 4):
@@ -16,8 +23,9 @@ def atomic_json_dump(data: dict, target_path: str | Path, indent: int = 4):
     target = Path(target_path)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    # Create a hidden temp file in the same directory
-    temp_file = target.parent / f".{target.name}.tmp"
+    # Hidden temp file in the same directory, unique per write: several BlinkView instances may
+    # save the same profile at once, and a shared temp name would let them write into one file.
+    temp_file = target.parent / f".{target.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
 
     try:
         with open(temp_file, "w", encoding="utf-8") as f:
@@ -27,7 +35,14 @@ def atomic_json_dump(data: dict, target_path: str | Path, indent: int = 4):
             os.fsync(f.fileno())
 
         # Atomic swap (overwrites target if it exists)
-        temp_file.replace(target)
+        for attempt in range(REPLACE_ATTEMPTS):
+            try:
+                temp_file.replace(target)
+                break
+            except PermissionError:
+                if attempt == REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(REPLACE_RETRY_DELAY_S)
 
     except (IOError, OSError) as e:
         if temp_file.exists():

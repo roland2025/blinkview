@@ -139,7 +139,9 @@ class FileManager:
         # nowhere better to go - e.g. FileManager.stop()'s final bookkeeping - actually needs to
         # write) rather than unconditionally on every replay launch, which used to leave an
         # empty timestamped folder behind purely as a side effect of opening a replay.
-        self.session_dir = self._create_session_dir(create=not replay_mode)
+        # Unique (not exist_ok) for live runs: two instances of one profile (one per board, see
+        # --params) started within the same second would otherwise share - and corrupt - one folder.
+        self.session_dir = self._create_unique_session_dir() if not replay_mode else self._create_session_dir(False)
         print(f"[FileManager] session_dir={self.session_dir}")
 
         # Guards session_dir/metadata against FileLogger threads writing their stats while
@@ -244,12 +246,18 @@ class FileManager:
         one-second resolution, and mkdir(exist_ok=True) would silently merge two sessions rotated
         within the same second. Appends _2, _3, ... on collision."""
         base = self._create_session_dir(create=False)
+        base.parent.mkdir(parents=True, exist_ok=True)
         candidate = base
         n = 2
-        while candidate.exists():
-            candidate = base.with_name(f"{base.name}_{n}")
-            n += 1
-        candidate.mkdir(parents=True)
+        while True:
+            # mkdir itself is the check: another process (a second instance of this profile) may
+            # create the same name between an exists() test and our mkdir.
+            try:
+                candidate.mkdir()
+                break
+            except FileExistsError:
+                candidate = base.with_name(f"{base.name}_{n}")
+                n += 1
         return candidate
 
     def _get_git_info(self) -> Dict[str, Any]:
