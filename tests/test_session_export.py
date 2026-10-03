@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +13,15 @@ import zstandard
 
 from blinkview.storage.log_file_archive import compress_log_part_file
 from blinkview.utils import session_export
-from blinkview.utils.session_export import SessionRead, iter_session_lines
+from blinkview.utils.session_export import (
+    STATS_LOGGER_NAMES,
+    ExportFilter,
+    SessionRead,
+    iter_session_lines,
+    keep_line,
+)
+
+SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "blinkview"
 
 
 def _line(i: int, device: str = "nrf", module: str = "app.main") -> bytes:
@@ -298,3 +307,66 @@ class TestGaps:
         _, report = _read([_write_plain(tmp_path, 5, _lines(0, 1))], check_gaps=False)
 
         assert report.warnings == []
+
+
+def _log(device: str, module: str, message: str = "x") -> bytes:
+    return f"2026-10-01T12:00:00.000000Z I {device} {module}: {message}".encode()
+
+
+class TestStatsFilter:
+    @pytest.mark.parametrize(
+        "module",
+        [
+            "central.stats",
+            "source.nrf_rtt.stats",
+            "source.nrf_rtt.tuner",
+            "parser.nrf.stats_in",
+            "parser.nrf.stats_out",
+            "parser.nrf.tuner_out",
+            "reorder.stats_out",
+            "stats",
+        ],
+    )
+    def test_system_stats_lines_are_dropped(self, module):
+        assert not keep_line(_log("system", module, "1234 msg/s"), ExportFilter())
+
+    @pytest.mark.parametrize("module", ["statsd", "foo.stats_extra", "stats.collector", "app.tuner2"])
+    def test_system_modules_that_only_resemble_stats_are_kept(self, module):
+        assert keep_line(_log("system", module), ExportFilter())
+
+    @pytest.mark.parametrize(
+        "message",
+        ["send_command: reset", "J-Link connection lost", "Target system has no power"],
+    )
+    def test_other_system_lines_are_kept(self, message):
+        """Host actions that explain firmware behaviour."""
+        assert keep_line(_log("system", "source.nrf_rtt", message), ExportFilter())
+
+    def test_a_firmware_module_named_stats_is_kept(self):
+        assert keep_line(_log("nrf", "stats"), ExportFilter())
+        assert keep_line(_log("nrf", "app.stats"), ExportFilter())
+
+    def test_include_stats_keeps_them(self):
+        options = ExportFilter(include_stats=True)
+        assert keep_line(_log("system", "central.stats"), options)
+        assert keep_line(_log("system", "parser.nrf.tuner_out"), options)
+
+    def test_a_module_token_without_its_colon_still_matches(self):
+        assert not keep_line(b"2026-10-01T12:00:00.000000Z I system central.stats x", ExportFilter())
+
+    @pytest.mark.parametrize("line", [b"", b"garbage", b"two fields", b"only three fields", b"\xff\xfe \x00"])
+    def test_lines_with_fewer_than_four_fields_are_kept(self, line):
+        assert keep_line(line, ExportFilter())
+
+    def test_invalid_utf8_message_is_filtered_without_decoding(self):
+        assert keep_line(_log("nrf", "app.main") + b" \xff\xfe", ExportFilter())
+        assert not keep_line(_log("system", "central.stats") + b" \xff\xfe", ExportFilter())
+
+    def test_names_match_every_stats_child_call_in_src(self):
+        """A new logger.stats_child(name) would otherwise leak its lines into every export."""
+        used = set()
+        for path in SRC_ROOT.rglob("*.py"):
+            used |= set(re.findall(r"stats_child\(\s*[\"']([^\"']+)[\"']", path.read_text(encoding="utf-8")))
+
+        assert used, "found no stats_child calls - has the API been renamed?"
+        assert used == set(STATS_LOGGER_NAMES)
