@@ -172,9 +172,11 @@ def main():
     if args.command != "config":
         from blinkview.utils.github_update import GitHubUpdate
 
+        # stderr: a notice, not command output - `blink replay --list > file` (or an export to
+        # stdout) must not start with it.
         msg = GitHubUpdate.get_update_message()
         if msg:
-            print(f"[{msg}]\n")
+            print(f"[{msg}]\n", file=sys.stderr)
 
     try:
         # --- Execution ---
