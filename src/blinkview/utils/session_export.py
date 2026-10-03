@@ -14,10 +14,13 @@ Works in bytes end to end - lines are never decoded, so the output is byte-ident
 stored (invalid UTF-8 included)."""
 
 import errno
+import json
 import os
 import sys
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
+from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO, Iterable, Iterator, Optional, Sequence
 
@@ -51,16 +54,86 @@ ZST_INPUT_CHUNK_BYTES = 1 << 16
 
 @dataclass
 class ExportFilter:
-    """Which lines keep_line() drops."""
+    """Which lines keep_line() drops. Build it with make_filter() from command-line style values."""
 
     include_stats: bool = False
+    drop_modules: tuple[bytes, ...] = ()  # module prefixes, on any device
+    drop_tags: tuple[bytes, ...] = ()  # b"<device> <module prefix>" prefixes; b"<device> " drops a device
+    since: Optional[bytes] = None  # inclusive, in the line's own 27-byte UTC timestamp format
+    until: Optional[bytes] = None  # exclusive
+
+
+class FilterError(ValueError):
+    pass
+
+
+def make_filter(
+    include_stats: bool = False,
+    drop: Sequence[str] = (),
+    drop_device: Sequence[str] = (),
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+) -> ExportFilter:
+    """`drop` entries are a module prefix (`app.bms`, any device) or `"DEVICE module-prefix"`
+    (`"iot battery."`, one device) - logprep.py's rule. Raises FilterError on a value that would
+    silently do the wrong thing, like an empty prefix (which would drop every line)."""
+    drop_modules, drop_tags = [], []
+    for entry in drop:
+        words = entry.split(" ")
+        if not entry or "" in words or len(words) > 2:
+            raise FilterError(f'--drop {entry!r}: expected "MODULE-PREFIX" or "DEVICE MODULE-PREFIX"')
+        (drop_modules if len(words) == 1 else drop_tags).append(entry.encode())
+    for device in drop_device:
+        if not device or " " in device:
+            raise FilterError(f"--drop-device {device!r}: expected a single device name")
+        drop_tags.append(device.encode() + b" ")
+
+    since_ts = _parse_bound("--since", since)
+    until_ts = _parse_bound("--until", until)
+    if since_ts is not None and until_ts is not None and since_ts >= until_ts:
+        raise FilterError(f"--since {since} is not before --until {until}")
+
+    return ExportFilter(include_stats, tuple(drop_modules), tuple(drop_tags), since_ts, until_ts)
+
+
+def _parse_bound(flag: str, text: Optional[str]) -> Optional[bytes]:
+    """An ISO 8601 time as the 27-byte UTC prefix lines start with, so bounds compare as bytes
+    (fixed-width UTC sorts as text). With a zone (`Z`, `+03:00`) it's used as given; without one
+    it's local time."""
+    if text is None:
+        return None
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        raise FilterError(f"{flag} {text!r}: expected an ISO 8601 time, e.g. 2026-10-01T14:30 or 2026-10-01T11:30Z")
+    if moment.tzinfo is None:
+        moment = moment.astimezone()  # naive -> local
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ").encode()
+
+
+def line_timestamp(line: bytes) -> Optional[bytes]:
+    """The line's 27-byte UTC timestamp prefix, or None if it doesn't start with one (a cut-off
+    line, or not a log line at all). A shape check, not a full parse - it's run per line."""
+    ts = line[:27]
+    if len(ts) == 27 and ts[26] == 0x5A and ts[10] == 0x54 and ts[4] == 0x2D and ts[19] == 0x2E:  # Z T - .
+        return ts
+    return None
 
 
 def keep_line(line: bytes, options: ExportFilter) -> bool:
     """Whether a unified log line (no b"\\n") goes to the export.
 
     Line grammar: `<timestamp> <level> <device> <module>: <message>`. A line with fewer than
-    four fields isn't a log line, but it's still data - kept, never filtered."""
+    four fields isn't a log line, but it's still data - kept, never filtered by stats or drops.
+    Time bounds only apply to lines that start with a timestamp."""
+    if options.since is not None or options.until is not None:
+        ts = line_timestamp(line)
+        if ts is not None:
+            if options.since is not None and ts < options.since:
+                return False
+            if options.until is not None and ts >= options.until:
+                return False
+
     fields = line.split(b" ", 4)
     if len(fields) < 4:
         return True
@@ -73,6 +146,11 @@ def keep_line(line: bytes, options: ExportFilter) -> bool:
     if not options.include_stats and device == b"system":
         if module.rpartition(b".")[2] in _STATS_LOGGER_NAMES_BYTES:
             return False
+
+    if options.drop_modules and module.startswith(options.drop_modules):
+        return False
+    if options.drop_tags and (device + b" " + module).startswith(options.drop_tags):
+        return False
 
     return True
 
@@ -237,10 +315,31 @@ drops a benchmark source's `stats` output. --include-stats keeps them.
 All other `system` lines are kept on purpose: they record host actions that
 explain firmware behaviour (commands sent, resets, J-Link/RTT connection loss,
 target power).
+
+More filters, each repeatable (one value per flag):
+
+  --drop app.bms            drop modules starting with app.bms, on any device
+  --drop "iot battery."     drop modules starting with battery., on device iot
+  --drop-device iot         drop every line of device iot
+
+Prefixes are plain text: --drop app.bms also drops app.bmsx. Derived devices
+(parsed from another device's lines) are never dropped unless asked for.
+
+  --since 2026-10-01T14:30  keep lines at or after this time
+  --until 2026-10-01T15:00  keep lines before this time
+
+A time with a zone (Z, +03:00) is used as given; without one it's local time.
+Lines that don't start with a timestamp are kept.
+
+--summary prints per session to stderr: lines read and kept, first and last
+timestamp, the parts read, whether the session was recorded in dev mode, and
+the 40 most frequent kept `device module` tags - a quick way to pick --drop
+values.
 """
 
 # Kept lines are written in batches of this many.
 _WRITE_BATCH_LINES = 4096
+SUMMARY_TOP_TAGS = 40
 
 
 def setup_export_parser(parser: ArgumentParser) -> None:
@@ -251,13 +350,32 @@ def setup_export_parser(parser: ArgumentParser) -> None:
     parser.add_argument("-o", "--outdir", default=None, help="write OUTDIR/<session>.log per session instead of stdout")
     parser.add_argument("-l", "--logdir", default=None, help="base log directory for name lookups (as blink replay)")
     parser.add_argument("--include-stats", action="store_true", help="keep BlinkView's own stats/tuner lines")
+    parser.add_argument(
+        "--drop", action="append", default=[], metavar="TAG", help='drop "MODULE-PREFIX" or "DEVICE MODULE-PREFIX"'
+    )
+    parser.add_argument("--drop-device", action="append", default=[], metavar="DEV", help="drop all lines of DEV")
+    parser.add_argument("--since", default=None, metavar="TIME", help="keep lines at or after TIME (ISO 8601)")
+    parser.add_argument("--until", default=None, metavar="TIME", help="keep lines before TIME (ISO 8601)")
+    parser.add_argument("--summary", action="store_true", help="print a per-session summary to stderr")
 
 
 @dataclass
 class ExportSource:
     name: str  # session folder name - the output file is <name>.log
+    folder: Path  # where metadata.json is
     parts: list[Path]
     check_gaps: bool
+
+
+@dataclass
+class ExportResult:
+    report: SessionRead
+    read: int = 0
+    kept: int = 0
+    # Only filled with --summary:
+    first_ts: Optional[bytes] = None
+    last_ts: Optional[bytes] = None
+    tags: Optional[Counter] = None
 
 
 class ExportError(Exception):
@@ -266,12 +384,15 @@ class ExportError(Exception):
 
 def run_export(args) -> None:
     try:
+        try:
+            options = make_filter(args.include_stats, args.drop, args.drop_device, args.since, args.until)
+        except FilterError as e:
+            raise ExportError(str(e))
         sources = _resolve_sources(args)
-        options = ExportFilter(include_stats=args.include_stats)
         if args.outdir is None:
-            _export_to_stdout(sources[0], options)
+            _export_to_stdout(sources[0], options, args.summary)
         else:
-            _export_to_dir(sources, Path(args.outdir), options)
+            _export_to_dir(sources, Path(args.outdir), options, args.summary)
     except ExportError as e:
         sys.exit(f"blink export: {e}")
 
@@ -304,7 +425,8 @@ def _resolve_sources(args) -> list[ExportSource]:
 def _resolve_one(arg: str, logdir: Optional[str]) -> ExportSource:
     path = Path(arg)
     if path.is_file():
-        return ExportSource(name=path.resolve().parent.name, parts=[path], check_gaps=False)
+        folder = path.resolve().parent
+        return ExportSource(name=folder.name, folder=folder, parts=[path], check_gaps=False)
     if path.is_dir():
         return _source_for_folder(path)
 
@@ -325,13 +447,13 @@ def _source_for_folder(folder: Path) -> ExportSource:
     parts = unified_log_parts(info)
     if not parts:
         raise ExportError(f"no session.NNNN.log[.zst] parts in {folder}")
-    return ExportSource(name=folder.resolve().name, parts=parts, check_gaps=True)
+    return ExportSource(name=folder.resolve().name, folder=folder, parts=parts, check_gaps=True)
 
 
-def _export_to_stdout(source: ExportSource, options: ExportFilter) -> None:
+def _export_to_stdout(source: ExportSource, options: ExportFilter, summary: bool) -> None:
     out = sys.stdout.buffer
     try:
-        report, _, _ = _export_session(source, out, options)
+        result = _export_session(source, out, options, summary)
         out.flush()
     except OSError as e:
         # The reader went away (`blink export X | head`). On Windows a write to a closed pipe can
@@ -342,33 +464,91 @@ def _export_to_stdout(source: ExportSource, options: ExportFilter) -> None:
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
         sys.exit(0)
-    _print_warnings(source, report)
+    _print_warnings(source, result.report)
+    if summary:
+        _print_summary(source, result)
 
 
-def _export_to_dir(sources: list[ExportSource], outdir: Path, options: ExportFilter) -> None:
+def _export_to_dir(sources: list[ExportSource], outdir: Path, options: ExportFilter, summary: bool) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     for source in sources:
         out_path = outdir / f"{source.name}.log"
         with open(out_path, "wb") as out:
-            report, read, kept = _export_session(source, out, options)
-        print(f"{out_path}: {kept:,} of {read:,} lines", file=sys.stderr)
-        _print_warnings(source, report)
+            result = _export_session(source, out, options, summary)
+        print(f"{out_path}: {result.kept:,} of {result.read:,} lines", file=sys.stderr)
+        _print_warnings(source, result.report)
+        if summary:
+            _print_summary(source, result)
 
 
-def _export_session(source: ExportSource, out: BinaryIO, options: ExportFilter) -> tuple[SessionRead, int, int]:
-    report = SessionRead()
-    read = kept = 0
+def _export_session(source: ExportSource, out: BinaryIO, options: ExportFilter, summary: bool) -> ExportResult:
+    result = ExportResult(report=SessionRead())
+    if summary:
+        result.tags = Counter()
     batch: list[bytes] = []
-    for line in iter_session_lines(source.parts, report, check_gaps=source.check_gaps):
-        read += 1
-        if keep_line(line, options):
-            batch.append(line)
-            if len(batch) >= _WRITE_BATCH_LINES:
-                kept += len(batch)
-                _write_lines(out, batch)
-    kept += len(batch)
+    for line in iter_session_lines(source.parts, result.report, check_gaps=source.check_gaps):
+        result.read += 1
+        if not keep_line(line, options):
+            continue
+        batch.append(line)
+        if len(batch) >= _WRITE_BATCH_LINES:
+            result.kept += len(batch)
+            _write_lines(out, batch)
+        if summary:
+            _count_for_summary(result, line)
+    result.kept += len(batch)
     _write_lines(out, batch)
-    return report, read, kept
+    return result
+
+
+def _count_for_summary(result: ExportResult, line: bytes) -> None:
+    # A cut-off last line either still has its whole timestamp (the row did start then) or fails
+    # line_timestamp()'s shape check - so no partial-line special case is needed here.
+    ts = line_timestamp(line)
+    if ts is not None:
+        if result.first_ts is None:
+            result.first_ts = ts
+        result.last_ts = ts
+    fields = line.split(b" ", 4)
+    tag = fields[2] + b" " + fields[3].removesuffix(b":") if len(fields) >= 4 else b"(not a log line)"
+    result.tags[tag] += 1
+
+
+def _print_summary(source: ExportSource, result: ExportResult) -> None:
+    def text(raw: bytes) -> str:
+        return raw.decode("utf-8", errors="replace")
+
+    lines = [f"summary: {source.name}"]
+    lines.append(f"  lines     {result.kept:,} kept of {result.read:,} read")
+    if result.first_ts is None:
+        lines.append("  time      no timestamped lines kept")
+    else:
+        lines.append(f"  time      {text(result.first_ts)} .. {text(result.last_ts)} (UTC)")
+    lines.append(f"  parts     {', '.join(_describe_part(part) for part in result.report.parts)}")
+    lines.append(f"  dev mode  {_recorded_dev_mode(source.folder)}")
+    if result.tags:
+        lines.append(f"  top tags  (of {len(result.tags):,}, by kept lines)")
+        for tag, count in result.tags.most_common(SUMMARY_TOP_TAGS):
+            lines.append(f"    {count:>10,}  {text(tag)}")
+    print("\n".join(lines), file=sys.stderr)
+
+
+def _describe_part(part: PartReport) -> str:
+    if part.path is None:
+        return f"{part.listed.name} (vanished)"
+    notes = [note for note, on in (("zst", part.compressed), ("warning", part.warning is not None)) if on]
+    return part.path.name + (f" ({', '.join(notes)})" if notes else "")
+
+
+def _recorded_dev_mode(folder: Path) -> str:
+    """From metadata.json, for the summary only - filtering never depends on it (older sessions
+    don't record it)."""
+    try:
+        meta = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+        dev_mode = meta["environment"]["dev_mode"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return "not recorded"
+    return "on" if dev_mode else "off"
 
 
 def _write_lines(out: BinaryIO, batch: list[bytes]) -> None:
