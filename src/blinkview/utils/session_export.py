@@ -290,93 +290,100 @@ def _format_ranges(numbers: list[int]) -> str:
 # --- Command line ---
 
 EXPORT_DESCRIPTION = """\
-Write a recorded session's unified log out as plain text, filtered.
+Write a recorded BlinkView session out as plain text, filtered - for reading
+a session outside the GUI, by hand or from scripts and AI tools.
 
-SESSION is a session folder, a single session.NNNN.log[.zst] part file, or a
-session id or display name looked up like `blink replay` (in this project's
-log folder, or under --logdir). A path that exists wins over a name. A name
-lookup also matches part of a name, so the session it resolved to is printed
-on stderr. --last exports the newest session instead.
+SESSIONS
+  Run inside the BlinkView project (the folder with .blinkview/). `blink
+  replay --list` lists its sessions, newest first. An id such as
+  20261002_162827_default_bench is <local date>_<local time>_<profile>_<name>.
+  SESSION may be an id, part of an id or display name (the match is printed
+  on stderr), a session folder, or one session.NNNN.log[.zst] part file.
+  [active] sessions are still recording; an export gives everything flushed
+  so far (every few seconds).
 
-Output is the lines exactly as stored, one per log row:
+OUTPUT
+  One line per log row, byte for byte as recorded:
 
-  YYYY-MM-DDTHH:MM:SS.uuuuuuZ <level> <device> <module>: <message>
+    2026-10-02T13:28:27.664524Z I board app.sensor: temperature 21.5 C
+    <timestamp, UTC>            L <device> <module>: <message>
 
-Timestamps are UTC; level is a single letter. One session goes to stdout
-unless -o is given. With -o, each session is written to
-OUTDIR/<session folder name>.log. Plain and compressed (.zst) parts are read
-in order; a truncated, corrupt or missing part is reported on stderr and the
-rest is still exported.
+  Times quoted from a console or the GUI are usually local - convert first.
+  Levels: T trace, D debug, I info, W warning, E error, F fatal, C critical.
+  Device `system` is BlinkView itself on the host; the others are configured
+  devices, or devices derived from another device's data (repeating its text,
+  or the only readable form of binary data such as CAN). Lines without this
+  shape, e.g. continuations of a multi-line message, are always kept.
 
-Filtering: BlinkView's own throughput diagnostics are dropped - `system` lines
-whose module ends in .stats, .stats_in, .stats_out, .tuner or .tuner_out.
-Sessions recorded before dev mode, or with it on, are mostly these. This also
-drops a benchmark source's `stats` output. --include-stats keeps them.
+  Lines go to stdout, or with -o to files - prefer -o, sessions are often
+  100k+ lines. stderr gets the resolved session, --summary and warnings (a
+  truncated, corrupt or missing part; the rest is still exported). Exit
+  status: 0 done, 1 error, 2 bad command line.
 
-All other `system` lines are kept on purpose: they record host actions that
-explain firmware behaviour (commands sent, resets, J-Link/RTT connection loss,
-target power).
+FILTERING
+  Only BlinkView's own throughput diagnostics are dropped by default: `system`
+  modules ending in .stats, .stats_in, .stats_out, .tuner or .tuner_out.
+  Check the other `system` lines when a device misbehaves: they record what
+  the host did - commands sent (`send_command: reset`), hardware resets,
+  J-Link/RTT connection loss, `Target system has no power`. `system gui.lag`
+  is GUI performance noise.
 
-More filters, each repeatable (one value per flag):
+PRESETS
+  Named --drop/--drop-device sets in <profile>.export_presets.json next to
+  the profile JSON - the one the session was recorded with, else the active
+  profile's:
 
-  --drop app.bms            drop modules starting with app.bms, on any device
-  --drop "iot battery."     drop modules starting with battery., on device iot
-  --drop-device iot         drop every line of device iot
+    {"quiet": {"description": "...", "drop": ["app.heartbeat"],
+               "drop_device": ["can0"]}}
+"""
 
-Prefixes are plain text: --drop app.bms also drops app.bmsx. Derived devices
-(parsed from another device's lines) are never dropped unless asked for.
-
-  --since 2026-10-01T14:30  keep lines at or after this time
-  --until 2026-10-01T15:00  keep lines before this time
-
-A time with a zone (Z, +03:00) is used as given; without one it's local time.
-Lines that don't start with a timestamp are kept.
-
---summary prints per session to stderr: lines read and kept, first and last
-timestamp, the parts read, whether the session was recorded in dev mode, and
-the 40 most frequent kept `device module` tags - a quick way to pick --drop
-values.
-
-Presets: --preset NAME applies a named set of drops kept in an
-export_presets.json file next to the profile JSON
-(.blinkview/profiles/<profile>/export_presets.json):
-
-  {
-    "analysis": {
-      "description": "what an analysis needs",
-      "drop": ["app.bms", "iot battery."],
-      "drop_device": ["can0"]
-    }
-  }
-
-The file is looked up per session: first in the folder of the profile the
-session was recorded with (metadata.json), then in the active profile's
-folder. --drop and --drop-device add to the preset.
+EXPORT_EPILOG = """\
+typical use:
+  blink replay --list                                   which sessions exist
+  blink export --last --summary -o OUT                  what's in the newest one
+  blink export --last --preset quiet -o OUT             with a preset's drops
+  blink export 20261002_162827 --since 2026-10-02T16:30 --until 2026-10-02T16:45
+  blink export --last | grep -E "^[^ ]+ [EFC] "         errors and worse only
 """
 
 # Kept lines are written in batches of this many.
 _WRITE_BATCH_LINES = 4096
 SUMMARY_TOP_TAGS = 40
-PRESETS_FILE_NAME = "export_presets.json"
+# <profile>.export_presets.json next to the profile JSON - FileManager.get_profile_path()'s naming,
+# like <profile>.view_presets.json.
+PRESETS_FILE_SUFFIX = ".export_presets.json"
 _PRESET_KEYS = {"description", "drop", "drop_device"}
 
 
 def setup_export_parser(parser: ArgumentParser) -> None:
     parser.description = EXPORT_DESCRIPTION
+    parser.epilog = EXPORT_EPILOG
     parser.formatter_class = RawDescriptionHelpFormatter
-    parser.add_argument("sessions", nargs="*", metavar="SESSION", help="session folder, part file, id or name")
-    parser.add_argument("--last", action="store_true", help="export the most recently recorded session")
-    parser.add_argument("-o", "--outdir", default=None, help="write OUTDIR/<session>.log per session instead of stdout")
-    parser.add_argument("-l", "--logdir", default=None, help="base log directory for name lookups (as blink replay)")
+    parser.add_argument("sessions", nargs="*", metavar="SESSION", help="session id, part of one, folder or part file")
+    parser.add_argument("--last", action="store_true", help="export the newest session")
+    parser.add_argument(
+        "-o", "--outdir", default=None, help="write OUTDIR/<session id>.log per session (needed for several)"
+    )
+    parser.add_argument("-l", "--logdir", default=None, help="log folder to look names up in (default: the project's)")
     parser.add_argument("--include-stats", action="store_true", help="keep BlinkView's own stats/tuner lines")
     parser.add_argument(
-        "--drop", action="append", default=[], metavar="TAG", help='drop "MODULE-PREFIX" or "DEVICE MODULE-PREFIX"'
+        "--drop",
+        action="append",
+        default=[],
+        metavar="TAG",
+        help='drop a module prefix on any device ("app.heartbeat") or on one device ("bridge power."); repeatable',
     )
-    parser.add_argument("--drop-device", action="append", default=[], metavar="DEV", help="drop all lines of DEV")
-    parser.add_argument("--since", default=None, metavar="TIME", help="keep lines at or after TIME (ISO 8601)")
-    parser.add_argument("--until", default=None, metavar="TIME", help="keep lines before TIME (ISO 8601)")
-    parser.add_argument("--summary", action="store_true", help="print a per-session summary to stderr")
-    parser.add_argument("--preset", default=None, metavar="NAME", help=f"apply the drops of preset NAME ({PRESETS_FILE_NAME})")
+    parser.add_argument("--drop-device", action="append", default=[], metavar="DEV", help="drop device DEV; repeatable")
+    parser.add_argument(
+        "--since", default=None, metavar="TIME", help="keep lines at/after TIME: ISO 8601, local unless Z or +hh:mm"
+    )
+    parser.add_argument("--until", default=None, metavar="TIME", help="keep lines before TIME (as --since)")
+    parser.add_argument(
+        "--summary", action="store_true", help="per session on stderr: counts, time span, parts, dev mode, top 40 tags"
+    )
+    parser.add_argument(
+        "--preset", default=None, metavar="NAME", help="apply preset NAME; --drop/--drop-device add to it"
+    )
 
 
 @dataclass
@@ -440,14 +447,18 @@ def _filter_for(source: ExportSource, args) -> ExportFilter:
 
 
 def preset_files_for(session_folder: Path) -> list[Path]:
-    """Where to look for the session's export_presets.json, in order: the folder of the profile
-    it was recorded with (metadata.json config.source_file), then the active profile's folder.
-    Duplicates removed; whether each exists is load_preset()'s business."""
+    """Where to look for the session's <profile>.export_presets.json, in order: next to the
+    profile JSON it was recorded with (metadata.json config.source_file), then next to the active
+    profile's JSON (<profile dir>/<profile>.json). Duplicates removed; whether each exists is
+    load_preset()'s business."""
     candidates = []
-    source_file = _read_metadata(session_folder).get("config", {}).get("source_file")
+    config = _read_metadata(session_folder).get("config")
+    source_file = config.get("source_file") if isinstance(config, dict) else None
     if isinstance(source_file, str) and source_file:
-        candidates.append(Path(source_file).parent / PRESETS_FILE_NAME)
-    candidates.append(resolve_active_profile_dir() / PRESETS_FILE_NAME)
+        profile_json = Path(source_file)
+        candidates.append(profile_json.with_name(profile_json.stem + PRESETS_FILE_SUFFIX))
+    active_dir = resolve_active_profile_dir()
+    candidates.append(active_dir / (active_dir.name + PRESETS_FILE_SUFFIX))
     unique = []
     for path in candidates:
         if path not in unique:
@@ -461,7 +472,7 @@ def load_preset(name: str, candidates: Sequence[Path]) -> Preset:
     file = next((path for path in candidates if path.is_file()), None)
     if file is None:
         looked = ", ".join(str(path) for path in candidates)
-        raise ExportError(f"--preset {name}: no {PRESETS_FILE_NAME} found (looked in: {looked})")
+        raise ExportError(f"--preset {name}: no presets file found (looked for: {looked})")
     try:
         presets = json.loads(file.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
