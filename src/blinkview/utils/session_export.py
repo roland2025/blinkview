@@ -13,14 +13,25 @@ plain Python and zstandard instead of going through UnifiedLogReplay.
 Works in bytes end to end - lines are never decoded, so the output is byte-identical to what was
 stored (invalid UTF-8 included)."""
 
+import errno
 import os
+import sys
+from argparse import ArgumentParser, RawDescriptionHelpFormatter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Iterable, Iterator, Optional, Sequence
 
 import zstandard
 
-from blinkview.utils.session_lister import ARCHIVE_SUFFIX, existing_part, part_index
+from blinkview.utils.session_lister import (
+    ARCHIVE_SUFFIX,
+    SessionInfo,
+    existing_part,
+    part_index,
+    resolve_log_root,
+    resolve_session,
+    unified_log_parts,
+)
 
 # Plain parts are read in chunks of this many bytes.
 PLAIN_CHUNK_BYTES = 1 << 20
@@ -195,3 +206,178 @@ def _format_ranges(numbers: list[int]) -> str:
         prev = n
     ranges.append((start, prev))
     return ", ".join(f"{a:04d}" if a == b else f"{a:04d}-{b:04d}" for a, b in ranges)
+
+
+# --- Command line ---
+
+EXPORT_DESCRIPTION = """\
+Write a recorded session's unified log out as plain text, filtered.
+
+SESSION is a session folder, a single session.NNNN.log[.zst] part file, or a
+session id or display name looked up like `blink replay` (in this project's
+log folder, or under --logdir). A path that exists wins over a name. A name
+lookup also matches part of a name, so the session it resolved to is printed
+on stderr. --last exports the newest session instead.
+
+Output is the lines exactly as stored, one per log row:
+
+  YYYY-MM-DDTHH:MM:SS.uuuuuuZ <level> <device> <module>: <message>
+
+Timestamps are UTC; level is a single letter. One session goes to stdout
+unless -o is given. With -o, each session is written to
+OUTDIR/<session folder name>.log. Plain and compressed (.zst) parts are read
+in order; a truncated, corrupt or missing part is reported on stderr and the
+rest is still exported.
+
+Filtering: BlinkView's own throughput diagnostics are dropped - `system` lines
+whose module ends in .stats, .stats_in, .stats_out, .tuner or .tuner_out.
+Sessions recorded before dev mode, or with it on, are mostly these. This also
+drops a benchmark source's `stats` output. --include-stats keeps them.
+
+All other `system` lines are kept on purpose: they record host actions that
+explain firmware behaviour (commands sent, resets, J-Link/RTT connection loss,
+target power).
+"""
+
+# Kept lines are written in batches of this many.
+_WRITE_BATCH_LINES = 4096
+
+
+def setup_export_parser(parser: ArgumentParser) -> None:
+    parser.description = EXPORT_DESCRIPTION
+    parser.formatter_class = RawDescriptionHelpFormatter
+    parser.add_argument("sessions", nargs="*", metavar="SESSION", help="session folder, part file, id or name")
+    parser.add_argument("--last", action="store_true", help="export the most recently recorded session")
+    parser.add_argument("-o", "--outdir", default=None, help="write OUTDIR/<session>.log per session instead of stdout")
+    parser.add_argument("-l", "--logdir", default=None, help="base log directory for name lookups (as blink replay)")
+    parser.add_argument("--include-stats", action="store_true", help="keep BlinkView's own stats/tuner lines")
+
+
+@dataclass
+class ExportSource:
+    name: str  # session folder name - the output file is <name>.log
+    parts: list[Path]
+    check_gaps: bool
+
+
+class ExportError(Exception):
+    pass
+
+
+def run_export(args) -> None:
+    try:
+        sources = _resolve_sources(args)
+        options = ExportFilter(include_stats=args.include_stats)
+        if args.outdir is None:
+            _export_to_stdout(sources[0], options)
+        else:
+            _export_to_dir(sources, Path(args.outdir), options)
+    except ExportError as e:
+        sys.exit(f"blink export: {e}")
+
+
+def _resolve_sources(args) -> list[ExportSource]:
+    if args.last and args.sessions:
+        raise ExportError("give either SESSION arguments or --last, not both")
+    if not args.last and not args.sessions:
+        raise ExportError("give a SESSION (folder, part file, id or name) or --last")
+
+    if args.last:
+        log_dir, project_name = resolve_log_root(log_dir=args.logdir)
+        session = resolve_session(log_dir, project_name, last=True)
+        if session is None:
+            raise ExportError(f"no recorded session with a unified log in {Path(log_dir) / project_name}")
+        print(f"--last: {session.session_id}", file=sys.stderr)
+        sources = [_source_for_folder(session.path)]
+    else:
+        sources = [_resolve_one(arg, args.logdir) for arg in args.sessions]
+
+    if len(sources) > 1 and args.outdir is None:
+        raise ExportError("several sessions need -o OUTDIR (stdout takes one)")
+    names = [source.name for source in sources]
+    clashes = sorted({name for name in names if names.count(name) > 1})
+    if clashes:
+        raise ExportError(f"several arguments would write the same output file: {', '.join(clashes)}")
+    return sources
+
+
+def _resolve_one(arg: str, logdir: Optional[str]) -> ExportSource:
+    path = Path(arg)
+    if path.is_file():
+        return ExportSource(name=path.resolve().parent.name, parts=[path], check_gaps=False)
+    if path.is_dir():
+        return _source_for_folder(path)
+
+    log_dir, project_name = resolve_log_root(log_dir=logdir)
+    session = resolve_session(log_dir, project_name, name=arg)
+    if session is None:
+        raise ExportError(
+            f"no session folder, part file or recorded session matching {arg!r} "
+            f"(looked in {Path(log_dir) / project_name})"
+        )
+    print(f"{arg}: {session.session_id}", file=sys.stderr)
+    return _source_for_folder(session.path)
+
+
+def _source_for_folder(folder: Path) -> ExportSource:
+    # unified_log_parts() only looks at the folder; the rest of SessionInfo is metadata.json's.
+    info = SessionInfo(folder.name, folder, folder.name, "", "unknown", None, None, None)
+    parts = unified_log_parts(info)
+    if not parts:
+        raise ExportError(f"no session.NNNN.log[.zst] parts in {folder}")
+    return ExportSource(name=folder.resolve().name, parts=parts, check_gaps=True)
+
+
+def _export_to_stdout(source: ExportSource, options: ExportFilter) -> None:
+    out = sys.stdout.buffer
+    try:
+        report, _, _ = _export_session(source, out, options)
+        out.flush()
+    except OSError as e:
+        # The reader went away (`blink export X | head`). On Windows a write to a closed pipe can
+        # be EINVAL rather than EPIPE.
+        if not isinstance(e, BrokenPipeError) and e.errno != errno.EINVAL:
+            raise
+        # Point stdout at devnull so the interpreter's own flush at exit doesn't fail again.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(0)
+    _print_warnings(source, report)
+
+
+def _export_to_dir(sources: list[ExportSource], outdir: Path, options: ExportFilter) -> None:
+    outdir.mkdir(parents=True, exist_ok=True)
+    for source in sources:
+        out_path = outdir / f"{source.name}.log"
+        with open(out_path, "wb") as out:
+            report, read, kept = _export_session(source, out, options)
+        print(f"{out_path}: {kept:,} of {read:,} lines", file=sys.stderr)
+        _print_warnings(source, report)
+
+
+def _export_session(source: ExportSource, out: BinaryIO, options: ExportFilter) -> tuple[SessionRead, int, int]:
+    report = SessionRead()
+    read = kept = 0
+    batch: list[bytes] = []
+    for line in iter_session_lines(source.parts, report, check_gaps=source.check_gaps):
+        read += 1
+        if keep_line(line, options):
+            batch.append(line)
+            if len(batch) >= _WRITE_BATCH_LINES:
+                kept += len(batch)
+                _write_lines(out, batch)
+    kept += len(batch)
+    _write_lines(out, batch)
+    return report, read, kept
+
+
+def _write_lines(out: BinaryIO, batch: list[bytes]) -> None:
+    # Every line gets its b"\n" back, including a partial last line of a live/truncated part.
+    if batch:
+        out.write(b"\n".join(batch) + b"\n")
+        batch.clear()
+
+
+def _print_warnings(source: ExportSource, report: SessionRead) -> None:
+    for warning in report.warning_lines():
+        print(f"warning: {source.name}: {warning}", file=sys.stderr)

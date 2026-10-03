@@ -147,6 +147,12 @@ def main():
     setup_config_parser(config_parser)
     config_parser.set_defaults(func=handle_config)
 
+    export_parser = subparsers.add_parser("export", prog="blink export", help="Write a recorded session's log out as filtered text")
+    from blinkview.utils.session_export import run_export, setup_export_parser
+
+    setup_export_parser(export_parser)
+    export_parser.set_defaults(func=run_export)
+
     update_parser = subparsers.add_parser("update", help="Manage BlinkView versions")
     from blinkview.utils.cli_updater import handle_update, setup_update_parser
 
