@@ -11,6 +11,7 @@ plain path-in/path-out functions with no actual cold-segment coupling. Shared by
 storage/log_file_archive.py (session/source raw log file compression) - see
 plans/expressive-sauteeing-sun.md."""
 
+import os
 from pathlib import Path
 from typing import Union
 
@@ -22,13 +23,29 @@ import zstandard
 _FRAME_HEADER_PROBE_SIZE = 32
 
 
+def _fsync_dir(dir_path: Path) -> None:
+    """Makes a rename inside dir_path durable. POSIX only - Windows can't open a directory for
+    fsync, and NTFS journals metadata operations in order anyway."""
+    if os.name == "nt":
+        return
+    fd = os.open(dir_path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def compress_file(src_path: Union[str, Path], dst_path: Union[str, Path]) -> None:
     """Streams src_path through zstd into dst_path. Writes to a `.tmp` sibling of dst_path and
     renames into place, so a reader (decompress_file_to_buffer) can never observe a partially-
     written file. Passes `size=` (src_path's own on-disk size) so the frame embeds its
     decompressed content size - decompress_file_to_buffer relies on being able to read that back
     cheaply (from just the frame header, not by decompressing anything) to preallocate an
-    exactly-sized output buffer instead of growing one dynamically."""
+    exactly-sized output buffer instead of growing one dynamically.
+
+    The `.tmp` is fsynced before the rename, and (on POSIX) the directory after it: every caller
+    deletes src_path once this returns, so after a power loss the rename must never be on disk
+    while the compressed bytes aren't - that would leave a truncated `.zst` as the only copy."""
     src_path = Path(src_path)
     dst_path = Path(dst_path)
     tmp_path = dst_path.with_name(dst_path.name + ".tmp")
@@ -36,7 +53,10 @@ def compress_file(src_path: Union[str, Path], dst_path: Union[str, Path]) -> Non
     cctx = zstandard.ZstdCompressor()
     with open(src_path, "rb") as src, open(tmp_path, "wb") as dst:
         cctx.copy_stream(src, dst, size=raw_size)
+        dst.flush()
+        os.fsync(dst.fileno())
     tmp_path.replace(dst_path)
+    _fsync_dir(dst_path.parent)
 
 
 def decompress_file_to_buffer(path: Union[str, Path]) -> np.ndarray:
