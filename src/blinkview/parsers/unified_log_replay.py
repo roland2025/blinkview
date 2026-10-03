@@ -34,6 +34,20 @@ if TYPE_CHECKING:
 # ops/timestamps.py's nb_parse_unified_log_ts_ns for the timestamp math.
 
 
+def _existing_part(part: Path) -> Optional[Path]:
+    """The part to actually read for a listed `part`. A plain part listed by
+    unified_log_parts() can be compressed and unlinked before replay gets to it (a live
+    session rotating, or the rename-then-unlink window) - its `.zst` sibling then holds the same
+    content, complete since compress_file fsyncs before renaming."""
+    if part.exists():
+        return part
+    if not part.name.endswith(ARCHIVE_SUFFIX):
+        compressed = part.with_name(part.name + ARCHIVE_SUFFIX)
+        if compressed.exists():
+            return compressed
+    return None
+
+
 class UnifiedLogReplay(BaseDaemon):
     """One-shot reader that loads a previously-written unified log (FileLogger/log_row
     output) back into Central Storage. Not a live source/parser - pushes straight into
@@ -254,6 +268,12 @@ class UnifiedLogReplay(BaseDaemon):
                 if self.on_part_progress:
                     self.on_part_progress(part_index, total_parts, part.name)
 
+                listed_part = part
+                part = _existing_part(listed_part)
+                if part is None:
+                    if self.logger:
+                        self.logger.warn("UnifiedLogReplay: log part vanished, skipped: %s", listed_part.name)
+                    continue
                 if os.path.getsize(part) == 0:
                     continue
 

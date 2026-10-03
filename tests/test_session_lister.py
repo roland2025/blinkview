@@ -193,9 +193,9 @@ class TestResolveSession:
         project_dir = tmp_path / "proj"
         _write_session(project_dir, "older", {"session_id": "older", "created_at": "2026-01-01T00:00:00Z"})
         newer_dir = _write_session(project_dir, "newer", {"session_id": "newer", "created_at": "2026-06-01T00:00:00Z"})
-        (newer_dir / "session.000").write_text("data")
+        (newer_dir / "session.0000.log").write_text("data")
         older_dir = project_dir / "older"
-        (older_dir / "session.000").write_text("data")
+        (older_dir / "session.0000.log").write_text("data")
 
         result = resolve_session(tmp_path, "proj", last=True)
 
@@ -204,7 +204,7 @@ class TestResolveSession:
     def test_matches_by_exact_session_id(self, tmp_path):
         project_dir = tmp_path / "proj"
         session_dir = _write_session(project_dir, "session1", {"session_id": "session1"})
-        (session_dir / "session.000").write_text("data")
+        (session_dir / "session.0000.log").write_text("data")
 
         result = resolve_session(tmp_path, "proj", name="session1")
 
@@ -215,7 +215,7 @@ class TestResolveSession:
         session_dir = _write_session(
             project_dir, "session1", {"session_id": "session1", "project": {"display_name": "My Run"}}
         )
-        (session_dir / "session.000").write_text("data")
+        (session_dir / "session.0000.log").write_text("data")
 
         result = resolve_session(tmp_path, "proj", name="My Run")
 
@@ -226,7 +226,7 @@ class TestResolveSession:
         session_dir = _write_session(
             project_dir, "session1", {"session_id": "session1", "project": {"display_name": "My Special Run"}}
         )
-        (session_dir / "session.000").write_text("data")
+        (session_dir / "session.0000.log").write_text("data")
 
         result = resolve_session(tmp_path, "proj", name="special")
 
@@ -235,7 +235,7 @@ class TestResolveSession:
     def test_no_name_and_no_last_returns_none(self, tmp_path):
         project_dir = tmp_path / "proj"
         session_dir = _write_session(project_dir, "session1", {"session_id": "session1"})
-        (session_dir / "session.000").write_text("data")
+        (session_dir / "session.0000.log").write_text("data")
 
         assert resolve_session(tmp_path, "proj") is None
 
@@ -256,42 +256,71 @@ class TestResolveSession:
     def test_unmatched_name_returns_none(self, tmp_path):
         project_dir = tmp_path / "proj"
         session_dir = _write_session(project_dir, "session1", {"session_id": "session1"})
-        (session_dir / "session.000").write_text("data")
+        (session_dir / "session.0000.log").write_text("data")
 
         assert resolve_session(tmp_path, "proj", name="nonexistent") is None
 
 
+def _session_info(path):
+    return SessionInfo(
+        session_id="s1",
+        path=path,
+        display_name="s1",
+        profile="",
+        status="unknown",
+        created_at=None,
+        finished_at=None,
+        duration_seconds=None,
+    )
+
+
 class TestUnifiedLogParts:
-    def test_returns_sorted_session_dot_star_files(self, tmp_path):
-        info = SessionInfo(
-            session_id="s1",
-            path=tmp_path,
-            display_name="s1",
-            profile="",
-            status="unknown",
-            created_at=None,
-            finished_at=None,
-            duration_seconds=None,
-        )
-        (tmp_path / "session.002").write_text("b")
-        (tmp_path / "session.000").write_text("a")
-        (tmp_path / "session.001").write_text("c")
-        (tmp_path / "other.txt").write_text("x")
+    def test_returns_parts_in_index_order(self, tmp_path):
+        (tmp_path / "session.0002.log").write_text("b")
+        (tmp_path / "session.0000.log.zst").write_text("a")
+        (tmp_path / "session.0001.log").write_text("c")
 
-        parts = unified_log_parts(info)
+        parts = unified_log_parts(_session_info(tmp_path))
 
-        assert [p.name for p in parts] == ["session.000", "session.001", "session.002"]
+        assert [p.name for p in parts] == ["session.0000.log.zst", "session.0001.log", "session.0002.log"]
+
+    def test_ignores_everything_that_is_not_a_unified_log_part(self, tmp_path):
+        """A `.zst.tmp` is compress_file's not-yet-renamed output - replaying it would mmap
+        partial zstd bytes as plain text."""
+        (tmp_path / "session.0000.log").write_text("a")
+        (tmp_path / "session.0001.log.zst.tmp").write_text("partial")
+        (tmp_path / "session.000").write_text("x")
+        (tmp_path / "session.0002.bin").write_text("x")
+        (tmp_path / "src_0001.0000.bin").write_text("x")
+        (tmp_path / "metadata.json").write_text("{}")
+        (tmp_path / "session.0003.log").mkdir()
+
+        parts = unified_log_parts(_session_info(tmp_path))
+
+        assert [p.name for p in parts] == ["session.0000.log"]
+
+    def test_plain_part_wins_over_its_compressed_sibling(self, tmp_path):
+        """Both exist between compress_file's rename and FileLogger's unlink, or for good when the
+        unlink failed - in which case a restart() may have kept appending to the plain file, so
+        it can be a superset of the .zst. Replaying both would also duplicate rows."""
+        (tmp_path / "session.0000.log.zst").write_text("old")
+        (tmp_path / "session.0000.log").write_text("old + new")
+        (tmp_path / "session.0001.log.zst").write_text("next")
+
+        parts = unified_log_parts(_session_info(tmp_path))
+
+        assert [p.name for p in parts] == ["session.0000.log", "session.0001.log.zst"]
+
+    def test_sorts_by_index_past_four_digits(self, tmp_path):
+        (tmp_path / "session.10000.log").write_text("b")
+        (tmp_path / "session.9999.log.zst").write_text("a")
+
+        parts = unified_log_parts(_session_info(tmp_path))
+
+        assert [p.name for p in parts] == ["session.9999.log.zst", "session.10000.log"]
 
     def test_returns_empty_list_when_no_parts_exist(self, tmp_path):
-        info = SessionInfo(
-            session_id="s1",
-            path=tmp_path,
-            display_name="s1",
-            profile="",
-            status="unknown",
-            created_at=None,
-            finished_at=None,
-            duration_seconds=None,
-        )
+        assert unified_log_parts(_session_info(tmp_path)) == []
 
-        assert unified_log_parts(info) == []
+    def test_returns_empty_list_when_the_session_folder_is_gone(self, tmp_path):
+        assert unified_log_parts(_session_info(tmp_path / "deleted")) == []
