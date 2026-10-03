@@ -209,6 +209,45 @@ class TestApply:
         assert gui_context.config_manager.sent == [] or len(calls) >= 0
 
 
+class TestKeysTheFormDoesNotShow:
+    """The Settings dialog opens the profile root, whose schema only knows a few sections - every
+    other top-level key (e.g. `parameters`) used to be patched away on Apply."""
+
+    CONFIG_WITH_UNKNOWN = {**CONFIG, "parameters": {"serial": {"paths": []}}, "export_presets": {"a": {}}}
+
+    def test_apply_leaves_them_alone(self, widget, gui_context):
+        _load(widget, config=self.CONFIG_WITH_UNKNOWN)
+        widget._widget_registry["name"]["widget"].setText("new-name")
+
+        widget._on_apply_clicked()
+
+        _, patch = gui_context.config_manager.sent[0]
+        assert [op["path"] for op in patch] == ["/name"]
+
+    def test_they_do_not_count_as_a_change(self, widget):
+        _load(widget, config=self.CONFIG_WITH_UNKNOWN)
+        widget._widget_registry["name"]["widget"].setText("new-name")
+        assert widget.btn_apply.isEnabled() is True
+
+        widget._widget_registry["name"]["widget"].setText("test")
+
+        assert widget.btn_apply.isEnabled() is False
+
+    def test_factory_typed_node_still_drops_keys_its_schema_does_not_know(self, widget, gui_context):
+        """After a type switch the old type's settings must go - unchanged behaviour."""
+        gui_context.config_manager.factory_types_map["source"] = [("adb", "ADB")]
+        gui_context.config_manager.factory_schema_map[("source", "adb")] = {
+            "properties": {"port": {"type": "integer", "default": 1}}
+        }
+        _load(widget, schema={"_factory": "source", "properties": {}}, config={"type": "adb", "port": 1, "baudrate": 9})
+        widget._widget_registry["port"]["widget"].setValue(2)
+
+        widget._on_apply_clicked()
+
+        _, patch = gui_context.config_manager.sent[0]
+        assert {"op": "remove", "path": "/baudrate"} in patch
+
+
 class TestApplyTimeout:
     def test_still_applying_after_timeout_resets_button(self, widget):
         widget.applying_config = True
