@@ -13,6 +13,7 @@ from blinkview.utils.session_lister import (
     existing_part,
     list_sessions,
     part_index,
+    resolve_active_profile_dir,
     resolve_log_root,
     resolve_session,
     unified_log_parts,
@@ -363,3 +364,34 @@ class TestPartIndex:
     def test_returns_none_for_other_names(self):
         for name in ("session.0007.log.zst.tmp", "session.007.log", "src_0001.0000.bin", "metadata.json"):
             assert part_index(Path(name)) is None, name
+
+
+class TestResolveActiveProfileDir:
+    """Mirrors FileManager.__init__'s profile_name precedence, read-only."""
+
+    def _resolve(self, settings, project_root, workspace):
+        with (
+            patch("blinkview.utils.session_lister.get_project_root", return_value=project_root),
+            patch("blinkview.utils.session_lister.get_workspace_dir", return_value=workspace),
+        ):
+            return resolve_active_profile_dir(settings=FakeSettings(settings))
+
+    def test_active_profile_wins(self, tmp_path):
+        settings = {"active_profile": "astra", "default_profile": "other"}
+        assert self._resolve(settings, tmp_path, tmp_path / ".blinkview") == tmp_path / ".blinkview" / "profiles" / "astra"
+
+    def test_then_default_profile(self, tmp_path):
+        assert self._resolve({"default_profile": "bench"}, tmp_path, tmp_path) == tmp_path / "profiles" / "bench"
+
+    def test_then_default_in_a_project(self, tmp_path):
+        assert self._resolve({}, tmp_path, tmp_path) == tmp_path / "profiles" / "default"
+
+    def test_then_the_project_name_standalone(self, tmp_path):
+        assert self._resolve({"project_name": "My Proj"}, None, tmp_path) == tmp_path / "profiles" / "My_Proj"
+
+    def test_name_is_sanitized_like_file_manager(self, tmp_path):
+        assert self._resolve({"active_profile": "a b/c"}, tmp_path, tmp_path) == tmp_path / "profiles" / "a_b_c"
+
+    def test_creates_nothing(self, tmp_path):
+        result = self._resolve({"active_profile": "astra"}, tmp_path, tmp_path)
+        assert not result.exists()

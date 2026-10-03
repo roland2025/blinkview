@@ -17,7 +17,7 @@ from typing import NamedTuple, Optional
 
 from blinkview.core.settings_manager import SettingsManager
 from blinkview.utils.global_settings import get_blink_home
-from blinkview.utils.project_settings import get_project_root
+from blinkview.utils.project_settings import get_project_root, get_workspace_dir
 
 _SANITIZE_RE = re.compile(r"[^A-Za-z0-9_]+")
 
@@ -55,13 +55,7 @@ def resolve_log_root(log_dir=None, settings: Optional[SettingsManager] = None) -
 
     project_dir = get_project_root()
     standalone_mode = project_dir is None
-
-    project_name = settings.get("project_name")
-    if project_name is None:
-        project_name = project_dir.name if project_dir else None
-    if project_name is None:
-        project_name = Path.cwd().name
-    project_name = _sanitize(project_name)
+    project_name = _resolve_project_name(settings, project_dir)
 
     if log_dir is None:
         log_dir = settings.get("log_dir")
@@ -73,6 +67,29 @@ def resolve_log_root(log_dir=None, settings: Optional[SettingsManager] = None) -
             log_dir = "logs"
 
     return Path(log_dir), project_name
+
+
+def resolve_active_profile_dir(settings: Optional[SettingsManager] = None) -> Path:
+    """The folder of the profile a plain `blink` run would use - FileManager.__init__'s
+    profile_name precedence (active_profile, default_profile, then the project name standalone
+    or "default"), read-only, without --profile/--config. Nothing is created."""
+    settings = settings or SettingsManager()
+    project_dir = get_project_root()
+    profile_name = (
+        settings.get("active_profile")
+        or settings.get("default_profile")
+        or (_resolve_project_name(settings, project_dir) if project_dir is None else "default")
+    )
+    return get_workspace_dir() / "profiles" / _sanitize(profile_name)
+
+
+def _resolve_project_name(settings: SettingsManager, project_dir: Optional[Path]) -> str:
+    project_name = settings.get("project_name")
+    if project_name is None:
+        project_name = project_dir.name if project_dir else None
+    if project_name is None:
+        project_name = Path.cwd().name
+    return _sanitize(project_name)
 
 
 def list_sessions(log_dir: Path, project_name: str) -> list[SessionInfo]:

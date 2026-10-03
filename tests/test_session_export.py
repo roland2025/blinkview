@@ -659,6 +659,151 @@ class TestFilterFlags:
         assert capsysbinary.readouterr().out == lines[1] + b"\n" + lines[2] + b"\n"
 
 
+PRESET_LINES = [
+    _log("nrf", "app.bms"),
+    _log("nrf", "app.main"),
+    _log("iot", "battery.level"),
+    _log("can0", "frame"),
+    _log("nrf", "gui.lag"),
+]
+
+
+def _profile(root: Path, presets) -> Path:
+    """A profile folder with an export_presets.json; returns the profile JSON's path, as
+    metadata.json config.source_file records it (the JSON itself needn't exist)."""
+    root.mkdir(parents=True)
+    (root / "export_presets.json").write_text(presets if isinstance(presets, str) else json.dumps(presets))
+    return root / f"{root.name}.json"
+
+
+def _session_recorded_with(root: Path, name: str, source_file: Path, lines=PRESET_LINES) -> Path:
+    folder = root / name
+    folder.mkdir(parents=True)
+    (folder / "metadata.json").write_text(json.dumps({"config": {"source_file": str(source_file)}}))
+    _write_plain(folder, 0, lines)
+    return folder
+
+
+class TestPresets:
+    @pytest.fixture(autouse=True)
+    def no_active_profile(self, tmp_path):
+        """The fallback profile folder - empty unless a test puts a presets file there."""
+        active = tmp_path / "active_profile"
+        with patch.object(session_export, "resolve_active_profile_dir", return_value=active):
+            yield active
+
+    def test_preset_from_the_recorded_profile(self, tmp_path, capsysbinary):
+        profile = _profile(tmp_path / "default", {"analysis": {"drop": ["app.bms", "iot battery."]}})
+        folder = _session_recorded_with(tmp_path, "s", profile)
+
+        _run([str(folder), "--preset", "analysis"])
+
+        captured = capsysbinary.readouterr()
+        assert captured.out.splitlines() == [_log("nrf", "app.main"), _log("can0", "frame"), _log("nrf", "gui.lag")]
+        assert b"preset 'analysis' from" in captured.err
+
+    def test_flags_add_to_the_preset(self, tmp_path, capsysbinary):
+        profile = _profile(tmp_path / "default", {"analysis": {"drop": ["app.bms"], "drop_device": ["iot"]}})
+        folder = _session_recorded_with(tmp_path, "s", profile)
+
+        _run([str(folder), "--preset", "analysis", "--drop", "gui.lag", "--drop-device", "can0"])
+
+        assert capsysbinary.readouterr().out.splitlines() == [_log("nrf", "app.main")]
+
+    def test_falls_back_to_the_active_profile(self, tmp_path, capsysbinary, no_active_profile):
+        """Recorded profile gone (or recorded elsewhere): the active profile's presets apply."""
+        _profile(no_active_profile, {"analysis": {"drop_device": ["nrf"]}})
+        folder = _session_recorded_with(tmp_path, "s", tmp_path / "gone" / "gone.json")
+
+        _run([str(folder), "--preset", "analysis"])
+
+        assert capsysbinary.readouterr().out.splitlines() == [_log("iot", "battery.level"), _log("can0", "frame")]
+
+    def test_session_without_metadata_uses_the_active_profile(self, tmp_path, capsysbinary, no_active_profile):
+        _profile(no_active_profile, {"analysis": {"drop_device": ["nrf", "iot", "can0"]}})
+        folder = tmp_path / "s"
+        folder.mkdir()
+        _write_plain(folder, 0, PRESET_LINES)
+
+        _run([str(folder), "--preset", "analysis"])
+
+        assert capsysbinary.readouterr().out == b""
+
+    def test_recorded_profile_wins_over_the_active_one(self, tmp_path, capsysbinary, no_active_profile):
+        _profile(no_active_profile, {"analysis": {"drop_device": ["nrf"]}})
+        profile = _profile(tmp_path / "default", {"analysis": {"drop_device": ["iot"]}})
+        folder = _session_recorded_with(tmp_path, "s", profile)
+
+        _run([str(folder), "--preset", "analysis"])
+
+        assert _log("nrf", "app.main") in capsysbinary.readouterr().out.splitlines()
+
+    def test_a_preset_missing_from_the_recorded_profile_is_not_looked_up_elsewhere(self, tmp_path, no_active_profile):
+        """The first presets file found decides - mixing two profiles' presets would surprise."""
+        _profile(no_active_profile, {"analysis": {}})
+        profile = _profile(tmp_path / "default", {"other": {}})
+        folder = _session_recorded_with(tmp_path, "s", profile)
+
+        with pytest.raises(SystemExit, match=r"not in .*available: other"):
+            _run([str(folder), "--preset", "analysis"])
+
+    def test_two_sessions_from_different_profiles_resolve_separately(self, tmp_path):
+        a = _session_recorded_with(tmp_path, "a", _profile(tmp_path / "pa", {"analysis": {"drop_device": ["nrf"]}}))
+        b = _session_recorded_with(tmp_path, "b", _profile(tmp_path / "pb", {"analysis": {"drop_device": ["iot"]}}))
+
+        _run([str(a), str(b), "--preset", "analysis", "-o", str(tmp_path / "out")])
+
+        assert _log("nrf", "app.main") not in (tmp_path / "out" / "a.log").read_bytes().splitlines()
+        assert _log("iot", "battery.level") in (tmp_path / "out" / "a.log").read_bytes().splitlines()
+        assert _log("nrf", "app.main") in (tmp_path / "out" / "b.log").read_bytes().splitlines()
+        assert _log("iot", "battery.level") not in (tmp_path / "out" / "b.log").read_bytes().splitlines()
+
+    def test_no_presets_file_anywhere_lists_where_it_looked(self, tmp_path):
+        folder = _session_recorded_with(tmp_path, "s", tmp_path / "default" / "default.json")
+
+        with pytest.raises(SystemExit, match=r"no export_presets.json found \(looked in: .*default.*active_profile"):
+            _run([str(folder), "--preset", "analysis"])
+
+    @pytest.mark.parametrize(
+        "presets, message",
+        [
+            ("{not json", "can't read"),
+            ('["a"]', "expected an object"),
+            ({"analysis": ["app.bms"]}, "must be an object"),
+            ({"analysis": {"drops": ["app.bms"]}}, r"unknown keys \['drops'\]"),
+            ({"analysis": {"drop": "app.bms"}}, "drop must be a list of strings"),
+            ({"analysis": {"drop_device": [1]}}, "drop_device must be a list of strings"),
+            ({"analysis": {"drop": [""]}}, r"preset 'analysis': --drop ''"),
+        ],
+    )
+    def test_broken_presets_file_is_an_error_naming_it(self, tmp_path, presets, message):
+        folder = _session_recorded_with(tmp_path, "s", _profile(tmp_path / "default", presets))
+
+        with pytest.raises(SystemExit, match=message) as excinfo:
+            _run([str(folder), "--preset", "analysis"])
+
+        if message != "can't read":
+            assert "export_presets.json" in str(excinfo.value)
+
+    def test_a_broken_preset_for_a_later_session_writes_nothing(self, tmp_path):
+        good = _session_recorded_with(tmp_path, "a", _profile(tmp_path / "pa", {"analysis": {}}))
+        bad = _session_recorded_with(tmp_path, "b", _profile(tmp_path / "pb", {"other": {}}))
+        outdir = tmp_path / "out"
+
+        with pytest.raises(SystemExit):
+            _run([str(good), str(bad), "--preset", "analysis", "-o", str(outdir)])
+
+        assert not outdir.exists()
+
+    def test_description_is_allowed_and_ignored(self, tmp_path, capsysbinary):
+        profile = _profile(tmp_path / "default", {"analysis": {"description": "for reading", "drop": ["app"]}})
+        folder = _session_recorded_with(tmp_path, "s", profile)
+
+        _run([str(folder), "--preset", "analysis"])
+
+        assert capsysbinary.readouterr().out.splitlines() == [_log("iot", "battery.level"), _log("can0", "frame"), _log("nrf", "gui.lag")]
+
+
 def _summary(err: bytes) -> str:
     return err.decode()[err.decode().index("summary:") :]
 
