@@ -4,7 +4,12 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import json
+import os
 import re
+import subprocess
+import sys
+from argparse import ArgumentParser
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +24,8 @@ from blinkview.utils.session_export import (
     SessionRead,
     iter_session_lines,
     keep_line,
+    run_export,
+    setup_export_parser,
 )
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "blinkview"
@@ -370,3 +377,220 @@ class TestStatsFilter:
 
         assert used, "found no stats_child calls - has the API been renamed?"
         assert used == set(STATS_LOGGER_NAMES)
+
+
+def _session(root: Path, name: str, lines: list[bytes], created_at: str = "2026-10-01T12:00:00Z") -> Path:
+    folder = root / name
+    folder.mkdir(parents=True)
+    (folder / "metadata.json").write_text(json.dumps({"session_id": name, "created_at": created_at}))
+    _write_plain(folder, 0, lines)
+    return folder
+
+
+def _run(argv: list[str]):
+    parser = ArgumentParser(prog="blink export")
+    setup_export_parser(parser)
+    run_export(parser.parse_args(argv))
+
+
+SESSION_LINES = [_line(0), _log("system", "central.stats", "5 msg/s"), _line(1), _log("system", "gui.lag", "40 ms")]
+KEPT_LINES = [SESSION_LINES[0], SESSION_LINES[2], SESSION_LINES[3]]
+
+
+class TestCommand:
+    def test_session_folder_to_stdout(self, tmp_path, capsysbinary):
+        folder = _session(tmp_path, "20261001_120000_a", SESSION_LINES)
+
+        _run([str(folder)])
+
+        assert capsysbinary.readouterr().out == b"\n".join(KEPT_LINES) + b"\n"
+
+    def test_include_stats_keeps_everything(self, tmp_path, capsysbinary):
+        folder = _session(tmp_path, "20261001_120000_a", SESSION_LINES)
+
+        _run([str(folder), "--include-stats"])
+
+        assert capsysbinary.readouterr().out == b"\n".join(SESSION_LINES) + b"\n"
+
+    def test_single_part_file_is_named_after_its_folder(self, tmp_path):
+        folder = _session(tmp_path, "20261001_120000_a", SESSION_LINES)
+        _write_plain(folder, 3, [_line(9)])  # alone, not a gap
+
+        _run([str(folder / "session.0003.log"), "-o", str(tmp_path / "out")])
+
+        assert (tmp_path / "out" / "20261001_120000_a.log").read_bytes() == _line(9) + b"\n"
+
+    def test_several_sessions_to_outdir(self, tmp_path, capsysbinary):
+        a = _session(tmp_path, "a", SESSION_LINES)
+        b = _session(tmp_path, "b", [_line(5)])
+        outdir = tmp_path / "new" / "out"
+
+        _run([str(a), str(b), "-o", str(outdir)])
+
+        assert (outdir / "a.log").read_bytes() == b"\n".join(KEPT_LINES) + b"\n"
+        assert (outdir / "b.log").read_bytes() == _line(5) + b"\n"
+        captured = capsysbinary.readouterr()
+        assert captured.out == b""
+        assert b"3 of 4 lines" in captured.err
+
+    def test_partial_last_line_is_terminated_and_bytes_pass_through(self, tmp_path, capsysbinary):
+        folder = tmp_path / "s"
+        folder.mkdir()
+        lines = [_line(0) + b" \xff\xfe", _line(1)]
+        _write_plain(folder, 0, lines, terminated=False)
+
+        _run([str(folder)])
+
+        assert capsysbinary.readouterr().out == b"\n".join(lines) + b"\n"
+
+    def test_warnings_go_to_stderr_with_the_session_name(self, tmp_path, capsysbinary):
+        folder = _session(tmp_path, "s", [_line(0)])
+        _write_plain(folder, 2, [_line(2)])
+
+        _run([str(folder)])
+
+        captured = capsysbinary.readouterr()
+        assert captured.out == _line(0) + b"\n" + _line(2) + b"\n"
+        assert b"warning: s: missing parts 0001" in captured.err
+
+    def test_mixed_plain_and_compressed_parts(self, tmp_path, capsysbinary):
+        folder = tmp_path / "s"
+        folder.mkdir()
+        _write_zst(folder, 0, [_line(0)])
+        _write_plain(folder, 1, [_line(1)])
+
+        _run([str(folder)])
+
+        assert capsysbinary.readouterr().out == _line(0) + b"\n" + _line(1) + b"\n"
+
+
+class TestSessionLookup:
+    @pytest.fixture
+    def log_root(self, tmp_path):
+        root = tmp_path / "logs"
+        _session(root / "proj", "20261001_120000_old_bench", [_line(0)], created_at="2026-10-01T12:00:00Z")
+        _session(root / "proj", "20261002_120000_new_astra", [_line(1)], created_at="2026-10-02T12:00:00Z")
+        with patch.object(session_export, "resolve_log_root", return_value=(root, "proj")):
+            yield root
+
+    def test_by_id(self, log_root, capsysbinary):
+        _run(["20261001_120000_old_bench"])
+
+        captured = capsysbinary.readouterr()
+        assert captured.out == _line(0) + b"\n"
+        assert b"20261001_120000_old_bench: 20261001_120000_old_bench" in captured.err
+
+    def test_partial_name_prints_what_it_resolved_to(self, log_root, capsysbinary):
+        _run(["astra"])
+
+        captured = capsysbinary.readouterr()
+        assert captured.out == _line(1) + b"\n"
+        assert b"astra: 20261002_120000_new_astra" in captured.err
+
+    def test_last(self, log_root, capsysbinary):
+        _run(["--last"])
+
+        assert capsysbinary.readouterr().out == _line(1) + b"\n"
+
+    def test_unknown_name_is_an_error(self, log_root):
+        with pytest.raises(SystemExit, match="no session folder, part file or recorded session matching 'nope'"):
+            _run(["nope"])
+
+    def test_an_existing_path_wins_over_a_name(self, log_root, tmp_path, capsysbinary, monkeypatch):
+        """A folder in cwd named like a recorded session is exported, not the recorded one."""
+        _session(tmp_path / "cwd", "astra", [_line(7)])
+        monkeypatch.chdir(tmp_path / "cwd")
+
+        _run(["astra"])
+
+        assert capsysbinary.readouterr().out == _line(7) + b"\n"
+
+
+class TestCommandErrors:
+    def test_nothing_to_export(self):
+        with pytest.raises(SystemExit, match="give a SESSION"):
+            _run([])
+
+    def test_last_with_sessions(self, tmp_path):
+        with pytest.raises(SystemExit, match="not both"):
+            _run(["--last", str(tmp_path)])
+
+    def test_several_sessions_without_outdir(self, tmp_path):
+        a = _session(tmp_path, "a", [_line(0)])
+        b = _session(tmp_path, "b", [_line(1)])
+
+        with pytest.raises(SystemExit, match="several sessions need -o"):
+            _run([str(a), str(b)])
+
+    def test_output_name_clash_writes_nothing(self, tmp_path):
+        folder = _session(tmp_path, "s", [_line(0)])
+        _write_plain(folder, 1, [_line(1)])
+        outdir = tmp_path / "out"
+
+        with pytest.raises(SystemExit, match="same output file: s"):
+            _run([str(folder / "session.0000.log"), str(folder / "session.0001.log"), "-o", str(outdir)])
+
+        assert not outdir.exists()
+
+    def test_folder_without_parts(self, tmp_path):
+        with pytest.raises(SystemExit, match="no session.NNNN.log"):
+            _run([str(tmp_path)])
+
+
+def _subprocess_env(tmp_path: Path) -> dict:
+    env = dict(os.environ)
+    env["HOME"] = env["USERPROFILE"] = str(tmp_path / "home")
+    env["BLINK_PROJECT_ROOT"] = str(tmp_path / "no_project")
+    return env
+
+
+class TestFreshProcess:
+    def test_export_does_not_import_numba_qt_or_the_pipeline(self, tmp_path):
+        """Must be a subprocess: in-process, sys.modules holds whatever other tests imported."""
+        folder = tmp_path / "s"
+        folder.mkdir()
+        _write_zst(folder, 0, [_line(0)])
+        _write_plain(folder, 1, [_line(1)])
+        code = (
+            "import sys, atexit\n"
+            "atexit.register(lambda: sys.stderr.write('MODULES:' + ','.join(sorted(sys.modules)) + '\\n'))\n"
+            f"sys.argv = ['blink', 'export', {str(folder)!r}, '-o', {str(tmp_path / 'out')!r}]\n"
+            "from blinkview.__main__ import main\n"
+            "main()\n"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", code], env=_subprocess_env(tmp_path), capture_output=True, text=True, timeout=60
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "out" / "s.log").read_bytes() == _line(0) + b"\n" + _line(1) + b"\n"
+        modules = result.stderr.split("MODULES:")[1].strip().split(",")
+        heavy = [
+            m
+            for m in modules
+            if m.split(".")[0] in ("numba", "llvmlite", "PySide6", "qtpy")
+            or m.startswith(("blinkview.parsers", "blinkview.ops", "blinkview.storage", "blinkview.core.id_registry"))
+        ]
+        assert heavy == []
+
+    def test_piping_into_a_reader_that_stops_early_exits_quietly(self, tmp_path):
+        """`blink export X | head`. Enough output to overflow the pipe buffer, so the writer is
+        still writing when the reader goes away."""
+        folder = tmp_path / "s"
+        folder.mkdir()
+        _write_plain(folder, 0, [_line(i) for i in range(200_000)])
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "blinkview", "export", str(folder)],
+            env=_subprocess_env(tmp_path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert proc.stdout.read(100)
+        proc.stdout.close()
+        stderr = proc.stderr.read()
+        returncode = proc.wait(timeout=60)
+
+        assert b"Traceback" not in stderr, stderr.decode(errors="replace")
+        assert returncode == 0
