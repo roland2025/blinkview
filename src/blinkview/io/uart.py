@@ -175,8 +175,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
         # 2. Stats and Auto-Tuning Setup
         # We set msg_size_bytes to 20 to maintain your ~50 chunks/KB density preference
-        stats = Speedometer(logger=self.logger.child("stats"))
-        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=20, logger=self.logger.child("tuner"))
+        stats = Speedometer(logger=self.logger.stats_child("stats"))
+        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=20, logger=self.logger.stats_child("tuner"))
 
         pool_create = self.shared.array_pool.create
 

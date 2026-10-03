@@ -333,7 +333,7 @@ class CentralStorage(BaseCentralStorage):
         stop_is_set = self._stop_event.is_set
         get = self.input_queue.get
 
-        speedometer = Speedometer(logger=self.logger.child("stats"))
+        speedometer = Speedometer(logger=self.logger.stats_child("stats"))
 
         while not stop_is_set():
             # we need to push messages to subscribers here, but for now we just keep them in the log

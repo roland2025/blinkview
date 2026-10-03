@@ -449,7 +449,6 @@ class BlinkMainWindow(QMainWindow):
         self.logger_fast_timer = self.logger.child("timer_fast")
 
         self.logger_gc = self.logger.child("gc")
-        self.logger_stats = self.logger.child("stats")
 
         self.fps_slow = 1
         self.timeout_slow = 1000 // self.fps_slow
@@ -1179,7 +1178,6 @@ class BlinkMainWindow(QMainWindow):
                 # msg = f"In: {in_mps} | Out: {out_mps} | Backlog: {backlog} ({capacity_pct:.1f}%) | pool: {current_rows} / {max_rows} ({current_rows / max_rows * 100:.1f}%)"
                 msg = f"{format_metric(in_mps)} | {current_rows / max_rows * 100:.1f}% of {format_metric(max_rows)} | {format_metric(max_sequence)}"
                 self.mps_label.setText(msg)
-                # self.logger_stats.debug(msg)
 
                 # Optional: Highlight drop rate if it's non-zero
                 if dropped > 0:

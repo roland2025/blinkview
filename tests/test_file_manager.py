@@ -51,6 +51,7 @@ def make_manager(tmp_path, **overrides):
     fm.params = {}
     fm.params_files = []
     fm.params_label = None
+    fm.dev_mode = False
     fm.metadata = {
         "loggers": {},
         "status": "active",
@@ -660,3 +661,31 @@ class TestRotate:
         fm = make_rotatable_manager(tmp_path, replay_source_dir=tmp_path / "recorded")
         with pytest.raises(RuntimeError):
             fm.rotate()
+
+
+class TestRecordDevMode:
+    def test_writes_dev_mode_into_metadata_json(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+        assert _read_metadata(fm.session_dir)["environment"]["dev_mode"] is False
+
+        fm.record_dev_mode(True)
+
+        assert _read_metadata(fm.session_dir)["environment"]["dev_mode"] is True
+
+    def test_is_kept_across_rotate(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+        fm.record_dev_mode(True)
+
+        _, new_dir = fm.rotate()
+
+        assert _read_metadata(new_dir)["environment"]["dev_mode"] is True
+
+    def test_replay_mode_does_not_write_metadata(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+        fm.replay_mode = True
+        before = (fm.session_dir / "metadata.json").read_text()
+
+        fm.record_dev_mode(True)
+
+        assert (fm.session_dir / "metadata.json").read_text() == before
+        assert fm.metadata["environment"]["dev_mode"] is True

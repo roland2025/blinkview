@@ -164,8 +164,8 @@ class CANReader(BaseReader):
         _ts_offset_ns = None
 
         # Tuner setup: Estimating an average CAN message payload of 8 bytes
-        stats = Speedometer(logger=self.logger.child("stats"))
-        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=8, logger=self.logger.child("tuner"))
+        stats = Speedometer(logger=self.logger.stats_child("stats"))
+        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=8, logger=self.logger.stats_child("tuner"))
 
         pool_create = self.shared.array_pool.create
 

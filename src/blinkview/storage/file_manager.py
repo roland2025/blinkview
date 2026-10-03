@@ -156,6 +156,7 @@ class FileManager:
         self.params_label: Optional[str] = None
         self.params_session: Optional[str] = None  # the params file's "session", if any
         self.param_origins: Dict[str, str] = {}  # parameter -> "set 'left'" / "--param" / ...
+        self.dev_mode = False  # set by the Registry via record_dev_mode()
 
         # Write initial metadata
         self.metadata = self._build_metadata()
@@ -193,6 +194,8 @@ class FileManager:
                 "python": platform.python_version(),
                 "platform": platform.platform(),
                 "node": platform.node(),
+                # Whether BlinkView's own stats/tuner lines were logged - see utils/dev_mode.py
+                "dev_mode": self.dev_mode,
                 # "git": self._get_git_info()
             },
             "loggers": {},
@@ -228,6 +231,13 @@ class FileManager:
         self.param_origins = dict(origins or {})
         self.metadata["config"]["params"] = dict(self.params)
         self.metadata["config"]["params_files"] = [str(p) for p in self.params_files]
+        if not self.replay_mode:
+            self.write_metadata()
+
+    def record_dev_mode(self, dev_mode: bool) -> None:
+        """Stores this run's dev mode in metadata.json (kept across rotate())."""
+        self.dev_mode = bool(dev_mode)
+        self.metadata["environment"]["dev_mode"] = self.dev_mode
         if not self.replay_mode:
             self.write_metadata()
 

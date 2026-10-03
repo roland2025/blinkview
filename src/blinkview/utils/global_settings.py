@@ -25,6 +25,7 @@ class GlobalSettings(Settings):
         """Returns a list of supported settings keys."""
         return [
             "log_dir",
+            "dev_mode",  # BlinkView's own pipeline stats/tuner logging - see utils/dev_mode.py
             "update",  # dict for update specific stuff
             # "update_check",  # Enable/disable auto-check on startup
             # "update_source",  # Path to git repo

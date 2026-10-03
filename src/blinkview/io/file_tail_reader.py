@@ -104,7 +104,7 @@ class FileTailReader(BaseReader):
             return pool_create(PooledLogBatch, buffer_chunks, buffer_bytes)
 
         batch = None
-        stats = Speedometer(logger=self.logger.child("stats"))
+        stats = Speedometer(logger=self.logger.stats_child("stats"))
 
         try:
             while not stop_is_set():

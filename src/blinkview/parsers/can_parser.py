@@ -125,9 +125,9 @@ class CantoolsParser(BaseParser):
             pool_create = self.shared.array_pool.create
 
             # --- Auto-Tuning Trackers ---
-            speed_in = Speedometer(logger=self.logger.child("stats_in"))
-            speed_out = Speedometer(logger=self.logger.child("stats_out"))
-            tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.child("tuner_out"))
+            speed_in = Speedometer(logger=self.logger.stats_child("stats_in"))
+            speed_out = Speedometer(logger=self.logger.stats_child("stats_out"))
+            tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.stats_child("tuner_out"))
 
             def batch_acquire() -> PooledLogBatch:
                 return pool_create(
