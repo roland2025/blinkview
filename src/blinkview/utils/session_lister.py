@@ -24,8 +24,9 @@ _SANITIZE_RE = re.compile(r"[^A-Za-z0-9_]+")
 # FileManager.get_path_for_log pads part indexes to 4 digits, so part 10000 is just wider -
 # hence \d{4,}, and sorting by int rather than by name.
 _UNIFIED_PART_RE = re.compile(r"session\.(\d{4,})\.log(\.zst)?")
-# storage/log_file_archive.ARCHIVE_SUFFIX - not imported from there, see the module comment above.
-_ARCHIVE_SUFFIX = ".zst"
+# Same as storage/log_file_archive.ARCHIVE_SUFFIX - not imported from there, see the module comment
+# above.
+ARCHIVE_SUFFIX = ".zst"
 
 
 def _sanitize(name: str) -> str:
@@ -210,6 +211,13 @@ def unified_log_parts(session_info: SessionInfo) -> list[Path]:
     return [by_index[index] for index in sorted(by_index)]
 
 
+def part_index(part: Path) -> Optional[int]:
+    """The part index in a unified log part's file name (`session.0007.log[.zst]` -> 7), or None
+    for any other name."""
+    match = _UNIFIED_PART_RE.fullmatch(part.name)
+    return int(match.group(1)) if match else None
+
+
 def existing_part(part: Path) -> Optional[Path]:
     """The part to actually read for a listed `part`. A plain part listed by
     unified_log_parts() can be compressed and unlinked before a reader gets to it (a live
@@ -217,8 +225,8 @@ def existing_part(part: Path) -> Optional[Path]:
     content, complete since compress_file fsyncs before renaming."""
     if part.exists():
         return part
-    if not part.name.endswith(_ARCHIVE_SUFFIX):
-        compressed = part.with_name(part.name + _ARCHIVE_SUFFIX)
+    if not part.name.endswith(ARCHIVE_SUFFIX):
+        compressed = part.with_name(part.name + ARCHIVE_SUFFIX)
         if compressed.exists():
             return compressed
     return None
