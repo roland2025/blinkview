@@ -21,6 +21,10 @@ from blinkview.utils.project_settings import get_project_root
 
 _SANITIZE_RE = re.compile(r"[^A-Za-z0-9_]+")
 
+# FileManager.get_path_for_log pads part indexes to 4 digits, so part 10000 is just wider -
+# hence \d{4,}, and sorting by int rather than by name.
+_UNIFIED_PART_RE = re.compile(r"session\.(\d{4,})\.log(\.zst)?")
+
 
 def _sanitize(name: str) -> str:
     """Mirrors FileManager._sanitize - must match how session folder names were built."""
@@ -177,11 +181,28 @@ def format_session_label(session_info: SessionInfo) -> str:
 
 
 def unified_log_parts(session_info: SessionInfo) -> list[Path]:
-    """Returns the central FileLogger's session.NNNN.<ext> parts for a session, in order.
+    """Returns the central FileLogger's session.NNNN.log[.zst] parts for a session, one per part
+    index, in index order.
 
     Registry.configure_system() gives `central`'s FileLogger local_ctx.logging_id="session"
     (registry.py), so this is the unified log a live run writes - distinct from the raw
     per-source chunk files also living in the session folder.
+
+    Only exact part names match - never a compress_file `.zst.tmp` still being written. When an
+    index exists both plain and compressed, the plain file wins: it's either identical to the
+    `.zst` (between compress_file's rename and FileLogger's unlink, or for good if the unlink
+    failed after a rotation), or a superset of it (the unlink failed at shutdown, so the part
+    index wasn't bumped and a restart() went on appending to the plain file). A plain part can
+    still be unlinked after this returns - UnifiedLogReplay falls back to its `.zst` sibling.
     """
-    parts = sorted(session_info.path.glob("session.*"))
-    return parts
+    if not session_info.path.is_dir():
+        return []
+    by_index: dict[int, Path] = {}
+    for path in session_info.path.iterdir():
+        match = _UNIFIED_PART_RE.fullmatch(path.name)
+        if match is None or not path.is_file():
+            continue
+        index = int(match.group(1))
+        if index not in by_index or match.group(2) is None:
+            by_index[index] = path
+    return [by_index[index] for index in sorted(by_index)]

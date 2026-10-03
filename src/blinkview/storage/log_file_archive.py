@@ -12,8 +12,9 @@ still being actively appended to (FileLogger.open_file/_flush), and only gets co
 it's done being written - on rotation (the just-closed part) or on FileLogger shutdown (the
 final part) - see FileLogger.open_file/run in file_logger.py. Compressed in place (no separate
 archive directory, unlike cold storage): `session.0000.log` -> `session.0000.log.zst`, in the
-same session folder, since unified_log_parts()'s `session.*` glob (utils/session_lister.py)
-already matches any suffix and part-index ordering is unaffected by it.
+same session folder. unified_log_parts() (utils/session_lister.py) matches both
+`session.NNNN.log` and `session.NNNN.log.zst` (never the `.zst.tmp`), keeping one file per part
+index.
 
 UnifiedLogReplay (parsers/unified_log_replay.py) decompresses a `.zst` part straight into an
 owned buffer instead of mmap'ing it, and falls back to the existing mmap path for any part that

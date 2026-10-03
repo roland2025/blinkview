@@ -267,6 +267,54 @@ class TestRun:
         assert len(subscriber.batches) == 1
         assert [r["message"] for r in subscriber.batches[0]] == ["first", "second"]
 
+    def test_listed_plain_part_compressed_away_before_replay_reads_its_zst(self, tmp_path, id_registry, array_pool):
+        """unified_log_parts() lists the plain file; a live session's FileLogger can compress and
+        unlink it before replay gets there. Its rows must come from the .zst, once."""
+        from blinkview.storage.log_file_archive import compress_log_part_file
+
+        device = id_registry.get_device("dev")
+        device.get_module("log")
+
+        part0 = tmp_path / "session.0000.log"
+        part0.write_text(make_line("2026-01-01T00:00:00.000000", "I", "dev", "log", "first") + "\n")
+        part1 = tmp_path / "session.0001.log"
+        part1.write_text(make_line("2026-01-01T00:00:01.000000", "I", "dev", "log", "second") + "\n")
+        listed = [part0, part1]
+        compress_log_part_file(part1)
+        part1.unlink()
+
+        subscriber = CapturingSubscriber()
+        logger = FakeLogger()
+        replay = make_replay(listed, id_registry, array_pool, logger=logger)
+        replay.central.subscribe(subscriber)
+
+        replay.run()
+
+        assert len(subscriber.batches) == 1
+        assert [r["message"] for r in subscriber.batches[0]] == ["first", "second"]
+        assert logger.warnings == []
+        assert logger.exceptions == []
+
+    def test_listed_part_gone_entirely_is_skipped_with_a_warning(self, tmp_path, id_registry, array_pool):
+        """Used to abort the whole replay with FileNotFoundError, losing every later part."""
+        device = id_registry.get_device("dev")
+        device.get_module("log")
+
+        part0 = tmp_path / "session.0000.log"  # never written
+        part1 = tmp_path / "session.0001.log"
+        part1.write_text(make_line("2026-01-01T00:00:01.000000", "I", "dev", "log", "second") + "\n")
+
+        subscriber = CapturingSubscriber()
+        logger = FakeLogger()
+        replay = make_replay([part0, part1], id_registry, array_pool, logger=logger)
+        replay.central.subscribe(subscriber)
+
+        replay.run()
+
+        assert [r["message"] for r in subscriber.batches[0]] == ["second"]
+        assert any("session.0000.log" in w for w in logger.warnings)
+        assert logger.exceptions == []
+
     def test_skips_unparseable_lines_and_continues(self, tmp_path, id_registry, array_pool):
         part = tmp_path / "session.0000.log"
         part.write_text(
@@ -401,19 +449,6 @@ class TestRun:
 
         all_messages = [r["message"] for batch in subscriber.batches for r in batch]
         assert all_messages == ["seen"]
-
-    def test_missing_log_part_is_caught_and_logged_without_raising(self, tmp_path, id_registry, array_pool):
-        missing = tmp_path / "does_not_exist.log"
-
-        subscriber = CapturingSubscriber()
-        logger = FakeLogger()
-        replay = make_replay([missing], id_registry, array_pool, logger=logger)
-        replay.central.subscribe(subscriber)
-
-        replay.run()  # FileNotFoundError from os.path.getsize() must be caught, not propagated
-
-        assert subscriber.batches == []
-        assert len(logger.exceptions) == 1
 
     def test_pushes_batches_straight_into_central_log_pool(self, tmp_path, id_registry, array_pool):
         """Regression test: this reader no longer feeds central via subscribe()/distribute() on
