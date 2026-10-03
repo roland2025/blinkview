@@ -10,6 +10,9 @@ crash-safe, no-extra-copy pattern instead of duplicating it - see
 plans/expressive-sauteeing-sun.md. Cold-segment-specific behavior (archive dir/suffix
 conventions, writable-buffer requirements) stays covered by tests/test_cold_archive.py."""
 
+import os
+from pathlib import Path
+
 import numpy as np
 
 from blinkview.core.zstd_file_compression import compress_file, decompress_file_to_buffer
@@ -53,6 +56,39 @@ def test_compress_writes_via_tmp_sibling_then_renames(tmp_path):
 
     assert dst.exists()
     assert not dst.with_name(dst.name + ".tmp").exists()
+
+
+def test_compress_fsyncs_tmp_before_rename(tmp_path, monkeypatch):
+    """Callers delete the source once compress_file returns, so after a power loss the rename
+    must never be durable while the compressed bytes aren't - the `.tmp`'s fsync has to come
+    first, on the complete file."""
+    src = tmp_path / "data.bin"
+    original = b"some content " * 100
+    src.write_bytes(original)
+    dst = tmp_path / "data.bin.zst"
+    tmp = dst.with_name(dst.name + ".tmp")
+
+    events = []
+    real_fsync = os.fsync
+    real_replace = Path.replace
+
+    def recording_fsync(fd):
+        events.append(("fsync", os.fstat(fd).st_size))
+        real_fsync(fd)
+
+    def recording_replace(self, target):
+        events.append(("replace", self.name))
+        return real_replace(self, target)
+
+    monkeypatch.setattr("blinkview.core.zstd_file_compression.os.fsync", recording_fsync)
+    monkeypatch.setattr(Path, "replace", recording_replace)
+
+    compress_file(src, dst)
+
+    replace_at = events.index(("replace", tmp.name))
+    synced_sizes = [size for kind, size in events[:replace_at] if kind == "fsync"]
+    assert dst.stat().st_size in synced_sizes  # the whole compressed file, not a partial one
+    assert bytes(decompress_file_to_buffer(dst)) == original
 
 
 def test_decompressed_buffer_is_writable(tmp_path):
