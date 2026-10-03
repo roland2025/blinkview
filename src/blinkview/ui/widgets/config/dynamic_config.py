@@ -210,7 +210,7 @@ class DynamicConfigWidget(QWidget):
         if self.applying_config:
             return
 
-        current_ui_state = self.get_config()
+        current_ui_state = self._config_to_apply()
         is_changed = current_ui_state != self.current_config
 
         # Toggle both buttons together
@@ -231,7 +231,7 @@ class DynamicConfigWidget(QWidget):
         self.applying_config = True
 
         previous_config = self.current_config
-        current_config = self.get_config()
+        current_config = self._config_to_apply()
 
         # --- Generate RFC 6902 JSON Patch ---
 
@@ -1069,6 +1069,28 @@ class DynamicConfigWidget(QWidget):
 
     def get_config(self) -> dict:
         return self._extract_data(self._widget_registry)
+
+    def _config_to_apply(self) -> dict:
+        """get_config() plus the loaded config's top-level keys this form has no field for.
+
+        Apply diffs this against the loaded config, so a key the schema doesn't describe would
+        otherwise become a `remove` op. The Settings dialog opens the profile root `/`, whose
+        schema only knows `central`/`reorder` - every Apply there deleted e.g. the profile's
+        `parameters` block. Not on factory-typed nodes: after a type switch, keys the new type's
+        schema doesn't know are the old type's settings, and removing them is intended."""
+        config = self.get_config()
+        if self._is_factory_node():
+            return config
+        shown = self.schema.get("properties", {})
+        for key, value in self.current_config.items():
+            if key not in shown and key not in config:
+                config[key] = deepcopy(value)
+        return config
+
+    def _is_factory_node(self) -> bool:
+        # Same test as _inject_factory_schema, on the schema as loaded (before injection).
+        schema = self.original_schema or {}
+        return bool(schema.get("_factory") or schema.get("properties", {}).get("_factory", {}).get("default"))
 
     def _extract_data(self, registry: dict) -> dict:
         """
