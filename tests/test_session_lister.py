@@ -12,6 +12,7 @@ from blinkview.utils.session_lister import (
     SessionInfo,
     existing_part,
     list_sessions,
+    part_index,
     resolve_log_root,
     resolve_session,
     unified_log_parts,
@@ -351,3 +352,14 @@ class TestExistingPart:
         (tmp_path / "session.0000.log.zst.zst").write_text("a")
 
         assert existing_part(tmp_path / "session.0000.log.zst") is None
+
+
+class TestPartIndex:
+    def test_reads_the_index_of_plain_and_compressed_parts(self):
+        assert part_index(Path("session.0007.log")) == 7
+        assert part_index(Path("session.0007.log.zst")) == 7
+        assert part_index(Path("session.10000.log")) == 10000
+
+    def test_returns_none_for_other_names(self):
+        for name in ("session.0007.log.zst.tmp", "session.007.log", "src_0001.0000.bin", "metadata.json"):
+            assert part_index(Path(name)) is None, name
