@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from blinkview.utils.session_lister import (
     SessionInfo,
+    existing_part,
     list_sessions,
     resolve_log_root,
     resolve_session,
@@ -324,3 +325,29 @@ class TestUnifiedLogParts:
 
     def test_returns_empty_list_when_the_session_folder_is_gone(self, tmp_path):
         assert unified_log_parts(_session_info(tmp_path / "deleted")) == []
+
+
+class TestExistingPart:
+    def test_returns_a_part_that_still_exists(self, tmp_path):
+        part = tmp_path / "session.0000.log"
+        part.write_text("a")
+        (tmp_path / "session.0000.log.zst").write_text("a")
+
+        assert existing_part(part) == part
+
+    def test_falls_back_to_the_compressed_sibling_of_a_vanished_plain_part(self, tmp_path):
+        """Listed by unified_log_parts(), then compressed and unlinked before the reader got
+        to it."""
+        compressed = tmp_path / "session.0000.log.zst"
+        compressed.write_text("a")
+
+        assert existing_part(tmp_path / "session.0000.log") == compressed
+
+    def test_returns_none_when_a_plain_part_and_its_sibling_are_both_gone(self, tmp_path):
+        assert existing_part(tmp_path / "session.0000.log") is None
+
+    def test_returns_none_for_a_vanished_compressed_part(self, tmp_path):
+        """No `.zst.zst` lookup - a compressed part has no further fallback."""
+        (tmp_path / "session.0000.log.zst.zst").write_text("a")
+
+        assert existing_part(tmp_path / "session.0000.log.zst") is None

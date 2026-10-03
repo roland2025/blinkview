@@ -21,6 +21,7 @@ from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.id_resolution import nb_resolve_names_batch, nb_resolve_scoped_names_batch
 from blinkview.ops.unified_log_scan import nb_push_unified_log_rows, nb_scan_unified_log_lines
 from blinkview.storage.log_file_archive import ARCHIVE_SUFFIX, decompress_log_part_to_buffer
+from blinkview.utils.session_lister import existing_part
 
 if TYPE_CHECKING:
     from blinkview.core.central_storage import CentralStorage
@@ -32,20 +33,6 @@ if TYPE_CHECKING:
 # Parsed entirely by ops/unified_log_scan.py's Numba kernels (nb_scan_unified_log_lines,
 # nb_push_unified_log_rows) - see that module for the byte-level grammar scan and
 # ops/timestamps.py's nb_parse_unified_log_ts_ns for the timestamp math.
-
-
-def _existing_part(part: Path) -> Optional[Path]:
-    """The part to actually read for a listed `part`. A plain part listed by
-    unified_log_parts() can be compressed and unlinked before replay gets to it (a live
-    session rotating, or the rename-then-unlink window) - its `.zst` sibling then holds the same
-    content, complete since compress_file fsyncs before renaming."""
-    if part.exists():
-        return part
-    if not part.name.endswith(ARCHIVE_SUFFIX):
-        compressed = part.with_name(part.name + ARCHIVE_SUFFIX)
-        if compressed.exists():
-            return compressed
-    return None
 
 
 class UnifiedLogReplay(BaseDaemon):
@@ -269,7 +256,7 @@ class UnifiedLogReplay(BaseDaemon):
                     self.on_part_progress(part_index, total_parts, part.name)
 
                 listed_part = part
-                part = _existing_part(listed_part)
+                part = existing_part(listed_part)
                 if part is None:
                     if self.logger:
                         self.logger.warn("UnifiedLogReplay: log part vanished, skipped: %s", listed_part.name)
