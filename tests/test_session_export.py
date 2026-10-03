@@ -462,7 +462,12 @@ class TestTimeBounds:
 
     def test_lines_without_a_timestamp_are_kept(self):
         options = make_filter(since="2026-10-01T12:00Z", until="2026-10-01T13:00Z")
-        for line in (b"", b"continuation of a message", b"2026-10-01T09:00", b"2026-10-01 09:00:00.000000Z I nrf app: x"):
+        for line in (
+            b"",
+            b"continuation of a message",
+            b"2026-10-01T09:00",
+            b"2026-10-01 09:00:00.000000Z I nrf app: x",
+        ):
             assert keep_line(line, options), line
 
     def test_bounds_and_drops_both_apply(self):
@@ -669,10 +674,11 @@ PRESET_LINES = [
 
 
 def _profile(root: Path, presets) -> Path:
-    """A profile folder with an export_presets.json; returns the profile JSON's path, as
+    """A profile folder with a <profile>.export_presets.json; returns the profile JSON's path, as
     metadata.json config.source_file records it (the JSON itself needn't exist)."""
     root.mkdir(parents=True)
-    (root / "export_presets.json").write_text(presets if isinstance(presets, str) else json.dumps(presets))
+    presets_file = root / f"{root.name}.export_presets.json"
+    presets_file.write_text(presets if isinstance(presets, str) else json.dumps(presets))
     return root / f"{root.name}.json"
 
 
@@ -761,7 +767,11 @@ class TestPresets:
     def test_no_presets_file_anywhere_lists_where_it_looked(self, tmp_path):
         folder = _session_recorded_with(tmp_path, "s", tmp_path / "default" / "default.json")
 
-        with pytest.raises(SystemExit, match=r"no export_presets.json found \(looked in: .*default.*active_profile"):
+        with pytest.raises(
+            SystemExit,
+            match=r"no presets file found \(looked for: .*default\.export_presets\.json.*"
+            r"active_profile\.export_presets\.json",
+        ):
             _run([str(folder), "--preset", "analysis"])
 
     @pytest.mark.parametrize(
@@ -801,7 +811,11 @@ class TestPresets:
 
         _run([str(folder), "--preset", "analysis"])
 
-        assert capsysbinary.readouterr().out.splitlines() == [_log("iot", "battery.level"), _log("can0", "frame"), _log("nrf", "gui.lag")]
+        assert capsysbinary.readouterr().out.splitlines() == [
+            _log("iot", "battery.level"),
+            _log("can0", "frame"),
+            _log("nrf", "gui.lag"),
+        ]
 
 
 def _summary(err: bytes) -> str:
@@ -875,7 +889,9 @@ class TestSummary:
         archive.write_bytes(archive.read_bytes()[:-20])
         _write_plain(folder, 1, [_line(1)])
 
-        with patch.object(session_export, "existing_part", side_effect=lambda p: None if p.name.endswith("1.log") else p):
+        with patch.object(
+            session_export, "existing_part", side_effect=lambda p: None if p.name.endswith("1.log") else p
+        ):
             _run([str(folder), "--summary"])
 
         summary = _summary(capsysbinary.readouterr().err)

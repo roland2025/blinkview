@@ -378,7 +378,9 @@ class TestResolveActiveProfileDir:
 
     def test_active_profile_wins(self, tmp_path):
         settings = {"active_profile": "orion", "default_profile": "other"}
-        assert self._resolve(settings, tmp_path, tmp_path / ".blinkview") == tmp_path / ".blinkview" / "profiles" / "orion"
+        assert (
+            self._resolve(settings, tmp_path, tmp_path / ".blinkview") == tmp_path / ".blinkview" / "profiles" / "orion"
+        )
 
     def test_then_default_profile(self, tmp_path):
         assert self._resolve({"default_profile": "bench"}, tmp_path, tmp_path) == tmp_path / "profiles" / "bench"
