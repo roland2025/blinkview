@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 from argparse import ArgumentParser
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,9 +22,11 @@ from blinkview.utils import session_export
 from blinkview.utils.session_export import (
     STATS_LOGGER_NAMES,
     ExportFilter,
+    FilterError,
     SessionRead,
     iter_session_lines,
     keep_line,
+    make_filter,
     run_export,
     setup_export_parser,
 )
@@ -379,6 +382,103 @@ class TestStatsFilter:
         assert used == set(STATS_LOGGER_NAMES)
 
 
+class TestDrops:
+    def test_module_prefix_drops_on_any_device(self):
+        options = make_filter(drop=["app.bms"])
+        assert not keep_line(_log("nrf", "app.bms"), options)
+        assert not keep_line(_log("iot", "app.bms.cell"), options)
+        assert not keep_line(_log("nrf", "app.bmsx"), options)  # a plain prefix, as logprep.py
+        assert keep_line(_log("nrf", "app.battery"), options)
+
+    def test_device_and_module_prefix_drops_on_that_device_only(self):
+        options = make_filter(drop=["iot battery."])
+        assert not keep_line(_log("iot", "battery.level"), options)
+        assert keep_line(_log("nrf", "battery.level"), options)
+        assert keep_line(_log("iot", "battery"), options)  # "battery" doesn't start with "battery."
+        assert keep_line(_log("iotx", "battery.level"), options)
+
+    def test_drop_device_drops_the_whole_device_and_only_it(self):
+        options = make_filter(drop_device=["iot"])
+        assert not keep_line(_log("iot", "app"), options)
+        assert not keep_line(_log("iot", "x.y.z"), options)
+        assert keep_line(_log("iot2", "app"), options)
+        assert keep_line(_log("nrf", "iot"), options)
+
+    def test_several_rules_combine(self):
+        options = make_filter(drop=["app.bms", "iot modem."], drop_device=["can0"])
+        assert not keep_line(_log("nrf", "app.bms"), options)
+        assert not keep_line(_log("iot", "modem.at"), options)
+        assert not keep_line(_log("can0", "frame"), options)
+        assert keep_line(_log("nrf", "modem.at"), options)
+
+    def test_drops_never_touch_lines_that_are_not_log_lines(self):
+        assert keep_line(b"app.bms", make_filter(drop=["app.bms"]))
+
+    @pytest.mark.parametrize("bad", ["", " app", "app ", "a  b", "a b c"])
+    def test_malformed_drop_is_rejected(self, bad):
+        """An empty prefix would match - and silently drop - every line."""
+        with pytest.raises(FilterError):
+            make_filter(drop=[bad])
+
+    @pytest.mark.parametrize("bad", ["", "a b"])
+    def test_malformed_drop_device_is_rejected(self, bad):
+        with pytest.raises(FilterError):
+            make_filter(drop_device=[bad])
+
+
+def _at(ts: str, device: str = "nrf") -> bytes:
+    return f"{ts} I {device} app: x".encode()
+
+
+class TestTimeBounds:
+    def test_since_is_inclusive_and_until_exclusive(self):
+        options = make_filter(since="2026-10-01T12:00:00Z", until="2026-10-01T13:00:00Z")
+        assert not keep_line(_at("2026-10-01T11:59:59.999999Z"), options)
+        assert keep_line(_at("2026-10-01T12:00:00.000000Z"), options)
+        assert keep_line(_at("2026-10-01T12:59:59.999999Z"), options)
+        assert not keep_line(_at("2026-10-01T13:00:00.000000Z"), options)
+
+    def test_offset_is_converted_to_utc(self):
+        options = make_filter(since="2026-10-01T15:00+03:00")
+        assert not keep_line(_at("2026-10-01T11:59:59.999999Z"), options)
+        assert keep_line(_at("2026-10-01T12:00:00.000000Z"), options)
+
+    def test_naive_time_is_local(self):
+        local_noon_utc = datetime(2026, 10, 1, 12, 0).astimezone().astimezone(timezone.utc)
+        just_before = (local_noon_utc - timedelta(microseconds=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        at = local_noon_utc.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+        options = make_filter(since="2026-10-01T12:00")
+
+        assert not keep_line(_at(just_before), options)
+        assert keep_line(_at(at), options)
+
+    def test_date_only_means_midnight(self):
+        options = make_filter(until="2026-10-02T00:00Z")
+        assert keep_line(_at("2026-10-01T23:59:59.999999Z"), options)
+        assert not keep_line(_at("2026-10-02T00:00:00.000000Z"), options)
+        local_midnight = datetime(2026, 10, 2).astimezone().astimezone(timezone.utc)
+        assert make_filter(since="2026-10-02").since == local_midnight.strftime("%Y-%m-%dT%H:%M:%S.%fZ").encode()
+
+    def test_lines_without_a_timestamp_are_kept(self):
+        options = make_filter(since="2026-10-01T12:00Z", until="2026-10-01T13:00Z")
+        for line in (b"", b"continuation of a message", b"2026-10-01T09:00", b"2026-10-01 09:00:00.000000Z I nrf app: x"):
+            assert keep_line(line, options), line
+
+    def test_bounds_and_drops_both_apply(self):
+        options = make_filter(drop=["app"], since="2026-10-01T12:00Z")
+        assert not keep_line(_at("2026-10-01T12:30:00.000000Z"), options)  # in range, but dropped
+
+    @pytest.mark.parametrize("bad", ["yesterday", "2026-13-01", "12:00"])
+    def test_unparseable_time_is_rejected(self, bad):
+        with pytest.raises(FilterError):
+            make_filter(since=bad)
+
+    def test_empty_window_is_rejected(self):
+        with pytest.raises(FilterError, match="not before"):
+            make_filter(since="2026-10-01T13:00Z", until="2026-10-01T12:00Z")
+
+
 def _session(root: Path, name: str, lines: list[bytes], created_at: str = "2026-10-01T12:00:00Z") -> Path:
     folder = root / name
     folder.mkdir(parents=True)
@@ -535,6 +635,111 @@ class TestCommandErrors:
     def test_folder_without_parts(self, tmp_path):
         with pytest.raises(SystemExit, match="no session.NNNN.log"):
             _run([str(tmp_path)])
+
+    def test_bad_filter_value_is_an_error_before_reading(self, tmp_path):
+        with pytest.raises(SystemExit, match="--since 'soon'"):
+            _run([str(tmp_path / "does-not-matter"), "--since", "soon"])
+
+
+class TestFilterFlags:
+    def test_repeated_drop_flags_and_drop_device(self, tmp_path, capsysbinary):
+        lines = [_log("nrf", "app.bms"), _log("nrf", "app.main"), _log("iot", "battery.x"), _log("can0", "f")]
+        folder = _session(tmp_path, "s", lines)
+
+        _run([str(folder), "--drop", "app.bms", "--drop", "iot battery.", "--drop-device", "can0"])
+
+        assert capsysbinary.readouterr().out == _log("nrf", "app.main") + b"\n"
+
+    def test_since_and_until(self, tmp_path, capsysbinary):
+        lines = [_at(f"2026-10-01T12:00:0{i}.000000Z") for i in range(5)]
+        folder = _session(tmp_path, "s", lines)
+
+        _run([str(folder), "--since", "2026-10-01T12:00:01Z", "--until", "2026-10-01T12:00:03Z"])
+
+        assert capsysbinary.readouterr().out == lines[1] + b"\n" + lines[2] + b"\n"
+
+
+def _summary(err: bytes) -> str:
+    return err.decode()[err.decode().index("summary:") :]
+
+
+class TestSummary:
+    def test_counts_times_parts_and_tags(self, tmp_path, capsysbinary):
+        folder = tmp_path / "s"
+        folder.mkdir()
+        (folder / "metadata.json").write_text(json.dumps({"environment": {"dev_mode": True}}))
+        _write_zst(folder, 0, [_at("2026-10-01T12:00:00.000000Z"), _log("system", "central.stats")])
+        _write_plain(folder, 1, [_at("2026-10-01T12:00:01.000000Z"), _at("2026-10-01T12:00:02.000000Z", "iot")])
+
+        _run([str(folder), "--summary"])
+
+        summary = _summary(capsysbinary.readouterr().err)
+        assert "summary: s" in summary
+        assert "3 kept of 4 read" in summary
+        assert "2026-10-01T12:00:00.000000Z .. 2026-10-01T12:00:02.000000Z (UTC)" in summary
+        assert "session.0000.log.zst (zst), session.0001.log" in summary
+        assert "dev mode  on" in summary
+        tag_lines = summary.split("by kept lines)\n")[1].splitlines()
+        assert [line.split() for line in tag_lines] == [["2", "nrf", "app"], ["1", "iot", "app"]]
+
+    def test_partial_last_line_with_a_cut_timestamp_is_not_the_last_time(self, tmp_path, capsysbinary):
+        folder = tmp_path / "s"
+        folder.mkdir()
+        path = folder / "session.0000.log"
+        path.write_bytes(_at("2026-10-01T12:00:00.000000Z") + b"\n" + b"2026-10-01T12:00:0")
+
+        _run([str(folder), "--summary"])
+
+        summary = _summary(capsysbinary.readouterr().err)
+        assert ".. 2026-10-01T12:00:00.000000Z (UTC)" in summary
+        assert "(not a log line)" in summary
+
+    @pytest.mark.parametrize(
+        "metadata, expected",
+        [
+            ({"environment": {"dev_mode": False}}, "off"),
+            ({"environment": {}}, "not recorded"),
+            (None, "not recorded"),
+        ],
+    )
+    def test_dev_mode_states(self, tmp_path, capsysbinary, metadata, expected):
+        folder = tmp_path / "s"
+        folder.mkdir()
+        if metadata is not None:
+            (folder / "metadata.json").write_text(json.dumps(metadata))
+        _write_plain(folder, 0, [_line(0)])
+
+        _run([str(folder), "--summary"])
+
+        assert f"dev mode  {expected}" in _summary(capsysbinary.readouterr().err)
+
+    def test_part_file_reads_dev_mode_from_its_folder(self, tmp_path, capsysbinary):
+        folder = tmp_path / "s"
+        folder.mkdir()
+        (folder / "metadata.json").write_text(json.dumps({"environment": {"dev_mode": False}}))
+        part = _write_plain(folder, 0, [_line(0)])
+
+        _run([str(part), "--summary"])
+
+        assert "dev mode  off" in _summary(capsysbinary.readouterr().err)
+
+    def test_vanished_and_broken_parts_are_marked(self, tmp_path, capsysbinary):
+        folder = tmp_path / "s"
+        folder.mkdir()
+        archive = _write_zst(folder, 0, _lines(0, 2000))
+        archive.write_bytes(archive.read_bytes()[:-20])
+        _write_plain(folder, 1, [_line(1)])
+
+        with patch.object(session_export, "existing_part", side_effect=lambda p: None if p.name.endswith("1.log") else p):
+            _run([str(folder), "--summary"])
+
+        summary = _summary(capsysbinary.readouterr().err)
+        assert "session.0000.log.zst (zst, warning), session.0001.log (vanished)" in summary
+
+    def test_no_summary_without_the_flag(self, tmp_path, capsysbinary):
+        _run([str(_session(tmp_path, "s", [_line(0)]))])
+
+        assert b"summary:" not in capsysbinary.readouterr().err
 
 
 def _subprocess_env(tmp_path: Path) -> dict:
