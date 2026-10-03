@@ -105,7 +105,7 @@ class BinaryFileReader(BaseReader):
         batch = None
         offset = 0
 
-        stats = Speedometer(logger=self.logger.child("stats"))
+        stats = Speedometer(logger=self.logger.stats_child("stats"))
 
         try:
             while not stop_is_set():

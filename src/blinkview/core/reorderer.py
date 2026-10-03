@@ -50,8 +50,8 @@ class Reorder(BaseReorder):
         get_nowait = self.input_queue.get_nowait
 
         batch_out: Optional[PooledLogBatch] = None
-        speed_out = Speedometer(logger=self.logger.child("stats_out"))
-        tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.child("tuner_out"))
+        speed_out = Speedometer(logger=self.logger.stats_child("stats_out"))
+        tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.stats_child("tuner_out"))
 
         # logger_backlog = self.logger.child("backlog")
 

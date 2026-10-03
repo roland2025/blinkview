@@ -170,10 +170,10 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             stop_is_set = self._stop_event.is_set
 
             # --- Auto-Tuning Trackers ---
-            speed_in = Speedometer(logger=self.logger.child("stats_in"))
-            speed_out = Speedometer(logger=self.logger.child("stats_out"))
+            speed_in = Speedometer(logger=self.logger.stats_child("stats_in"))
+            speed_out = Speedometer(logger=self.logger.stats_child("stats_out"))
 
-            tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.child("tuner_out"))
+            tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.stats_child("tuner_out"))
 
             logger_in = self.logger.child("batch_in")
             logger_out = self.logger.child("batch_out")

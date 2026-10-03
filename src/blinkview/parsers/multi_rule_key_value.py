@@ -463,8 +463,8 @@ log rows into synthetic submodules, via a single Numba-JIT kernel call per input
             # earlier in this same run() loop is visible to the very next kernel call.
             return device_identity.modules_table.bundle()
 
-        speed_out = Speedometer(logger=self.logger.child("stats_out"))
-        tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.child("tuner_out"))
+        speed_out = Speedometer(logger=self.logger.stats_child("stats_out"))
+        tuner_out = ThroughputAutoTuner(speed_out, logger=self.logger.stats_child("tuner_out"))
 
         pool_create = self.shared.array_pool.create
 

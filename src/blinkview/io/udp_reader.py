@@ -113,12 +113,12 @@ class UDPReader(BaseReader):
 
         # 2. Stats and Auto-Tuning Setup
         # Using a slightly larger baseline message size for UDP vs Serial
-        stats = Speedometer(logger=self.logger.child("stats"))
+        stats = Speedometer(logger=self.logger.stats_child("stats"))
         tuner = ThroughputAutoTuner(
             speedometer=stats,
             default_buffer_bytes=self.buffer_size,
             msg_size_bytes=1024,
-            logger=self.logger.child("tuner"),
+            logger=self.logger.stats_child("tuner"),
         )
 
         pool_create = self.shared.array_pool.create

@@ -77,7 +77,7 @@ class ProjectSettings(Settings):
     @classmethod
     def supported_keys(cls):
         """Returns a list of supported settings keys."""
-        return "active_profile", "project_name", "created_at", "log_dir"
+        return "active_profile", "project_name", "created_at", "log_dir", "dev_mode"
 
     @classmethod
     def init(cls, path=None):

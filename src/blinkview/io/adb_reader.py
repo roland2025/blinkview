@@ -114,9 +114,9 @@ ensuring high throughput without pipeline stalls."""
         delay_ns = int(self.delay * 1_000_000)
 
         # 2. Stats and Auto-Tuning Setup
-        stats = Speedometer(logger=self.logger.child("stats"))
+        stats = Speedometer(logger=self.logger.stats_child("stats"))
         tuner = ThroughputAutoTuner(
-            speedometer=stats, default_buffer_bytes=65536, msg_size_bytes=64, logger=self.logger.child("tuner")
+            speedometer=stats, default_buffer_bytes=65536, msg_size_bytes=64, logger=self.logger.stats_child("tuner")
         )
 
         pool_create = self.shared.array_pool.create

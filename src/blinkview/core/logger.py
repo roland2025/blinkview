@@ -60,6 +60,12 @@ class BaseLogger:
         """
         raise NotImplementedError("Child loggers must implement the child() method.")
 
+    def stats_child(self, name: str) -> "BaseLogger":
+        """Child logger for BlinkView's own pipeline diagnostics (Speedometer/ThroughputAutoTuner
+        output) - only enabled in dev mode, see utils/dev_mode.py. Loggers without a Registry
+        (PrintLogger: before the Registry is initialised, and in tests) just log."""
+        return self.child(name)
+
 
 class SystemLogger(BaseLogger):
     __slots__ = "category", "owner_name", "module_path", "registry", "_enabled", "is_essential"
@@ -162,6 +168,12 @@ class SystemLogger(BaseLogger):
             enabled=child_enabled,
             essential=child_essential,
         )
+
+    def stats_child(self, name: str) -> "SystemLogger":
+        """Disabled unless the Registry runs in dev mode: a disabled child never formats a message,
+        registers its module, or adds a row. `enabled` is always passed explicitly, so this
+        logger's state can't leak into its parent's other children."""
+        return self.child(name, enabled=getattr(self.registry, "dev_mode", False))
 
     def child_creator(self, name: str) -> Callable[[], "SystemLogger"]:
         """

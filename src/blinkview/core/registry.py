@@ -27,6 +27,7 @@ from blinkview.core.system_context import SystemContext
 from blinkview.core.task_manager import TaskManager
 from blinkview.storage.file_manager import FileManager
 from blinkview.subscribers.subscriber import SubscriberFactory
+from blinkview.utils.dev_mode import resolve_dev_mode
 from blinkview.utils.time_utils import TimeUtils
 
 if TYPE_CHECKING:
@@ -111,6 +112,11 @@ class Registry:
         self.initialized = False
         self.replay_mode = replay_mode
 
+        settings = settings or SettingsManager()
+        # Read once per run (SettingsManager doesn't re-read its files anyway): every
+        # SystemLogger.stats_child() sees the same value, and it's recorded in metadata.json.
+        self.dev_mode = resolve_dev_mode(settings)
+
         self._temp_log_queue: Queue = Queue()
 
         np_pool = NumpyArrayPool(max_bytes=64 * 1024 * 1024)
@@ -146,6 +152,7 @@ class Registry:
             config_path=config_path,
             replay_mode=replay_mode,
         )
+        self.file_manager.record_dev_mode(self.dev_mode)
         if replay_source_dir is not None:
             # Set here (constructor time), before self.id_registry is built below, rather than
             # as a post-construction assignment (ui/run.py used to do
@@ -229,7 +236,7 @@ class Registry:
             id_registry=self.id_registry,
             factories=factories,
             tasks=TaskManager(),
-            settings=settings or SettingsManager(),
+            settings=settings,
             array_pool=np_pool,
             pid_history=self.pid_history,
         )
