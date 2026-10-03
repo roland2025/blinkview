@@ -24,10 +24,46 @@ from blinkview.utils.session_lister import ARCHIVE_SUFFIX, existing_part, part_i
 
 # Plain parts are read in chunks of this many bytes.
 PLAIN_CHUNK_BYTES = 1 << 20
+# BlinkView's own throughput diagnostics: the names every logger.stats_child(...) call in src/ uses
+# (Speedometer / ThroughputAutoTuner output), dropped from `system` unless --include-stats. A new
+# stats_child name must be added here - tests/test_session_export.py checks the two agree. It
+# describes what recorded sessions contain, so it isn't tied to dev mode: sessions from before dev
+# mode, or recorded with it on, have these lines.
+STATS_LOGGER_NAMES = ("stats", "stats_in", "stats_out", "tuner", "tuner_out")
+_STATS_LOGGER_NAMES_BYTES = frozenset(name.encode() for name in STATS_LOGGER_NAMES)
+
 # Compressed bytes fed to the decompressor per call. decompressobj().decompress() has no output
 # cap, so this bounds each burst of decompressed text (unified logs compress ~11x) and how much a
 # corrupt block can take down with it - the call that hits the corruption returns nothing.
 ZST_INPUT_CHUNK_BYTES = 1 << 16
+
+
+@dataclass
+class ExportFilter:
+    """Which lines keep_line() drops."""
+
+    include_stats: bool = False
+
+
+def keep_line(line: bytes, options: ExportFilter) -> bool:
+    """Whether a unified log line (no b"\\n") goes to the export.
+
+    Line grammar: `<timestamp> <level> <device> <module>: <message>`. A line with fewer than
+    four fields isn't a log line, but it's still data - kept, never filtered."""
+    fields = line.split(b" ", 4)
+    if len(fields) < 4:
+        return True
+    device = fields[2]
+    module = fields[3].removesuffix(b":")
+
+    # The last segment, so `source.nrf_rtt.stats` and `parser.nrf.stats_in` match while
+    # `foo.stats_extra` or `statsd` don't. Only on `system`: a firmware module may well be
+    # called `stats`.
+    if not options.include_stats and device == b"system":
+        if module.rpartition(b".")[2] in _STATS_LOGGER_NAMES_BYTES:
+            return False
+
+    return True
 
 
 @dataclass
