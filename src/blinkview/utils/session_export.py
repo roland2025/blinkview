@@ -31,6 +31,7 @@ from blinkview.utils.session_lister import (
     SessionInfo,
     existing_part,
     part_index,
+    resolve_active_profile_dir,
     resolve_log_root,
     resolve_session,
     unified_log_parts,
@@ -335,11 +336,29 @@ Lines that don't start with a timestamp are kept.
 timestamp, the parts read, whether the session was recorded in dev mode, and
 the 40 most frequent kept `device module` tags - a quick way to pick --drop
 values.
+
+Presets: --preset NAME applies a named set of drops kept in an
+export_presets.json file next to the profile JSON
+(.blinkview/profiles/<profile>/export_presets.json):
+
+  {
+    "analysis": {
+      "description": "what an analysis needs",
+      "drop": ["app.bms", "iot battery."],
+      "drop_device": ["can0"]
+    }
+  }
+
+The file is looked up per session: first in the folder of the profile the
+session was recorded with (metadata.json), then in the active profile's
+folder. --drop and --drop-device add to the preset.
 """
 
 # Kept lines are written in batches of this many.
 _WRITE_BATCH_LINES = 4096
 SUMMARY_TOP_TAGS = 40
+PRESETS_FILE_NAME = "export_presets.json"
+_PRESET_KEYS = {"description", "drop", "drop_device"}
 
 
 def setup_export_parser(parser: ArgumentParser) -> None:
@@ -357,6 +376,7 @@ def setup_export_parser(parser: ArgumentParser) -> None:
     parser.add_argument("--since", default=None, metavar="TIME", help="keep lines at or after TIME (ISO 8601)")
     parser.add_argument("--until", default=None, metavar="TIME", help="keep lines before TIME (ISO 8601)")
     parser.add_argument("--summary", action="store_true", help="print a per-session summary to stderr")
+    parser.add_argument("--preset", default=None, metavar="NAME", help=f"apply the drops of preset NAME ({PRESETS_FILE_NAME})")
 
 
 @dataclass
@@ -382,19 +402,93 @@ class ExportError(Exception):
     pass
 
 
+@dataclass
+class Preset:
+    name: str
+    file: Path
+    drop: list[str]
+    drop_device: list[str]
+
+
 def run_export(args) -> None:
     try:
         try:
-            options = make_filter(args.include_stats, args.drop, args.drop_device, args.since, args.until)
+            # Checked before anything is resolved or read: a typo shouldn't cost a whole read.
+            make_filter(args.include_stats, args.drop, args.drop_device, args.since, args.until)
         except FilterError as e:
             raise ExportError(str(e))
         sources = _resolve_sources(args)
+        # Every session's filter is built before the first byte is written, so a missing or
+        # broken preset for the third session doesn't leave two exports behind.
+        jobs = [(source, _filter_for(source, args)) for source in sources]
         if args.outdir is None:
-            _export_to_stdout(sources[0], options, args.summary)
+            _export_to_stdout(*jobs[0], args.summary)
         else:
-            _export_to_dir(sources, Path(args.outdir), options, args.summary)
+            _export_to_dir(jobs, Path(args.outdir), args.summary)
     except ExportError as e:
         sys.exit(f"blink export: {e}")
+
+
+def _filter_for(source: ExportSource, args) -> ExportFilter:
+    drop, drop_device = list(args.drop), list(args.drop_device)
+    if args.preset is not None:
+        preset = load_preset(args.preset, preset_files_for(source.folder))
+        print(f"{source.name}: preset {preset.name!r} from {preset.file}", file=sys.stderr)
+        drop = preset.drop + drop
+        drop_device = preset.drop_device + drop_device
+    return make_filter(args.include_stats, drop, drop_device, args.since, args.until)
+
+
+def preset_files_for(session_folder: Path) -> list[Path]:
+    """Where to look for the session's export_presets.json, in order: the folder of the profile
+    it was recorded with (metadata.json config.source_file), then the active profile's folder.
+    Duplicates removed; whether each exists is load_preset()'s business."""
+    candidates = []
+    source_file = _read_metadata(session_folder).get("config", {}).get("source_file")
+    if isinstance(source_file, str) and source_file:
+        candidates.append(Path(source_file).parent / PRESETS_FILE_NAME)
+    candidates.append(resolve_active_profile_dir() / PRESETS_FILE_NAME)
+    unique = []
+    for path in candidates:
+        if path not in unique:
+            unique.append(path)
+    return unique
+
+
+def load_preset(name: str, candidates: Sequence[Path]) -> Preset:
+    """The preset `name` from the first existing file in `candidates`. A preset missing from that
+    file is an error - not a reason to look further, which would mix two profiles' presets."""
+    file = next((path for path in candidates if path.is_file()), None)
+    if file is None:
+        looked = ", ".join(str(path) for path in candidates)
+        raise ExportError(f"--preset {name}: no {PRESETS_FILE_NAME} found (looked in: {looked})")
+    try:
+        presets = json.loads(file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ExportError(f"--preset {name}: can't read {file}: {e}")
+    if not isinstance(presets, dict):
+        raise ExportError(f"{file}: expected an object of preset name: preset")
+    if name not in presets:
+        available = ", ".join(sorted(presets)) or "none"
+        raise ExportError(f"--preset {name}: not in {file} (available: {available})")
+
+    preset = presets[name]
+    if not isinstance(preset, dict):
+        raise ExportError(f"{file}: preset {name!r} must be an object")
+    unknown = sorted(set(preset) - _PRESET_KEYS)
+    if unknown:
+        raise ExportError(f"{file}: preset {name!r} has unknown keys {unknown} (allowed: {sorted(_PRESET_KEYS)})")
+    lists = {}
+    for key in ("drop", "drop_device"):
+        values = preset.get(key, [])
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            raise ExportError(f"{file}: preset {name!r}: {key} must be a list of strings")
+        lists[key] = values
+    try:
+        make_filter(drop=lists["drop"], drop_device=lists["drop_device"])
+    except FilterError as e:
+        raise ExportError(f"{file}: preset {name!r}: {e}")
+    return Preset(name, file, lists["drop"], lists["drop_device"])
 
 
 def _resolve_sources(args) -> list[ExportSource]:
@@ -469,9 +563,9 @@ def _export_to_stdout(source: ExportSource, options: ExportFilter, summary: bool
         _print_summary(source, result)
 
 
-def _export_to_dir(sources: list[ExportSource], outdir: Path, options: ExportFilter, summary: bool) -> None:
+def _export_to_dir(jobs: list[tuple[ExportSource, ExportFilter]], outdir: Path, summary: bool) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
-    for source in sources:
+    for source, options in jobs:
         out_path = outdir / f"{source.name}.log"
         with open(out_path, "wb") as out:
             result = _export_session(source, out, options, summary)
@@ -543,12 +637,20 @@ def _describe_part(part: PartReport) -> str:
 def _recorded_dev_mode(folder: Path) -> str:
     """From metadata.json, for the summary only - filtering never depends on it (older sessions
     don't record it)."""
+    environment = _read_metadata(folder).get("environment")
+    if not isinstance(environment, dict) or "dev_mode" not in environment:
+        return "not recorded"
+    return "on" if environment["dev_mode"] else "off"
+
+
+def _read_metadata(folder: Path) -> dict:
+    """The session's metadata.json, or {} if it's missing or unreadable - a session folder copied
+    by hand, or a part file passed on its own, may well have none."""
     try:
         meta = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
-        dev_mode = meta["environment"]["dev_mode"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return "not recorded"
-    return "on" if dev_mode else "off"
+    except (OSError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
 
 
 def _write_lines(out: BinaryIO, batch: list[bytes]) -> None:
