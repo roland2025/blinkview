@@ -134,16 +134,23 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
 
         settings = SettingsManager()
 
-        from blinkview.ui.widgets.update_widget import UpdateWidget
+        from blinkview.utils.install_info import UpdateSource, resolve_update_source
 
-        if not UpdateWidget.ensure_update_path(settings):
-            print("Update path setup aborted by user. Exiting.")
-            sys.exit(0)
+        update_source = resolve_update_source(settings)
+
+        # Only a source checkout needs its repo path (git updates, Numba cache next to the repo);
+        # a package install has no repo to point at.
+        if update_source == UpdateSource.GIT:
+            from blinkview.ui.widgets.update_widget import UpdateWidget
+
+            if not UpdateWidget.ensure_update_path(settings):
+                print("Update path setup aborted by user. Exiting.")
+                sys.exit(0)
 
         # 2. Export Numba Cache BEFORE importing Registry/Kernels
         from blinkview.core.numba_setup import export_numba_cache
 
-        cache_path = export_numba_cache(settings)
+        cache_path = export_numba_cache(settings, update_source)
         print(f"Numba cache exported to: {cache_path}")
 
         from blinkview.core.profile_params import ProfileParamError
