@@ -9,7 +9,7 @@ description = "High-performance log viewer and telemetry tool for multi-source, 
 readme = "README.md"
 
 
-requires-python = ">=3.10, <3.15"
+requires-python = ">=3.11, <3.15"
 license = "MPL-2.0"
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -106,6 +106,15 @@ features = ["hardware"]
 
 [tool.hatch.version]
 path = "src/blinkview/__init__.py"
+
+# Explicit allow-list: the default sdist picks up everything not gitignored, including local
+# venvs, IDE files and untracked plans/.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/blinkview",
+    "/README.md",
+    "/LICENSE",
+]
 
 [tool.ruff]
 line-length = 120

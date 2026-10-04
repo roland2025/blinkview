@@ -929,7 +929,7 @@ class Registry:
         self.central.unsubscribe(subscriber)
         self._subscribers.remove(subscriber)
 
-    add_file_logger: Callable[[any, str, Optional[str]], FileLogger]
+    add_file_logger: Callable[[any, str, Optional[str]], "FileLogger"]
     now: Callable[[], float]
     now_ns: Callable[[], int]
 
