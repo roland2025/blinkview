@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from blinkview.ui import run as run_module
+from blinkview.utils.install_info import UpdateSource
 
 
 class TestRegisterDesktopEntry:
@@ -161,7 +162,13 @@ def isolate_run_dependencies(qapp, monkeypatch):
     monkeypatch.setattr(
         "blinkview.ui.widgets.update_widget.UpdateWidget.ensure_update_path", staticmethod(lambda settings: True)
     )
-    monkeypatch.setattr("blinkview.core.numba_setup.export_numba_cache", lambda settings: "fake_cache_path")
+    monkeypatch.setattr(
+        "blinkview.core.numba_setup.export_numba_cache", lambda settings, update_source=None: "fake_cache_path"
+    )
+    # Pinned to a source checkout so the update-path gate runs regardless of how the test env is installed.
+    monkeypatch.setattr(
+        "blinkview.utils.install_info.resolve_update_source", lambda settings, info=None: UpdateSource.GIT
+    )
     monkeypatch.setattr("qdarktheme.setup_theme", lambda *a, **kw: None)
 
 
@@ -265,6 +272,32 @@ class TestUpdatePathAborted:
 
         assert exc_info.value.code == 0
         assert FakeRegistry.instances == []
+
+
+class TestPackageInstallSkipsUpdatePath:
+    def test_never_asks_for_a_repo_path(self, monkeypatch):
+        """A PyPI install has no source repo; the blocking 'select repository' dialog must not run."""
+        monkeypatch.setattr(
+            "blinkview.utils.install_info.resolve_update_source", lambda settings, info=None: UpdateSource.PYPI
+        )
+
+        def _must_not_be_called(settings):
+            raise AssertionError("ensure_update_path called for a package install")
+
+        monkeypatch.setattr(
+            "blinkview.ui.widgets.update_widget.UpdateWidget.ensure_update_path", staticmethod(_must_not_be_called)
+        )
+        seen = []
+        monkeypatch.setattr(
+            "blinkview.core.numba_setup.export_numba_cache",
+            lambda settings, update_source=None: seen.append(update_source) or "fake_cache_path",
+        )
+
+        with pytest.raises(SystemExit):
+            run_module.run(make_args())
+
+        assert len(FakeRegistry.instances) == 1
+        assert seen == [UpdateSource.PYPI]
 
 
 class TestInstallVersionOnExit:
