@@ -308,7 +308,7 @@ class TestInstallVersionOnExit:
             def install(self, version):
                 installed.append(version)
 
-        monkeypatch.setattr("blinkview.utils.updater.Updater", FakeUpdater)
+        monkeypatch.setattr("blinkview.utils.updater.make_updater", FakeUpdater)
 
         original_init = FakeMainWindow.__init__
 

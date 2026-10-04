@@ -101,7 +101,7 @@ class TestCheckForUpdatesSilently:
             constructed.append(settings)
             return FakeUpdater(settings, check_version_status_result=(None, None))
 
-        monkeypatch.setattr(updater_module, "Updater", fake_updater_factory)
+        monkeypatch.setattr(updater_module, "make_updater", fake_updater_factory)
 
         gui_context, _run_task_calls = self.make_gui_context()
         update_checker.check_for_updates_silently(gui_context)
@@ -114,7 +114,7 @@ class TestCheckForUpdatesSilently:
         def fake_updater_factory(settings):
             return FakeUpdater(settings, latest_version="99.0.0", check_version_status_result=(None, None))
 
-        monkeypatch.setattr(updater_module, "Updater", fake_updater_factory)
+        monkeypatch.setattr(updater_module, "make_updater", fake_updater_factory)
 
         gui_context, run_task_calls = self.make_gui_context()
         update_checker.check_for_updates_silently(gui_context)
@@ -132,7 +132,7 @@ class TestCheckForUpdatesSilently:
         def fake_updater_factory(settings):
             return FakeUpdater(settings, latest_version=__version__, check_version_status_result=(None, None))
 
-        monkeypatch.setattr(updater_module, "Updater", fake_updater_factory)
+        monkeypatch.setattr(updater_module, "make_updater", fake_updater_factory)
 
         gui_context, _run_task_calls = self.make_gui_context()
         update_checker.check_for_updates_silently(gui_context)
@@ -146,7 +146,7 @@ class TestCheckForUpdatesSilently:
             def fetch(self, force=False):
                 raise RuntimeError("network down")
 
-        monkeypatch.setattr(updater_module, "Updater", lambda settings: ExplodingUpdater(settings))
+        monkeypatch.setattr(updater_module, "make_updater", lambda settings: ExplodingUpdater(settings))
 
         gui_context, _run_task_calls = self.make_gui_context()
         update_checker.check_for_updates_silently(gui_context)  # must not raise

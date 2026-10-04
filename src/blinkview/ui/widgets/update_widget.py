@@ -27,7 +27,7 @@ from blinkview.ui.utils.update_checker import check_post_update
 from blinkview.ui.utils.window_title import titled
 from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.message_box import MessageBox
-from blinkview.utils.updater import UpdateError, Updater
+from blinkview.utils.updater import GitUpdater, UpdateError, make_updater
 
 
 class TaskSignals(QObject):
@@ -163,14 +163,15 @@ class UpdateWidget(QWidget):
 
         # 2. Try to initialize with current settings
         try:
-            self.updater = Updater(self.gui_context.settings)
+            self.updater = make_updater(self.gui_context.settings)
             self._update_ui_after_init()
             return True
         except UpdateError:
-            # 3. Path is missing or invalid. Use the static helper to fix it.
+            # 3. Path is missing or invalid (only a source checkout has one). Use the static
+            # helper to fix it.
             if self.ensure_update_path(self.gui_context.settings):
                 # Setup succeeded, try again
-                self.updater = Updater(self.gui_context.settings)
+                self.updater = make_updater(self.gui_context.settings)
                 self._update_ui_after_init()
                 return True
 
@@ -185,7 +186,7 @@ class UpdateWidget(QWidget):
         # Use the static method logic so we don't repeat the loop/validation code
         if self.ensure_update_path(self.gui_context.settings):
             # Re-initialize the updater instance with the new path
-            self.updater = Updater(self.gui_context.settings)
+            self.updater = make_updater(self.gui_context.settings)
             self._update_ui_after_init()
 
             # Immediately fetch if the path just changed
@@ -197,6 +198,8 @@ class UpdateWidget(QWidget):
         """Helper to sync UI state after a successful Updater initialization."""
         self.status_label.setText(f"<b>Current Version:</b> v{__version__}")
         self.fetch_btn.setEnabled(True)
+        # Shown only while a source checkout's repo path is missing (ensure_updater's failure path);
+        # a package install never has one.
         self.config_btn.setVisible(False)
         self.updater.channel = str(self.gui_context.settings.get("update.channel", "stable")).lower()
         self.list_local_versions()
@@ -281,7 +284,8 @@ class UpdateWidget(QWidget):
                 # Further back: "Mar 25"
                 display_time = dt.strftime("%b %d")
 
-        self.status_label.setText(f"<b>Version:</b> v{__version__} <small>(Checked: {display_time})</small>")
+        source = f" from {self.updater.describe()}" if self.updater else ""
+        self.status_label.setText(f"<b>Version:</b> v{__version__} <small>(Checked{source}: {display_time})</small>")
 
     def _on_fetch_finished(self, versions):
         self.update_status()
@@ -310,12 +314,11 @@ class UpdateWidget(QWidget):
         """
 
         from blinkview.ui.widgets.message_box import MessageBox
-        from blinkview.utils.updater import Updater
 
         path_str = settings.get("update.path", "")
 
         # 1. Check if the current path is already valid
-        if path_str and Updater.is_valid_repo(Path(path_str)):
+        if path_str and GitUpdater.is_valid_repo(Path(path_str)):
             return True
 
         # 2. If not, prompt the user
@@ -331,7 +334,7 @@ class UpdateWidget(QWidget):
 
             selected_path = Path(selected).resolve()
 
-            if Updater.is_valid_repo(selected_path):
+            if GitUpdater.is_valid_repo(selected_path):
                 settings.set("update.path", str(selected_path), scope="global")
                 return True
 

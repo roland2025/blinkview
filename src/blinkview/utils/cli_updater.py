@@ -10,11 +10,13 @@ def setup_update_parser(parser):
     subparsers = parser.add_subparsers(dest="update_command", help="Update sub-commands")
 
     # blink update fetch
-    subparsers.add_parser("fetch", help="Fetch latest tags/metadata from the repository")
+    subparsers.add_parser(
+        "fetch", help="Fetch the latest versions (git tags in a source checkout, else the package index)"
+    )
 
     # blink update list
-    list_p = subparsers.add_parser("list", help="List available versions/tags")
-    list_p.add_argument("--remote", action="store_true", help="List remote tags instead of local")
+    list_p = subparsers.add_parser("list", help="List available versions on the current update channel")
+    list_p.add_argument("--remote", action="store_true", help="Query the remote now instead of the last fetched list")
 
     # blink update install
     inst_p = subparsers.add_parser("install", help="Switch to a specific version")
@@ -28,16 +30,16 @@ def handle_update(args):
     import sys
 
     from blinkview import __version__
-    from blinkview.utils.updater import UpdateError, Updater
+    from blinkview.utils.updater import UpdateError, make_updater
 
     try:
-        # Updater handles all settings resolution internally now!
-        updater = Updater()
+        # Picks git tags (source checkout) or the package index, per install_info.
+        updater = make_updater()
 
         if args.update_command == "fetch":
-            print(f"Fetching updates in {updater.repo_path}...")
-            updater.fetch()
-            print("Successfully fetched latest tags and metadata.")
+            print(f"Fetching updates from {updater.describe()}...")
+            updater.fetch(force=True)
+            print("Fetched the latest versions.")
 
         elif args.update_command == "list":
             versions = updater.get_versions(remote=args.remote)
@@ -71,7 +73,7 @@ def handle_update(args):
 
         else:
             print(f"Current Version: v{__version__}")
-            print(f"Source Path: {updater.repo_path}")
+            print(f"Update source: {updater.describe()}")
             print("Use 'fetch', 'list', or 'install <version>' to manage updates.")
 
     except UpdateError as e:

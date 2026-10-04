@@ -40,7 +40,7 @@ class FakeGuiContext:
 
 
 class FakeUpdater:
-    """Stands in for blinkview.utils.updater.Updater - never touches git/filesystem."""
+    """Stands in for what blinkview.utils.updater.make_updater returns - never touches git/filesystem."""
 
     fail_construction = False
     versions_local = ["v1.0.0"]
@@ -52,6 +52,9 @@ class FakeUpdater:
             raise UpdateError("no path configured")
         self.settings = settings
         self.channel = str(settings.get("update.channel", "stable")).lower()
+
+    def describe(self):
+        return "fake source"
 
     def get_versions(self, remote=False):
         return FakeUpdater.versions_remote if remote else FakeUpdater.versions_local
@@ -73,7 +76,7 @@ def _reset_fake_updater():
 
 @pytest.fixture(autouse=True)
 def _patch_module(monkeypatch):
-    monkeypatch.setattr(module, "Updater", FakeUpdater)
+    monkeypatch.setattr(module, "make_updater", FakeUpdater)
     monkeypatch.setattr(module, "check_post_update", lambda updater, parent=None: None)
 
 
@@ -308,7 +311,7 @@ class TestOnError:
 
 class TestEnsureUpdatePath:
     def test_already_valid_path_returns_true_without_prompting(self, monkeypatch):
-        from blinkview.utils.updater import Updater as RealUpdater
+        from blinkview.utils.updater import GitUpdater as RealUpdater
 
         monkeypatch.setattr(RealUpdater, "is_valid_repo", staticmethod(lambda p: True))
         settings = FakeSettings({"update.path": "/already/valid"})
@@ -316,8 +319,9 @@ class TestEnsureUpdatePath:
         assert UpdateWidget.ensure_update_path(settings) is True
 
     def test_user_cancels_dialog_returns_false(self, qapp, monkeypatch):
-        from blinkview.utils.updater import Updater as RealUpdater
         from qtpy.QtWidgets import QFileDialog
+
+        from blinkview.utils.updater import GitUpdater as RealUpdater
 
         monkeypatch.setattr(RealUpdater, "is_valid_repo", staticmethod(lambda p: False))
         monkeypatch.setattr(module.MessageBox, "info", staticmethod(lambda *a, **kw: None))
@@ -327,8 +331,9 @@ class TestEnsureUpdatePath:
         assert UpdateWidget.ensure_update_path(settings) is False
 
     def test_valid_selection_saves_path_and_returns_true(self, qapp, monkeypatch, tmp_path):
-        from blinkview.utils.updater import Updater as RealUpdater
         from qtpy.QtWidgets import QFileDialog
+
+        from blinkview.utils.updater import GitUpdater as RealUpdater
 
         monkeypatch.setattr(RealUpdater, "is_valid_repo", staticmethod(lambda p: True))
         monkeypatch.setattr(module.MessageBox, "info", staticmethod(lambda *a, **kw: None))
