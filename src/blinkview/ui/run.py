@@ -199,9 +199,9 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
         sys.exit(exit_code)
     finally:
         if install_version is not None:
-            from blinkview.utils.updater import Updater
+            from blinkview.utils.updater import make_updater
 
-            updater = Updater()
+            updater = make_updater()
             updater.install(install_version)
 
 

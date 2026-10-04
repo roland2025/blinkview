@@ -13,13 +13,13 @@ def check_for_updates_silently(gui_context, parent=None):
     from blinkview.ui.gui_context import GUIContext
     from blinkview.ui.widgets.toast import ToastType
     from blinkview.ui.widgets.toast_dispatcher import toast_dispatcher
-    from blinkview.utils.updater import Updater
+    from blinkview.utils.updater import make_updater
 
     gui_context: GUIContext
 
     # Capture the parent reference before entering the background thread
     # Usually you want to anchor to the main window
-    updater = Updater(gui_context.settings)
+    updater = make_updater(gui_context.settings)
     check_post_update(updater, parent)
 
     def _bg_worker():

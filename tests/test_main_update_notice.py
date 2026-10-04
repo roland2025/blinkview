@@ -19,7 +19,7 @@ import sys
 def test_update_notice_goes_to_stderr_and_stdout_stays_clean(tmp_path):
     home = tmp_path / "home"
     (home / ".blinkview").mkdir(parents=True)
-    (home / ".blinkview" / "settings.json").write_text(json.dumps({"update_check": {"latest_version": "999.0.0"}}))
+    (home / ".blinkview" / "settings.json").write_text(json.dumps({"update": {"latest_version": "999.0.0"}}))
 
     env = dict(os.environ)
     env["HOME"] = str(home)
