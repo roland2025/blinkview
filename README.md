@@ -90,7 +90,7 @@ This demo includes a multi-threaded Qt Client and a headless Backend service—n
 
 ### Requirements
 
-- Python 3.10+
+- Python 3.11+
 
 BlinkView manages its dependencies via `uv`, including optional hardware backends and GUI support.
 
@@ -104,16 +104,17 @@ BlinkView is best installed via `uv` for environment isolation.
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-**Install from source:**
+**Install from PyPI:**
 
 ```bash
-# Clone the repo
-git clone https://github.com/roland2025/blinkview.git
-cd blinkview
-
-# Install the tool
-uv tool install ".[all]"
+uv tool install "blinkview[all]"
 ```
+
+`[all]` brings the GUI and every hardware backend. Narrower extras: `pyside6` (GUI only), `serial`, `can`, `jlink`, `hardware` (all three).
+
+**Updating:** BlinkView checks for new versions once a day and shows a notice when one is available. Run `blink update upgrade`, or use *Check for updates* in the app. The update channel (`stable`, `rc` or `dev`) is picked in the same dialog or with `blink config --global update.channel dev`.
+
+**Install from source:** see [DEVELOPER.md](https://github.com/roland2025/blinkview/blob/main/DEVELOPER.md). A source install updates from the git tags in its checkout instead of PyPI.
 
 ---
 
