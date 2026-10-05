@@ -40,6 +40,12 @@ dependencies = [
     "packaging"
 ]
 
+# Shown as links in the PyPI sidebar.
+[project.urls]
+Homepage = "https://roland2025.github.io/blinkview/"
+Repository = "https://github.com/roland2025/blinkview"
+Issues = "https://github.com/roland2025/blinkview/issues"
+
 [project.optional-dependencies]
 
 # Hardware Backends
