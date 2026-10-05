@@ -30,14 +30,15 @@ def run(cmd, capture=False):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: uv run scripts/release.py [patch|minor|major|standard|x.y.z]")
+        print("Usage: uv run scripts/release.py [patch|minor|major|release|dev|rc|x.y.z]")
         return
 
     increment = sys.argv[1]
 
-    # Map 'release' or 'final' to 'standard' for easier typing
-    if increment in ["release", "final"]:
-        increment = "standard"
+    # hatch's segment for "drop the .devN / rcN suffix" is 'release' (0.18.1.dev0 -> 0.18.1);
+    # 'standard' is the name of its version scheme, not a segment, and fails.
+    if increment in ["final", "standard"]:
+        increment = "release"
 
     # Bump version
     try:
