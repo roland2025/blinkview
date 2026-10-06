@@ -228,7 +228,112 @@ class TestPersistentToast:
         assert calls == [True]
 
 
+class TestDeterminateProgress:
+    """set_progress() swaps the cosmetic countdown ring for real progress, with the percentage
+    painted in the middle of the ring - e.g. a first-start Numba compile reporting N of M."""
+
+    def test_new_toast_starts_in_countdown_mode(self, qapp, qtbot):
+        toast = ToastWidget("msg", persistent=True)
+        qtbot.addWidget(toast)
+        assert toast.icon_widget.determinate is None
+
+    def test_set_progress_stops_the_countdown_animation(self, qapp, qtbot):
+        toast = ToastWidget("msg", persistent=True)
+        qtbot.addWidget(toast)
+        toast.show_toast()
+        assert toast.prog_anim.state() == toast.prog_anim.State.Running
+
+        toast.set_progress(0.25)
+
+        assert toast.prog_anim.state() == toast.prog_anim.State.Stopped
+        assert toast.icon_widget.determinate == 0.25
+
+    def test_set_progress_does_not_hide_a_non_persistent_toast(self, qapp, qtbot):
+        """prog_anim.finished is what auto-hides a normal toast; stopping it for determinate mode
+        must not count as finishing."""
+        toast = ToastWidget("msg", duration=0.05, persistent=False)
+        qtbot.addWidget(toast)
+        toast.show_toast()
+
+        toast.set_progress(0.5)
+        qtbot.wait(150)
+
+        assert toast.fade_anim.endValue() != 0
+
+    def test_show_toast_after_set_progress_does_not_restart_the_countdown(self, qapp, qtbot):
+        toast = ToastWidget("msg", persistent=True)
+        qtbot.addWidget(toast)
+
+        toast.set_progress(0.1)
+        toast.show_toast()
+
+        assert toast.prog_anim.state() == toast.prog_anim.State.Stopped
+
+    @pytest.mark.parametrize(
+        "fraction, expected",
+        [(0.0, "0%"), (0.426, "42%"), (0.999, "99%"), (1.0, "100%"), (-0.5, "0%"), (1.7, "100%")],
+    )
+    def test_percent_text_is_floored_and_clamped(self, qapp, qtbot, fraction, expected):
+        toast = ToastWidget("msg", persistent=True)
+        qtbot.addWidget(toast)
+
+        toast.set_progress(fraction)
+
+        assert toast.icon_widget.percent_text() == expected
+
+    def test_repeated_value_does_not_schedule_a_repaint(self, qapp, qtbot, monkeypatch):
+        toast = ToastWidget("msg", persistent=True)
+        qtbot.addWidget(toast)
+        toast.set_progress(0.3)
+
+        calls = []
+        monkeypatch.setattr(toast.icon_widget, "update", lambda *a: calls.append(a))
+        toast.set_progress(0.3)
+        toast.set_progress(0.4)
+
+        assert len(calls) == 1
+
+    def test_set_progress_keeps_the_toast_size(self, qapp, qtbot):
+        toast = ToastWidget("compiling", persistent=True)
+        qtbot.addWidget(toast)
+        size = toast.size()
+
+        toast.set_progress(0.5)
+
+        assert toast.size() == size
+
+    def test_determinate_toast_paints_without_error(self, qapp, qtbot):
+        toast = ToastWidget("compiling", persistent=True)
+        qtbot.addWidget(toast)
+        toast.set_progress(0.66)
+
+        toast.icon_widget.grab()  # runs paintEvent
+
+    def test_hover_handlers_tolerate_a_stopped_animation(self, qapp, qtbot):
+        toast = ToastWidget("msg", persistent=True)
+        qtbot.addWidget(toast)
+        toast.show_toast()
+        toast.set_progress(0.5)
+
+        toast.enterEvent(_fake_enter_event())
+        toast.leaveEvent(_fake_leave_event())
+
+        assert toast.prog_anim.state() == toast.prog_anim.State.Stopped
+
+
 class TestShowPersistent:
+    def test_progress_argument_starts_in_determinate_mode(self, qapp, qtbot):
+        from qtpy.QtWidgets import QWidget
+
+        parent = QWidget()
+        qtbot.addWidget(parent)
+        parent.resize(400, 300)
+
+        toast = ToastManager.show_persistent("Compiling", parent=parent, progress=0.0)
+
+        assert toast.icon_widget.determinate == 0.0
+        assert toast.prog_anim.state() == toast.prog_anim.State.Stopped
+
     def test_returns_the_toast_widget(self, qapp, qtbot):
         from qtpy.QtWidgets import QWidget
 

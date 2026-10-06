@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 from qtpy.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, QVariantAnimation
-from qtpy.QtGui import QColor, QPainter, QPen
+from qtpy.QtGui import QColor, QFontMetricsF, QPainter, QPen
 from qtpy.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QWidget
 
 
@@ -18,9 +18,14 @@ class ToastType:
 
 
 class ToastIcon(QLabel):
+    PERCENT_FONT_PX = 8
+
     def __init__(self, config, parent=None):
         super().__init__(config["icon"], parent)
         self._progress = 1.0
+        # None = countdown mode (ring driven by ToastWidget.prog_anim, type glyph in the middle).
+        # A float in [0, 1] = determinate mode (ring fills clockwise, percentage in the middle).
+        self._determinate = None
         self._color = QColor(config["text"])
 
         # Pull offset directly from the ToastType dict
@@ -40,6 +45,22 @@ class ToastIcon(QLabel):
         self._progress = value
         self.update()
 
+    def set_determinate(self, fraction):
+        """Switches to determinate mode and shows `fraction` (clamped to [0, 1])."""
+        fraction = min(1.0, max(0.0, float(fraction)))
+        if fraction == self._determinate:
+            return
+        self._determinate = fraction
+        self.update()
+
+    @property
+    def determinate(self):
+        return self._determinate
+
+    def percent_text(self):
+        # Floor, so "100%" only shows once the work is really complete.
+        return f"{int(self._determinate * 100)}%"
+
     def paintEvent(self, event):
         painter = QPainter(self)
         try:
@@ -58,11 +79,26 @@ class ToastIcon(QLabel):
             pen.setColor(self._color)
             painter.setPen(pen)
             start_angle = 90 * 16
-            span_angle = int(self._progress * 360 * 16)
+            if self._determinate is None:
+                span_angle = int(self._progress * 360 * 16)
+            else:
+                span_angle = -int(self._determinate * 360 * 16)  # negative span = clockwise
             painter.drawArc(rect, start_angle, span_angle)
+
+            if self._determinate is not None:
+                font = painter.font()
+                font.setPixelSize(self.PERCENT_FONT_PX)
+                font.setBold(True)
+                painter.setFont(font)
+                text = self.percent_text()
+                # "100%" touches the ring at this size - drop the sign when it doesn't fit inside.
+                if QFontMetricsF(font).horizontalAdvance(text) > rect.width() - 2 * pen.width() - 2:
+                    text = text[:-1]
+                painter.drawText(rect, Qt.AlignCenter, text)
         finally:
             painter.end()
-        super().paintEvent(event)
+        if self._determinate is None:
+            super().paintEvent(event)  # the type glyph; replaced by the percentage otherwise
 
 
 class ToastWidget(QWidget):
@@ -239,7 +275,8 @@ class ToastWidget(QWidget):
         self.fade_anim.setEndValue(1)
         self.fade_anim.setEasingCurve(QEasingCurve.OutCubic)
         self.fade_anim.start()
-        self.prog_anim.start()
+        if self.icon_widget.determinate is None:
+            self.prog_anim.start()
 
     def hide_toast(self):
         if self.fade_anim.state() == QPropertyAnimation.Running and self.fade_anim.endValue() == 0:
@@ -259,6 +296,16 @@ class ToastWidget(QWidget):
         self.msg_label.setText(text)
         self._fit_to_content()
         ToastManager._reposition_toasts()
+
+    def set_progress(self, fraction):
+        """Shows real progress (0.0-1.0) in the ring, with the percentage in its middle instead
+        of the type glyph. The first call stops the cosmetic countdown for good, so the ring only
+        moves when the caller reports progress. Doesn't dismiss at 1.0 - the caller still calls
+        dismiss() when the work is done. Cheap to call often: a repeated value doesn't repaint
+        and the toast's size doesn't change."""
+        if self.prog_anim.state() != QVariantAnimation.Stopped:
+            self.prog_anim.stop()  # stop() doesn't emit finished, so no auto-hide is triggered
+        self.icon_widget.set_determinate(fraction)
 
     def _fit_to_content(self):
         """Sizes the toast to its message: as wide as the text needs (between MIN_WIDTH and
@@ -313,16 +360,20 @@ class ToastManager:
         return cls._show(message, toast_type, duration, action_text, action_callback, click_callback, parent, False)
 
     @classmethod
-    def show_persistent(cls, message, toast_type=ToastType.INFO, duration=60.0, parent=None):
+    def show_persistent(cls, message, toast_type=ToastType.INFO, duration=60.0, parent=None, progress=None):
         """Like show(), but the returned ToastWidget stays visible once its progress-ring
         animation finishes (rather than auto-hiding) and is handed back to the caller so it can
-        be updated in place via set_message()/dismiss() - e.g. shutdown-compression progress,
-        where a caller wants one toast that ticks through "compressing N of M" rather than a new
-        toast per file. Only safe to call from the main/UI thread (unlike notify()/
-        ToastDispatcher, there's no cross-thread signal marshalling here - the returned widget
-        must be usable synchronously by the caller)."""
+        be updated in place via set_message()/set_progress()/dismiss() - e.g. shutdown-compression
+        progress, where a caller wants one toast that ticks through "compressing N of M" rather
+        than a new toast per file. Pass `progress` (0.0-1.0) to start in determinate mode (see
+        ToastWidget.set_progress) instead of with the cosmetic countdown. Only safe to call from
+        the main/UI thread (unlike notify()/ToastDispatcher, there's no cross-thread signal
+        marshalling here - the returned widget must be usable synchronously by the caller)."""
         print(f"[ToastManager]: show_persistent: {message}")
-        return cls._show(message, toast_type, duration, None, None, None, parent, True)
+        toast = cls._show(message, toast_type, duration, None, None, None, parent, True)
+        if toast is not None and progress is not None:
+            toast.set_progress(progress)
+        return toast
 
     @classmethod
     def _show(cls, message, toast_type, duration, action_text, action_callback, click_callback, parent, persistent):
