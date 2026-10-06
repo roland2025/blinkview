@@ -88,23 +88,19 @@ This demo includes a multi-threaded Qt Client and a headless Backend service—n
 
 ## Installation
 
-### Requirements
+BlinkView is installed with [uv](https://docs.astral.sh/uv/), which keeps it in its own environment and downloads a suitable Python (3.11+) if you don't have one.
 
-- Python 3.11+
-
-BlinkView manages its dependencies via `uv`, including optional hardware backends and GUI support.
-
-### Using UV (Recommended)
-
-BlinkView is best installed via `uv` for environment isolation.
-
-**Windows (PowerShell):**
+**1. Install uv** (skip this if you already have it):
 
 ```bash
+# Windows (PowerShell)
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-**Install from PyPI:**
+**2. Install BlinkView from [PyPI](https://pypi.org/project/blinkview/):**
 
 ```bash
 uv tool install "blinkview[all]"
@@ -112,9 +108,21 @@ uv tool install "blinkview[all]"
 
 `[all]` brings the GUI and every hardware backend. Narrower extras: `pyside6` (GUI only), `serial`, `can`, `jlink`, `hardware` (all three).
 
-**Updating:** BlinkView checks for new versions once a day and shows a notice when one is available. Run `blink update upgrade`, or use *Check for updates* in the app. The update channel (`stable`, `rc` or `dev`) is picked in the same dialog or with `blink config --global update.channel dev`.
+### Updating
 
-**Install from source:** see [DEVELOPER.md](https://github.com/roland2025/blinkview/blob/main/DEVELOPER.md). A source install updates from the git tags in its checkout instead of PyPI.
+BlinkView checks for new versions once a day and shows a notice when one is available. Run `blink update upgrade`, or use *Check for updates* in the app. The update channel (`stable`, `rc` or `dev`) is picked in the same dialog or with `blink config --global update.channel dev`.
+
+### Optional: install from source
+
+Only needed if you want to change BlinkView itself or run unreleased code:
+
+```bash
+git clone https://github.com/roland2025/blinkview.git
+cd blinkview
+uv tool install ".[all]"
+```
+
+A source install updates from the git tags in its checkout instead of PyPI. See [DEVELOPER.md](https://github.com/roland2025/blinkview/blob/main/DEVELOPER.md) for the development setup.
 
 ---
 

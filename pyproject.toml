@@ -61,7 +61,7 @@ hardware = [
 # --- Optional GUI Dependencies (GIL-dependent) ---
 gui-core = [
     "qtpy>=2.4.0",
-    "pyqtdarktheme",
+    "pyqtdarktheme-fork>=2.3.6,<2.4",
     "pyqtgraph",
     "numpy",
     "numba",
