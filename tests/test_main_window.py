@@ -485,6 +485,113 @@ class TestPollQueue:
         main_window.poll_queue()  # must not raise - caught and logged internally
 
 
+class TestBackgroundWarmup:
+    """registry.warmup() runs on the TaskManager pool behind a progress toast, and the rest of the
+    startup chain (sidebars, UI-state restore, registry.start()) only runs once it has finished -
+    see plans/background-warmup.md. registry.warmup is replaced by a fake that blocks until the
+    test releases it, so these tests control exactly when the "compile" ends."""
+
+    @pytest.fixture
+    def controlled_warmup(self, main_window, monkeypatch):
+        import threading
+
+        from blinkview.core.warmup import WarmupCancelled
+
+        state = SimpleNamespace(release=threading.Event(), started=threading.Event(), cancel=None, thread=None)
+
+        def fake_warmup(on_progress=None, cancel=None):
+            state.cancel = cancel
+            state.thread = threading.current_thread()
+            state.started.set()
+            on_progress(0.25, "BinaryParser")
+            while not state.release.wait(0.01):
+                if cancel.is_set():
+                    raise WarmupCancelled()
+            on_progress(1.0, "")
+
+        monkeypatch.setattr(main_window.gui_context.registry, "warmup", fake_warmup)
+        sidebars = []
+        monkeypatch.setattr(main_window, "_add_sidebars", lambda: sidebars.append(True))
+        state.sidebars = sidebars
+        return state
+
+    def test_runs_off_the_main_thread_and_continues_startup_when_done(self, main_window, qtbot, controlled_warmup):
+        import threading
+
+        main_window._start_warmup()
+        assert controlled_warmup.started.wait(5)
+
+        assert controlled_warmup.thread is not threading.main_thread()
+        assert controlled_warmup.sidebars == []  # startup waits for the warmup
+        assert main_window.toolbar.isEnabled() is False
+
+        controlled_warmup.release.set()
+        qtbot.waitUntil(lambda: controlled_warmup.sidebars == [True], timeout=5000)
+        assert main_window._warmup_bridge is None
+
+    def test_cold_cache_shows_a_progress_toast_that_is_dismissed_at_the_end(
+        self, main_window, qtbot, controlled_warmup, monkeypatch
+    ):
+        from blinkview.ui import main_window as main_window_module
+
+        monkeypatch.setattr(main_window_module, "IS_CACHE_WARM", False)
+        main_window._start_warmup()
+        toast = main_window._warmup_toast
+        assert toast is not None
+
+        qtbot.waitUntil(lambda: toast.icon_widget.determinate == 0.25, timeout=5000)
+
+        controlled_warmup.release.set()
+        qtbot.waitUntil(lambda: controlled_warmup.sidebars == [True], timeout=5000)
+        assert main_window._warmup_toast is None
+        assert toast.fade_anim.endValue() == 0  # dismissed
+
+    def test_warm_cache_shows_no_toast(self, main_window, qtbot, controlled_warmup, monkeypatch):
+        from blinkview.ui import main_window as main_window_module
+
+        monkeypatch.setattr(main_window_module, "IS_CACHE_WARM", True)
+        main_window._start_warmup()
+
+        assert main_window._warmup_toast is None
+        controlled_warmup.release.set()
+        qtbot.waitUntil(lambda: controlled_warmup.sidebars == [True], timeout=5000)
+
+    def test_toolbar_is_enabled_again_once_the_registry_has_started(self, main_window, monkeypatch):
+        main_window._set_startup_controls_enabled(False)
+        monkeypatch.setattr(main_window.gui_context.registry, "start", lambda: None)
+        monkeypatch.setattr(main_window, "_start_timers", lambda: None)
+
+        main_window._start_registry()
+
+        assert main_window.toolbar.isEnabled() is True
+
+    def test_close_mid_warmup_cancels_it_and_keeps_the_saved_layout(
+        self, main_window, qtbot, controlled_warmup, monkeypatch
+    ):
+        saves = []
+        monkeypatch.setattr(main_window.gui_context.registry.file_manager, "save_gui", lambda: saves.append(True))
+
+        main_window._start_warmup()
+        assert controlled_warmup.started.wait(5)
+
+        main_window.close()
+
+        assert controlled_warmup.cancel.is_set()
+        assert saves == []  # the layout on screen isn't the user's yet
+        qtbot.waitUntil(lambda: main_window._shutdown_ready_to_close, timeout=5000)
+        assert controlled_warmup.sidebars == []  # no UI built while tearing down
+
+    def test_close_after_startup_still_saves_the_layout(self, main_window, qtbot, monkeypatch):
+        saves = []
+        monkeypatch.setattr(main_window.gui_context.registry.file_manager, "save_gui", lambda: saves.append(True))
+        main_window._layout_restored = True
+
+        main_window.close()
+
+        assert saves == [True]
+        qtbot.waitUntil(lambda: main_window._shutdown_ready_to_close, timeout=5000)
+
+
 class TestCloseEvent:
     """Registry.stop() now does real shutdown-time compression work (cold storage + file logger
     parts - see core/registry.py's stop(on_progress=...)), so closeEvent defers the actual close

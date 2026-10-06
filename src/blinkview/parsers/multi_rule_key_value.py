@@ -556,7 +556,7 @@ log rows into synthetic submodules, via a single Numba-JIT kernel call per input
                 batch_out.release()
 
     @staticmethod
-    @register_warmup
+    @register_warmup(weight=10.0)
     def warmup(helper: "NumbaWarmupHelper"):
         """Triggers compilation for every KvRuleID branch (including the KEY_VALUE dynamic
         tracker/resolve path) via one real nb_process_kv_batch call - the single-kernel-call

@@ -425,7 +425,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             del frame_parser
 
     @staticmethod
-    @register_warmup
+    @register_warmup(weight=40.0)  # ~half of a cold warmup: every decoder and section is its own kernel
     def warmup(helper: "NumbaWarmupHelper"):
         """Compiles every frame decoder and every frame parser section in one go.
 
@@ -436,12 +436,15 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
         no_steps = {"type": "default", "parser_errors_hidden": False, "steps": [], "filter_squash_spaces": False}
 
-        for decoder_config in FRAME_DECODER_WARMUPS:
-            BinaryParser._warmup_config(helper, {**WARMUP_DECODER_DEFAULTS, **decoder_config}, no_steps)
-
         line_decoder = {**WARMUP_DECODER_DEFAULTS, "type": "line_decoder"}
-        for step_config in FRAME_SECTION_WARMUPS:
-            BinaryParser._warmup_config(helper, line_decoder, {**no_steps, "steps": [step_config]})
+        configs = [
+            ({**WARMUP_DECODER_DEFAULTS, **decoder_config}, no_steps) for decoder_config in FRAME_DECODER_WARMUPS
+        ]
+        configs += [(line_decoder, {**no_steps, "steps": [step_config]}) for step_config in FRAME_SECTION_WARMUPS]
+
+        for index, (decoder_config, parser_config) in enumerate(configs):
+            helper.report_substep(index, len(configs))
+            BinaryParser._warmup_config(helper, decoder_config, parser_config)
 
         print("[Warmup] BinaryParser frame decoders and sections ... done")
 
