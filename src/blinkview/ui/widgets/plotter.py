@@ -1594,12 +1594,20 @@ class TelemetryPlotter(QWidget):
         # Trigger: Anchor discovery
         start_seq, num_channels = get_telemetry_anchor(helper.log_pool, helper.floats_mod.id, SEQ_NONE, discovery_ws)
         warmup_channels_total = num_channels if num_channels > 0 else 1
+
+        # ~13 s cold as one callback, so report each phase: the ring would otherwise sit still for
+        # that long. 1-channel and multi-channel buffers compile separate 'C'/'F' specializations
+        # (a single-column array counts as C-contiguous), so later iterations compile again too.
+        steps = 1 + 3 * warmup_channels_total
+        helper.report_substep(1, steps)
+
         for warmup_channels in range(warmup_channels_total):
             temp_floats = allocate_telemetry_workspace(warmup_channels)
             module_buffer = ModuleBuffer(max_points=1024, num_channels=warmup_channels)
 
             start_seq = dtypes.SEQ_TYPE(start_seq)
 
+            helper.report_substep(1 + 3 * warmup_channels, steps)
             if warmup_channels > 0:
                 with fetch_telemetry_arrays(
                     helper.array_pool,
@@ -1612,6 +1620,7 @@ class TelemetryPlotter(QWidget):
                 ) as batch:
                     module_buffer.update(batch)
 
+                helper.report_substep(2 + 3 * warmup_channels, steps)
                 # Trigger: playback-scrub window extraction (nb_extract_telemetry_segment_window_
                 # backward/forward, via fetch_telemetry_window) - separate code path from the
                 # forward-watermark fetch above, exercised here so REPLAY-mode scrubbing doesn't
@@ -1634,6 +1643,7 @@ class TelemetryPlotter(QWidget):
                 ):
                     pass
 
+            helper.report_substep(3 + 3 * warmup_channels, steps)
             buf_bundle = module_buffer.bundle()
 
             t_now = helper.time_ns() / 1e9
