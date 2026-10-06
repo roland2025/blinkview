@@ -1580,7 +1580,7 @@ class TelemetryPlotter(QWidget):
         return len(all_names) != len(set(all_names))
 
     @staticmethod
-    @register_warmup
+    @register_warmup(weight=13.0)
     def warmup(helper: "NumbaWarmupHelper"):
         """Triggers compilation for telemetry discovery and extraction (nb_slice_and_downsample,
         nb_downsample_inplace). Requires data in the pool, provided by

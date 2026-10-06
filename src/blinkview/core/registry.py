@@ -6,7 +6,7 @@
 
 from pathlib import Path
 from queue import Queue
-from threading import RLock
+from threading import Lock, RLock
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -218,6 +218,7 @@ class Registry:
         self.warmup_success = False
         self.warmup_error = None
         self._warmup_done = False
+        self._warmup_lock = Lock()
 
         # ==========================================
         # LAYER 2: Storage & Sinks
@@ -814,27 +815,41 @@ class Registry:
 
         self._temp_log_queue = None  # Release the temporary log queue
 
-    def warmup(self):
+    def warmup(self, on_progress=None, cancel=None):
         """Compiles Numba kernels. Safe to call once, ahead of start(); start() will
-        call it itself if it hasn't run yet."""
-        if self._warmup_done:
-            return
+        call it itself if it hasn't run yet.
 
-        try:
-            self.warmup_success = False
-            self.logger.warn("NUMBA: compiling kernels")
+        Thread-safe: the GUI runs this on a background thread, and a start() that comes in
+        meanwhile blocks on _warmup_lock until it's done instead of running a second warmup in
+        parallel. `on_progress`/`cancel` are passed to NumbaWarmupHelper.run_all(). A cancelled
+        warmup still counts as done (run_all() has cleared the callback registry by then, so
+        there's nothing left to rerun) but not as successful; any kernel it didn't reach
+        compiles on first use instead."""
+        from blinkview.core.warmup import WarmupCancelled
 
-            self.get_warmup().run_all()
+        with self._warmup_lock:
+            if self._warmup_done:
+                return
 
-            self.logger.warn("NUMBA: compiling done")
-            self.warmup_success = True
-        except Exception as e:
-            self.warmup_error = str(e)
-            self.warmup_success = False
-            self.logger.exception("Error during compiling kernels", exc=e)
-        finally:
-            self.warmup_helper = None
-            self._warmup_done = True
+            try:
+                self.warmup_success = False
+                self.logger.warn("NUMBA: compiling kernels")
+
+                self.get_warmup().run_all(on_progress=on_progress, cancel=cancel)
+
+                self.logger.warn("NUMBA: compiling done")
+                self.warmup_success = True
+            except WarmupCancelled:
+                self.warmup_error = "cancelled"
+                self.warmup_success = False
+                self.logger.warn("NUMBA: compiling cancelled")
+            except Exception as e:
+                self.warmup_error = str(e)
+                self.warmup_success = False
+                self.logger.exception("Error during compiling kernels", exc=e)
+            finally:
+                self.warmup_helper = None
+                self._warmup_done = True
 
     def start(self, configure=True):
         if self._is_running:

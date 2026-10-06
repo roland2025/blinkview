@@ -6,6 +6,7 @@
 
 import signal
 import sys
+import threading
 import traceback
 from time import perf_counter, time
 from types import SimpleNamespace
@@ -14,7 +15,6 @@ from typing import Optional
 from qtpy.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
 from qtpy.QtGui import QAction, QFont, QGuiApplication
 from qtpy.QtWidgets import (
-    QApplication,
     QDockWidget,
     QInputDialog,
     QLabel,
@@ -120,6 +120,14 @@ class _ShutdownWorker(QObject):
             traceback.print_exc()
         finally:
             self.finished.emit()
+
+
+class _WarmupBridge(QObject):
+    """Marshals Registry.warmup()'s on_progress callback and its completion (both on a TaskManager
+    worker thread) onto the main thread - same queued-signal reasoning as _ShutdownWorker."""
+
+    progress = Signal(float, str)  # fraction of the whole warmup, callback label
+    finished = Signal()
 
 
 class _SessionRotationWorker(QObject):
@@ -443,6 +451,11 @@ class BlinkMainWindow(QMainWindow):
         self._numba_compile_end = 0
         self._numba_compile_start = 0
 
+        # Background Numba warmup (see _start_warmup) - kept alive until it finishes.
+        self._warmup_bridge: Optional[_WarmupBridge] = None
+        self._warmup_cancel: Optional[threading.Event] = None
+        self._warmup_toast = None
+
         # UI Poller (Runs here, updates the log window)
         self.gui_context.set_theme(StyleConfig())
 
@@ -497,14 +510,18 @@ class BlinkMainWindow(QMainWindow):
     def load_ui_state(self):
         """Staged startup sequence, run once the window is shown:
         1. move the window to its final position
-        2. show the "compiling shaders" toast
-        3. numba warmup
-        4. add the sources/pipelines sidebars
-        5. restore other windows and tabs
-        6. registry.start()
-        7. start main-window timers
-        8. show the ready toast
-        9. check for updates
+        2. numba warmup on a background thread, with a progress toast on a cold cache; the
+           toolbar stays disabled until step 6
+        3. add the sources/pipelines sidebars
+        4. restore other windows and tabs
+        5. registry.start()
+        6. re-enable the toolbar, start main-window timers
+        7. show the ready toast
+        8. check for updates
+
+        Steps 3+ only run once the warmup has finished: nothing on the GUI thread may call a
+        Numba kernel while it runs (it would block on Numba's compiler lock or compile the kernel
+        itself), and the restored widgets do.
         """
         self.gui_context.gui_state.restore_window_geometry(
             self.gui_context.registry.file_manager.get_gui_state_path(for_load=True),
@@ -517,28 +534,55 @@ class BlinkMainWindow(QMainWindow):
         # Materialize the window in its perfect location
         self.setWindowOpacity(1.0)
 
-        self._show_precompile_toast()
+        self._start_warmup()
 
-    def _show_precompile_toast(self):
-        # FAST PATH: Skip the warning toast and the 333ms delay if cache is warm
-        if IS_CACHE_WARM:
-            self._run_warmup()
-        else:
-            ToastManager.show("Compiling Shaders", ToastType.WARNING, duration=2, parent=self)
+    def _start_warmup(self):
+        """Runs registry.warmup() on the TaskManager pool so the window keeps painting during a
+        cold-cache compile (~75 s; measured in plans/background-warmup.md). A warm cache takes the
+        same path, just without the toast."""
+        registry = self.gui_context.registry
+        self._set_startup_controls_enabled(False)
 
-            QApplication.processEvents()
-            QTimer.singleShot(1000, self._run_warmup)
+        if not IS_CACHE_WARM:
+            self._warmup_toast = ToastManager.show_persistent(
+                "First start: compiling kernels (one time only)", ToastType.WARNING, parent=self, progress=0.0
+            )
 
-    def _run_warmup(self):
-        # registry.warmup() blocks the GUI thread for the duration of the numba compile, so
-        # force any pending paint/animation events (the "Compiling Shaders" toast) to actually
-        # reach the screen first - a QTimer delay alone doesn't guarantee that.
-        QApplication.processEvents()
+        bridge = _WarmupBridge(self)
+        bridge.progress.connect(self._on_warmup_progress)
+        bridge.finished.connect(self._on_warmup_finished)
+        self._warmup_bridge = bridge
+        self._warmup_cancel = threading.Event()
 
-        self._numba_compile_start = self.gui_context.registry.now_ns()
-        self.gui_context.registry.warmup()
+        self._numba_compile_start = registry.now_ns()
+        future = registry.system_ctx.tasks.run_task(
+            registry.warmup, on_progress=bridge.progress.emit, cancel=self._warmup_cancel
+        )
+        # Worker thread: only emit, the slot runs on the main thread.
+        future.add_done_callback(lambda _future: bridge.finished.emit())
+
+    def _on_warmup_progress(self, fraction, label):
+        if self._warmup_toast is not None:
+            self._warmup_toast.set_progress(fraction)
+
+    def _on_warmup_finished(self):
         self._numba_compile_end = self.gui_context.registry.now_ns()
+        self._warmup_bridge = None
+        if self._warmup_toast is not None:
+            self._warmup_toast.dismiss()
+            self._warmup_toast = None
+
+        if self.gui_context.is_shutting_down:
+            return  # closed mid-warmup (see closeEvent) - don't build the UI we're tearing down
         self._add_sidebars()
+
+    def _set_startup_controls_enabled(self, enabled):
+        """The toolbar (and the frameless title bar's menu) opens widgets and dialogs that need
+        compiled kernels and a started registry, so it's disabled until startup has finished."""
+        self.toolbar.setEnabled(enabled)
+        title_bar = getattr(self, "title_bar", None)
+        if title_bar is not None:
+            title_bar.menu_btn.setEnabled(enabled)
 
     def _add_sidebars(self):
         devices_config_node = self.gui_context.config_manager.create_node("/sources")
@@ -565,6 +609,7 @@ class BlinkMainWindow(QMainWindow):
     def _start_registry(self):
         self._layout_restored = True
         self.gui_context.registry.start()
+        self._set_startup_controls_enabled(True)
         self._start_timers()
 
     def _start_timers(self):
@@ -1314,7 +1359,17 @@ class BlinkMainWindow(QMainWindow):
         self.gui_context.is_shutting_down = True
         event.ignore()
 
-        self.gui_context.registry.file_manager.save_gui()
+        if self._warmup_cancel is not None:
+            # Stops a still-running warmup at its next callback/sub-step, so Registry.stop()'s
+            # tasks.shutdown() waits seconds for that worker thread instead of the whole compile.
+            self._warmup_cancel.set()
+
+        if self._layout_restored:
+            self.gui_context.registry.file_manager.save_gui()
+        else:
+            # Closed before startup restored the saved layout (e.g. during the warmup): what's on
+            # screen isn't the user's layout, so saving it would overwrite theirs.
+            print("Startup not finished - keeping the saved layout")
 
         self._start_shutdown_compression()
 
