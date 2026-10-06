@@ -1045,7 +1045,9 @@ class BlinkMainWindow(QMainWindow):
 
             bridge = _ReplayLoadBridge(self)
             self._replay_load_bridge = bridge  # keep alive for the duration of the load
-            self._replay_load_toast = ToastManager.show_persistent(f"Loading file 0 of {len(parts)}...", parent=self)
+            self._replay_load_toast = ToastManager.show_persistent(
+                f"Loading file 0 of {len(parts)}...", parent=self, progress=0.0
+            )
             bridge.progress.connect(self._on_replay_load_progress)
             bridge.finished.connect(self._on_replay_load_finished)
 
@@ -1079,6 +1081,9 @@ class BlinkMainWindow(QMainWindow):
     def _on_replay_load_progress(self, current: int, total: int, label: str):
         if self._replay_load_toast is not None:
             self._replay_load_toast.set_message(f"Loading file {current} of {total} ({label})")
+            # Reported as each part *starts* (1-based), so current - 1 parts are done.
+            if total > 0:
+                self._replay_load_toast.set_progress((current - 1) / total)
 
     @Slot()
     def _on_replay_load_finished(self):
@@ -1376,7 +1381,7 @@ class BlinkMainWindow(QMainWindow):
     def _start_shutdown_compression(self):
         from blinkview.ui.widgets.toast import ToastManager
 
-        self._shutdown_toast = ToastManager.show_persistent("Compressing files...", parent=self)
+        self._shutdown_toast = ToastManager.show_persistent("Compressing files...", parent=self, progress=0.0)
 
         self._shutdown_thread = QThread(self)
         self._shutdown_worker = _ShutdownWorker(self.gui_context.registry)
@@ -1391,6 +1396,9 @@ class BlinkMainWindow(QMainWindow):
     def _on_shutdown_progress(self, current: int, total: int, label: str):
         if self._shutdown_toast is not None:
             self._shutdown_toast.set_message(f"Compressing files... {current} of {total} ({label})")
+            # Reported as each file *finishes*, so current files are done.
+            if total > 0:
+                self._shutdown_toast.set_progress(current / total)
 
     @Slot()
     def _on_shutdown_compression_done(self):

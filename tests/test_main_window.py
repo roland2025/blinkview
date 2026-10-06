@@ -352,6 +352,7 @@ class TestStartReplay:
         assert created["bound"] is True
         assert created["started"] is True
         assert load_calls == [tmp_path]
+        assert main_window._replay_load_toast.icon_widget.determinate == 0.0  # ring starts empty
 
         # Ingest must be paused before the reader starts, and neither resumed nor frozen until
         # the reader itself reports completion (on_finished) - not just because start_replay
@@ -379,6 +380,21 @@ class TestStartReplay:
         assert resume_calls == [True]
         assert freeze_calls == [True]
         assert registry.playback_clock.current_ts_ns == recording_end_ns
+
+    def test_replay_load_progress_updates_toast_text_and_ring(self, main_window):
+        messages, progress = [], []
+        main_window._replay_load_toast = SimpleNamespace(set_message=messages.append, set_progress=progress.append)
+
+        main_window._on_replay_load_progress(1, 4, "unified.0000.log")
+        main_window._on_replay_load_progress(3, 4, "unified.0002.log")
+
+        assert messages == ["Loading file 1 of 4 (unified.0000.log)", "Loading file 3 of 4 (unified.0002.log)"]
+        assert progress == [0.0, 0.5]  # reported as each part *starts*, so current - 1 are done
+
+    def test_replay_load_progress_is_a_noop_without_a_toast(self, main_window):
+        main_window._replay_load_toast = None
+
+        main_window._on_replay_load_progress(1, 2, "unified.0000.log")  # must not raise
 
     def test_skips_unified_log_replay_when_already_resumed_from_cold_storage(self, main_window, monkeypatch, tmp_path):
         """A previous run with cold_storage_persist_on_close enabled may have already archived
@@ -599,13 +615,28 @@ class TestCloseEvent:
     cover the two Qt-signal-connected slots directly (fast, deterministic) and the full threaded
     flow end-to-end (via qtbot.waitUntil, since real work happens on a background QThread)."""
 
-    def test_on_shutdown_progress_updates_toast_text(self, main_window):
-        messages = []
-        main_window._shutdown_toast = SimpleNamespace(set_message=messages.append)
+    def test_on_shutdown_progress_updates_toast_text_and_ring(self, main_window):
+        messages, progress = [], []
+        main_window._shutdown_toast = SimpleNamespace(set_message=messages.append, set_progress=progress.append)
 
         main_window._on_shutdown_progress(2, 5, "segment_0000000001.blkseg")
 
         assert messages == ["Compressing files... 2 of 5 (segment_0000000001.blkseg)"]
+        assert progress == [0.4]  # reported per *finished* file
+
+    def test_on_shutdown_progress_with_zero_total_leaves_the_ring_alone(self, main_window):
+        progress = []
+        main_window._shutdown_toast = SimpleNamespace(set_message=lambda text: None, set_progress=progress.append)
+
+        main_window._on_shutdown_progress(0, 0, "")
+
+        assert progress == []
+
+    def test_shutdown_toast_starts_in_progress_mode(self, main_window, qtbot):
+        main_window.close()
+
+        assert main_window._shutdown_toast.icon_widget.determinate is not None
+        qtbot.waitUntil(lambda: main_window._shutdown_ready_to_close, timeout=5000)
 
     def test_on_shutdown_progress_is_a_noop_without_a_toast(self, main_window):
         main_window._shutdown_toast = None
