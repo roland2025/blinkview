@@ -66,8 +66,11 @@ class ToastIcon(QLabel):
         try:
             painter.setRenderHint(QPainter.Antialiasing)
 
-            # Create the circle rect and slide it by the per-type offset
-            rect = QRectF(3, 3, 26, 26).translated(0.5 + self.ring_offset[0], 4 + self.ring_offset[1])
+            # Create the circle rect and slide it by the per-type offset. The offset centres the
+            # ring on the type glyph, so it only applies while that glyph is shown - around the
+            # percentage it would just push the ring past the widget's bottom edge (WARNING).
+            offset_x, offset_y = self.ring_offset if self._determinate is None else (0, 0)
+            rect = QRectF(3, 3, 26, 26).translated(0.5 + offset_x, 4 + offset_y)
 
             # Draw track
             pen = QPen(QColor(255, 255, 255, 30))

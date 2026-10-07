@@ -19,27 +19,46 @@ The type name must match the factory name; tests/test_frame_warmup.py checks tha
 an entry and that every entry builds. Like warmup_registry, this module has no imports so the parser modules can
 decorate their classes without cycles."""
 
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple
 
 FRAME_DECODER_WARMUPS: List[Dict] = []
 FRAME_SECTION_WARMUPS: List[Dict] = []
 
+# Relative cold-cache cost of each entry, keyed by (kind, type name) - only used to weight
+# BinaryParser.warmup()'s sub-step progress, like warmup_registry's _WARMUP_WEIGHTS one level up.
+# Roughly seconds on a dev machine. Most sections compile one kernel in 1-2 s and keep the default;
+# an entry that reuses an already compiled kernel costs next to nothing.
+FRAME_WARMUP_WEIGHTS: Dict[Tuple[str, str], float] = {}
 
-def _register(target: List[Dict], type_name: str, config: Dict) -> Callable:
+DEFAULT_FRAME_WARMUP_WEIGHT = 1.5
+SHARED_KERNEL_WARMUP_WEIGHT = 0.1
+
+KIND_DECODER = "decoder"
+KIND_SECTION = "section"
+
+
+def frame_warmup_weight(kind: str, type_name: str) -> float:
+    return FRAME_WARMUP_WEIGHTS.get((kind, type_name), DEFAULT_FRAME_WARMUP_WEIGHT)
+
+
+def _register(target: List[Dict], kind: str, type_name: str, warmup_weight: float, config: Dict) -> Callable:
     entry = {"type": type_name, **config}
 
     def decorator(cls):
         target.append(entry)
+        FRAME_WARMUP_WEIGHTS[(kind, type_name)] = warmup_weight
         return cls
 
     return decorator
 
 
-def frame_decoder_warmup(type_name: str, **config) -> Callable:
-    """Class decorator: registers `{"type": type_name, **config}` as a frame_decoder config to warm up."""
-    return _register(FRAME_DECODER_WARMUPS, type_name, config)
+def frame_decoder_warmup(type_name: str, *, warmup_weight: float = DEFAULT_FRAME_WARMUP_WEIGHT, **config) -> Callable:
+    """Class decorator: registers `{"type": type_name, **config}` as a frame_decoder config to warm up.
+    `warmup_weight` is its relative cold-cache cost for progress reporting (see FRAME_WARMUP_WEIGHTS)."""
+    return _register(FRAME_DECODER_WARMUPS, KIND_DECODER, type_name, warmup_weight, config)
 
 
-def frame_section_warmup(type_name: str, **config) -> Callable:
-    """Class decorator: registers `{"type": type_name, **config}` as a frame parser step config to warm up."""
-    return _register(FRAME_SECTION_WARMUPS, type_name, config)
+def frame_section_warmup(type_name: str, *, warmup_weight: float = DEFAULT_FRAME_WARMUP_WEIGHT, **config) -> Callable:
+    """Class decorator: registers `{"type": type_name, **config}` as a frame parser step config to warm up.
+    `warmup_weight` is its relative cold-cache cost for progress reporting (see FRAME_WARMUP_WEIGHTS)."""
+    return _register(FRAME_SECTION_WARMUPS, KIND_SECTION, type_name, warmup_weight, config)
