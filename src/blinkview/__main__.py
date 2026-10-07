@@ -53,17 +53,46 @@ def apply_session_profile(args, session_info):
 def run_replay(args):
     # utils/session_lister.py deliberately avoids importing anything from blinkview.storage/
     # blinkview.parsers (the numba/id_registry cluster, ~600 modules) so --list stays fast.
-    from blinkview.utils.session_lister import list_sessions, resolve_log_root, resolve_session, unified_log_parts
+    from blinkview.utils.session_lister import (
+        describe_session,
+        format_session_table,
+        list_sessions,
+        resolve_log_root,
+        resolve_session,
+        unified_log_parts,
+    )
 
     log_dir, project_name = resolve_log_root(log_dir=args.logdir)
 
+    if (args.json or args.limit is not None) and not args.list:
+        print("Error: --json and --limit only apply to --list.", file=sys.stderr)
+        sys.exit(2)
+
     if args.list:
         sessions = [s for s in list_sessions(log_dir, project_name) if unified_log_parts(s)]
+        if args.profile is not None:
+            sessions = [s for s in sessions if s.profile == args.profile]
+        total = len(sessions)
+        if args.limit is not None:
+            sessions = sessions[: max(args.limit, 0)]
+
+        if args.json:
+            import json
+
+            print(json.dumps([describe_session(s) for s in sessions], indent=2))
+            return
         if not sessions:
             print(f"No replay sessions found for project '{project_name}' in {log_dir}.")
             return
-        for s in sessions:
-            print(f"{s.session_id}  [{s.status}]  {s.display_name} (profile={s.profile}, created={s.created_at})")
+        print(format_session_table(sessions))
+        # stderr: hints, not command output - same reasoning as the update notice in main().
+        shown = str(total) if len(sessions) == total else f"{len(sessions)} of {total}"
+        print(
+            f"\n{shown} session(s), newest first. ~ = no clean finish (still recording, or killed): "
+            "estimated from the last write.\n"
+            "Open one: blink replay <SESSION ID>    As text: blink export <SESSION ID> --summary -o OUT",
+            file=sys.stderr,
+        )
         return
 
     session_info = resolve_session(log_dir, project_name, name=args.name, last=args.last)

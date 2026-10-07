@@ -45,6 +45,9 @@ class SessionInfo(NamedTuple):
     created_at: Optional[str]
     finished_at: Optional[str]
     duration_seconds: Optional[float]
+    # Bytes the unified log's FileLogger has written (metadata.json loggers.session.total_bytes),
+    # uncompressed. None when the metadata has no such entry.
+    log_bytes: Optional[int] = None
 
 
 def resolve_log_root(log_dir=None, settings: Optional[SettingsManager] = None) -> tuple[Path, str]:
@@ -123,11 +126,20 @@ def list_sessions(log_dir: Path, project_name: str) -> list[SessionInfo]:
                 created_at=meta.get("created_at"),
                 finished_at=meta.get("finished_at"),
                 duration_seconds=meta.get("duration_seconds"),
+                log_bytes=_unified_log_bytes(meta),
             )
         )
 
     sessions.sort(key=lambda s: s.created_at or "", reverse=True)
     return sessions
+
+
+def _unified_log_bytes(meta: dict) -> Optional[int]:
+    try:
+        total = meta["loggers"]["session"]["total_bytes"]
+    except (KeyError, TypeError):
+        return None
+    return total if isinstance(total, int) else None
 
 
 def resolve_session(
@@ -180,24 +192,109 @@ def _format_duration(seconds: Optional[float]) -> str:
     return f"{hours}h {minutes:02d}m"
 
 
+def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+    """metadata.json timestamps are UTC ISO 8601 (FileManager appends a trailing 'Z' after an
+    already-offset isoformat())."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.rstrip("Z"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def format_session_label(session_info: SessionInfo) -> str:
-    """Human-readable menu label: 'YYYY-MM-DD HH:MM (duration)  display_name [profile]'.
-    created_at is stored as UTC ISO 8601 (FileManager appends a trailing 'Z' after an
-    already-offset isoformat()), shown here in local time."""
+    """Human-readable menu label: 'YYYY-MM-DD HH:MM (duration)  display_name [profile]',
+    created_at shown in local time."""
     started = "????-??-?? ??:??"
     if session_info.created_at:
-        try:
-            dt = datetime.fromisoformat(session_info.created_at.rstrip("Z"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            started = dt.astimezone().strftime("%Y-%m-%d %H:%M")
-        except ValueError:
-            started = session_info.created_at
+        dt = _parse_timestamp(session_info.created_at)
+        started = dt.astimezone().strftime("%Y-%m-%d %H:%M") if dt else session_info.created_at
 
     label = f"{started} ({_format_duration(session_info.duration_seconds)})  {session_info.display_name}"
     if session_info.profile:
         label += f" [{session_info.profile}]"
     return label
+
+
+def _format_size(size: Optional[int]) -> str:
+    if size is None:
+        return "?"
+    if size < 1024:
+        return f"{size} B"
+    value = size / 1024
+    for unit in ("KB", "MB"):
+        if value < 1024:
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def describe_session(session_info: SessionInfo) -> dict:
+    """Everything `blink replay --list` shows about a session, as JSON-ready values.
+
+    A session that never reached FileManager's finish (still recording, or the process was
+    killed) has no duration_seconds - it is then estimated from the newest unified log part's
+    mtime and flagged `duration_estimated`. Likewise `log_bytes` falls back to the parts' size on
+    disk (smaller than the log itself for compressed parts)."""
+    parts = unified_log_parts(session_info)
+    started = _parse_timestamp(session_info.created_at)
+    finished = _parse_timestamp(session_info.finished_at)
+
+    disk_bytes = 0
+    last_write = 0.0
+    for part in parts:
+        try:
+            stat = part.stat()
+        except OSError:
+            continue
+        disk_bytes += stat.st_size
+        last_write = max(last_write, stat.st_mtime)
+
+    duration = session_info.duration_seconds
+    estimated = False
+    if duration is None and started is not None and last_write:
+        duration = round(max(0.0, last_write - started.timestamp()), 3)
+        estimated = True
+
+    return {
+        "session_id": session_info.session_id,
+        "name": session_info.display_name,
+        "profile": session_info.profile,
+        "status": session_info.status,
+        "started_at": started.isoformat() if started else None,
+        "finished_at": finished.isoformat() if finished else None,
+        "duration_seconds": duration,
+        "duration_estimated": estimated,
+        "log_bytes": session_info.log_bytes or disk_bytes,
+        "parts": len(parts),
+        "path": str(session_info.path),
+    }
+
+
+def format_session_table(sessions: list[SessionInfo]) -> str:
+    """The `blink replay --list` table, one session per line. NAME is last since it is the only
+    column that may contain spaces."""
+    rows = [("SESSION ID", "STARTED (local)", "DURATION", "SIZE", "STATUS", "PROFILE", "NAME")]
+    for session_info in sessions:
+        info = describe_session(session_info)
+        started = _parse_timestamp(info["started_at"])
+        duration = "?" if info["duration_seconds"] is None else _format_duration(info["duration_seconds"])
+        rows.append(
+            (
+                info["session_id"],
+                started.astimezone().strftime("%Y-%m-%d %H:%M") if started else "?",
+                f"~{duration}" if info["duration_estimated"] else duration,
+                _format_size(info["log_bytes"]),
+                info["status"],
+                info["profile"] or "-",
+                info["name"],
+            )
+        )
+
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]) - 1)]
+    return "\n".join("  ".join(cell.ljust(width) for cell, width in zip(row, widths)) + "  " + row[-1] for row in rows)
 
 
 def unified_log_parts(session_info: SessionInfo) -> list[Path]:
