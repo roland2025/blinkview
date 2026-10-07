@@ -295,8 +295,10 @@ class FileManager:
     def snapshot_gui_start(self):
         """Copies the workspace GUI config/state into the current session folder as its `start`
         record - at startup, and for each new session after rotate() (the caller saves the
-        workspace copies first, see MainWindow's session rotation)."""
-        self._snapshot_master_to_session("gui_config")
+        workspace layout first, see MainWindow's session rotation). The GUI config is recorded
+        from its ConfigManager, like the main config's `start` - `<profile>.gui.json` does not
+        exist on disk until the first watch is added."""
+        self.save_gui_config(suffix="start")
         self._snapshot_master_to_session("gui_state", self.get_gui_state_path(for_load=True))
 
     def _create_session_dir(self, create: bool = True) -> Path:
@@ -610,19 +612,14 @@ class FileManager:
         gui_dir.mkdir(exist_ok=True)
         return gui_dir
 
-    def save_gui_config(self, suffix: str = "autosave", session_only: bool = False):
-        """Saves GUI preferences. If session_only is True, does not touch the Workspace."""
-        if not self.gui_context or not hasattr(self.gui_context, "gui_config"):
+    def save_gui_config(self, suffix: str = "final"):
+        """Records the GUI config (watches) in the session folder. The workspace file
+        `<profile>.gui.json` is not written here - its ConfigManager is the only writer."""
+        gui_config = getattr(self.gui_context, "gui_config", None)
+        if gui_config is None:
             return
 
-        data = self.gui_context.gui_config.get_data()
-
-        # Workspace (Live Master) - Skip if session_only is requested
-        if not session_only:
-            atomic_json_dump(data, self.get_config_path("gui_config"))
-
-        # Session (Historical Archive) - Always save
-        atomic_json_dump(data, self.get_session_path("gui_config", suffix))
+        atomic_json_dump(gui_config.get_data(), self.get_session_path("gui", suffix))
 
     def save_gui_state(self, suffix: str = "autosave", session_only: bool = False):
         """Saves UI layout. If session_only is True, does not touch the Workspace."""
