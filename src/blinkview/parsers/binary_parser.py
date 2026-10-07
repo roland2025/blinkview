@@ -12,7 +12,13 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property, on_config_change, override_property
 from blinkview.core.constants import FactoryCategory
-from blinkview.core.frame_warmup_registry import FRAME_DECODER_WARMUPS, FRAME_SECTION_WARMUPS
+from blinkview.core.frame_warmup_registry import (
+    FRAME_DECODER_WARMUPS,
+    FRAME_SECTION_WARMUPS,
+    KIND_DECODER,
+    KIND_SECTION,
+    frame_warmup_weight,
+)
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.output import OutputConfig
 from blinkview.core.types.parsing import SyncState, create_default_sync
@@ -442,9 +448,16 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         ]
         configs += [(line_decoder, {**no_steps, "steps": [step_config]}) for step_config in FRAME_SECTION_WARMUPS]
 
-        for index, (decoder_config, parser_config) in enumerate(configs):
-            helper.report_substep(index, len(configs))
+        # Weighted, not "index of len(configs)": the configs cost anything from ~0 to 8 s each.
+        weights = [frame_warmup_weight(KIND_DECODER, config["type"]) for config in FRAME_DECODER_WARMUPS]
+        weights += [frame_warmup_weight(KIND_SECTION, config["type"]) for config in FRAME_SECTION_WARMUPS]
+        total_weight = sum(weights)
+        done_weight = 0.0
+
+        for (decoder_config, parser_config), weight in zip(configs, weights):
+            helper.report_substep(done_weight, total_weight)
             BinaryParser._warmup_config(helper, decoder_config, parser_config)
+            done_weight += weight
 
         print("[Warmup] BinaryParser frame decoders and sections ... done")
 

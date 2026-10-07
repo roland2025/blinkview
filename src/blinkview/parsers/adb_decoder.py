@@ -31,7 +31,7 @@ from blinkview.utils.log_level import LogLevel
 
 
 @FrameDecoderFactory.register("decode_adb_long_frame")
-@frame_decoder_warmup("decode_adb_long_frame")
+@frame_decoder_warmup("decode_adb_long_frame", warmup_weight=4.0)
 @override_property("frame_delimiter", default=CHAR_LF)
 @override_property("frame_length_maximum", default=32 * 1024)
 @override_property("frame_resync_on_start", default=False)  # logcat output always starts on a line boundary

@@ -51,7 +51,7 @@ class _WarmupProgress:
         self._label = label
         self._emit(0.0)
 
-    def substep(self, done: int, total: int):
+    def substep(self, done: float, total: float):
         self._check_cancel()
         if total > 0:
             self._emit(min(1.0, max(0.0, done / total)))
@@ -118,11 +118,12 @@ class NumbaWarmupHelper:
             pid_history=self.pid_history,
         )
 
-    def report_substep(self, done: int, total: int):
+    def report_substep(self, done: float, total: float):
         """For callbacks with a long loop of independent compiles (e.g. BinaryParser's 30 decoder
         and section configs): call before each item so progress moves within the callback and a
-        cancel takes effect between items instead of only after the whole callback. A no-op when
-        the callback is run outside run_all() (unit tests)."""
+        cancel takes effect between items instead of only after the whole callback. `done`/`total`
+        are item counts, or summed weights when the items' costs differ a lot. A no-op when the
+        callback is run outside run_all() (unit tests)."""
         progress = getattr(self, "_progress", None)
         if progress is not None:
             progress.substep(done, total)

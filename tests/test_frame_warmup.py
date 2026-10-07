@@ -7,14 +7,20 @@
 import time
 from types import SimpleNamespace
 
+import pytest
 
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.factory_registry import FactoryRegistry
 from blinkview.core.frame_warmup_registry import (
+    DEFAULT_FRAME_WARMUP_WEIGHT,
     FRAME_DECODER_WARMUPS,
     FRAME_SECTION_WARMUPS,
+    FRAME_WARMUP_WEIGHTS,
+    KIND_DECODER,
+    KIND_SECTION,
     frame_decoder_warmup,
     frame_section_warmup,
+    frame_warmup_weight,
 )
 from blinkview.core.warmup import NumbaWarmupHelper
 from blinkview.parsers.binary_parser import BinaryParser
@@ -36,6 +42,41 @@ def test_decorators_register_the_config_and_return_the_class_unchanged():
     finally:
         FRAME_DECODER_WARMUPS[:] = before_decoders
         FRAME_SECTION_WARMUPS[:] = before_sections
+        FRAME_WARMUP_WEIGHTS.pop((KIND_DECODER, "dec"), None)
+        FRAME_WARMUP_WEIGHTS.pop((KIND_SECTION, "sec"), None)
+
+
+def test_warmup_weight_is_kept_out_of_the_config():
+    before_decoders = list(FRAME_DECODER_WARMUPS)
+    try:
+
+        class Dummy:
+            pass
+
+        frame_decoder_warmup("heavy_dec", warmup_weight=8.0, frame_length=3)(Dummy)
+        assert FRAME_DECODER_WARMUPS[-1] == {"type": "heavy_dec", "frame_length": 3}
+        assert frame_warmup_weight(KIND_DECODER, "heavy_dec") == 8.0
+        assert frame_warmup_weight(KIND_SECTION, "heavy_dec") == DEFAULT_FRAME_WARMUP_WEIGHT  # other kind
+    finally:
+        FRAME_DECODER_WARMUPS[:] = before_decoders
+        FRAME_WARMUP_WEIGHTS.pop((KIND_DECODER, "heavy_dec"), None)
+
+
+def test_binary_parser_warmup_reports_weighted_substeps(monkeypatch):
+    monkeypatch.setattr(BinaryParser, "_warmup_config", staticmethod(lambda helper, decoder, parser: None))
+    reported = []
+    helper = SimpleNamespace(report_substep=lambda done, total: reported.append(done / total))
+
+    BinaryParser.warmup(helper)
+
+    weights = [frame_warmup_weight(KIND_DECODER, e["type"]) for e in FRAME_DECODER_WARMUPS]
+    weights += [frame_warmup_weight(KIND_SECTION, e["type"]) for e in FRAME_SECTION_WARMUPS]
+    assert len(reported) == len(weights)
+    assert reported[0] == 0.0
+    assert reported == sorted(reported)
+    # Each step advances by its own weight's share, not by 1/len.
+    steps = [b - a for a, b in zip(reported, reported[1:])]
+    assert steps == pytest.approx([w / sum(weights) for w in weights[:-1]])
 
 
 def test_every_registered_decoder_has_a_warmup_entry_and_vice_versa():

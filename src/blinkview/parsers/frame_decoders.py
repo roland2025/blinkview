@@ -9,7 +9,7 @@ from blinkview.core.configurable import configurable, configuration_property
 from blinkview.core.constants import FactoryCategory
 from blinkview.core.factory import BaseFactory
 from blinkview.core.factory_category_registry import register_factory_category
-from blinkview.core.frame_warmup_registry import frame_decoder_warmup
+from blinkview.core.frame_warmup_registry import SHARED_KERNEL_WARMUP_WEIGHT, frame_decoder_warmup
 from blinkview.core.types.frames import FrameConfig
 from blinkview.core.types.parsing import CodecID
 
@@ -153,7 +153,8 @@ class FrameDecoder(FrameDecoderBase):
 
 
 @FrameDecoderFactory.register("none")
-@frame_decoder_warmup("none")
+# Runs first, so it also pays for the shared finish kernel and the batch processors.
+@frame_decoder_warmup("none", warmup_weight=8.0)
 class PreFramedDecoder(FrameDecoder):
     """For pre-framed data"""
 
@@ -164,7 +165,7 @@ class PreFramedDecoder(FrameDecoder):
 
 
 @FrameDecoderFactory.register("line_decoder")
-@frame_decoder_warmup("line_decoder")
+@frame_decoder_warmup("line_decoder", warmup_weight=3.5)
 class LineDecoder(FrameDecoder):
     """Frame processor with no special encoding"""
 
@@ -177,7 +178,7 @@ class LineDecoder(FrameDecoder):
 
 
 @FrameDecoderFactory.register("cobs_decoder")
-@frame_decoder_warmup("cobs_decoder")
+@frame_decoder_warmup("cobs_decoder", warmup_weight=SHARED_KERNEL_WARMUP_WEIGHT)
 class CobsDecoder(FrameDecoder):
     """Frame processor for COBS-encoded frames"""
 
@@ -189,7 +190,7 @@ class CobsDecoder(FrameDecoder):
 
 
 @FrameDecoderFactory.register("decode_slip_frame")
-@frame_decoder_warmup("decode_slip_frame")
+@frame_decoder_warmup("decode_slip_frame", warmup_weight=SHARED_KERNEL_WARMUP_WEIGHT)
 class SlipDecoder(FrameDecoder):
     """Frame processor for SLIP-encoded frames"""
 
