@@ -107,6 +107,67 @@ class TestLoadReplaySession:
             replay.stop()
             original.stop()
 
+    def test_no_finished_at_takes_the_end_from_the_recordings_last_row(self, tmp_path):
+        """What MainWindow does once a crashed session has finished loading: the seek bar's
+        fixed length runs from the session's created_at to the last row actually recorded."""
+        original = make_real_registry(tmp_path, "original_h2")
+        session_dir = original.file_manager.session_dir  # never stopped: no finished_at
+
+        import json
+
+        created_ns = _epoch_ns(json.loads((session_dir / "metadata.json").read_text())["created_at"])
+
+        replay = make_real_registry(tmp_path, "replay_h2")
+        try:
+            replay.load_replay_session(session_dir)
+            assert replay.replay_session_bounds_ns is None
+
+            first_row_ns, last_row_ns = created_ns + 1_000_000, created_ns + 5_000_000_000
+            replay.set_replay_recording_bounds(first_row_ns, last_row_ns)
+
+            assert replay.replay_session_bounds_ns == (created_ns, last_row_ns)
+        finally:
+            replay.stop()
+            original.stop()
+
+    def test_recording_bounds_do_not_override_a_cleanly_finished_sessions_metadata(self, tmp_path):
+        original = make_real_registry(tmp_path, "original_h3")
+        session_dir = original.file_manager.session_dir
+        original.file_manager.stop()
+        original.stop()
+
+        replay = make_real_registry(tmp_path, "replay_h3")
+        try:
+            replay.load_replay_session(session_dir)
+            from_metadata = replay.replay_session_bounds_ns
+            assert from_metadata is not None
+
+            replay.set_replay_recording_bounds(1, 2)
+
+            assert replay.replay_session_bounds_ns == from_metadata
+        finally:
+            replay.stop()
+
+    def test_recording_bounds_without_usable_metadata_use_the_first_row(self, tmp_path):
+        """metadata.json unreadable: no created_at either, so both ends come from the rows. An
+        empty recording (0, 0) records nothing."""
+        original = make_real_registry(tmp_path, "original_h4")
+        session_dir = original.file_manager.session_dir
+        (session_dir / "metadata.json").write_text("{ not json")
+
+        replay = make_real_registry(tmp_path, "replay_h4")
+        try:
+            replay.load_replay_session(session_dir)
+
+            replay.set_replay_recording_bounds(0, 0)
+            assert replay.replay_session_bounds_ns is None
+
+            replay.set_replay_recording_bounds(1_000, 9_000)
+            assert replay.replay_session_bounds_ns == (1_000, 9_000)
+        finally:
+            replay.stop()
+            original.stop()
+
     def test_range_edits_during_replay_never_modify_the_original_sessions_own_file(self, tmp_path):
         """The whole point of the replay/ scratch redirect (FileManager.replay_source_dir /
         _redirect_to_replay_scratch): a session being replayed must never have its own files
