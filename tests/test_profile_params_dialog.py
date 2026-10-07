@@ -46,7 +46,7 @@ def write_profile(tmp_path, with_parameters=True, serial="1"):
             "speed": {"paths": ["/sources/src_a/speed"]},
         }
     (tmp_path / "rtt.json").write_text(json.dumps(profile))
-    (tmp_path / "rtt.params.left.json").write_text(
+    (tmp_path / "rtt.left.params.json").write_text(
         json.dumps({"session": "Left board", "params": {"rtt_serial": "51024923"}})
     )
 
@@ -112,10 +112,10 @@ class TestShows:
             "rtt_serial": {"value": "51024923", "profile": "1", "origin": "set 'left'"},
             "speed": {"value": "", "profile": "4000", "origin": "(profile value)"},
         }
-        assert "rtt.params.left.json" in dlg.info_label.text()
+        assert "rtt.left.params.json" in dlg.info_label.text()
         assert "session 'Left board'" in dlg.info_label.text()  # not the folder-safe "Left_board"
         assert dlg.session_edit.text() == "Left board"
-        assert dlg.btn_save.text() == "Save to 'rtt.params.left.json'"
+        assert dlg.btn_save.text() == "Save to 'rtt.left.params.json'"
         assert dlg.btn_save.isEnabled()
         assert not dlg.btn_apply.isEnabled()  # nothing edited yet
         assert dlg.table.item(row_of(dlg, "rtt_serial"), COL_NAME).toolTip() == "J-Link serial"
@@ -237,7 +237,7 @@ class TestSave:
         set_cell(dlg, "speed", "8000")  # pending edits are saved too
         dlg.session_edit.setText("Left bench")
         assert dlg.save_to_current_set() is True
-        assert json.loads((tmp_path / "rtt.params.left.json").read_text()) == {
+        assert json.loads((tmp_path / "rtt.left.params.json").read_text()) == {
             "session": "Left bench",
             "params": {"rtt_serial": "51024923", "speed": 8000},
         }
@@ -247,15 +247,15 @@ class TestSave:
         dlg.session_edit.setText("")
         monkeypatch.setattr(dlg, "_ask_set_name", lambda default: ("right", True))
         assert dlg.save_as_new_set() == "right"
-        assert json.loads((tmp_path / "rtt.params.right.json").read_text()) == {"rtt_serial": "51024923"}
+        assert json.loads((tmp_path / "rtt.right.params.json").read_text()) == {"rtt_serial": "51024923"}
 
     def test_save_as_existing_set_asks_before_overwriting(self, make_dialog, tmp_path, monkeypatch):
         dlg, _ = make_dialog()
-        before = (tmp_path / "rtt.params.left.json").read_text()
+        before = (tmp_path / "rtt.left.params.json").read_text()
         monkeypatch.setattr(dlg, "_ask_set_name", lambda default: ("left", True))
         monkeypatch.setattr(dlg, "_confirm_overwrite", lambda path: False)
         assert dlg.save_as_new_set() is None
-        assert (tmp_path / "rtt.params.left.json").read_text() == before
+        assert (tmp_path / "rtt.left.params.json").read_text() == before
 
     def test_save_as_rejects_bad_name_and_cancel(self, make_dialog, monkeypatch, warnings):
         dlg, _ = make_dialog()
@@ -270,7 +270,7 @@ class TestSave:
         monkeypatch.setattr(dlg, "_ask_set_name", lambda default: ("empty", True))
         assert dlg.save_as_new_set() is None
         assert warnings == ["No parameter has a value - nothing to save."]
-        assert not (tmp_path / "rtt.params.empty.json").exists()
+        assert not (tmp_path / "rtt.empty.params.json").exists()
 
 
 class TestLaunchCommand:
