@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import ctypes
-from threading import RLock
+from threading import Lock, RLock
 from time import sleep
 from typing import TYPE_CHECKING, Optional
 
@@ -49,6 +49,28 @@ SWD_SPEED_DESCRIPTIONS = [
     "30 MHz - Pro Grade",
     "50 MHz - Extreme (High-end targets only)",
 ]
+
+
+_enumerator_lock = Lock()
+_enumerator_jlink: Optional["pylink.JLink"] = None
+
+
+def _list_jlink_serials() -> list[str]:
+    """Serial numbers of the J-Links currently attached over USB.
+
+    Uses one long-lived, lock-guarded JLink instance. Every pylink.JLink() in the
+    process shares the same J-Link DLL, and destroying an instance calls into it
+    and FreeLibrary()s it, so a throwaway instance per call (schema fetches run on
+    worker threads) crashes the DLL under a reader thread that is opening its probe.
+    """
+    global _enumerator_jlink
+
+    with _enumerator_lock:
+        if _enumerator_jlink is None:
+            import pylink
+
+            _enumerator_jlink = pylink.JLink()
+        return [str(emu.SerialNumber) for emu in _enumerator_jlink.connected_emulators()]
 
 
 @DeviceFactory.register("jlink_rtt")
@@ -154,12 +176,8 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         schema = super().get_config_schema()
 
         try:
-            import pylink
-
-            jlink = pylink.JLink()
             # Dynamically fetch connected J-Link emulators
-            emulators = jlink.connected_emulators()
-            serials = [str(emu.SerialNumber) for emu in emulators]
+            serials = _list_jlink_serials()
             descriptions = [f"J-Link {sn}" for sn in serials]
 
             if "serial_number" in schema["properties"]:
