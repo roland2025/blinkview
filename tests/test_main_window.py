@@ -380,6 +380,9 @@ class TestStartReplay:
         assert resume_calls == [True]
         assert freeze_calls == [True]
         assert registry.playback_clock.current_ts_ns == recording_end_ns
+        # No finished_at was loaded (a crashed session), so the seek bar's fixed length comes
+        # from the recording's own rows - not from the later self-logging either.
+        assert registry.replay_session_bounds_ns == (1_000_000_000, recording_end_ns)
 
     def test_replay_load_progress_updates_toast_text_and_ring(self, main_window):
         messages, progress = [], []
@@ -429,6 +432,8 @@ class TestStartReplay:
         assert registry.central.log_pool.frozen_since_sequence_id is not None
         # Everything is already resident, so the cursor lands on the recording's end right away.
         assert registry.playback_clock.current_ts_ns == 5_000_000_000
+        # ...and with no finished_at loaded, the recording's rows give the seek bar its length.
+        assert registry.replay_session_bounds_ns == (1_000_000_000, 5_000_000_000)
 
 
 class TestRelaunchAsReplay:

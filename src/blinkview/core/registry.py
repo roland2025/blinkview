@@ -281,8 +281,11 @@ class Registry:
         # finished_at - the recorded session's actual fixed length, independent of any named
         # PlaybackRange (not itself a selectable range - see playback_control.py's
         # _seek_bar_bounds, the only reader). None outside REPLAY-of-a-loaded-session, or when
-        # the session's metadata.json is missing/incomplete.
+        # the session's metadata.json is missing/incomplete - until the load finishes and
+        # set_replay_recording_bounds() fills it in from the recording's own rows.
         self.replay_session_bounds_ns: Optional[tuple[int, int]] = None
+        # The loaded session's metadata.json created_at, kept for that fallback.
+        self._replay_created_at_ns: Optional[int] = None
 
         # Bumped at the end of every rotate_session() - views poll it (via
         # core/session_generation.py) to drop data fetched from the previous session.
@@ -522,11 +525,27 @@ class Registry:
 
             if metadata is not None:
                 start_ts_ns = self._parse_iso_utc_to_epoch_ns(metadata.get("created_at"))
+                self._replay_created_at_ns = start_ts_ns
                 end_ts_ns = self._parse_iso_utc_to_epoch_ns(metadata.get("finished_at"))
                 if start_ts_ns is not None and end_ts_ns is not None and end_ts_ns > start_ts_ns:
                     self.replay_session_bounds_ns = (start_ts_ns, end_ts_ns)
 
         self.playback_clock.enter_replay_following_end()
+
+    def set_replay_recording_bounds(self, first_ts_ns: Optional[int], last_ts_ns: Optional[int]):
+        """Fallback for replay_session_bounds_ns when load_replay_session could not set it: a
+        session that crashed (or is still recording) has no finished_at in its metadata.json,
+        so its length is taken from the recording itself - `first_ts_ns`/`last_ts_ns` are the
+        first and last row of the loaded data, which the caller knows once loading finishes.
+        The start stays the session's created_at when that is known. Does nothing when the
+        metadata already gave the bounds."""
+        if self.replay_session_bounds_ns is not None or not last_ts_ns:
+            return
+        start_ts_ns = self._replay_created_at_ns
+        if start_ts_ns is None or start_ts_ns >= last_ts_ns:
+            start_ts_ns = first_ts_ns
+        if start_ts_ns and start_ts_ns < last_ts_ns:
+            self.replay_session_bounds_ns = (start_ts_ns, last_ts_ns)
 
     def rotate_session(self, display_name: Optional[str] = None) -> tuple[Path, Path]:
         """Ends the current session and starts a new one at runtime - sources, pipelines and the
