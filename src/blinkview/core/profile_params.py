@@ -13,7 +13,7 @@ A profile declares parameters that point at config fields:
     }
 
 and each run fills them in, lowest to highest precedence: the value already stored in the
-profile (the default), parameter files (`--params left` -> `<profile>.params.left.json`, or an
+profile (the default), parameter files (`--params left` -> `<profile>.left.params.json`, or an
 explicit path), then individual `--param name=value` arguments. Values are applied to the
 in-memory config only - ConfigManager keeps them out of the profile file (see
 ConfigManager.param_bindings).
@@ -26,6 +26,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 PARAMS_KEY = "parameters"
+# Named sets are `<profile>.<set>.params.json` - the set name comes before the kind, so every
+# set file has the same ending (one .gitignore rule: `*.params.json`).
+PARAMS_FILE_SUFFIX = ".params.json"
 
 
 class _Missing:
@@ -74,18 +77,21 @@ def is_params_file_spec(spec: str) -> bool:
 
 def params_set_path(config_dir: Path, config_file_name: str, set_name: str) -> Path:
     """Where the named set `set_name` of a profile lives: next to `<profile>.json`."""
-    return Path(config_dir) / f"{config_file_name}.params.{set_name}.json"
+    return Path(config_dir) / f"{config_file_name}.{set_name}{PARAMS_FILE_SUFFIX}"
 
 
 def list_params_sets(config_dir: Path, config_file_name: str) -> List[str]:
-    prefix = f"{config_file_name}.params."
+    prefix = f"{config_file_name}."
     config_dir = Path(config_dir)
     if not config_dir.is_dir():
         return []
     return sorted(
-        f.name[len(prefix) : -len(".json")]
+        f.name[len(prefix) : -len(PARAMS_FILE_SUFFIX)]
         for f in config_dir.iterdir()
-        if f.is_file() and f.name.startswith(prefix) and f.name.endswith(".json")
+        if f.is_file()
+        and f.name.startswith(prefix)
+        and f.name.endswith(PARAMS_FILE_SUFFIX)
+        and len(f.name) > len(prefix) + len(PARAMS_FILE_SUFFIX)
     )
 
 
@@ -181,8 +187,10 @@ def params_label(specs: Optional[Iterable[str]], cli_params: Optional[Dict[str, 
     for spec in specs or []:
         if is_params_file_spec(spec):
             stem = Path(spec).stem
-            # "rtt.params.left.json" -> "left"
-            parts.append(stem.rsplit(".params.", 1)[-1])
+            # "rtt.left.params.json" -> "left"
+            if stem.endswith(".params"):
+                stem = stem[: -len(".params")].rsplit(".", 1)[-1]
+            parts.append(stem)
         else:
             parts.append(spec)
     if parts:

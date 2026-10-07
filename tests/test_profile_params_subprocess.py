@@ -130,7 +130,7 @@ def stop(proc):
 
 
 def test_params_set_and_param_reach_the_running_registry(blink):
-    blink.config_path.with_name("rtt.params.left.json").write_text(json.dumps({"rtt_serial": 51024923}))
+    blink.config_path.with_name("rtt.left.params.json").write_text(json.dumps({"rtt_serial": 51024923}))
     proc = blink("--params", "left")
     try:
         started, output = wait_for(proc, STARTUP_MARKER)

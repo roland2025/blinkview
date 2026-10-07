@@ -27,7 +27,7 @@ def add_param_arguments(parser):
         metavar="SET_OR_FILE",
         action="append",
         default=None,
-        help="Load profile parameter values from a named set (<profile>.params.SET.json next to the profile) "
+        help="Load profile parameter values from a named set (<profile>.SET.params.json next to the profile) "
         "or a .json file path. Repeatable; later files win.",
     )
     parser.add_argument(

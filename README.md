@@ -209,7 +209,7 @@ When several boards share one configuration and differ only in, say, the J-Link 
 blink switch rtt --add-param rtt_serial /sources/src_1eb62594/serial_number
 blink switch rtt --add-param com_port /sources/src_ab12cd34/port
 
-# Save one parameter set per board (rtt.params.left.json next to the profile)
+# Save one parameter set per board (rtt.left.params.json next to the profile)
 blink switch rtt --save-params left  --param rtt_serial=51024923 --param com_port=COM7
 blink switch rtt --save-params right --param rtt_serial=51099999 --param com_port=COM9
 blink switch rtt --show-params
@@ -222,7 +222,8 @@ blink -p rtt --params right
 * `--params` also accepts a path to any `.json` file of `name: value` pairs, e.g. for machine-specific values you don't want in the repo. It can be repeated; later files win. `--param NAME=VALUE` overrides a single value for one run.
 * Parameter values are never written to the profile, so the profile file stays the same for every board. Session logs and `metadata.json` record the values each run actually used.
 * The set name appears in the window title (`project / rtt [left]`) and is the default session name. A set can store its own session name (`--save-params left ... --session "Left board"`); `-s` on the command line still wins.
-* Each set keeps its own window layout (`rtt.gui_state.left.json`), starting from the profile's normal layout until it is first saved.
+* Each set keeps its own window layout (`rtt.left.gui_state.json`), starting from the profile's normal layout until it is first saved.
+* If the `.blinkview` folder is committed to a repo, two `.gitignore` rules keep the per-machine files out of it: `*.params.json` (parameter sets) and `*.gui_state.json` (window layouts).
 * Several instances can run the same profile at once. An edit made in one is saved without undoing the others' edits, and the others offer to **Reload** it (a notification, or **Reload Profile from Disk** in the main menu).
 * **Main menu → Profile Parameters...** shows the values in use and where they came from. Change a value and press **Apply** to use it right away, without restarting and without changing the profile. **Save to Set** / **Save as New Set...** store the values for the next start, and **Copy Launch Command** gives the matching `blink ...` command line.
 * In the config editor, right-click a field's label and choose **Make profile parameter...**, so you don't have to look up the config path.

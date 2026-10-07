@@ -74,7 +74,7 @@ class TestParamsLabel:
         assert params_label(["left", "bench"]) == "left+bench"
 
     def test_file_path_uses_set_part_of_stem(self):
-        assert params_label(["./x/rtt.params.left.json"]) == "left"
+        assert params_label(["./x/rtt.left.params.json"]) == "left"
         assert params_label(["C:/cfg/board7.json"]) == "board7"
 
     def test_falls_back_to_cli_values(self):
@@ -227,7 +227,7 @@ class TestParamsFiles:
         loaded = load_params_files(["left"], tmp_path, "rtt")
         values, paths = loaded.values, loaded.paths
         assert values == {"rtt_serial": "1"}
-        assert paths == [tmp_path / "rtt.params.left.json"]
+        assert paths == [tmp_path / "rtt.left.params.json"]
 
     def test_explicit_path_relative_to_cwd(self, tmp_path, monkeypatch):
         (tmp_path / "bench").mkdir()
@@ -256,14 +256,17 @@ class TestParamsFiles:
     @pytest.mark.parametrize("content", ["[1]", "{bad json", '{"x": {"nested": 1}}'])
     def test_bad_content(self, tmp_path, content):
         params_set_path(tmp_path, "rtt", "left").write_text(content)
-        with pytest.raises(ProfileParamError, match="rtt.params.left.json"):
+        with pytest.raises(ProfileParamError, match="rtt.left.params.json"):
             load_params_files(["left"], tmp_path, "rtt")
 
     def test_list_sets(self, tmp_path):
         for name in ("right", "left"):
             params_set_path(tmp_path, "rtt", name).write_text("{}")
         (tmp_path / "rtt.json").write_text("{}")
-        (tmp_path / "other.params.x.json").write_text("{}")
+        (tmp_path / "other.x.params.json").write_text("{}")
+        # The layouts (shared and per set) sit in the same folder and are not sets.
+        (tmp_path / "rtt.gui_state.json").write_text("{}")
+        (tmp_path / "rtt.left.gui_state.json").write_text("{}")
         assert list_params_sets(tmp_path, "rtt") == ["left", "right"]
 
 
@@ -383,10 +386,10 @@ class TestSwitchCommand:
         }
 
         run_switch("rtt", "--save-params", "left", "--param", "rtt_serial=51024923")
-        assert read(workspace / "rtt.params.left.json") == {"rtt_serial": "51024923"}
+        assert read(workspace / "rtt.left.params.json") == {"rtt_serial": "51024923"}
 
         run_switch("rtt", "--save-params", "template")
-        assert read(workspace / "rtt.params.template.json") == {"rtt_serial": "11111111"}
+        assert read(workspace / "rtt.template.params.json") == {"rtt_serial": "11111111"}
 
         capsys.readouterr()
         run_switch("rtt", "--show-params")
@@ -450,7 +453,7 @@ class TestRegistryParams:
             assert fm.session_dir.name.endswith("_left")  # default session name = set name
             meta = json.loads((fm.session_dir / "metadata.json").read_text())
             assert meta["config"]["params"] == {"rtt_serial": "51024923", "speed": 12000}
-            assert meta["config"]["params_files"] == [str(tmp_path / "rtt.params.left.json")]
+            assert meta["config"]["params_files"] == [str(tmp_path / "rtt.left.params.json")]
 
             start = json.loads(fm.get_session_path(suffix="start").read_text())
             assert start["sources"]["src_a"]["serial_number"] == "51024923"
@@ -837,7 +840,7 @@ class TestParamsFileSession:
     def test_switch_save_params_with_session_and_show(self, workspace, capsys):
         run_switch("rtt", "--add-param", "rtt_serial", SERIAL_PATH)
         run_switch("rtt", "--save-params", "left", "--param", "rtt_serial=7", "--session", "Left board")
-        assert read(workspace / "rtt.params.left.json") == {"session": "Left board", "params": {"rtt_serial": "7"}}
+        assert read(workspace / "rtt.left.params.json") == {"session": "Left board", "params": {"rtt_serial": "7"}}
 
         capsys.readouterr()
         run_switch("rtt", "--show-params")
@@ -920,16 +923,16 @@ class TestGuiStatePerParamsSet:
     def test_own_file_missing_loads_shared_saves_own(self, fm, tmp_path):
         fm.params_label = "left"
         assert fm.get_gui_state_path(for_load=True) == tmp_path / "rtt.gui_state.json"
-        assert fm.get_gui_state_path() == tmp_path / "rtt.gui_state.left.json"
+        assert fm.get_gui_state_path() == tmp_path / "rtt.left.gui_state.json"
 
     def test_own_file_present_is_loaded(self, fm, tmp_path):
         fm.params_label = "left"
-        (tmp_path / "rtt.gui_state.left.json").write_text("{}")
-        assert fm.get_gui_state_path(for_load=True) == tmp_path / "rtt.gui_state.left.json"
+        (tmp_path / "rtt.left.gui_state.json").write_text("{}")
+        assert fm.get_gui_state_path(for_load=True) == tmp_path / "rtt.left.gui_state.json"
 
     def test_label_is_sanitized_into_the_file_name(self, fm, tmp_path):
         fm.params_label = "left+bench"
-        assert fm.get_gui_state_path() == tmp_path / "rtt.gui_state.left_bench.json"
+        assert fm.get_gui_state_path() == tmp_path / "rtt.left_bench.gui_state.json"
 
     def test_save_gui_state_writes_own_file_only(self, fm, tmp_path):
         from types import SimpleNamespace
@@ -941,7 +944,7 @@ class TestGuiStatePerParamsSet:
 
         fm.save_gui_state()
 
-        assert read(tmp_path / "rtt.gui_state.left.json") == {"layout": "left"}
+        assert read(tmp_path / "rtt.left.gui_state.json") == {"layout": "left"}
         assert read(shared) == {"layout": "shared"}
         assert read(fm.get_session_path("gui_state", "autosave")) == {"layout": "left"}
 
@@ -951,13 +954,13 @@ class TestGuiStatePerParamsSet:
         fm.snapshot_gui_start()
         assert read(fm.get_session_path("gui_state", "start")) == {"layout": "shared"}
 
-        (tmp_path / "rtt.gui_state.left.json").write_text(json.dumps({"layout": "left"}))
+        (tmp_path / "rtt.left.gui_state.json").write_text(json.dumps({"layout": "left"}))
         fm.snapshot_gui_start()
         assert read(fm.get_session_path("gui_state", "start")) == {"layout": "left"}
 
     def test_label_comes_from_registry_params(self, fm):
         assert fm.params_label == "rtt_serial_1"
-        assert fm.get_gui_state_path().name == "rtt.gui_state.rtt_serial_1.json"
+        assert fm.get_gui_state_path().name == "rtt.rtt_serial_1.gui_state.json"
 
 
 # ==========================================

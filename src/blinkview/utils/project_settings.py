@@ -192,7 +192,7 @@ def setup_project_parser(parser):
     params_group.add_argument(
         "--save-params",
         metavar="SET",
-        help="Write parameter set SET (<profile>.params.SET.json) from the --param values given "
+        help="Write parameter set SET (<profile>.SET.params.json) from the --param values given "
         "(or from the profile's current defaults if none).",
     )
     params_group.add_argument(

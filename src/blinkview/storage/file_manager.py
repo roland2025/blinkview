@@ -655,14 +655,14 @@ class FileManager:
 
     def get_gui_state_path(self, for_load: bool = False) -> Path:
         """The window layout file. An instance started with --params/--param keeps its own
-        (`<profile>.gui_state.<label>.json`, e.g. one per board) so several instances of one
+        (`<profile>.<label>.gui_state.json`, e.g. one per board) so several instances of one
         profile don't overwrite each other's layout on exit. Until that file is first saved,
         loading falls back to the shared `<profile>.gui_state.json`."""
         shared = self.get_config_path("gui_state")
         label = getattr(self, "params_label", None)
         if not label:
             return shared
-        own = self.get_config_path(f"gui_state.{self._sanitize(label)}")
+        own = self.get_config_path(f"{self._sanitize(label)}.gui_state")
         if for_load and not own.exists():
             return shared
         return own
