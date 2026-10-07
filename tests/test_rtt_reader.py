@@ -353,6 +353,29 @@ class TestGetCommands:
 
 
 class TestGetConfigSchema:
+    @pytest.fixture(autouse=True)
+    def _fresh_enumerator(self, monkeypatch):
+        # The enumerator JLink is cached for the life of the process; drop it so each
+        # test constructs one from its own monkeypatched pylink.JLink.
+        monkeypatch.setattr("blinkview.io.rtt._enumerator_jlink", None)
+
+    def test_reuses_one_jlink_instance_across_schema_fetches(self, monkeypatch):
+        created = []
+
+        class CountingJLink:
+            def __init__(self):
+                created.append(self)
+
+            def connected_emulators(self):
+                return []
+
+        monkeypatch.setattr(pylink, "JLink", CountingJLink)
+
+        JLinkRTTReader.get_config_schema()
+        JLinkRTTReader.get_config_schema()
+
+        assert len(created) == 1
+
     def test_populates_serial_number_enum_from_connected_emulators(self, monkeypatch):
         class FakeEmu:
             def __init__(self, sn):
