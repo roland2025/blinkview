@@ -102,12 +102,12 @@ class TestClearButton:
         new_dir = fm.session_dir
 
         old_files = _session_files(old_dir)
-        assert {f"{cfg}.gui_state.final.json", f"{cfg}.gui_config.final.json", f"{cfg}.final.json"} <= old_files
+        assert {f"{cfg}.gui_state.final.json", f"{cfg}.gui.final.json", f"{cfg}.final.json"} <= old_files
         final_state = json.loads((old_dir / f"{cfg}.gui_state.final.json").read_text())
         assert "Rotation Logs" in [tab["name"] for tab in final_state["open_tabs"]]
 
         new_files = _session_files(new_dir)
-        assert {f"{cfg}.gui_state.start.json", f"{cfg}.gui_config.start.json", f"{cfg}.start.json"} <= new_files
+        assert {f"{cfg}.gui_state.start.json", f"{cfg}.gui.start.json", f"{cfg}.start.json"} <= new_files
         assert main_window.gui_context.gui_config.autosave_path.parent == new_dir
         assert registry.config.autosave_path.parent == new_dir
 

@@ -258,27 +258,38 @@ class TestGuiSaving:
     def test_save_gui_config_is_a_noop_without_gui_context(self, tmp_path):
         fm = make_manager(tmp_path)
         fm.save_gui_config()  # must not raise
-        assert not fm.get_config_path("gui_config").exists()
+        assert not fm.get_session_path("gui", "final").exists()
 
-    def test_save_gui_config_writes_workspace_and_session_copies(self, tmp_path):
+    def test_save_gui_config_is_a_noop_before_the_gui_config_is_set(self, tmp_path):
+        # GuiContext defines gui_config = None until the main window builds its ConfigManager.
+        fm = make_manager(tmp_path)
+        fm.gui_context = SimpleNamespace(gui_config=None)
+        fm.save_gui_config()  # must not raise
+        assert not fm.get_session_path("gui", "final").exists()
+
+    def test_save_gui_config_writes_only_the_session_copy(self, tmp_path):
+        """`<profile>.gui.json` belongs to the GUI ConfigManager; FileManager only records the
+        session snapshot, and never writes a second `<profile>.gui_config.json` copy."""
         fm = make_manager(tmp_path)
         fm.gui_context = SimpleNamespace(gui_config=SimpleNamespace(get_data=lambda: {"a": 1}))
 
-        fm.save_gui_config(suffix="autosave")
+        fm.save_gui_config(suffix="final")
 
-        workspace_path = fm.get_config_path("gui_config")
-        session_path = fm.get_session_path("gui_config", "autosave")
-        assert json.loads(workspace_path.read_text()) == {"a": 1}
-        assert json.loads(session_path.read_text()) == {"a": 1}
-
-    def test_save_gui_config_session_only_skips_the_workspace_copy(self, tmp_path):
-        fm = make_manager(tmp_path)
-        fm.gui_context = SimpleNamespace(gui_config=SimpleNamespace(get_data=lambda: {"a": 1}))
-
-        fm.save_gui_config(suffix="autosave", session_only=True)
-
+        assert json.loads(fm.get_session_path("gui", "final").read_text()) == {"a": 1}
+        assert not fm.get_config_path("gui").exists()
         assert not fm.get_config_path("gui_config").exists()
-        assert fm.get_session_path("gui_config", "autosave").exists()
+        assert not fm.get_session_path("gui_config", "final").exists()
+
+    def test_snapshot_gui_start_records_the_gui_config_in_use(self, tmp_path):
+        """Also on a fresh profile, where `<profile>.gui.json` is not on disk yet."""
+        fm = make_manager(tmp_path)
+        fm.gui_context = SimpleNamespace(gui_config=SimpleNamespace(get_data=lambda: {"watches": {}}))
+        assert not fm.get_config_path("gui").exists()
+
+        fm.snapshot_gui_start()
+
+        assert json.loads(fm.get_session_path("gui", "start").read_text()) == {"watches": {}}
+        assert not fm.get_session_path("gui_config", "start").exists()
 
     def test_save_gui_state_writes_workspace_and_session_copies(self, tmp_path):
         fm = make_manager(tmp_path)
@@ -292,7 +303,7 @@ class TestGuiSaving:
     def test_save_gui_calls_config_and_state_with_final_suffix(self, tmp_path):
         fm = make_manager(tmp_path)
         calls = []
-        fm.save_gui_config = lambda suffix="autosave", session_only=False: calls.append(("config", suffix))
+        fm.save_gui_config = lambda suffix="final": calls.append(("config", suffix))
         fm.save_gui_state = lambda suffix="autosave", session_only=False: calls.append(("state", suffix))
 
         fm.save_gui()
