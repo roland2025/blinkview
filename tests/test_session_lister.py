@@ -5,12 +5,16 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from blinkview.utils.session_lister import (
     SessionInfo,
+    describe_session,
     existing_part,
+    format_session_table,
     list_sessions,
     part_index,
     resolve_active_profile_dir,
@@ -397,3 +401,93 @@ class TestResolveActiveProfileDir:
     def test_creates_nothing(self, tmp_path):
         result = self._resolve({"active_profile": "astra"}, tmp_path, tmp_path)
         assert not result.exists()
+
+
+def _recorded_session(tmp_path, folder_name="20260928_124343_nrf_bench", **meta):
+    base = {
+        "session_id": folder_name,
+        "status": "finished",
+        "created_at": "2026-09-28T09:43:43.954330+00:00Z",
+        "finished_at": "2026-09-28T09:49:02.972781+00:00Z",
+        "duration_seconds": 319.018,
+        "project": {"display_name": "bench"},
+        "config": {"profile": "nrf"},
+        "loggers": {"session": {"total_bytes": 5000}},
+    }
+    base.update(meta)
+    session_dir = _write_session(tmp_path / "proj", folder_name, {k: v for k, v in base.items() if v is not None})
+    (session_dir / "session.0000.log").write_text("data")
+    return session_dir
+
+
+class TestDescribeSession:
+    def test_finished_session(self, tmp_path):
+        session_dir = _recorded_session(tmp_path)
+
+        (session,) = list_sessions(tmp_path, "proj")
+
+        assert describe_session(session) == {
+            "session_id": "20260928_124343_nrf_bench",
+            "name": "bench",
+            "profile": "nrf",
+            "status": "finished",
+            "started_at": "2026-09-28T09:43:43.954330+00:00",
+            "finished_at": "2026-09-28T09:49:02.972781+00:00",
+            "duration_seconds": 319.018,
+            "duration_estimated": False,
+            "log_bytes": 5000,
+            "parts": 1,
+            "path": str(session_dir),
+        }
+
+    def test_unfinished_session_estimates_duration_from_the_last_write(self, tmp_path):
+        session_dir = _recorded_session(tmp_path, status="active", finished_at=None, duration_seconds=None)
+        started = datetime(2026, 9, 28, 9, 43, 43, 954330, tzinfo=timezone.utc).timestamp()
+        os.utime(session_dir / "session.0000.log", (started + 90, started + 90))
+
+        (session,) = list_sessions(tmp_path, "proj")
+        info = describe_session(session)
+
+        assert info["duration_seconds"] == 90.0
+        assert info["duration_estimated"] is True
+        assert info["finished_at"] is None
+
+    def test_log_bytes_falls_back_to_the_size_on_disk(self, tmp_path):
+        _recorded_session(tmp_path, loggers=None)
+
+        (session,) = list_sessions(tmp_path, "proj")
+
+        assert session.log_bytes is None
+        assert describe_session(session)["log_bytes"] == len("data")
+
+    def test_unparseable_created_at_leaves_start_and_estimate_unknown(self, tmp_path):
+        _recorded_session(tmp_path, created_at="garbage", duration_seconds=None)
+
+        (session,) = list_sessions(tmp_path, "proj")
+        info = describe_session(session)
+
+        assert info["started_at"] is None
+        assert info["duration_seconds"] is None
+
+
+class TestFormatSessionTable:
+    def test_one_aligned_line_per_session_under_a_header(self, tmp_path):
+        _recorded_session(tmp_path)
+        _recorded_session(
+            tmp_path,
+            "20260929_100000_default_long_name_here",
+            created_at="2026-09-29T07:00:00+00:00Z",
+            status="active",
+            duration_seconds=None,
+            project={"display_name": "long name here"},
+            config={},
+        )
+
+        header, newest, oldest = format_session_table(list_sessions(tmp_path, "proj")).splitlines()
+
+        assert header.split() == ["SESSION", "ID", "STARTED", "(local)", "DURATION", "SIZE", "STATUS", "PROFILE", "NAME"]
+        assert newest.startswith("20260929_100000_default_long_name_here  ")
+        assert newest.endswith("  active    -        long name here")
+        assert "  ~" in newest  # estimated duration
+        assert oldest.endswith("  4.9 KB  finished  nrf      bench")
+        assert header.index("DURATION") == oldest.index("5m 19s")

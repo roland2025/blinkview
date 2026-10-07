@@ -43,6 +43,14 @@ def setup_replay_parser(parser):
     setup_gui_parser(parser)
 
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--list", action="store_true", help="List available replay sessions for this project and exit")
+    group.add_argument(
+        "--list",
+        action="store_true",
+        help="List this project's replay sessions, newest first (start, duration, log size, status) and exit. "
+        "With -p, only that profile's sessions.",
+    )
     group.add_argument("--last", action="store_true", help="Replay the most recently recorded session")
     group.add_argument("name", type=str, nargs="?", default=None, help="Session id or display name to replay")
+
+    parser.add_argument("--json", action="store_true", help="With --list: print the sessions as JSON (times in UTC)")
+    parser.add_argument("-n", "--limit", type=int, default=None, metavar="N", help="With --list: only the newest N")

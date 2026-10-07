@@ -295,7 +295,8 @@ a session outside the GUI, by hand or from scripts and AI tools.
 
 SESSIONS
   Run inside the BlinkView project (the folder with .blinkview/). `blink
-  replay --list` lists its sessions, newest first. An id such as
+  replay --list` lists its sessions, newest first, with start, duration and
+  log size (`--json` for scripts, `-p PROFILE` / `-n N` to narrow). An id such as
   20261002_162827_default_bench is <local date>_<local time>_<profile>_<name>.
   SESSION may be an id, part of an id or display name (the match is printed
   on stderr), a session folder, or one session.NNNN.log[.zst] part file.
