@@ -546,7 +546,7 @@ class BlinkMainWindow(QMainWindow):
 
         if not IS_CACHE_WARM:
             self._warmup_toast = ToastManager.show_persistent(
-                "First start: compiling kernels (one time only)", ToastType.WARNING, parent=self, progress=0.0
+                "Compiling shaders", ToastType.WARNING, parent=self, progress=0.0
             )
 
         bridge = _WarmupBridge(self)
