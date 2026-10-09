@@ -16,11 +16,13 @@ from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.id_registry.tables import IndexedStringTable
 from blinkview.core.id_registry.types import RegistryParams
 from blinkview.core.logger import PrintLogger
+from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.id_registry import NO_PARENT, nb_get_descendants
 from blinkview.utils.log_level import LogLevel
 
 if TYPE_CHECKING:
     from blinkview.core.device_identity import DeviceIdentity, ModuleIdentity
+    from blinkview.core.warmup import NumbaWarmupHelper
 
 
 class IDRegistry:
@@ -304,6 +306,16 @@ class IDRegistry:
         """
         # Pass our cached array and current counter straight to Numba
         return nb_get_descendants(target_id, self._parent_array, self._module_id_counter)
+
+    @staticmethod
+    @register_warmup
+    def warmup(helper: "NumbaWarmupHelper"):
+        """Triggers compilation for nb_get_descendants. Nothing calls it during startup: its
+        first real caller is a module-with-children filter (a log tab opened on a module's
+        children, or the mcp_server pipeline's `module` filter), which would otherwise compile
+        it on that first use."""
+        print("[Warmup] IDRegistry ...")
+        helper.registry.get_descendant_ids(helper.warmup_mod.id)
 
     def get_descendant_modules(self, target_id: int) -> "list[ModuleIdentity]":
         """Python path: Returns actual objects for UI or high-level logic."""
