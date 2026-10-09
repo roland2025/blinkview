@@ -206,6 +206,41 @@ class TestParseModuleTagsStatemachine:
         start, length = tracker.starts[0], tracker.lengths[0]
         assert bytes(tracker.name_bytes[start : start + length]).decode() == "net.wifi"
 
+    def _parse(self, msg, **overrides):
+        buf = _buf(msg)
+        tracker = _tracker()
+        table = IndexedStringTable(initial_capacity=4, use_hashes=True).bundle()
+        next_cursor = nb_parse_module_tags_statemachine(
+            buf, 0, len(msg), _out_bundle(), 0, tracker, self._config(**overrides), table
+        )
+        name = bytes(tracker.name_bytes[tracker.starts[0] : tracker.starts[0] + tracker.lengths[0]]).decode()
+        return name, msg[next_cursor:]
+
+    def test_dot_word_after_bracket_tag_is_a_submodule(self):
+        name, rest = self._parse("app: [BMS] .Charging: status: 0, is allowed: 0")
+        assert name == "app.bms.charging"
+        assert rest == "status: 0, is allowed: 0"
+
+    def test_bracket_tag_after_dot_word_keeps_chaining(self):
+        name, rest = self._parse("[BMS] .Charging: [Cell] done")
+        assert name == "bms.charging.cell"
+        assert rest == "done"
+
+    def test_word_after_bracket_tag_without_dot_is_message(self):
+        name, rest = self._parse("app: [BMS] Charging: status: 0")
+        assert name == "app.bms"
+        assert rest == "Charging: status: 0"
+
+    def test_rejected_dot_candidate_keeps_its_dot_in_the_message(self):
+        name, rest = self._parse("[BMS] .5 volts")
+        assert name == "bms"
+        assert rest == ".5 volts"
+
+    def test_dot_separator_disabled_leaves_dot_word_in_message(self):
+        name, rest = self._parse("app: [BMS] .Charging: status: 0", enable_dot_separator=False)
+        assert name == "app.bms"
+        assert rest == ".Charging: status: 0"
+
     def test_no_tag_found_returns_negative_one(self):
         msg = "no tags here"
         buf = _buf(msg)

@@ -207,7 +207,6 @@ def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx
     nb = tracker.name_bytes
 
     tag_count = 0
-    in_bracket_mode = False
 
     prefix_len = config.prefix_bytes.size
     if prefix_len > 0 and (config.prefix_match or config.prefix_remove):
@@ -246,6 +245,10 @@ def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx
         if curr >= end_cursor:
             break
 
+        # Where the message resumes if this candidate turns out not to be a tag, so a
+        # rejected ".5 volts" keeps its leading dot.
+        resume = curr
+
         saw_dot = False
         if config.enable_dot_separator:
             if buffer[curr] == CHAR_DOT:
@@ -255,16 +258,15 @@ def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx
                 while curr < end_cursor and nb_is_whitespace(buffer[curr]):
                     curr += 1
                 if curr >= end_cursor:
+                    curr = resume
                     break
 
         first_char = buffer[curr]
 
-        if tag_count > 0:
-            if first_char != CHAR_LBRACKET:
-                if in_bracket_mode:
-                    break
-                elif not saw_dot:
-                    break
+        # A follow-up tag is either another [bracket] or a dot-led "word:" - the latter
+        # also after a bracket tag, e.g. "app: [BMS] .Charging: ..." -> app.bms.charging.
+        if tag_count > 0 and first_char != CHAR_LBRACKET and not saw_dot:
+            break
 
         sep_len = 1 if tag_count > 0 else 0
         # trial state
@@ -286,7 +288,6 @@ def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx
             move_cursor_to = scan_ptr + 1
             if move_cursor_to < end_cursor and buffer[move_cursor_to] == CHAR_COLON:
                 move_cursor_to += 1
-            in_bracket_mode = True
             if tag_len == 0 or tag_count >= max_depth or raw_len + sep_len + tag_len > max_length:
                 return -1
             for i in range(tag_len):
@@ -312,6 +313,7 @@ def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx
             if not ok:
                 if tag_count == 0:
                     return -1
+                curr = resume
                 break
             tag_len = scan_ptr - tag_data_start
             move_cursor_to = scan_ptr + 1
