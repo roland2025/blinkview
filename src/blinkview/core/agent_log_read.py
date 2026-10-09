@@ -1,0 +1,351 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
+# Copyright (c) 2026 Roland Uuesoo
+
+"""The agent API's log reading (the `read_logs` tool, and the reply half of `send`): fetch rows
+from central storage by sequence cursor, optionally waiting for new ones.
+
+Everything goes through the log viewer's own helpers - LogFilter, LogSegmentScanner,
+LogTextFetcher and the FormattingConfig formatter (core/log_fetch.py) - so an agent gets the
+same filtering and the same lines a log tab shows. Only the request parsing, the cursor
+bookkeeping and the wait loop live here."""
+
+import time
+from datetime import datetime, timedelta, timezone
+from datetime import time as dt_time
+from typing import Callable, NamedTuple, Optional
+
+import numpy as np
+
+from blinkview.core import dtypes
+from blinkview.core.agent_api import AgentApiError
+from blinkview.core.dtypes import SEQ_NONE
+from blinkview.core.log_fetch import LogSegmentScanner, LogTextFetcher
+from blinkview.core.types.formatting import FormattingConfig
+from blinkview.utils.log_filter import LogFilter
+from blinkview.utils.log_level import LogLevel
+from blinkview.utils.utc_offset import get_local_utc_offset_seconds
+
+DEFAULT_MAX_LINES = 200
+HARD_MAX_LINES = 2000
+DEFAULT_LAST_N = 50
+DEFAULT_AROUND_LINES = 50
+DEFAULT_MAX_MODULES = 500
+HARD_MAX_MODULES = 5000
+MAX_WAIT_SECONDS = 60.0
+POLL_SECONDS = 0.05
+
+# BlinkView's own log lines (pipeline/source state, and this API's "send to ..." audit lines).
+SYSTEM_DEVICE = "system"
+
+# The mask handed to LogSegmentScanner is sized past the current module count, so modules
+# registered between building it and the scanner slicing it are still covered.
+_MASK_SLACK = 1024
+_NO_SIDEBAR_MASK = np.zeros(0, dtype=dtypes.LEVEL_TYPE)
+
+_LEVELS = {level.name_conf: level for level in LogLevel.LIST_UI}
+_LEVELS["WARN"] = LogLevel.WARN
+
+_FORMAT_FLAGS = ("show_ts", "show_date", "show_dev", "show_lvl", "show_mod", "show_rx_ts")
+
+
+class _Step(NamedTuple):
+    text: str
+    rows: int
+    cursor: int
+    more_pending: bool  # the cap was hit: matching rows newer than `cursor` remain
+
+
+def _number(args: dict, key: str, default, low, high):
+    value = args.get(key, default)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AgentApiError(f"'{key}' must be a number")
+    return min(max(value, low), high)
+
+
+def _string(args: dict, key: str) -> str:
+    value = args.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise AgentApiError(f"'{key}' must be a string")
+    return value
+
+
+def _find_device(id_registry, name: str):
+    """Lookup only: IDRegistry.get_device would register a misspelled name as a new device."""
+    devices = id_registry.get_all_devices()
+    for device in devices:
+        if device.name == name:
+            return device
+    raise AgentApiError(f"unknown device '{name}', known: {sorted(d.name for d in devices)}")
+
+
+def _find_module(id_registry, device, path: str):
+    for module in id_registry.get_all_modules():
+        if module.device is device and module.name == path:
+            return module
+    raise AgentApiError(f"device '{device.name}' has no module '{path}' (it may not have logged yet)")
+
+
+def _format_config(args: dict) -> FormattingConfig:
+    defaults = FormattingConfig()
+    fields = {}
+    for flag in _FORMAT_FLAGS:
+        value = args.get(flag, getattr(defaults, flag))
+        if not isinstance(value, bool):
+            raise AgentApiError(f"'{flag}' must be true or false")
+        fields[flag] = value
+    fields["ts_precision"] = int(_number(args, "ts_precision", defaults.ts_precision, 0, 9))
+    return FormattingConfig(**fields)
+
+
+def _parse_time(text: str, tz_offset_sec: int) -> int:
+    """A time as the returned lines show it ("2026-10-09 20:52:26.508", or ISO 8601 with 'T',
+    'Z' or an offset), or a time of day alone (today's date) -> epoch ns, the unit of row
+    timestamps. Without an offset in the text it is read in the timezone the lines are
+    formatted in (`tz_offset_sec`)."""
+    display_tz = timezone(timedelta(seconds=tz_offset_sec))
+    text = text.strip()
+    try:
+        if "-" not in text.lstrip("-") and ":" in text:
+            moment = datetime.combine(datetime.now(display_tz).date(), dt_time.fromisoformat(text))
+        else:
+            moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise AgentApiError(
+            f"cannot read 'around' time '{text}': use e.g. '2026-10-09 20:52:26.508' or '20:52:26'"
+        ) from None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=display_tz)
+
+    since_epoch = moment - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return (since_epoch.days * 86400 + since_epoch.seconds) * 1_000_000_000 + since_epoch.microseconds * 1000
+
+
+def list_modules(registry, args: dict) -> dict:
+    """The `list_modules` tool: devices and the module paths under each, for `read_logs`'
+    `device`/`module` filters."""
+    id_registry = registry.id_registry
+    device_name = _string(args, "device")
+    contains = _string(args, "contains").lower()
+    include_system = args.get("include_system", False) or device_name == SYSTEM_DEVICE
+    max_modules = int(_number(args, "max_modules", DEFAULT_MAX_MODULES, 1, HARD_MAX_MODULES))
+    only_device = _find_device(id_registry, device_name) if device_name else None
+
+    by_device = {}
+    for device in id_registry.get_all_devices():
+        if only_device is not None and device is not only_device:
+            continue
+        if device.name == SYSTEM_DEVICE and not include_system:
+            continue
+        by_device[device.id] = {"name": device.name, "modules": []}
+
+    listed = 0
+    total = 0
+    for module in list(id_registry.get_all_modules()):
+        entry = by_device.get(module.device.id)
+        if entry is None or not module.name or (contains and contains not in module.name.lower()):
+            continue
+        total += 1
+        if listed < max_modules:
+            entry["modules"].append(module.name)
+            listed += 1
+
+    for entry in by_device.values():
+        entry["modules"].sort()
+    return {"devices": list(by_device.values()), "modules_listed": listed, "truncated": total > listed}
+
+
+def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: False) -> dict:
+    """Runs one `read_logs` request against `registry`'s central storage. Blocks the calling
+    thread for up to `wait_s`. See agent_mcp.py's tool description for the arguments."""
+    id_registry = registry.id_registry
+    central = registry.central
+    if central is None or central.log_pool is None:
+        raise AgentApiError("central storage is not running")
+    log_pool = central.log_pool
+
+    # --- Filter: the log viewer's LogFilter ---
+    device_name = _string(args, "device")
+    module_path = _string(args, "module")
+    if module_path and not device_name:
+        raise AgentApiError("'module' needs 'device'")
+    device = _find_device(id_registry, device_name) if device_name else None
+    module = _find_module(id_registry, device, module_path) if module_path else None
+
+    level_name = _string(args, "min_level").upper() or "ALL"
+    if level_name not in _LEVELS:
+        raise AgentApiError(f"unknown 'min_level' '{level_name}', one of: {sorted(_LEVELS)}")
+
+    # The module goes into the per-module mask below, not into LogFilter: its
+    # filtered_module_children mode selects a module's submodules *without* the module itself.
+    log_filter = LogFilter(id_registry, device, log_level=_LEVELS[level_name])
+    log_filter.set_text_filter(_string(args, "contains"))
+    log_filter.set_kv_filter(_string(args, "kv"))
+
+    include_system = args.get("include_system", False) or device_name == SYSTEM_DEVICE
+    system_device = next((d for d in id_registry.get_all_devices() if d.name == SYSTEM_DEVICE), None)
+    hide_system = system_device is not None and not include_system
+
+    def sidebar_filter():
+        """The scanner's per-module level mask (what the viewer's filter sidebar provides).
+        Rebuilt whenever the scanner re-bakes, i.e. each time a module is registered, so a
+        submodule appearing during a wait is picked up."""
+        if module is None and not hide_system:
+            return False, _NO_SIDEBAR_MASK
+
+        size = id_registry.module_count() + _MASK_SLACK
+        if module is not None:
+            mask = np.full(size, LogLevel.OFF.value, dtype=dtypes.LEVEL_TYPE)
+            mask[module.id] = LogLevel.ALL.value
+            mask[id_registry.get_descendant_ids(module.id)] = LogLevel.ALL.value
+        else:
+            mask = np.full(size, LogLevel.ALL.value, dtype=dtypes.LEVEL_TYPE)
+        if hide_system:
+            system_ids = system_device.get_all_module_ids()
+            mask[system_ids[system_ids < size]] = LogLevel.OFF.value
+        return True, mask
+
+    scanner = LogSegmentScanner(
+        id_registry,
+        lambda: central.log_pool,
+        log_filter,
+        get_sidebar_filter=sidebar_filter,
+        get_show_hidden=lambda: True,
+    )
+    fetcher = LogTextFetcher(scanner, registry.system_ctx.array_pool, tables_provider=id_registry.bundle)
+
+    # --- Formatting: the log viewer's formatter ---
+    format_cfg = _format_config(args)
+    utc = bool(args.get("utc", False))
+    tz_offset_sec = 0 if utc else get_local_utc_offset_seconds()
+
+    # --- Range and waiting ---
+    max_lines = int(_number(args, "max_lines", DEFAULT_MAX_LINES, 1, HARD_MAX_LINES))
+    wait_s = _number(args, "wait_s", 0, 0, MAX_WAIT_SECONDS)
+    quiet_s = _number(args, "quiet_ms", 0, 0, MAX_WAIT_SECONDS * 1000) / 1000.0
+    until = _string(args, "until")
+    after_seq = _number(args, "after_seq", None, 0, float("inf"))
+
+    result = {
+        "session_id": registry.file_manager.session_dir.name,
+        "utc_offset_minutes": tz_offset_sec // 60,
+    }
+
+    def finish(text: str, rows: int, cursor: int, **extra) -> dict:
+        result.update(lines=rows, next_seq=int(cursor), **extra)
+        result["text"] = text
+        return result
+
+    around = _string(args, "around")
+    if around:
+        # Time anchor: the viewer's "follow the playback clock" fetch, centred on a timestamp.
+        if after_seq is not None or wait_s:
+            raise AgentApiError("'around' cannot be combined with 'after_seq' or 'wait_s'")
+        anchor_ts = _parse_time(around, tz_offset_sec)
+        before = int(_number(args, "before", DEFAULT_AROUND_LINES, 0, HARD_MAX_LINES))
+        after = int(_number(args, "after", DEFAULT_AROUND_LINES, 0, HARD_MAX_LINES))
+        latest = int(log_pool.latest_sequence())
+        window = fetcher.fetch_history_window(
+            anchor_ts=anchor_ts, before_cap=before, after_cap=after, format_cfg=format_cfg, tz_offset_sec=tz_offset_sec
+        )
+        more_after = window.after_count >= after and window.newest_seq is not None
+        return finish(
+            window.text,
+            window.before_count + window.after_count,
+            window.newest_seq if more_after else latest,
+            before_lines=window.before_count,  # the lines from here on are at or after 'around'
+            after_lines=window.after_count,
+            older_rows_exist=not window.reached_start,
+        )
+
+    if after_seq is None and not wait_s:
+        # No cursor yet: the newest matching rows, like opening a log tab.
+        last_n = min(int(_number(args, "last_n", DEFAULT_LAST_N, 1, HARD_MAX_LINES)), max_lines)
+        tail = fetcher.fetch_live_tail(max_rows=last_n, format_cfg=format_cfg, tz_offset_sec=tz_offset_sec)
+        return finish(
+            tail.text, tail.total_new_rows, tail.highest_seq_seen, older_rows_exist=not tail.reached_live_edge
+        )
+
+    latest = int(log_pool.latest_sequence())
+    cursor = latest if after_seq is None else int(after_seq)
+    if cursor > latest:
+        # A cursor from a previous run of the app (sequences continue across session rotation,
+        # but restart with the process).
+        cursor = int(SEQ_NONE)
+        result["cursor_reset"] = True
+
+    def step(cursor: int, cap: int) -> _Step:
+        """Matching rows newer than `cursor`, oldest first, at most `cap`."""
+        fetcher.latest_seq_seen = cursor
+        tail = fetcher.fetch_live_tail(max_rows=cap, format_cfg=format_cfg, tz_offset_sec=tz_offset_sec)
+        if tail.reached_live_edge:
+            return _Step(tail.text, tail.total_new_rows, int(fetcher.latest_seq_seen), False)
+
+        # More than `cap` new rows: the tail scan kept the newest ones, which would skip the
+        # rows right after the cursor. Page forward from the cursor instead.
+        page = fetcher.fetch_history_window(
+            anchor_seq=cursor + 1, before_cap=0, after_cap=cap, format_cfg=format_cfg, tz_offset_sec=tz_offset_sec
+        )
+        if page.after_count >= cap and page.newest_seq is not None:
+            return _Step(page.text, page.after_count, int(page.newest_seq), True)
+        return _Step(page.text, page.after_count, int(tail.highest_seq_seen), False)
+
+    chunks = []
+    rows = 0
+    truncated = False
+    stopped_on = None
+    deadline = time.monotonic() + (wait_s or 0)
+    last_row_time = None
+
+    while True:
+        new = step(cursor, max_lines - rows)
+        cursor = new.cursor
+        if new.rows:
+            chunks.append(new.text)
+            rows += new.rows
+            last_row_time = time.monotonic()
+
+        if new.more_pending or rows >= max_lines:
+            truncated = new.more_pending
+            stopped_on = "max_lines"
+            break
+        if not wait_s:
+            break
+        if until:
+            if new.rows and until in new.text:
+                stopped_on = "until"
+                break
+        elif not quiet_s and rows:
+            stopped_on = "first_lines"
+            break
+
+        now = time.monotonic()
+        if quiet_s and last_row_time is not None and now - last_row_time >= quiet_s:
+            stopped_on = "quiet"
+            break
+        if now >= deadline:
+            stopped_on = "timeout"
+            break
+        if stop_is_set():
+            stopped_on = "shutdown"
+            break
+        time.sleep(POLL_SECONDS)
+
+    extra = {"truncated": truncated}
+    if wait_s:
+        extra["stopped_on"] = stopped_on
+    return finish("".join(chunks), rows, cursor, **extra)
+
+
+def current_sequence(registry) -> Optional[int]:
+    """The cursor to pass as `after_seq` for "everything from now on"."""
+    central = registry.central
+    if central is None or central.log_pool is None:
+        return None
+    return int(central.log_pool.latest_sequence())

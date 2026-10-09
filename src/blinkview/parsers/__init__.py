@@ -16,6 +16,7 @@ from blinkview.parsers import can_parser as can_parser
 from blinkview.parsers import frame_decoders as frame_decoders
 from blinkview.parsers import frame_parsers as frame_parsers
 from blinkview.parsers import key_value as key_value
+from blinkview.parsers import mcp_server as mcp_server
 from blinkview.parsers import module_gen as module_gen
 from blinkview.parsers import multi_rule_key_value as multi_rule_key_value
 from blinkview.parsers import parser as parser
@@ -28,6 +29,7 @@ __all__ = [
     "frame_decoders",
     "frame_parsers",
     "key_value",
+    "mcp_server",
     "module_gen",
     "multi_rule_key_value",
     "parser",

@@ -68,6 +68,15 @@ uv run pytest tests/test_registry_memory.py -v
 
 ```
 
+### Numba warmup check for the MCP tools
+Not part of the test suite (a cold run compiles every kernel, about 1.5 minutes). It starts a real `blink`
+with an empty Numba cache, runs every `blink mcp` tool against it, and fails if any kernel compiles after
+"System ready" - i.e. is missing from the startup warmup. Run it after adding an MCP tool or argument, or a
+kernel on a path the tools use:
+```bash
+uv run scripts/mcp_cold_cache_check.py        # -v lists each tool call; --help for the rest
+```
+
 ## Memory & Performance Standards
 
 BlinkView aims for a lean idle footprint. Current benchmarks on Python 3.14 (Windows) should target:

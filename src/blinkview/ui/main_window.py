@@ -153,6 +153,44 @@ class _SessionRotationWorker(QObject):
         self.finished.emit(new_dir.name)
 
 
+class _SessionRotationRequest:
+    """One rotation asked for from outside the UI thread, and where its outcome is handed back."""
+
+    def __init__(self, display_name: Optional[str]):
+        self.display_name = display_name
+        self.done = threading.Event()
+        self.old_dir = None
+        self.new_dir = None
+        self.error: Optional[str] = None
+
+    def finish(self, new_dir=None, error: Optional[str] = None):
+        self.new_dir = new_dir
+        self.error = error
+        self.done.set()
+
+
+class _SessionRotationBridge(QObject):
+    """Registry.session_rotation_handler for the GUI: lets a non-UI thread (the mcp_server
+    pipeline's request thread) run a rotation exactly like the Rotate button. `requested` is
+    emitted on the caller's thread and delivered to BlinkMainWindow as a queued call - same
+    reasoning as _ShutdownWorker."""
+
+    TIMEOUT_SECONDS = 120
+
+    requested = Signal(object)  # _SessionRotationRequest
+
+    def request(self, display_name: Optional[str] = None):
+        """Blocks the calling (non-UI) thread until the rotation finished. Returns
+        (old_dir, new_dir) like Registry.rotate_session."""
+        request = _SessionRotationRequest(display_name)
+        self.requested.emit(request)
+        if not request.done.wait(self.TIMEOUT_SECONDS):
+            raise TimeoutError(f"Session rotation did not finish within {self.TIMEOUT_SECONDS} s")
+        if request.error is not None:
+            raise RuntimeError(request.error)
+        return request.old_dir, request.new_dir
+
+
 class _ReplayLoadBridge(QObject):
     """Marshals UnifiedLogReplay's on_part_progress/on_finished callbacks (invoked on its own
     background thread - see UnifiedLogReplay.start()) onto the main/UI thread, the same reasoning
@@ -498,6 +536,11 @@ class BlinkMainWindow(QMainWindow):
         self._session_rotation_worker: Optional[_SessionRotationWorker] = None
         self._session_rotation_toast = None
         self._close_after_rotation = False
+        # A rotation asked for through Registry.request_session_rotation, waiting for its result.
+        self._session_rotation_request: Optional[_SessionRotationRequest] = None
+        self._session_rotation_bridge = _SessionRotationBridge(self)
+        self._session_rotation_bridge.requested.connect(self._on_session_rotation_requested)
+        registry.session_rotation_handler = self._session_rotation_bridge.request
 
         # Replay-load progress state (see start_replay) - same "keep it alive / dismissable"
         # reasoning as the shutdown-toast state above.
@@ -1301,6 +1344,20 @@ class BlinkMainWindow(QMainWindow):
         thread.start()
         return True
 
+    @Slot(object)
+    def _on_session_rotation_requested(self, request: _SessionRotationRequest):
+        """A rotation asked for from another thread (see _SessionRotationBridge)."""
+        request.old_dir = self.gui_context.registry.file_manager.session_dir
+        if not self.start_session_rotation(request.display_name):
+            request.finish(error="A new session can't be started now (replay, already rotating, or closing)")
+            return
+        self._session_rotation_request = request
+
+    def _answer_session_rotation_request(self, error: Optional[str] = None):
+        request, self._session_rotation_request = self._session_rotation_request, None
+        if request is not None:
+            request.finish(new_dir=self.gui_context.registry.file_manager.session_dir, error=error)
+
     @Slot(str)
     def _on_session_rotated(self, new_session_name: str):
         fm = self.gui_context.registry.file_manager
@@ -1311,12 +1368,14 @@ class BlinkMainWindow(QMainWindow):
             gui_config.autosave_path = fm.get_session_path("gui", suffix="autosave")
         fm.snapshot_gui_start()
 
+        self._answer_session_rotation_request()
         self._finish_session_rotation()
         ToastManager.show(f"New session: {new_session_name}", ToastType.SUCCESS, 3, parent=self)
 
     @Slot(str)
     def _on_session_rotation_failed(self, error: str):
         print(f"[MainWindow] Session rotation failed: {error}")
+        self._answer_session_rotation_request(error=error)
         self._finish_session_rotation()
         ToastManager.show(f"Could not start a new session: {error}", ToastType.ERROR, 5, parent=self)
 

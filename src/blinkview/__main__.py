@@ -188,6 +188,12 @@ def main():
     setup_recover_parser(recover_parser)
     recover_parser.set_defaults(func=run_recover)
 
+    mcp_parser = subparsers.add_parser("mcp", prog="blink mcp", help="MCP server (stdio) for AI agents to act on a running BlinkView")
+    from blinkview.agent_mcp import run_mcp, setup_mcp_parser
+
+    setup_mcp_parser(mcp_parser)
+    mcp_parser.set_defaults(func=run_mcp)
+
     update_parser = subparsers.add_parser("update", help="Manage BlinkView versions")
     from blinkview.utils.cli_updater import handle_update, setup_update_parser
 
@@ -210,7 +216,7 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command != "config":
+    if args.command not in ("config", "mcp"):
         from blinkview.utils.updater import get_update_notice
 
         # stderr: a notice, not command output - `blink replay --list > file` (or an export to

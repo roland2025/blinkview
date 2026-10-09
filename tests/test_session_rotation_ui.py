@@ -166,6 +166,70 @@ class TestClearButton:
         assert registry.session_generation == 1
 
 
+class TestRotationRequestedOffTheUiThread:
+    """Registry.request_session_rotation - what the mcp_server pipeline calls on its request
+    thread - runs the same rotation the button does and blocks its caller until it finished."""
+
+    @staticmethod
+    def _request_on_a_thread(registry, display_name=None):
+        outcome = {}
+
+        def work():
+            try:
+                outcome["dirs"] = registry.request_session_rotation(display_name)
+            except Exception as e:
+                outcome["error"] = e
+
+        thread = threading.Thread(target=work, daemon=True)
+        thread.start()
+        return thread, outcome
+
+    def test_returns_old_and_new_dir_after_the_gui_finished(self, qtbot, main_window, registry):
+        main_window.create_widget(WidgetName.LOG_VIEWER, "Rotation Logs")
+        fm = registry.file_manager
+        old_dir = fm.session_dir
+        cfg = fm.config_file_name
+
+        thread, outcome = self._request_on_a_thread(registry, "by agent")
+        qtbot.waitUntil(lambda: not thread.is_alive(), timeout=ROTATION_TIMEOUT_MS)
+
+        assert outcome["dirs"] == (old_dir, fm.session_dir)
+        assert fm.session_dir != old_dir
+        assert fm.session_display_name == "by_agent"
+        # The GUI part ran too: state saved into the old session, button back to normal.
+        assert f"{cfg}.gui_state.final.json" in _session_files(old_dir)
+        assert f"{cfg}.gui_state.start.json" in _session_files(fm.session_dir)
+        assert main_window._session_rotation_thread is None
+        assert main_window.rotate_button.isEnabled()
+
+    def test_refused_while_another_rotation_runs(self, qtbot, main_window, registry, monkeypatch):
+        release = threading.Event()
+        real_rotate = registry.rotate_session
+        monkeypatch.setattr(registry, "rotate_session", lambda name=None: (release.wait(10), real_rotate(name))[1])
+        assert main_window.start_session_rotation() is True
+
+        thread, outcome = self._request_on_a_thread(registry)
+        qtbot.waitUntil(lambda: not thread.is_alive(), timeout=ROTATION_TIMEOUT_MS)
+        release.set()
+        _wait_rotation_done(qtbot, main_window)
+
+        assert isinstance(outcome["error"], RuntimeError)
+        assert "can't be started now" in str(outcome["error"])
+        assert registry.session_generation == 1  # only the button's rotation happened
+
+    def test_a_failed_rotation_reaches_the_caller(self, qtbot, main_window, registry, monkeypatch):
+        def broken_rotate(display_name=None):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(registry, "rotate_session", broken_rotate)
+
+        thread, outcome = self._request_on_a_thread(registry)
+        qtbot.waitUntil(lambda: not thread.is_alive(), timeout=ROTATION_TIMEOUT_MS)
+
+        assert "disk full" in str(outcome["error"])
+        assert main_window._session_rotation_request is None
+
+
 def test_clear_is_unavailable_in_replay_mode(qapp, qtbot, registry):
     registry.replay_mode = True
     w = BlinkMainWindow(registry)

@@ -292,6 +292,10 @@ class Registry:
         # core/session_generation.py) to drop data fetched from the previous session.
         self.session_generation = 0
 
+        # Set by the GUI (BlinkMainWindow): runs a whole rotation the way the Rotate button does
+        # and returns once it finished - see request_session_rotation().
+        self.session_rotation_handler: Optional[Callable[[Optional[str]], tuple[Path, Path]]] = None
+
         self.module_value_tracker: LatestModuleValueTracker = None
 
         self._subscribers = []
@@ -587,6 +591,16 @@ class Registry:
 
         self.logger.info("[System] Session rotated: %s -> %s", old_dir.name, new_dir.name)
         return old_dir, new_dir
+
+    def request_session_rotation(self, display_name: Optional[str] = None) -> tuple[Path, Path]:
+        """rotate_session() for a caller that is not the GUI (the mcp_server pipeline). With a
+        GUI the rotation has to start on the UI thread, which saves the GUI state into the old
+        session first, so it goes through the handler the GUI installed; blocks until done.
+        Never call this on the UI thread."""
+        handler = self.session_rotation_handler
+        if handler is not None:
+            return handler(display_name)
+        return self.rotate_session(display_name)
 
     def stop(self, on_progress: Optional[Callable[[int, int, str], None]] = None):
         """Cleanly tear down the session.
