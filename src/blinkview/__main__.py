@@ -182,6 +182,12 @@ def main():
     setup_export_parser(export_parser)
     export_parser.set_defaults(func=run_export)
 
+    recover_parser = subparsers.add_parser("recover", prog="blink recover", help="Finalize sessions whose recording was killed")
+    from blinkview.utils.session_recovery import run_recover, setup_recover_parser
+
+    setup_recover_parser(recover_parser)
+    recover_parser.set_defaults(func=run_recover)
+
     update_parser = subparsers.add_parser("update", help="Manage BlinkView versions")
     from blinkview.utils.cli_updater import handle_update, setup_update_parser
 
