@@ -815,7 +815,11 @@ QToolButton[filterEnabled="true"] {
         refills from the tail as before. Every settings-change handler should call this instead
         of _redraw_history() directly, so adjusting a filter never silently un-pauses you."""
         if self.view_mode == LogViewMode.HISTORY:
-            self._reanchor_history(anchor_seq=self.history_anchor_seq, anchor_ts=self.history_anchor_ts_ns)
+            # allow_empty: a filter that matches nothing must blank the window, not leave the
+            # previous filter's rows on screen looking like the edit was ignored.
+            self._reanchor_history(
+                anchor_seq=self.history_anchor_seq, anchor_ts=self.history_anchor_ts_ns, allow_empty=True
+            )
         else:
             self._redraw_history()
 
@@ -1048,13 +1052,25 @@ QToolButton[filterEnabled="true"] {
         idx = max(0, min(block_number + offset, len(self._live_seqs) - 1))
         return self._live_seqs[idx]
 
-    def _reanchor_history(self, anchor_seq=None, anchor_ts=None, auto: bool = False, before_cap=None, after_cap=None):
+    def _reanchor_history(
+        self,
+        anchor_seq=None,
+        anchor_ts=None,
+        auto: bool = False,
+        before_cap=None,
+        after_cap=None,
+        allow_empty: bool = False,
+    ):
         """Rebuilds the history window around anchor_seq or anchor_ts (mutually exclusive) and
         repositions the view on it. Both callers below change the scrollbar's value
         programmatically, which would otherwise re-fire valueChanged and recurse straight back
         into _on_scroll_value_changed - the guard flag suppresses that re-entrancy
         (qt-log-table-viewer skill Sec 8). before_cap/after_cap passthrough to
-        _fetch_history_window - see its docstring."""
+        _fetch_history_window - see its docstring.
+
+        A fetch that matches nothing normally leaves the view untouched (nothing to anchor on).
+        allow_empty (filter re-applies, see _refresh_view) rebuilds an already-open history
+        window even then, keeping its anchor so loosening the filter brings the rows back."""
         was_live = self.view_mode != LogViewMode.HISTORY
         self._programmatic_scroll = True
         try:
@@ -1062,7 +1078,7 @@ QToolButton[filterEnabled="true"] {
                 anchor_seq=anchor_seq, anchor_ts=anchor_ts, before_cap=before_cap, after_cap=after_cap
             )
 
-            if before_count == 0 and after_count == 0:
+            if before_count == 0 and after_count == 0 and (was_live or not allow_empty):
                 return
 
             self.view_mode = LogViewMode.HISTORY
@@ -1082,7 +1098,8 @@ QToolButton[filterEnabled="true"] {
                 self._set_pause_ui(True, auto=auto)
 
             self.highlighter.setDocument(None)
-            self.text_area.set_max_block_count(before_count + after_count)
+            # max(1, ...): Qt reads a block count of 0 as "unlimited"
+            self.text_area.set_max_block_count(max(1, before_count + after_count))
             self.text_area.setPlainText(text_result)
             self.highlighter.setDocument(self.text_area.document())
 
