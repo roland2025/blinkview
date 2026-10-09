@@ -242,6 +242,7 @@ class Registry:
             pid_history=self.pid_history,
         )
         self.file_manager.set_context(self.system_ctx)
+        self.file_manager.start_heartbeat(self.system_ctx.tasks)
 
         self.system_device = self.id_registry.get_device("SYSTEM", essential=False)
         self.log_device_id = self.system_device.id
@@ -515,12 +516,11 @@ class Registry:
 
         metadata_path = session_dir / "metadata.json"
         if metadata_path.exists() and self.playback_ranges is not None:
-            import json
+            from blinkview.utils.session_lister import read_session_metadata
 
             try:
-                with metadata_path.open("r", encoding="utf-8") as f:
-                    metadata = json.load(f)
-            except (OSError, json.JSONDecodeError):
+                metadata = read_session_metadata(session_dir)
+            except (OSError, ValueError):
                 metadata = None
 
             if metadata is not None:

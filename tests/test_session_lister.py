@@ -487,7 +487,136 @@ class TestFormatSessionTable:
 
         assert header.split() == ["SESSION", "ID", "STARTED", "(local)", "DURATION", "SIZE", "STATUS", "PROFILE", "NAME"]
         assert newest.startswith("20260929_100000_default_long_name_here  ")
-        assert newest.endswith("  active    -        long name here")
+        # "active" in metadata.json, but nothing is recording it - see session_status().
+        assert newest.endswith("  crashed   -        long name here")
         assert "  ~" in newest  # estimated duration
         assert oldest.endswith("  4.9 KB  finished  nrf      bench")
         assert header.index("DURATION") == oldest.index("5m 19s")
+
+
+class TestSessionStatus:
+    NOW = datetime(2026, 10, 9, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _meta(self, age_s=1.0, pid=4242, host=None, status="active"):
+        import platform
+        from datetime import timedelta
+
+        return {
+            "status": status,
+            "process": {
+                "pid": pid,
+                "host": platform.node() if host is None else host,
+                "heartbeat_at": (self.NOW - timedelta(seconds=age_s)).isoformat(),
+            },
+        }
+
+    def _status(self, meta, pid_alive=True):
+        from blinkview.utils import session_lister
+
+        with patch.object(session_lister, "_pid_alive", return_value=pid_alive):
+            return session_lister.session_status(meta, now=self.NOW)
+
+    def test_fresh_heartbeat_and_live_pid_is_active(self):
+        assert self._status(self._meta()) == "active"
+
+    def test_dead_pid_on_this_host_is_crashed_at_once(self):
+        assert self._status(self._meta(age_s=1.0), pid_alive=False) == "crashed"
+
+    def test_stale_heartbeat_is_crashed_even_if_the_pid_exists(self):
+        """The pid may have been reused by an unrelated process since."""
+        from blinkview.utils.session_lister import HEARTBEAT_STALE_S
+
+        assert self._status(self._meta(age_s=HEARTBEAT_STALE_S + 1)) == "crashed"
+
+    def test_other_host_is_judged_by_heartbeat_alone(self):
+        assert self._status(self._meta(host="some-other-machine"), pid_alive=False) == "active"
+
+    def test_active_without_process_info_is_crashed(self):
+        assert self._status({"status": "active"}) == "crashed"
+
+    def test_unparseable_heartbeat_is_crashed(self):
+        meta = self._meta()
+        meta["process"]["heartbeat_at"] = "garbage"
+        assert self._status(meta) == "crashed"
+
+    def test_finished_is_left_alone(self):
+        assert self._status(self._meta(status="finished", age_s=99999), pid_alive=False) == "finished"
+
+    def test_missing_status_is_unknown(self):
+        assert self._status({}) == "unknown"
+
+
+class TestReadSessionMetadata:
+    def test_retries_while_the_file_is_being_swapped(self, tmp_path, monkeypatch):
+        """Windows: opening metadata.json while a recording session swaps a new one in fails
+        with PermissionError for a moment."""
+        from blinkview.utils import session_lister
+
+        session_dir = _write_session(tmp_path, "s", {"status": "active"})
+        real_read_text = Path.read_text
+        failures = [PermissionError("swap in progress"), PermissionError("swap in progress")]
+
+        def flaky_read_text(self, *args, **kwargs):
+            if failures:
+                raise failures.pop()
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", flaky_read_text)
+        monkeypatch.setattr(session_lister, "METADATA_READ_RETRY_DELAY_S", 0)
+
+        assert session_lister.read_session_metadata(session_dir) == {"status": "active"}
+        assert failures == []
+
+    def test_gives_up_on_a_file_that_stays_unreadable(self, tmp_path, monkeypatch):
+        import pytest
+
+        from blinkview.utils import session_lister
+
+        session_dir = _write_session(tmp_path, "s", {})
+
+        def denied(self, *args, **kwargs):
+            raise PermissionError("locked")
+
+        monkeypatch.setattr(Path, "read_text", denied)
+        monkeypatch.setattr(session_lister, "METADATA_READ_RETRY_DELAY_S", 0)
+
+        with pytest.raises(PermissionError):
+            session_lister.read_session_metadata(session_dir)
+
+
+class TestFormatSessionLabelCrashed:
+    def _info(self, path, duration_seconds):
+        return SessionInfo(
+            session_id=path.name,
+            path=path,
+            display_name="bench",
+            profile="adb",
+            status="crashed",
+            created_at="2026-07-16T08:12:49+00:00Z",
+            finished_at=None,
+            duration_seconds=duration_seconds,
+        )
+
+    def test_recovered_session_shows_its_length(self, tmp_path):
+        from blinkview.utils.session_lister import format_session_label
+
+        label = format_session_label(self._info(tmp_path, 125.0))
+
+        assert "(2m 05s - crashed)  bench [adb]" in label
+
+    def test_unrecovered_session_shows_the_estimated_length(self, tmp_path):
+        from blinkview.utils.session_lister import format_session_label
+
+        part = tmp_path / "session.0000.log"
+        part.write_text("data")
+        last_write = datetime(2026, 7, 16, 8, 13, 59, tzinfo=timezone.utc).timestamp()
+        os.utime(part, (last_write, last_write))
+
+        label = format_session_label(self._info(tmp_path, None))
+
+        assert "(~1m 10s - crashed)" in label
+
+    def test_no_length_known(self, tmp_path):
+        from blinkview.utils.session_lister import format_session_label
+
+        assert "(crashed)" in format_session_label(self._info(tmp_path, None))

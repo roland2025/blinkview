@@ -113,9 +113,10 @@ class TestLoadReplaySession:
         original = make_real_registry(tmp_path, "original_h2")
         session_dir = original.file_manager.session_dir  # never stopped: no finished_at
 
-        import json
+        from blinkview.utils.session_lister import read_session_metadata
 
-        created_ns = _epoch_ns(json.loads((session_dir / "metadata.json").read_text())["created_at"])
+        # Still being rewritten by `original` - a plain read can hit the swap on Windows.
+        created_ns = _epoch_ns(read_session_metadata(session_dir)["created_at"])
 
         replay = make_real_registry(tmp_path, "replay_h2")
         try:

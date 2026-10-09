@@ -167,6 +167,43 @@ class TestWriteMetadata:
         written = json.loads((fm.session_dir / "metadata.json").read_text())
         assert written == fm.metadata
 
+    def test_interrupted_write_leaves_the_previous_metadata_intact(self, tmp_path, monkeypatch):
+        """A write that dies partway (standing in for the process being killed mid-write) must
+        not truncate metadata.json - list_sessions would then skip the whole session."""
+        fm = make_manager(tmp_path)
+        fm.write_metadata()
+        before = (fm.session_dir / "metadata.json").read_text()
+
+        def dump_half_then_die(data, f, **kwargs):
+            f.write('{"status": "act')
+            raise OSError("killed mid-write")
+
+        monkeypatch.setattr("blinkview.utils.atomic_json_dump.json.dump", dump_half_then_die)
+        fm.metadata["status"] = "finished"
+
+        try:
+            fm.write_metadata()
+        except OSError:
+            pass
+
+        assert (fm.session_dir / "metadata.json").read_text() == before
+        assert [p.name for p in fm.session_dir.iterdir()] == ["metadata.json"]
+
+    def test_update_logger_stats_survives_a_failed_metadata_write(self, tmp_path, monkeypatch):
+        """Runs on FileLogger threads - a failed write must not propagate and end the thread."""
+        fm = make_manager(tmp_path)
+        logger = FakeFileLogger(logging_id="log-1")
+        fm.add_file_logger(logger)
+
+        def boom(*args, **kwargs):
+            raise PermissionError("metadata.json is open elsewhere")
+
+        monkeypatch.setattr(file_manager_module, "atomic_json_dump", boom)
+
+        fm.update_logger_stats(logger, 100)
+
+        assert fm.metadata["loggers"]["log-1"]["total_bytes"] == 100
+
 
 class TestFileLoggerLifecycle:
     def test_add_file_logger_initializes_a_new_metadata_entry(self, tmp_path):
@@ -700,3 +737,88 @@ class TestRecordDevMode:
 
         assert (fm.session_dir / "metadata.json").read_text() == before
         assert fm.metadata["environment"]["dev_mode"] is True
+
+
+class FakeTaskManager:
+    def __init__(self):
+        self.periodic = {}
+
+    def run_periodic(self, interval_seconds, func, *args, **kwargs):
+        task_id = f"task-{len(self.periodic)}"
+        self.periodic[task_id] = (interval_seconds, func)
+        return task_id
+
+    def stop_periodic(self, task_id):
+        self.periodic.pop(task_id, None)
+
+
+class TestHeartbeat:
+    def test_metadata_records_this_process(self, tmp_path):
+        import os
+        import platform
+
+        fm = make_rotatable_manager(tmp_path)
+
+        process = _read_metadata(fm.session_dir)["process"]
+        assert process["pid"] == os.getpid()
+        assert process["host"] == platform.node()
+        assert datetime.fromisoformat(process["heartbeat_at"]).tzinfo is not None
+
+    def test_start_registers_one_periodic_task(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+        tasks = FakeTaskManager()
+
+        fm.start_heartbeat(tasks)
+        fm.start_heartbeat(tasks)
+
+        assert [interval for interval, _ in tasks.periodic.values()] == [file_manager_module.HEARTBEAT_INTERVAL_S]
+
+    def test_not_started_in_replay_mode(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path, replay_mode=True)
+        tasks = FakeTaskManager()
+
+        fm.start_heartbeat(tasks)
+
+        assert tasks.periodic == {}
+
+    def test_beat_refreshes_heartbeat_on_disk(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+        fm.metadata["process"]["heartbeat_at"] = "2020-01-01T00:00:00+00:00"
+
+        fm._beat()
+
+        written = _read_metadata(fm.session_dir)["process"]["heartbeat_at"]
+        assert datetime.fromisoformat(written) > datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def test_beat_follows_a_rotation_into_the_new_session(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+        old_dir, new_dir = fm.rotate()
+        old_before = (old_dir / "metadata.json").read_text()
+        fm.metadata["process"]["heartbeat_at"] = "2020-01-01T00:00:00+00:00"
+
+        fm._beat()
+
+        assert (old_dir / "metadata.json").read_text() == old_before
+        assert _read_metadata(new_dir)["process"]["heartbeat_at"] != "2020-01-01T00:00:00+00:00"
+
+    def test_beat_does_not_recreate_a_discarded_session(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+        fm.discard_empty_session()
+        assert not fm.session_dir.exists()
+
+        fm._beat()
+
+        assert not fm.session_dir.exists()
+
+    def test_stop_ends_the_heartbeat_and_a_late_beat_changes_nothing(self, tmp_path):
+        fm = make_rotatable_manager(tmp_path)
+        tasks = FakeTaskManager()
+        fm.start_heartbeat(tasks)
+
+        fm.stop()
+        finished = (fm.session_dir / "metadata.json").read_text()
+        fm._beat()
+
+        assert tasks.periodic == {}
+        assert (fm.session_dir / "metadata.json").read_text() == finished
+        assert json.loads(finished)["status"] == "finished"

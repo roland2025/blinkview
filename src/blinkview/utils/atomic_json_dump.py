@@ -16,9 +16,14 @@ REPLACE_ATTEMPTS = 5
 REPLACE_RETRY_DELAY_S = 0.02
 
 
-def atomic_json_dump(data: dict, target_path: str | Path, indent: int = 4):
+def atomic_json_dump(data: dict, target_path: str | Path, indent: int = 4, fsync: bool = True):
     """
     Safely writes a dictionary to a JSON file using an atomic swap.
+
+    `fsync=False` skips forcing the data to disk before the swap - for a file rewritten many
+    times a second (FileManager.write_metadata). The swap alone still guarantees a reader, or a
+    restart after this process is killed, sees either the old or the new content, never a
+    partial file; only a power loss / OS crash can then lose the latest write.
     """
     target = Path(target_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -30,9 +35,10 @@ def atomic_json_dump(data: dict, target_path: str | Path, indent: int = 4):
     try:
         with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=indent)
-            f.flush()
-            # Ensure data is physically on the disk before renaming
-            os.fsync(f.fileno())
+            if fsync:
+                f.flush()
+                # Ensure data is physically on the disk before renaming
+                os.fsync(f.fileno())
 
         # Atomic swap (overwrites target if it exists)
         for attempt in range(REPLACE_ATTEMPTS):

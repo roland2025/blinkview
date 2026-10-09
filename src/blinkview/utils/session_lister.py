@@ -10,7 +10,9 @@
 # files off disk, so `blink replay --list` should stay a lightweight, fast operation.
 
 import json
+import platform
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -27,6 +29,14 @@ _UNIFIED_PART_RE = re.compile(r"session\.(\d{4,})\.log(\.zst)?")
 # Same as storage/log_file_archive.ARCHIVE_SUFFIX - not imported from there, see the module comment
 # above.
 ARCHIVE_SUFFIX = ".zst"
+
+# How often a recording FileManager refreshes metadata.json's process.heartbeat_at, and how old
+# that may get before the session counts as crashed - see session_status().
+HEARTBEAT_INTERVAL_S = 5.0
+HEARTBEAT_STALE_S = 30.0
+
+METADATA_READ_ATTEMPTS = 5
+METADATA_READ_RETRY_DELAY_S = 0.02
 
 
 def _sanitize(name: str) -> str:
@@ -95,6 +105,61 @@ def _resolve_project_name(settings: SettingsManager, project_dir: Optional[Path]
     return _sanitize(project_name)
 
 
+def read_session_metadata(session_dir: Path) -> dict:
+    """Parses <session_dir>/metadata.json. Raises OSError if it can't be read, ValueError
+    (json.JSONDecodeError) if it doesn't parse.
+
+    A session still recording rewrites this file by swapping a new one in place
+    (FileManager.write_metadata), and on Windows opening it at that very moment fails with
+    PermissionError - retried here, since the swap is over within milliseconds."""
+    meta_path = Path(session_dir) / "metadata.json"
+    for attempt in range(METADATA_READ_ATTEMPTS):
+        try:
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+        except PermissionError:
+            if attempt == METADATA_READ_ATTEMPTS - 1:
+                raise
+            time.sleep(METADATA_READ_RETRY_DELAY_S)
+
+
+def _pid_alive(pid: int) -> bool:
+    import psutil
+
+    return psutil.pid_exists(pid)
+
+
+def session_status(meta: dict, now: Optional[datetime] = None) -> str:
+    """A session's status as a reader should see it: metadata.json's own `status`, except that
+    an `active` session whose process is gone is reported as `crashed`.
+
+    FileManager records its pid/host in metadata.json and refreshes `heartbeat_at` every
+    HEARTBEAT_INTERVAL_S while recording. `active` is only believed while that heartbeat is
+    fresh - and, for a session recorded on this machine, while that pid still exists, which
+    catches a crash right away instead of after HEARTBEAT_STALE_S. The staleness check also
+    covers a pid that was reused by an unrelated process, and a session folder on another host.
+    An `active` session without the `process` block was recorded before the heartbeat existed
+    and can only be a leftover of a run that never finished."""
+    status = meta.get("status", "unknown")
+    if status != "active":
+        return status
+
+    process = meta.get("process")
+    if not isinstance(process, dict):
+        return "crashed"
+
+    heartbeat = _parse_timestamp(process.get("heartbeat_at"))
+    if heartbeat is None:
+        return "crashed"
+    now = now or datetime.now(timezone.utc)
+    if (now - heartbeat).total_seconds() > HEARTBEAT_STALE_S:
+        return "crashed"
+
+    pid = process.get("pid")
+    if process.get("host") == platform.node() and isinstance(pid, int) and not _pid_alive(pid):
+        return "crashed"
+    return "active"
+
+
 def list_sessions(log_dir: Path, project_name: str) -> list[SessionInfo]:
     """Enumerates <log_dir>/<project_name>/* session folders, reading each metadata.json.
     Folders without a metadata.json (not a session dir, or still being created) are skipped."""
@@ -110,8 +175,8 @@ def list_sessions(log_dir: Path, project_name: str) -> list[SessionInfo]:
         if not meta_path.is_file():
             continue
         try:
-            meta = json.loads(meta_path.read_text())
-        except (OSError, json.JSONDecodeError):
+            meta = read_session_metadata(entry)
+        except (OSError, ValueError):
             continue
 
         project_meta = meta.get("project", {})
@@ -122,7 +187,7 @@ def list_sessions(log_dir: Path, project_name: str) -> list[SessionInfo]:
                 path=entry,
                 display_name=project_meta.get("display_name", entry.name),
                 profile=config_meta.get("profile", ""),
-                status=meta.get("status", "unknown"),
+                status=session_status(meta),
                 created_at=meta.get("created_at"),
                 finished_at=meta.get("finished_at"),
                 duration_seconds=meta.get("duration_seconds"),
@@ -212,7 +277,17 @@ def format_session_label(session_info: SessionInfo) -> str:
         dt = _parse_timestamp(session_info.created_at)
         started = dt.astimezone().strftime("%Y-%m-%d %H:%M") if dt else session_info.created_at
 
-    label = f"{started} ({_format_duration(session_info.duration_seconds)})  {session_info.display_name}"
+    if session_info.status == "crashed":
+        # Not recovered yet (blink recover): no duration in the metadata, estimated like --list.
+        info = describe_session(session_info)
+        duration = "crashed"
+        duration_seconds = info["duration_seconds"]
+        if duration_seconds is not None:
+            estimate = "~" if info["duration_estimated"] else ""
+            duration = f"{estimate}{_format_duration(duration_seconds)} - crashed"
+    else:
+        duration = _format_duration(session_info.duration_seconds)
+    label = f"{started} ({duration})  {session_info.display_name}"
     if session_info.profile:
         label += f" [{session_info.profile}]"
     return label

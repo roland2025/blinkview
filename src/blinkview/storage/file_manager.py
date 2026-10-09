@@ -5,7 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import hashlib
-import json
+import os
 import platform
 import re
 import sys
@@ -22,6 +22,7 @@ from blinkview.storage.file_logger import FileLogger
 from blinkview.utils.atomic_json_dump import atomic_json_dump
 from blinkview.utils.global_settings import get_blink_home
 from blinkview.utils.project_settings import get_project_root, get_workspace_dir
+from blinkview.utils.session_lister import HEARTBEAT_INTERVAL_S
 
 
 def _get_file_hash(path: Path) -> str:
@@ -48,6 +49,11 @@ ROTATION_ACK_TIMEOUT_S = 10.0
 
 
 class FileManager:
+    # Heartbeat periodic task (start_heartbeat) - class-level defaults, so they exist before
+    # __init__ gets that far.
+    _heartbeat_tasks = None
+    _heartbeat_task_id: Optional[str] = None
+
     def __init__(
         self,
         session_name: str = None,
@@ -198,8 +204,44 @@ class FileManager:
                 "dev_mode": self.dev_mode,
                 # "git": self._get_git_info()
             },
+            # Who is recording this session, and when it last proved to be alive - lets a reader
+            # tell a crashed session from one still recording (session_lister.session_status).
+            "process": {
+                "pid": os.getpid(),
+                "host": platform.node(),
+                "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+            },
             "loggers": {},
         }
+
+    def start_heartbeat(self, task_manager) -> None:
+        """Refreshes metadata.json's process.heartbeat_at every HEARTBEAT_INTERVAL_S for as long
+        as this session records - follows rotate() into each new session, ends with stop()."""
+        if self.replay_mode or self._heartbeat_task_id is not None:
+            return
+        self._heartbeat_tasks = task_manager
+        self._heartbeat_task_id = task_manager.run_periodic(HEARTBEAT_INTERVAL_S, self._beat)
+
+    def stop_heartbeat(self) -> None:
+        if self._heartbeat_task_id is None:
+            return
+        self._heartbeat_tasks.stop_periodic(self._heartbeat_task_id)
+        self._heartbeat_task_id = None
+
+    def _beat(self) -> None:
+        with self._lock:
+            process = self.metadata.get("process")
+            if process is None or self.metadata.get("status") != "active" or self.replay_source_dir is not None:
+                return
+            # A session folder discarded at startup (discard_empty_session) must stay gone -
+            # write_metadata would recreate it.
+            if not self.session_dir.is_dir():
+                return
+            process["heartbeat_at"] = datetime.now(timezone.utc).isoformat()
+            try:
+                self.write_metadata()
+            except OSError as e:
+                print(f"[FileManager] Could not write session heartbeat: {e}")
 
     def _finalize_metadata(self, finished_time: datetime):
         """Marks the in-memory metadata as finished (status, finished_at, duration) - shared by
@@ -250,32 +292,36 @@ class FileManager:
             return True
         if self.replay_mode:
             return False
-        try:
-            if any(f.name != "metadata.json" for f in self.session_dir.iterdir()):
+        # Under the lock: a heartbeat write (_beat) in progress would show up here as a second,
+        # temporary file in the folder.
+        with self._lock:
+            try:
+                if any(f.name != "metadata.json" for f in self.session_dir.iterdir()):
+                    return False
+            except OSError:
                 return False
-        except OSError:
-            return False
 
-        self.discard_empty_session()
-        self.session_display_name = clean
-        self.session_dir = self._create_unique_session_dir()
-        self.metadata = self._build_metadata()
-        self.write_metadata()
-        return True
+            self.discard_empty_session()
+            self.session_display_name = clean
+            self.session_dir = self._create_unique_session_dir()
+            self.metadata = self._build_metadata()
+            self.write_metadata()
+            return True
 
     def discard_empty_session(self):
         """Removes the just-created session folder if nothing but metadata.json was written to it -
         for a startup that is aborted before anything ran (e.g. a bad --param)."""
-        try:
-            if not self.session_dir.is_dir():
-                return
-            contents = list(self.session_dir.iterdir())
-            if all(f.is_file() and f.name == "metadata.json" for f in contents):
-                for f in contents:
-                    f.unlink()
-                self.session_dir.rmdir()
-        except OSError as e:
-            print(f"[FileManager] Could not remove empty session folder {self.session_dir}: {e}")
+        with self._lock:
+            try:
+                if not self.session_dir.is_dir():
+                    return
+                contents = list(self.session_dir.iterdir())
+                if all(f.is_file() and f.name == "metadata.json" for f in contents):
+                    for f in contents:
+                        f.unlink()
+                    self.session_dir.rmdir()
+            except OSError as e:
+                print(f"[FileManager] Could not remove empty session folder {self.session_dir}: {e}")
 
     def _sanitize(self, name: str) -> str:
         # Allow alphanumeric and underscores, replace everything else with '_'
@@ -356,13 +402,15 @@ class FileManager:
     def write_metadata(self):
         """Writes or updates the metadata.json file in the session folder. Never called while
         replaying (see __init__/replay_mode) - this is always *this run's own* bookkeeping
-        folder, never the original session being replayed."""
+        folder, never the original session being replayed.
+
+        Written to a temp file and swapped in, so a process killed mid-write can't leave a
+        truncated metadata.json - session_lister.list_sessions skips a session whose metadata
+        doesn't parse, hiding it from "Load Session..." although its logs are intact. No fsync:
+        this runs on every FileLogger flush (update_logger_stats)."""
         with self._lock:
             self._ensure_session_dir()
-            meta_file = self.session_dir / "metadata.json"
-
-            with meta_file.open("w") as f:
-                json.dump(self.metadata, f, indent=4)
+            atomic_json_dump(self.metadata, self.session_dir / "metadata.json", fsync=False)
 
     def _ensure_session_dir(self):
         """Materializes the (possibly not-yet-created, in replay mode) session folder on first
@@ -489,7 +537,9 @@ class FileManager:
             if on_progress:
                 on_progress(logger.local.logging_id)
 
-        # Finalize Manifest
+        # Finalize Manifest. The heartbeat ran until here on purpose: the loggers' final-part
+        # compression above can take minutes, and the session is not crashed during it.
+        self.stop_heartbeat()
         self._finalize_metadata(datetime.now(timezone.utc))
 
         # Replay runs never get their own metadata.json - writing one would make this run itself
@@ -604,7 +654,14 @@ class FileManager:
                     current_total = self.metadata["loggers"][logger_id].get("total_bytes", 0)
                     self.metadata["loggers"][logger_id]["total_bytes"] = current_total + bytes_written
 
-                self.write_metadata()
+                # Called from FileLogger threads on every flush - a failed write here (e.g. the
+                # swap blocked on Windows while another process is reading metadata.json) must
+                # not end the logger thread. The tally is kept in memory and the next flush
+                # writes it again.
+                try:
+                    self.write_metadata()
+                except OSError as e:
+                    print(f"[FileManager] Could not update metadata.json: {e}")
 
     def _get_gui_dir(self) -> Path:
         """Helper to ensure gui directory exists."""

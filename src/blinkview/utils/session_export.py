@@ -31,6 +31,7 @@ from blinkview.utils.session_lister import (
     SessionInfo,
     existing_part,
     part_index,
+    read_session_metadata,
     resolve_active_profile_dir,
     resolve_log_root,
     resolve_session,
@@ -659,7 +660,7 @@ def _read_metadata(folder: Path) -> dict:
     """The session's metadata.json, or {} if it's missing or unreadable - a session folder copied
     by hand, or a part file passed on its own, may well have none."""
     try:
-        meta = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+        meta = read_session_metadata(folder)
     except (OSError, ValueError):
         return {}
     return meta if isinstance(meta, dict) else {}
