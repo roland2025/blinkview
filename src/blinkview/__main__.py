@@ -30,7 +30,7 @@ def run_cli(args):
 
 
 def run_daemon(args):
-    print(f"🔌 Starting Daemon on port: {args.port}")
+    print(f"Starting Daemon on port: {args.port}")
 
 
 def apply_session_profile(args, session_info):

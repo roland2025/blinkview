@@ -44,7 +44,7 @@ def main():
     try:
         run(["uvx", "hatch", "version", increment])
     except subprocess.CalledProcessError:
-        print("\n❌ Version bump failed.")
+        print("\nVersion bump failed.")
         return
 
     # Capture the new version

@@ -1107,15 +1107,15 @@ class Registry:
 
                 # Determine State
                 if is_dropping:
-                    state = "⚠️ DROP"
+                    state = "DROP"
                 elif fill_pct > 90:
-                    state = "🔥 CRIT"
+                    state = "CRIT"
                 elif fill_pct > 70:
                     state = "WARN"
                 elif push_rate > pop_rate * 1.1 and fill_pct > 20:
-                    state = "📈 FILL"
+                    state = "FILL"
                 else:
-                    state = "✅ OK"
+                    state = "OK"
 
                 # Format Row
                 # {value:>{rate_width},.1f} adds commas and ensures 1 decimal place

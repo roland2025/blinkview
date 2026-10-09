@@ -82,7 +82,7 @@ def restore_window_geometry_safe(window, geo_dict: dict):
         reattach_func = getattr(window, "reattach_to_main", None)
 
         if reattach_func and callable(reattach_func):
-            print("🪟 Off-screen window detected. Re-attaching...")
+            print("Off-screen window detected. Re-attaching...")
             # Use a timer to ensure we don't conflict with the current geometry event
             QTimer.singleShot(0, reattach_func)
             return

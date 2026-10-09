@@ -94,7 +94,7 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     with open(CSS_FILE, "w") as f:
         f.write(CUSTOM_CSS)
-    print(f"✓ Created {CSS_FILE}")
+    print(f"Created {CSS_FILE}")
 
     # Step 2: Compile Markdown to Standalone HTML via Pandoc
     print("Running pandoc compilation...")
@@ -114,9 +114,9 @@ def main():
             ],
             check=True,
         )
-        print(f"✓ Compiled {HTML_FILE} via Pandoc")
+        print(f"Compiled {HTML_FILE} via Pandoc")
     except subprocess.CalledProcessError as e:
-        print(f"❌ Pandoc compilation failed: {e}")
+        print(f"Pandoc compilation failed: {e}")
         return
 
     # Step 3: Parse and modify the output HTML
@@ -136,23 +136,23 @@ def main():
                 parts[i] = subparts[1]
                 parts[i - 1] = parts[i - 1] + '<pre class="mermaid">' + cleaned_text + "</pre>"
             content = "".join(parts)
-            print("✓ Fixed Mermaid HTML entities and container blocks")
+            print("Fixed Mermaid HTML entities and container blocks")
 
         # --- Inject Google Verification into <head> ---
         if "</head>" in content:
             content = content.replace("</head>", f"{GOOGLE_META}\n</head>", 1)
-            print("✓ Injected Google Verification Meta Tag")
+            print("Injected Google Verification Meta Tag")
 
         # --- Inject Mermaid JavaScript Engine into <body> ---
         if "</body>" in content:
             content = content.replace("</body>", f"{MERMAID_SCRIPT}\n</body>", 1)
-            print("✓ Injected Mermaid JS Component")
+            print("Injected Mermaid JS Component")
 
         f.seek(0)
         f.write(content)
         f.truncate()
 
-    print("\n🎉 Documentation build fully completed!")
+    print("\nDocumentation build fully completed!")
 
 
 if __name__ == "__main__":

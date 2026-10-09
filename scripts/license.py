@@ -31,7 +31,7 @@ def update_file_header(file_path: Path):
     try:
         original_content = file_path.read_text(encoding="utf-8")
     except Exception as e:
-        print(f"❌ Failed to read {file_path}: {e}")
+        print(f"Failed to read {file_path}: {e}")
         return
 
     shebang = ""
@@ -54,7 +54,7 @@ def update_file_header(file_path: Path):
         file_path.write_text(new_content, encoding="utf-8", newline="\n")
         print(f"Updated: {file_path}")
     except Exception as e:
-        print(f"❌ Failed to write {file_path}: {e}")
+        print(f"Failed to write {file_path}: {e}")
 
 
 def process_project(root_dir: Path):
@@ -63,10 +63,10 @@ def process_project(root_dir: Path):
         target_path = root_dir / folder_name
 
         if not target_path.exists():
-            print(f"ℹ️  Skipping {folder_name} (folder does not exist)")
+            print(f"Skipping {folder_name} (folder does not exist)")
             continue
 
-        print(f"📂 Processing directory: {folder_name}")
+        print(f"Processing directory: {folder_name}")
         for py_file in target_path.rglob("*.py"):
             # Ensure we don't modify the running script if it's in /scripts
             if py_file.resolve() == Path(__file__).resolve():

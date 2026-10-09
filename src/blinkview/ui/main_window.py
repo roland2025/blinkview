@@ -1184,7 +1184,7 @@ class BlinkMainWindow(QMainWindow):
 
             # If the gap is significantly larger than our ~16.6ms target, the UI is lagging
             if drift_ns / 1_000_000 > self.timeout_fast * 2:  # More than 2 frames late
-                msg = f"[UI Monitor] 🐌 Thread Lag Detected: {drift_ns / 1_000_000:.1f}ms since last poll!"
+                msg = f"[UI Monitor] Thread Lag Detected: {drift_ns / 1_000_000:.1f}ms since last poll!"
 
                 print(msg)
 
