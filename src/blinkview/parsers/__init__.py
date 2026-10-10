@@ -20,6 +20,7 @@ from blinkview.parsers import mcp_server as mcp_server
 from blinkview.parsers import module_gen as module_gen
 from blinkview.parsers import multi_rule_key_value as multi_rule_key_value
 from blinkview.parsers import parser as parser
+from blinkview.parsers import raw_hex as raw_hex
 from blinkview.parsers import time_sync_profiler as time_sync_profiler
 
 __all__ = [
@@ -33,5 +34,6 @@ __all__ = [
     "module_gen",
     "multi_rule_key_value",
     "parser",
+    "raw_hex",
     "time_sync_profiler",
 ]
