@@ -7,7 +7,7 @@
 import json
 
 from blinkview.core.agent_api import AgentApiError, AgentApiServer
-from blinkview.core.agent_log_read import current_sequence, list_modules, read_logs
+from blinkview.core.agent_log_read import current_sequence, list_modules, read_logs, summary
 from blinkview.core.agent_telemetry import telemetry_latest, telemetry_series
 from blinkview.core.configurable import configuration_property, override_property
 from blinkview.parsers.parser import BaseParser, ParserFactory
@@ -73,7 +73,7 @@ class McpServer(BaseParser):
 
 * Sends text and source commands (reset, halt, ...) to any source, or only to those listed in `send_to`.
 * Starts a new session.
-* Reads log lines, through the log viewer's own filters and formatter.
+* Reads log lines, through the log viewer's own filters and formatter, and counts them per module and level.
 * Reads telemetry: the latest value per module, and a module's numeric history.
 * Reads this profile's configuration (sources, pipelines, ...) as it is in effect now.
 * Listens on 127.0.0.1 only and requires a per-run token; everything it does is logged.
@@ -98,6 +98,7 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
                     "command": self._tool_command,
                     "rotate_session": self._tool_rotate_session,
                     "read_logs": self._tool_read_logs,
+                    "summary": self._tool_summary,
                     "list_modules": self._tool_list_modules,
                     "telemetry_latest": self._tool_telemetry_latest,
                     "telemetry_series": self._tool_telemetry_series,
@@ -238,6 +239,10 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
         if not self.allow_read:
             raise AgentApiError(f"reading logs is turned off on the '{self.name}' pipeline")
         return read_logs(self.shared.registry, args, self._stop_event.is_set)
+
+    def _tool_summary(self, args: dict) -> dict:
+        self._require_read()
+        return summary(self.shared.registry, args)
 
     def _tool_get_config(self, args: dict) -> dict:
         self._require_read()

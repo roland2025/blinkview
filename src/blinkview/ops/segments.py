@@ -431,6 +431,62 @@ def nb_filter_segment(
     return match_count
 
 
+# Columns of nb_count_rows_by_module_level's out_counts: 0 for a row without a level, then one
+# per level bit (LogLevel values are 1 << n), lowest first.
+LEVEL_SLOTS = 9
+
+
+@app_njit()
+def nb_count_rows_by_module_level(
+    segment,  # LogBundle
+    indices,
+    count,
+    max_seq,  # rows with a higher sequence are not counted
+    end_ts,  # =TS_UNSPECIFIED: rows with a later timestamp are not counted
+    out_counts,  # int64[module ids, LEVEL_SLOTS], added to
+    out_span,  # int64[2]: oldest and newest counted timestamp, widened
+):
+    """Counts the `count` rows referenced by `indices` (as produced by nb_filter_segment) per
+    module and level, on top of what `out_counts` already holds. Returns the rows counted."""
+    timestamps = segment.timestamps
+    levels = segment.levels
+    modules = segment.modules
+    seqs = segment.sequences
+    module_limit = out_counts.shape[0]
+
+    oldest_ts = out_span[0]
+    newest_ts = out_span[1]
+    counted = 0
+
+    for i in range(count):
+        row = indices[i]
+        if seqs[row] > max_seq:
+            continue
+        ts = timestamps[row]
+        if end_ts != TS_UNSPECIFIED and ts > end_ts:
+            continue
+        module = modules[row]
+        if module >= module_limit:
+            continue
+
+        level_slot = 0
+        level = levels[row]
+        while level != 0:
+            level_slot += 1
+            level >>= 1
+
+        out_counts[module, level_slot] += 1
+        counted += 1
+        if ts < oldest_ts:
+            oldest_ts = ts
+        if ts > newest_ts:
+            newest_ts = ts
+
+    out_span[0] = oldest_ts
+    out_span[1] = newest_ts
+    return counted
+
+
 @app_njit()
 def nb_find_next_module_match(segment: LogBundle, target_module, start_seq):
     """

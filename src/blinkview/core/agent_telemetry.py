@@ -11,12 +11,10 @@
 - `telemetry_series`: the numeric history of one module, through get_telemetry_anchor /
   fetch_telemetry_arrays (what a plot draws)."""
 
-from datetime import datetime, timedelta, timezone
-
 import numpy as np
 
 from blinkview.core.agent_api import AgentApiError
-from blinkview.core.agent_log_read import SYSTEM_DEVICE, _find_device, _find_module, _number, _string
+from blinkview.core.agent_log_read import SYSTEM_DEVICE, _find_device, _find_module, _format_ts, _number, _string
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.numpy_log import (
     allocate_discovery_workspace,
@@ -33,17 +31,9 @@ HARD_MAX_POINTS = 2000
 # Newest samples considered for one series request (statistics and decimation run over these).
 SERIES_FETCH_CAP = 20_000
 
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
 
 def _tz_offset_sec(args: dict) -> int:
     return 0 if args.get("utc", False) else get_local_utc_offset_seconds()
-
-
-def _format_ts(ts_ns: int, tz_offset_sec: int) -> str:
-    """Epoch ns -> "2026-10-09 20:52:26.508", the log lines' own layout."""
-    moment = _EPOCH + timedelta(microseconds=int(ts_ns) // 1000 + tz_offset_sec * 1_000_000)
-    return moment.strftime("%Y-%m-%d %H:%M:%S.") + f"{moment.microsecond // 1000:03d}"
 
 
 def _number_text(value: float) -> str:

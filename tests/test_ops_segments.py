@@ -13,11 +13,12 @@ from blinkview.core.types.log_batch import LogBundle
 from blinkview.ops.constants import CHAR_EQUALS, CHAR_SPACE
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS, build_kv_condition_arrays
 from blinkview.ops.segments import (
+    LEVEL_SLOTS,
     nb_bundle_extend,
     nb_bundle_push,
-    nb_bundle_push_len,
     nb_can_push,
     nb_copy_batch_to_segment,
+    nb_count_rows_by_module_level,
     nb_filter_segment,
     nb_find_next_module_index,
     nb_find_next_module_match,
@@ -349,6 +350,48 @@ def test_nb_segment_filter_reversed_end_seq_default_is_unbounded():
     )
 
     assert match_count == 3
+
+
+def test_count_rows_by_module_level_adds_up_per_module_and_level_bit():
+    bundle = make_bundle(
+        timestamps=[10, 20, 30, 40, 50, 60],
+        rx_timestamps=[10, 20, 30, 40, 50, 60],
+        devices=[0] * 6,
+        levels=[0, 4, 4, 16, 64, 4],  # none, INFO, INFO, ERROR, CRITICAL, INFO
+        modules=[0, 1, 1, 1, 2, 7],
+        sequences=[1, 2, 3, 4, 5, 6],
+        messages=["a", "b", "c", "d", "e", "f"],
+    )
+    all_rows = np.arange(6, dtype=np.int64)
+    no_seq_limit = dtypes.SEQ_TYPE(1 << 62)
+    counts = np.zeros((3, LEVEL_SLOTS), dtype=np.int64)  # module 7 has no row in it
+    span = np.array([np.iinfo(np.int64).max, np.iinfo(np.int64).min], dtype=dtypes.TS_TYPE)
+
+    counted = nb_count_rows_by_module_level(bundle, all_rows, 6, no_seq_limit, dtypes.TS_UNSPECIFIED, counts, span)
+
+    assert counted == 5
+    expected = np.zeros((3, LEVEL_SLOTS), dtype=np.int64)
+    expected[0, 0] = 1  # no level
+    expected[1, 3] = 2  # 4 = 1 << 2 -> slot 3
+    expected[1, 5] = 1
+    expected[2, 7] = 1
+    assert (counts == expected).all()
+    assert list(span) == [10, 50]
+
+    # Adds to what is there; only the first `count` indices are read; rows past max_seq are skipped.
+    some_rows = np.array([1, 3, 4], dtype=np.int64)
+    counted = nb_count_rows_by_module_level(
+        bundle, some_rows, 2, dtypes.SEQ_TYPE(3), dtypes.TS_UNSPECIFIED, counts, span
+    )
+    assert counted == 1
+    assert counts[1, 3] == 3 and counts.sum() == 6
+
+    # end_ts is inclusive.
+    counts[:] = 0
+    span[:] = [np.iinfo(np.int64).max, np.iinfo(np.int64).min]
+    counted = nb_count_rows_by_module_level(bundle, all_rows, 6, no_seq_limit, dtypes.TS_TYPE(20), counts, span)
+    assert counted == 2
+    assert list(span) == [10, 20]
 
 
 def test_filter_segment_forward_ascending_matches_from_start_seq():

@@ -5,28 +5,36 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 """The agent API's log reading (the `read_logs` tool, and the reply half of `send`): fetch rows
-from central storage by sequence cursor, optionally waiting for new ones.
+from central storage by sequence cursor, optionally waiting for new ones. Also the `summary`
+tool, which counts the matching rows per module and level instead of returning them.
 
 Everything goes through the log viewer's own helpers - LogFilter, LogSegmentScanner,
 LogTextFetcher and the FormattingConfig formatter (core/log_fetch.py) - so an agent gets the
 same filtering and the same lines a log tab shows. Only the request parsing, the cursor
-bookkeeping and the wait loop live here."""
+bookkeeping, the wait loop and summary's totals live here."""
 
 import time
 from datetime import datetime, timedelta, timezone
 from datetime import time as dt_time
-from typing import Callable, NamedTuple, Optional
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
 import numpy as np
 
 from blinkview.core import dtypes
 from blinkview.core.agent_api import AgentApiError
-from blinkview.core.dtypes import SEQ_NONE
+from blinkview.core.dtypes import SEQ_NONE, SEQ_TYPE, TS_TYPE, TS_UNSPECIFIED
 from blinkview.core.log_fetch import LogSegmentScanner, LogTextFetcher
 from blinkview.core.types.formatting import FormattingConfig
+from blinkview.core.warmup_registry import register_warmup
+from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
+from blinkview.ops.segments import LEVEL_SLOTS, nb_count_rows_by_module_level, segment_filter
+from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
 from blinkview.utils.utc_offset import get_local_utc_offset_seconds
+
+if TYPE_CHECKING:
+    from blinkview.core.warmup import NumbaWarmupHelper
 
 DEFAULT_MAX_LINES = 200
 HARD_MAX_LINES = 2000
@@ -34,6 +42,8 @@ DEFAULT_LAST_N = 50
 DEFAULT_AROUND_LINES = 50
 DEFAULT_MAX_MODULES = 500
 HARD_MAX_MODULES = 5000
+DEFAULT_SUMMARY_MODULES = 50
+HARD_SUMMARY_MODULES = 1000
 MAX_WAIT_SECONDS = 60.0
 POLL_SECONDS = 0.05
 
@@ -47,6 +57,18 @@ _NO_SIDEBAR_MASK = np.zeros(0, dtype=dtypes.LEVEL_TYPE)
 
 _LEVELS = {level.name_conf: level for level in LogLevel.LIST_UI}
 _LEVELS["WARN"] = LogLevel.WARN
+
+# nb_count_rows_by_module_level's level columns, by name: a row without a level, then one per
+# level bit.
+_LEVEL_SLOT_NAMES = ["NONE"] + [
+    getattr(LogLevel.from_value(1 << bit), "name_conf", f"LEVEL_{1 << bit}") for bit in range(LEVEL_SLOTS - 1)
+]
+# scan_history_window's "no cap": every matching row is wanted.
+_ALL_ROWS = 1 << 62
+_TS_MAX = np.iinfo(TS_TYPE).max
+_TS_MIN = np.iinfo(TS_TYPE).min
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 _FORMAT_FLAGS = ("show_ts", "show_date", "show_dev", "show_lvl", "show_mod", "show_rx_ts")
 
@@ -104,7 +126,7 @@ def _format_config(args: dict) -> FormattingConfig:
     return FormattingConfig(**fields)
 
 
-def _parse_time(text: str, tz_offset_sec: int) -> int:
+def _parse_time(text: str, tz_offset_sec: int, key: str = "around") -> int:
     """A time as the returned lines show it ("2026-10-09 20:52:26.508", or ISO 8601 with 'T',
     'Z' or an offset), or a time of day alone (today's date) -> epoch ns, the unit of row
     timestamps. Without an offset in the text it is read in the timezone the lines are
@@ -118,13 +140,19 @@ def _parse_time(text: str, tz_offset_sec: int) -> int:
             moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         raise AgentApiError(
-            f"cannot read 'around' time '{text}': use e.g. '2026-10-09 20:52:26.508' or '20:52:26'"
+            f"cannot read '{key}' time '{text}': use e.g. '2026-10-09 20:52:26.508' or '20:52:26'"
         ) from None
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=display_tz)
 
     since_epoch = moment - datetime(1970, 1, 1, tzinfo=timezone.utc)
     return (since_epoch.days * 86400 + since_epoch.seconds) * 1_000_000_000 + since_epoch.microseconds * 1000
+
+
+def _format_ts(ts_ns: int, tz_offset_sec: int) -> str:
+    """Epoch ns -> "2026-10-09 20:52:26.508", the log lines' own layout."""
+    moment = _EPOCH + timedelta(microseconds=int(ts_ns) // 1000 + tz_offset_sec * 1_000_000)
+    return moment.strftime("%Y-%m-%d %H:%M:%S.") + f"{moment.microsecond // 1000:03d}"
 
 
 def list_modules(registry, args: dict) -> dict:
@@ -161,16 +189,14 @@ def list_modules(registry, args: dict) -> dict:
     return {"devices": list(by_device.values()), "modules_listed": listed, "truncated": total > listed}
 
 
-def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: False) -> dict:
-    """Runs one `read_logs` request against `registry`'s central storage. Blocks the calling
-    thread for up to `wait_s`. See agent_mcp.py's tool description for the arguments."""
+def _make_scanner(registry, args: dict) -> LogSegmentScanner:
+    """The log viewer's scanner over central storage, with its LogFilter built from the
+    request's `device`, `module`, `min_level`, `contains`, `kv` and `include_system`."""
     id_registry = registry.id_registry
     central = registry.central
     if central is None or central.log_pool is None:
         raise AgentApiError("central storage is not running")
-    log_pool = central.log_pool
 
-    # --- Filter: the log viewer's LogFilter ---
     device_name = _string(args, "device")
     module_path = _string(args, "module")
     if module_path and not device_name:
@@ -211,13 +237,21 @@ def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: Fa
             mask[system_ids[system_ids < size]] = LogLevel.OFF.value
         return True, mask
 
-    scanner = LogSegmentScanner(
+    return LogSegmentScanner(
         id_registry,
         lambda: central.log_pool,
         log_filter,
         get_sidebar_filter=sidebar_filter,
         get_show_hidden=lambda: True,
     )
+
+
+def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: False) -> dict:
+    """Runs one `read_logs` request against `registry`'s central storage. Blocks the calling
+    thread for up to `wait_s`. See agent_mcp.py's tool description for the arguments."""
+    id_registry = registry.id_registry
+    scanner = _make_scanner(registry, args)
+    log_pool = registry.central.log_pool
     fetcher = LogTextFetcher(scanner, registry.system_ctx.array_pool, tables_provider=id_registry.bundle)
 
     # --- Formatting: the log viewer's formatter ---
@@ -341,6 +375,128 @@ def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: Fa
     if wait_s:
         extra["stopped_on"] = stopped_on
     return finish("".join(chunks), rows, cursor, **extra)
+
+
+def summary(registry, args: dict) -> dict:
+    """The `summary` tool: how many rows match, per module and level, over everything central
+    storage holds or a part of it. Same filters as `read_logs`; no line text is formatted."""
+    id_registry = registry.id_registry
+    scanner = _make_scanner(registry, args)
+    log_pool = registry.central.log_pool
+
+    tz_offset_sec = 0 if args.get("utc", False) else get_local_utc_offset_seconds()
+    max_modules = int(_number(args, "max_modules", DEFAULT_SUMMARY_MODULES, 1, HARD_SUMMARY_MODULES))
+
+    # --- Range: one lower bound at most, and an optional upper one ---
+    after_seq = _number(args, "after_seq", None, 0, float("inf"))
+    since_s = _number(args, "since_s", None, 0, float("inf"))
+    start = _string(args, "start")
+    end = _string(args, "end")
+    if sum((after_seq is not None, since_s is not None, bool(start))) > 1:
+        raise AgentApiError("give one of 'after_seq', 'since_s' and 'start', not several")
+
+    result = {
+        "session_id": registry.file_manager.session_dir.name,
+        "utc_offset_minutes": tz_offset_sec // 60,
+    }
+    # Rows appended while this runs are left to the next call: next_seq is exactly what was counted.
+    latest = int(log_pool.latest_sequence())
+    anchor_seq = None
+    if after_seq is not None:
+        if after_seq > latest:
+            result["cursor_reset"] = True  # a cursor from a previous run of the app, see read_logs
+        else:
+            anchor_seq = int(after_seq) + 1
+    start_ts = None
+    if since_s is not None:
+        start_ts = registry.now_ns() - int(since_s * 1e9)
+    elif start:
+        start_ts = _parse_time(start, tz_offset_sec, "start")
+    end_ts = TS_TYPE(_parse_time(end, tz_offset_sec, "end")) if end else TS_UNSPECIFIED
+    max_seq = SEQ_TYPE(latest)
+
+    # Sized past the current module count, like the scanner's mask (see _MASK_SLACK).
+    counts = np.zeros((id_registry.module_count() + _MASK_SLACK, LEVEL_SLOTS), dtype=np.int64)
+    span = np.array([_TS_MAX, _TS_MIN], dtype=TS_TYPE)
+
+    def count_rows(segment, indices_array, match_count):
+        nb_count_rows_by_module_level(segment.bundle, indices_array, match_count, max_seq, end_ts, counts, span)
+
+    scanner.scan_history_window(
+        anchor_seq=anchor_seq,
+        anchor_ts=start_ts,
+        before_cap=0,
+        after_cap=_ALL_ROWS,
+        consume_before=count_rows,  # never called: before_cap is 0
+        consume_after=count_rows,
+    )
+
+    def level_counts(per_slot) -> dict:
+        """{level name: rows} for the levels that occurred, most severe first."""
+        return {
+            _LEVEL_SLOT_NAMES[slot]: int(per_slot[slot]) for slot in range(LEVEL_SLOTS - 1, -1, -1) if per_slot[slot]
+        }
+
+    per_module = counts.sum(axis=1)
+    groups = []
+    for module_id in np.flatnonzero(per_module).tolist():
+        module = id_registry.module_from_int(module_id)
+        groups.append((int(per_module[module_id]), module.device.name, module.name or "-", module_id))
+    groups.sort(key=lambda group: (-group[0], group[1], group[2]))
+    shown = groups[:max_modules]
+
+    rows = int(per_module.sum())
+    result.update(
+        rows=rows,
+        levels=level_counts(counts.sum(axis=0)),
+        modules=len(groups),
+        modules_listed=len(shown),
+        truncated=len(groups) > len(shown),
+        # Pass as after_seq (here or to read_logs) for what was logged since this call.
+        next_seq=latest,
+    )
+    if rows:
+        result["first_time"] = _format_ts(span[0], tz_offset_sec)
+        result["last_time"] = _format_ts(span[1], tz_offset_sec)
+    result["text"] = "".join(
+        f"{total} {device_name} {module_name} "
+        + " ".join(f"{name}={count}" for name, count in level_counts(counts[module_id]).items())
+        + "\n"
+        for total, device_name, module_name, module_id in shown
+    )
+    return result
+
+
+@register_warmup
+def warmup_summary(helper: "NumbaWarmupHelper"):
+    """Compiles nb_count_rows_by_module_level with the argument types summary() passes. Needs
+    rows already in helper.log_pool (CircularLogPool.warmup, priority=100)."""
+    print("[Warmup] agent summary ...")
+
+    mod_count = max(10, helper.registry.module_count())
+    effective_mask = np.full(mod_count, LogLevel.ALL.value, dtype=dtypes.LEVEL_TYPE)
+    counts = np.zeros((mod_count, LEVEL_SLOTS), dtype=np.int64)
+    span = np.array([_TS_MAX, _TS_MIN], dtype=TS_TYPE)
+
+    with helper.log_pool.get_snapshot() as segments, helper.log_pool.acquire_indices_buffer() as indices:
+        for segment in segments:
+            if segment.size == 0:
+                continue
+            match_count = segment_filter(
+                segment.bundle,
+                effective_mask=effective_mask,
+                out_indices=indices.array,
+                max_matches=1000,
+                start_seq=0,
+                kv=EMPTY_KV_CONDITIONS,
+                text=EMPTY_TEXT_SEARCH,
+            )
+            nb_count_rows_by_module_level(
+                segment.bundle, indices.array, match_count, SEQ_TYPE(1 << 62), TS_UNSPECIFIED, counts, span
+            )
+            break
+
+    print("[Warmup] agent summary ... done")
 
 
 def current_sequence(registry) -> Optional[int]:

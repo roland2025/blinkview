@@ -24,6 +24,9 @@ PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 # Longer than the GUI's own rotation timeout (_SessionRotationBridge.TIMEOUT_SECONDS).
 ROTATE_TIMEOUT_SECONDS = 150
+# `summary` scans every retained row, cold storage included. HTTP timeouts of the tools that need
+# more than the default.
+_TOOL_TIMEOUT_SECONDS = {"rotate_session": ROTATE_TIMEOUT_SECONDS, "summary": 60.0}
 # Same cap as core/agent_log_read.py's MAX_WAIT_SECONDS (not imported: that module loads numba).
 MAX_WAIT_SECONDS = 60
 
@@ -32,6 +35,7 @@ INSTRUCTIONS = (
     "instances, the current session and the sources you may send to. To run a device command and see "
     "its reply, call `send` with `wait_s` (and `quiet_ms` or `until`). `read_logs` reads the live log "
     "with a sequence cursor: pass the `next_seq` of one call as `after_seq` of the next. "
+    "`summary` counts lines per module and level - start there to find where the errors are. "
     "`telemetry_latest` gives the current value of every module, `telemetry_series` a module's numeric "
     "history. `get_config` shows how the profile's sources and pipelines are set up. For a whole "
     "recorded session use the shell command `blink export SESSION_ID` (see `blink export --help`)."
@@ -135,6 +139,34 @@ TOOLS = [
                 **_WAIT_PROPERTIES,
                 **_FILTER_PROPERTIES,
                 **_FORMAT_PROPERTIES,
+                "instance": _INSTANCE_PROPERTY,
+            },
+        },
+    },
+    {
+        "name": "summary",
+        "description": "Counts log lines per module and level instead of returning them - where the "
+        "errors are, which module is noisy, whether anything was logged at all. Covers everything "
+        "BlinkView still holds of the session unless a range is given (`since_s`, `start`/`end`, or "
+        "`after_seq`). One line per module, busiest first: `count device module ERROR=n WARNING=n INFO=n` "
+        "(only the levels that occurred; NONE is a line without a level). `min_level='WARN'` leaves the "
+        "modules with problems. Then read the lines themselves with `read_logs` and the same filters.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since_s": {"type": "number", "description": "Only the last this many seconds."},
+                "start": {
+                    "type": "string",
+                    "description": "Only lines at or after this time, written like `read_logs`' `around`.",
+                },
+                "end": {"type": "string", "description": "Only lines up to this time; combines with any start."},
+                "after_seq": {
+                    "type": "integer",
+                    "description": "Only lines after this cursor: a `next_seq` (also this tool's own) or a `seq`.",
+                },
+                **{name: schema for name, schema in _FILTER_PROPERTIES.items() if name != "max_lines"},
+                "max_modules": {"type": "integer", "description": "Modules listed (default 50, max 1000)."},
+                "utc": {"type": "boolean", "description": "Times in UTC instead of local time (default false)."},
                 "instance": _INSTANCE_PROPERTY,
             },
         },
@@ -307,7 +339,7 @@ def call_tool(name: str, args: dict, run_dir: Optional[Path] = None, cwd: Option
 def call_instance_tool(instance: dict, name: str, args: dict) -> Any:
     """One tool call on an already chosen instance, with an HTTP timeout that outlasts what the
     tool itself may wait for. Shared with blinkview.client."""
-    timeout = ROTATE_TIMEOUT_SECONDS if name == "rotate_session" else 10.0
+    timeout = _TOOL_TIMEOUT_SECONDS.get(name, 10.0)
     wait_s = args.get("wait_s")
     if isinstance(wait_s, (int, float)) and not isinstance(wait_s, bool):
         timeout += min(max(wait_s, 0), MAX_WAIT_SECONDS)

@@ -96,6 +96,10 @@ class BlinkView:
             if time.monotonic() >= deadline:
                 return None
 
+    def summary(self, **args) -> dict:
+        """Counts of log lines per module and level; same filters as read_logs."""
+        return self.call("summary", **args)
+
     def rotate_session(self, name: Optional[str] = None) -> dict:
         """Ends the current recording session and starts a new, empty one."""
         return self.call("rotate_session", **_given(name=name))

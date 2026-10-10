@@ -203,6 +203,20 @@ def run_all_tools(mcp: McpSession):
     tool("read_logs", around="yesterday", expect_error=True)
     tool("read_logs", device="nope", expect_error=True)
 
+    # --- summary: whole log, each filter, each range ---
+    counted = tool("summary")
+    tool("summary", device="board", module="log", min_level="WARN", max_modules=1)
+    tool("summary", include_system=True, contains="burst", kv="state=run", utc=True)
+    tool("summary", since_s=60, end=stamp)
+    tool("summary", start=stamp, device="board")
+    tool("summary", after_seq=counted["next_seq"])
+    tool("summary", since_s=10, after_seq=1, expect_error=True)
+
+    # --- get_config ---
+    tool("get_config")
+    tool("get_config", path="/pipelines", depth=1)
+    tool("get_config", path="/nope", expect_error=True)
+
     # --- list_modules ---
     tool("list_modules")
     tool("list_modules", include_system=True, contains="parser", max_modules=3)
@@ -231,6 +245,7 @@ def run_all_tools(mcp: McpSession):
     tool("telemetry_latest", device="board")
     tool("telemetry_series", device="board", module="log")
     tool("list_modules")
+    tool("summary")
     tool("rotate_session")
 
 

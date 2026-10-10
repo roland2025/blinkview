@@ -140,6 +140,7 @@ class TestMcpProtocol:
             "status",
             "send",
             "read_logs",
+            "summary",
             "list_modules",
             "telemetry_latest",
             "telemetry_series",
@@ -228,5 +229,5 @@ def test_blink_mcp_fresh_process_speaks_only_json_on_stdout(tmp_path):
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     responses = [json.loads(line) for line in result.stdout.splitlines()]
     assert [r["id"] for r in responses] == [1, 2, 3]
-    assert len(responses[1]["result"]["tools"]) == 9
+    assert len(responses[1]["result"]["tools"]) == 10
     assert json.loads(responses[2]["result"]["content"][0]["text"]) == {"instances": []}

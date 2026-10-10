@@ -373,6 +373,122 @@ def test_allow_read_off(registry, run_dir):
         _call(run_dir, "read_logs")
     with pytest.raises(AgentApiError, match="reading logs is turned off"):
         _call(run_dir, "get_config")
+    with pytest.raises(AgentApiError, match="reading logs is turned off"):
+        _call(run_dir, "summary")
+
+
+# ---------------------------------------------------------------------------
+# summary
+# ---------------------------------------------------------------------------
+
+
+def _push_levels(registry, rows, device_name="rig"):
+    """Rows (module path, level or None, message) straight into central storage, 2 ms apart on
+    whole milliseconds. Returns each row's timestamp as a returned line would show it in UTC."""
+    from blinkview.core.agent_log_read import _format_ts
+    from blinkview.core.numpy_batch_manager import PooledLogBatch
+
+    rig = registry.id_registry.get_device(device_name)
+    module_ids = [rig.get_module(module_path).id for module_path, _level, _message in rows]
+
+    # These rows skip the reorder stage. BlinkView's own lines (startup, and the registrations
+    # just above) must be through it first: arriving after these with earlier timestamps, they
+    # would leave the segment out of time order.
+    log_pool = registry.central.log_pool
+    quiet_since, last_seq = time.monotonic(), log_pool.latest_sequence()
+    while time.monotonic() - quiet_since < 0.4:
+        time.sleep(0.05)
+        if log_pool.latest_sequence() != last_seq:
+            quiet_since, last_seq = time.monotonic(), log_pool.latest_sequence()
+
+    batch = registry.system_ctx.array_pool.create(
+        PooledLogBatch, len(rows), 8192, has_levels=True, has_modules=True, has_devices=True
+    )
+    stamps = []
+    with batch:
+        ts = (registry.now_ns() // 1_000_000 + 1) * 1_000_000
+        for (_module_path, level, message), module_id in zip(rows, module_ids):
+            batch.insert_any(
+                ts,
+                ts,
+                message.encode(),
+                level=level.value if level is not None else 0,
+                module=module_id,
+                device=rig.id,
+            )
+            stamps.append(_format_ts(ts, 0))
+            ts += 2_000_000
+        registry.central.log_pool.batch_append(batch)
+    return stamps
+
+
+def test_summary_counts_rows_per_module_and_level(registry, run_dir):
+    from blinkview.utils.log_level import LogLevel
+
+    _wait_for_server(run_dir)
+    stamps = _push_levels(
+        registry,
+        [
+            ("battery", LogLevel.ERROR, "pack fault"),
+            ("battery", LogLevel.INFO, "pack ok"),
+            ("motor", LogLevel.WARN, "hot"),
+            ("battery", LogLevel.INFO, "pack ok"),
+            ("battery.vbat", None, "3.71"),
+            ("motor", LogLevel.INFO, "idle"),
+        ],
+    )
+
+    result = _call(run_dir, "summary", device="rig", utc=True)
+
+    assert result["rows"] == 6
+    assert result["levels"] == {"ERROR": 1, "WARNING": 1, "INFO": 3, "NONE": 1}
+    assert list(result["levels"]) == ["ERROR", "WARNING", "INFO", "NONE"]  # most severe first
+    assert result["text"] == "3 rig battery ERROR=1 INFO=2\n2 rig motor WARNING=1 INFO=1\n1 rig battery.vbat NONE=1\n"
+    assert (result["modules"], result["modules_listed"], result["truncated"]) == (3, 3, False)
+    assert (result["first_time"], result["last_time"]) == (stamps[0], stamps[-1])
+    assert result["session_id"] == registry.file_manager.session_dir.name
+
+    # read_logs' filters.
+    problems = _call(run_dir, "summary", device="rig", min_level="WARN")
+    assert problems["text"] == "1 rig battery ERROR=1\n1 rig motor WARNING=1\n"
+    assert _call(run_dir, "summary", device="rig", contains="fault")["rows"] == 1
+    capped = _call(run_dir, "summary", device="rig", module="battery", max_modules=1)
+    assert capped["text"] == "3 rig battery ERROR=1 INFO=2\n"
+    assert (capped["rows"], capped["modules"], capped["modules_listed"], capped["truncated"]) == (4, 2, 1, True)
+    # BlinkView's own lines are left out unless asked for.
+    assert "system" not in _call(run_dir, "summary")["text"]
+    assert " system " in _call(run_dir, "summary", include_system=True)["text"]
+
+    # A time range: start and end are both inclusive.
+    assert _call(run_dir, "summary", device="rig", utc=True, start=stamps[3])["rows"] == 3
+    assert _call(run_dir, "summary", device="rig", utc=True, end=stamps[1])["rows"] == 2
+    window = _call(run_dir, "summary", device="rig", utc=True, start=stamps[1], end=stamps[2])
+    assert window["text"] == "1 rig battery INFO=1\n1 rig motor WARNING=1\n"
+    assert (window["first_time"], window["last_time"]) == (stamps[1], stamps[2])
+    assert _call(run_dir, "summary", device="rig", since_s=3600)["rows"] == 6
+    nothing = _call(run_dir, "summary", device="rig", start="2099-01-01 00:00:00")
+    assert (nothing["rows"], nothing["text"], nothing["levels"]) == (0, "", {})
+    assert "first_time" not in nothing
+
+    # The cursor: only what was logged after an earlier summary.
+    _push_levels(registry, [("motor", LogLevel.ERROR, "stalled")])
+    since = _call(run_dir, "summary", device="rig", after_seq=result["next_seq"])
+    assert since["text"] == "1 rig motor ERROR=1\n"
+    assert _call(run_dir, "summary", device="rig", after_seq=since["next_seq"])["rows"] == 0
+    assert _messages(_call(run_dir, "read_logs", device="rig", after_seq=result["next_seq"])) == ["stalled"]
+
+
+def test_summary_refuses_bad_requests(registry, run_dir):
+    _wait_for_server(run_dir)
+
+    with pytest.raises(AgentApiError, match="give one of 'after_seq', 'since_s' and 'start'"):
+        _call(run_dir, "summary", since_s=10, after_seq=1)
+    with pytest.raises(AgentApiError, match="cannot read 'start' time 'yesterday'"):
+        _call(run_dir, "summary", start="yesterday")
+    with pytest.raises(AgentApiError, match="cannot read 'end' time"):
+        _call(run_dir, "summary", end="later")
+    with pytest.raises(AgentApiError, match="unknown device 'nope'"):
+        _call(run_dir, "summary", device="nope")
 
 
 # ---------------------------------------------------------------------------
