@@ -12,7 +12,15 @@ from blinkview.ui.cli_args import setup_gui_parser, setup_replay_parser
 
 
 def run_init(args):
-    from blinkview.utils.project_settings import ProjectSettings
+    from blinkview.utils.project_settings import ProjectSettings, init_agent_project
+
+    if args.agent:
+        try:
+            init_agent_project(args.path)
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        return
 
     ProjectSettings.init(args.path)
 
@@ -139,6 +147,14 @@ def main():
     init_parser = subparsers.add_parser("init", help="Setup project")
     init_parser.add_argument(
         "path", nargs="?", default=".", help="Directory to initialize (default: current directory)"
+    )
+    init_parser.add_argument(
+        "--agent",
+        "--mcp",
+        dest="agent",
+        action="store_true",
+        help="Also set the project up for an AI agent: a profile with an 'mcp_server' pipeline that may change "
+        "the configuration, and `blink mcp` registered in .mcp.json (read by Claude Code).",
     )
     init_parser.set_defaults(func=run_init)
 

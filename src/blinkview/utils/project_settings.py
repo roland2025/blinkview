@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import json
 import os
 import re
 import shutil
@@ -101,12 +102,31 @@ class ProjectSettings(Settings):
         return cls()
 
 
-def switch_profile(name, create=False):
-    """Switches the active profile. If create=True, also creates a new config file if it doesn't exist."""
+def _check_profile_name(name: str):
+    """FileManager sanitizes profile names this way; a name that sanitizes to something else
+    would be written into one folder and then loaded from another."""
+    clean = re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9_]", "_", name)).strip("_")
+    if not clean or clean != name:
+        raise ValueError(f"Invalid profile name '{name}' (only letters, digits and '_' allowed; try '{clean}')")
+
+
+def switch_profile(name, create=False, agent=False):
+    """Switches the active profile. If create=True, also creates the profile's folder if it doesn't
+    exist. With agent=True a profile that has no config file yet gets one with an `mcp_server`
+    pipeline that may change the configuration (see core/default_config.py)."""
     workspace = get_workspace_dir()
     project_root = get_project_root()
 
     profile_dir = workspace / "profiles" / name
+    config_file = profile_dir / f"{name}.json"
+
+    if agent:
+        _check_profile_name(name)
+        if config_file.exists():
+            raise FileExistsError(
+                f"Profile '{name}' already has a configuration at {config_file.resolve()}. "
+                "Add a pipeline of type 'mcp_server' to it in BlinkView's settings instead."
+            )
 
     if not profile_dir.exists():
         if create:
@@ -115,6 +135,14 @@ def switch_profile(name, create=False):
         else:
             raise FileNotFoundError(f"Profile '{name}' does not exist at {profile_dir.resolve()}")
 
+    if agent:
+        from blinkview.core.default_config import agent_profile_config
+
+        atomic_json_dump(agent_profile_config(), config_file)
+        print(f"Wrote {config_file.resolve()} with an 'mcp_server' pipeline: an agent may change this profile.")
+        print("Register it with Claude Code once:  claude mcp add blinkview -- blink mcp")
+        print(f"Then start BlinkView on this profile:  blink -p {name}")
+
     if project_root:
         # If we are in a project, we can also write the active profile to the project settings for easy retrieval
         settings = ProjectSettings.load()
@@ -122,6 +150,67 @@ def switch_profile(name, create=False):
         settings.save()
 
         print(f"Switched to profile '{name}' within project '{project_root.name}'")
+
+
+def init_agent_project(path=None) -> Path:
+    """`blink init --agent`: a project an AI agent can set up from nothing. Makes `path` a project
+    if it is not one yet, gives its profile (the active one, else 'default') a configuration with
+    an `mcp_server` pipeline that may change it, and registers `blink mcp` in the folder's
+    `.mcp.json`, which Claude Code reads. Nothing that already exists is overwritten."""
+    from blinkview.core.default_config import agent_profile_config
+
+    root = Path(path) if path is not None else Path.cwd()
+    workspace = root / ".blinkview"
+    project_file = workspace / "project.json"
+
+    if project_file.exists():
+        print(f"'{root.resolve()}' is already a BlinkView project")
+    else:
+        ProjectSettings.init(root)
+
+    try:
+        with open(project_file) as f:
+            name = json.load(f).get("active_profile") or "default"
+    except (OSError, ValueError, AttributeError):
+        name = "default"
+    _check_profile_name(name)
+
+    config_file = workspace / "profiles" / name / f"{name}.json"
+    if config_file.exists():
+        print(
+            f"Profile '{name}' already has a configuration, left as it is: add a pipeline of type "
+            "'mcp_server' to it in BlinkView's settings."
+        )
+    else:
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json_dump(agent_profile_config(), config_file)
+        print(f"Wrote profile '{name}' with an 'mcp_server' pipeline: an agent may change this profile.")
+
+    mcp_file = root / ".mcp.json"
+    try:
+        with open(mcp_file) as f:
+            mcp_config = json.load(f)
+        servers = mcp_config.setdefault("mcpServers", {})
+        if not isinstance(servers, dict):
+            raise ValueError("'mcpServers' is not an object")
+    except FileNotFoundError:
+        mcp_config = {"mcpServers": {}}
+        servers = mcp_config["mcpServers"]
+    except (OSError, ValueError, AttributeError) as e:
+        print(f"Could not read {mcp_file.resolve()} ({e}), left as it is.")
+        print("Register the server yourself:  claude mcp add blinkview -- blink mcp")
+        servers = None
+
+    if servers is not None:
+        if "blinkview" in servers:
+            print(f"{mcp_file.name} already has a 'blinkview' server, left as it is.")
+        else:
+            servers["blinkview"] = {"command": "blink", "args": ["mcp"]}
+            atomic_json_dump(mcp_config, mcp_file)
+            print(f"Registered `blink mcp` in {mcp_file.resolve()}")
+
+    print("Start BlinkView in this folder (`blink`), then start the agent here and ask it to set up your board.")
+    return root
 
 
 def get_active_profile_name() -> str:
@@ -135,11 +224,7 @@ def duplicate_profile(source: str, new_name: str) -> Path:
     """Copies profile `source` to a new profile `new_name`. Profile files are named after their
     profile (`<name>.json`, `<name>.gui_state.json`, ...), so those prefixes are renamed too -
     otherwise FileManager would not find them under the new profile. Does not switch to it."""
-    # FileManager sanitizes profile names the same way; a name that sanitizes to something else
-    # would be copied into one folder and then loaded from another.
-    clean = re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9_]", "_", new_name)).strip("_")
-    if not clean or clean != new_name:
-        raise ValueError(f"Invalid profile name '{new_name}' (only letters, digits and '_' allowed; try '{clean}')")
+    _check_profile_name(new_name)
 
     profiles_path = get_workspace_dir() / "profiles"
     src_dir = profiles_path / source
@@ -170,6 +255,14 @@ def setup_project_parser(parser):
     )
     parser.add_argument(
         "-c", "--create", action="store_true", help="Create the profile if it doesn't exist (used with profile name)."
+    )
+    parser.add_argument(
+        "--agent",
+        "--mcp",
+        dest="agent",
+        action="store_true",
+        help="Give a profile that has no configuration yet one with an 'mcp_server' pipeline that may change "
+        "the configuration, so an AI agent (`blink mcp`) can set it up. Usually with --create.",
     )
     parser.add_argument(
         "--copy",
@@ -249,7 +342,11 @@ def handle_profile_args(args):
 
     # Handle Switch/Create
     if args.profile:
-        switch_profile(args.profile, create=args.create)
+        try:
+            switch_profile(args.profile, create=args.create, agent=getattr(args, "agent", False))
+        except (ValueError, FileExistsError) as e:
+            print(f"Error: {e}")
+            raise SystemExit(1)
     else:
         # If no profile name and no --list, show help
         print("Error: Please specify a profile name or use --list.")

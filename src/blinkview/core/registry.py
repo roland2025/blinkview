@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.config_manager import ConfigManager
 from blinkview.core.constants import FactoryCategory
+from blinkview.core.default_config import default_profile_config
 from blinkview.core.factory_category_registry import build_system_factory_registry
 from blinkview.core.id_history import IdHistory
 from blinkview.core.id_registry import IDRegistry
@@ -162,14 +163,7 @@ class Registry:
             # already set by the time that happens.
             self.file_manager.replay_source_dir = Path(replay_source_dir)
 
-        default_config = {
-            "version": "0.2",
-            "sources": {},
-            "pipelines": {},
-            "plugins": {},
-            "reorder": {"enabled": True, "type": "default"},
-            "central": {"enabled": True, "type": "default"},
-        }
+        default_config = default_profile_config()
         try:
             loaded = load_params_files(params_files, self.file_manager.config_dir, self.file_manager.config_file_name)
             params = {**loaded.values, **cli_params}
