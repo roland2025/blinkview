@@ -40,9 +40,9 @@ def _config():
             "pipe_kv": {
                 "enabled": True,
                 "type": "multi_rule_key_value",
-                "name": "a",
+                "name": "a_kv",
                 "sources_": ["pipe_a"],
-                "rules": [{"type": "key_value", "module_name": "battery"}],
+                "rules": [{"type": "key_value", "module_name": "a.battery"}],
             },
             "pipe_mcp": {"enabled": True, "type": "mcp_server", "name": "mcp"},
         },
@@ -61,7 +61,7 @@ def test_errors_name_the_path_and_what_was_expected(factories):
     config["sources"]["src_b"] = {"type": "tcp_cliant"}
     config["pipelines"]["pipe_a"]["sources_"] = ["src_gone"]
     config["pipelines"]["pipe_kv"]["rules"] = [
-        {"type": "anchor_word", "module_name": "battery", "match": "anywhere"},
+        {"type": "anchor_word", "module_name": "a.battery", "match": "anywhere"},
         {"type": "key_value"},
         "not a rule",
     ]
@@ -90,6 +90,52 @@ def test_an_unknown_key_is_a_warning_and_null_means_not_set(factories):
     assert check.warnings[0].startswith("/pipelines/pipe_kv/rules/0: unknown key 'modul_name' (known: ")
 
 
+def test_a_rule_module_needs_its_device_and_a_device_some_pipeline_logs_as(factories):
+    config = _config()
+    config["pipelines"]["pipe_kv"]["rules"] = [
+        {"type": "key_value", "module_name": "battery"},
+        {"type": "anchor_word", "module_name": "app.battery", "module_suffix": "vbat", "pattern": "Vbat:"},
+        {"type": "positional", "module_name": "A.battery", "module_suffix": "soc"},
+    ]
+
+    check = check_config(factories, config)
+
+    assert check.errors == [
+        "/pipelines/pipe_kv/rules/0/module_name: 'battery' is not a 'device.module' name, e.g. 'board.app.battery'"
+    ]
+    assert len(check.warnings) == 1
+    assert check.warnings[0].startswith(
+        "/pipelines/pipe_kv/rules/1/module_name: 'app.battery' is read as module 'battery' of device 'app', "
+        "and no pipeline is named 'app' (pipeline names: ['a', 'a_kv', 'mcp'])"
+    )
+
+
+def test_a_delimiter_is_one_character(factories):
+    config = _config()
+    config["pipelines"]["pipe_kv"]["rules"] = [
+        {"type": "key_value", "module_name": "a.battery", "kv_delimiter": ": ", "field_delimiter": ""},
+        {"type": "key_value", "module_name": "a.battery", "kv_delimiter": ":", "field_delimiter": "&"},
+    ]
+
+    assert check_config(factories, config).errors == [
+        "/pipelines/pipe_kv/rules/0/kv_delimiter: ': ' has 2 characters, expected 1",
+        "/pipelines/pipe_kv/rules/0/field_delimiter: '' has 0 characters, expected 1",
+    ]
+
+
+def test_pipelines_sharing_a_name_and_a_rename_are_warnings(factories):
+    before = _config()
+    after = deepcopy(before)
+    after["pipelines"]["pipe_kv"]["name"] = "A"
+
+    warnings = check_change(factories, before, after)
+
+    assert len(warnings) == 2
+    assert warnings[0].startswith("/pipelines: pipe_a, pipe_kv share the name 'a' and so log as one device.")
+    assert warnings[1].startswith("/pipelines/pipe_kv/name: a running pipeline keeps logging under its old name 'a_kv'")
+    assert check_change(factories, after, deepcopy(after)) == []
+
+
 def test_changed_entries_names_each_entry_that_differs():
     before, after = _config(), _config()
     after["sources"]["src_b"] = {"type": "udp"}
@@ -106,7 +152,7 @@ def test_check_change_refuses_only_what_the_edit_itself_breaks(factories):
     before["sources"]["src_a"]["port"] = "5000"  # already wrong: not this edit's fault
 
     after = deepcopy(before)
-    after["pipelines"]["pipe_kv"]["rules"].append({"type": "key_value", "module_name": "motor", "kv_delim": ":"})
+    after["pipelines"]["pipe_kv"]["rules"].append({"type": "key_value", "module_name": "a.motor", "kv_delim": ":"})
     warnings = check_change(factories, before, after)
     assert len(warnings) == 1 and "unknown key 'kv_delim'" in warnings[0]
 

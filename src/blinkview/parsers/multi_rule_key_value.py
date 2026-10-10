@@ -50,6 +50,20 @@ def _ascii_bytes_ro(s: str) -> np.ndarray:
     return np.frombuffer(s.encode("ascii"), dtype=dtypes.BYTE)
 
 
+# The module a rule reads its lines from. `_module_path` has core/config_schema.py check the name.
+_MATCH_MODULE = dict(
+    type="string",
+    required=True,
+    ui_order=5,
+    title="Match module",
+    _module_path=True,
+    description="The module whose lines this rule reads, as 'device.module' (e.g. 'board.app.battery'). The device "
+    "is the name of the pipeline that parses those lines, not of this one. Exact match: submodules are not included.",
+)
+# KEY_VALUE and DSV split on single bytes.
+_ONE_CHAR = dict(type="string", minLength=1, maxLength=1)
+
+
 @configurable
 @bindable
 @configuration_property("enabled", type="boolean", default=True, ui_order=2, title="Enabled")
@@ -73,13 +87,29 @@ class ExtractionRuleFactory(BaseFactory[ExtractionRule]):
     pass
 
 
-@configuration_property("module_name", type="string", required=True, ui_order=5, title="Match module")
+@configuration_property("module_name", **_MATCH_MODULE)
 @configuration_property("module_suffix", type="string", default="", ui_order=10, title="Module Name Suffix")
 @configuration_property(
     "prefix_strip", type="string", default="", ui_order=12, title="Prefix to Strip (e.g., 'Data: ')"
 )
-@configuration_property("field_delimiter", type="string", default=" ", ui_order=15, title="Field Delimiter")
-@configuration_property("kv_delimiter", type="string", default="=", ui_order=20, title="Key-Value Delimiter")
+@configuration_property(
+    "field_delimiter",
+    **_ONE_CHAR,
+    default=" ",
+    ui_order=15,
+    title="Field Delimiter",
+    description="The one character between two key-value pairs.",
+)
+@configuration_property(
+    "kv_delimiter",
+    **_ONE_CHAR,
+    default="=",
+    ui_order=20,
+    title="Key-Value Delimiter",
+    description="The one character between a key and its value. The value ends at the next field delimiter, so "
+    "'key: value' lines (a space after the colon) give nothing with a space as field delimiter: use anchor_word "
+    "or positional rules for those.",
+)
 @ExtractionRuleFactory.register("key_value")
 class KeyValueExtractionRule(ExtractionRule):
     """Extracts key=value pairs with a delimiter. The only rule type needing a per-row dynamic
@@ -115,7 +145,7 @@ class KeyValueExtractionRule(ExtractionRule):
         return base_mod_id, KvRuleID.KEY_VALUE, cfg
 
 
-@configuration_property("module_name", type="string", required=True, ui_order=5, title="Match module")
+@configuration_property("module_name", **_MATCH_MODULE)
 @configuration_property("module_suffix", type="string", required=True, default="", ui_order=10, title="New module name")
 @configuration_property(
     "match",
@@ -125,9 +155,35 @@ class KeyValueExtractionRule(ExtractionRule):
     default="contains",
     ui_order=15,
 )
-@configuration_property("pattern", type="string", required=True, default="", ui_order=20, title="Pattern")
-@configuration_property("index", type="integer", required=True, default=1, ui_order=25, title="Start Index")
-@configuration_property("count", type="integer", required=False, default=1, ui_order=30, title="Word Count (0 = All)")
+@configuration_property(
+    "pattern",
+    type="string",
+    required=True,
+    default="",
+    ui_order=20,
+    title="Pattern",
+    description="Text a line must start with, contain or end with (see 'match') for this rule to apply to it. "
+    "It only selects lines: it does not move where 'index' counts from.",
+)
+@configuration_property(
+    "index",
+    type="integer",
+    required=True,
+    default=1,
+    ui_order=25,
+    title="Start Index",
+    description="The word to take, counted from the start of the line (0 = the first word, words are separated "
+    "by whitespace) - not from the pattern.",
+)
+@configuration_property(
+    "count",
+    type="integer",
+    required=False,
+    default=1,
+    ui_order=30,
+    title="Word Count (0 = All)",
+    description="How many words to take from 'index' on (0 = all that remain).",
+)
 @ExtractionRuleFactory.register("anchor_word")
 class AnchorWordExtractionRule(ExtractionRule):
     """Extract values matching startswith/endswith/contains patterns."""
@@ -214,11 +270,11 @@ class JsonLiteExtractionRule(ExtractionRule):
         return base_mod_id, KvRuleID.JSON_LITE, cfg
 
 
-@configuration_property("module_name", type="string", required=True, ui_order=5, title="Match module")
+@configuration_property("module_name", **_MATCH_MODULE)
 @configuration_property("module_suffix", type="string", default="", ui_order=10, title="New Module Name")
 @configuration_property("startswith", type="string", default="", ui_order=8, title="Must start with signature")
 @configuration_property("prefix_strip", type="string", default="", ui_order=10, title="Prefix to Strip")
-@configuration_property("field_delimiter", type="string", default=";", ui_order=15, title="Field Delimiter")
+@configuration_property("field_delimiter", **_ONE_CHAR, default=";", ui_order=15, title="Field Delimiter")
 @configuration_property(
     "field_names",
     type="array",
@@ -293,9 +349,16 @@ class DsvExtractionRule(ExtractionRule):
         return base_mod_id, KvRuleID.DSV, cfg
 
 
-@configuration_property("module_name", type="string", required=True, ui_order=5, title="Match module")
+@configuration_property("module_name", **_MATCH_MODULE)
 @configuration_property("module_suffix", type="string", required=True, ui_order=10, title="New Module Name")
-@configuration_property("word_index", type="integer", default=0, ui_order=15, title="Word Index (Z)")
+@configuration_property(
+    "word_index",
+    type="integer",
+    default=0,
+    ui_order=15,
+    title="Word Index (Z)",
+    description="The word to take, counted from the start of the line (0 = the first word).",
+)
 @configuration_property("word_count", type="integer", default=1, ui_order=20, title="Word Count (0 = All remaining)")
 @ExtractionRuleFactory.register("positional")
 class PositionalExtractionRule(ExtractionRule):

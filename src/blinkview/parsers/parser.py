@@ -51,7 +51,8 @@ TransformFunc = Callable[[Any], Any]
     type="string",
     default="pipeline",
     required=True,
-    description="Name of the source device (for logging purposes)",
+    description="Name of the device this pipeline's output lines are logged as. Give each pipeline its own: "
+    "a key/value pipeline ignores the lines of its own device. Bound when the pipeline is created.",
     ui_remember=True,
 )
 @configuration_property(

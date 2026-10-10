@@ -80,7 +80,8 @@ def _list_jlink_serials() -> list[str]:
     default="NRF52840_XXAA",
     required=True,
     ui_order=5,
-    description="The target microcontroller device name (e.g., 'STM32F407VG', 'NRF52840_XXAA').",
+    description="The target microcontroller device name, exactly as in SEGGER's J-Link device list "
+    "(e.g., 'STM32F407VG', 'NRF52840_XXAA'). A family name such as 'NRF52' does not connect.",
 )
 @configuration_property(
     "serial_number",
@@ -389,7 +390,16 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                     else pylink.enums.JLinkInterfaces.JTAG
                 )
                 jl.set_tif(tif)
-                jl.connect(self.target_device, speed=self.speed)
+                try:
+                    jl.connect(self.target_device, speed=self.speed)
+                except (ValueError, pylink.errors.JLinkException) as e:
+                    # What pylink says for a name that is not in the J-Link device list.
+                    if str(e) in ("Invalid index.", "Unsupported device selected."):
+                        raise ValueError(
+                            f"J-Link does not know the target device '{self.target_device}': it needs the exact "
+                            "name from SEGGER's device list (e.g. 'NRF52840_XXAA', not 'NRF52')"
+                        ) from None
+                    raise
                 jl.rtt_start()
 
                 self._drain_stale_data(jl)

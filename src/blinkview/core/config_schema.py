@@ -152,6 +152,13 @@ def _check_node(factories, config: dict, schema: dict, data: Any, path: str, che
     enum = schema.get("enum")
     if enum and data not in enum and not schema.get("_allow_custom"):
         check.errors.append(f"{path}: {data!r} is not one of {enum}")
+    if isinstance(data, str):
+        shortest, longest = schema.get("minLength", 0), schema.get("maxLength")
+        if len(data) < shortest or (longest is not None and len(data) > longest):
+            wanted = f"{shortest}" if shortest == longest else f"{shortest} to {longest or 'any number of'}"
+            check.errors.append(f"{path}: {data!r} has {len(data)} characters, expected {wanted}")
+        if schema.get("_module_path"):
+            _check_module_path(config, data, path, check)
     if isinstance(data, (int, float)) and not isinstance(data, bool):
         if "minimum" in schema and data < schema["minimum"]:
             check.errors.append(f"{path}: {data} is below the minimum {schema['minimum']}")
@@ -163,6 +170,30 @@ def _check_node(factories, config: dict, schema: dict, data: Any, path: str, che
         known = _reference_ids(config, reference)
         if data not in known:
             check.errors.append(f"{path}: no entry '{data}' in {reference} (have: {sorted(known)})")
+
+
+def _pipeline_names(config: dict) -> dict:
+    """Device name -> ids of the pipelines logging as it (PipelineManager: `name`, or the id)."""
+    names = {}
+    pipelines = config.get("pipelines")
+    for entry_id, entry in pipelines.items() if isinstance(pipelines, dict) else ():
+        if isinstance(entry, dict):
+            names.setdefault(str(entry.get("name", entry_id)).lower(), []).append(entry_id)
+    return names
+
+
+def _check_module_path(config: dict, data: str, path: str, check: ConfigCheck):
+    """A `_module_path` field: 'device.module', as IDRegistry.resolve_module splits it."""
+    device, _, module = data.partition(".")
+    if not device or not module:
+        check.errors.append(f"{path}: {data!r} is not a 'device.module' name, e.g. 'board.app.battery'")
+        return
+    names = _pipeline_names(config)
+    if device.lower() not in names:
+        check.warnings.append(
+            f"{path}: {data!r} is read as module '{module}' of device '{device}', and no pipeline is named "
+            f"'{device}' (pipeline names: {sorted(names)}) - is the device name missing in front?"
+        )
 
 
 def _reference_ids(config: dict, reference: str) -> set:
@@ -199,6 +230,13 @@ def check_config(factories, config: dict) -> ConfigCheck:
             check.errors.append(f"{path}: expected an object of entries by id, got {_describe(entry)}")
             continue
         _check_node(factories, config, {"type": "object", "_factory": category}, entry, path, check)
+
+    for name, ids in _pipeline_names(config).items():
+        if len(ids) > 1:
+            check.warnings.append(
+                f"/pipelines: {', '.join(sorted(ids))} share the name '{name}' and so log as one device. A pipeline "
+                "reading another's lines (key/value extraction) ignores its own device: give it a name of its own"
+            )
     return check
 
 
@@ -241,7 +279,21 @@ def check_change(factories, before: dict, after: dict) -> List[str]:
         raise ConfigPatchError(
             "the patch was not applied, it would leave the configuration invalid:\n" + "\n".join(errors)
         )
-    return [warning for warning in new.warnings if warning not in old.warnings]
+    warnings = [warning for warning in new.warnings if warning not in old.warnings]
+
+    # PipelineManager binds a pipeline's device when it builds it, and never again.
+    old_pipelines, new_pipelines = before.get("pipelines"), after.get("pipelines")
+    if isinstance(old_pipelines, dict) and isinstance(new_pipelines, dict):
+        for entry_id, entry in new_pipelines.items():
+            was = old_pipelines.get(entry_id)
+            if isinstance(was, dict) and isinstance(entry, dict):
+                if was.get("name", entry_id) != entry.get("name", entry_id):
+                    warnings.append(
+                        f"/pipelines/{entry_id}/name: a running pipeline keeps logging under its old name "
+                        f"'{was.get('name', entry_id)}' until BlinkView restarts. To rename it now, remove the "
+                        "entry and add it under a new id"
+                    )
+    return warnings
 
 
 def schema_at(factories, config: dict, path: str) -> dict:
