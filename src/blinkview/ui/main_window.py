@@ -61,6 +61,10 @@ from blinkview.ui.widgets.telemetry_table import TelemetryTable as TelemetryTabl
 from blinkview.ui.widgets.TelemetryWatch import TelemetryWatch
 from blinkview.ui.widgets.title_bar import TitleBar
 from blinkview.ui.widgets.toast import ToastManager, ToastType
+
+# Imported here, not where it is used: the dispatcher is created on first import and delivers
+# its toasts on the thread it was created on, which has to be this (the UI) thread.
+from blinkview.ui.widgets.toast_dispatcher import toast_dispatcher
 from blinkview.ui.widgets.update_widget import UpdateWidget as UpdateWidget
 from blinkview.ui.widgets.update_widget import check_post_update
 from blinkview.ui.windows.detached_tab_window import DetachedTabWindow
@@ -192,6 +196,14 @@ class _SessionRotationBridge(QObject):
         if request.error is not None:
             raise RuntimeError(request.error)
         return request.old_dir, request.new_dir
+
+
+class _ViewRequestBridge(QObject):
+    """Registry.open_view_handler for the GUI: `requested` is emitted on the caller's thread
+    (the mcp_server pipeline's request thread) and delivered to BlinkMainWindow as a queued
+    call - same reasoning as _ShutdownWorker."""
+
+    requested = Signal(str, str)  # kind, id
 
 
 class _ReplayLoadBridge(QObject):
@@ -383,7 +395,9 @@ class BlinkMainWindow(QMainWindow):
             self.gui_context.config_manager.create_node("/sources"), self.gui_context
         )
         self.sources_tool_btn.setText("Devices")
-        self.sources_tool_btn.setToolTip("Show/hide the Sources and Pipelines sidebars.\nRight-click to manage sources.")
+        self.sources_tool_btn.setToolTip(
+            "Show/hide the Sources and Pipelines sidebars.\nRight-click to manage sources."
+        )
         self.sources_tool_btn.clicked.connect(self._set_device_docks_visible)
         self.sources_dock.visibilityChanged.connect(self._sync_device_docks_button)
         self.pipelines_dock.visibilityChanged.connect(self._sync_device_docks_button)
@@ -545,6 +559,10 @@ class BlinkMainWindow(QMainWindow):
         self._session_rotation_bridge.requested.connect(self._on_session_rotation_requested)
         registry.session_rotation_handler = self._session_rotation_bridge.request
         registry.user_notice_handler = self._show_user_notice
+        registry.gui_config = self.gui_context.gui_config
+        self._view_request_bridge = _ViewRequestBridge(self)
+        self._view_request_bridge.requested.connect(self._on_view_requested)
+        registry.open_view_handler = self._view_request_bridge.requested.emit
 
         # Replay-load progress state (see start_replay) - same "keep it alive / dismissable"
         # reasoning as the shutdown-toast state above.
@@ -1352,8 +1370,6 @@ class BlinkMainWindow(QMainWindow):
     def _show_user_notice(self, message: str, action_text: Optional[str] = None, action=None):
         """Registry.user_notice_handler: called on any thread, the dispatcher's signal takes the
         toast to the UI thread. One with a button stays long enough to be clicked."""
-        from blinkview.ui.widgets.toast_dispatcher import toast_dispatcher
-
         toast_dispatcher.notify(
             message,
             duration=USER_NOTICE_ACTION_SECONDS if action_text else 5.0,
@@ -1361,6 +1377,17 @@ class BlinkMainWindow(QMainWindow):
             action_callback=action,
             parent=self,
         )
+
+    def _on_view_requested(self, kind: str, view_id: str):
+        """A view asked for from another thread (see _ViewRequestBridge). An open one is
+        brought forward instead of opened twice (create_widget)."""
+        if kind != "watch":
+            return
+        # Not through open_watch: its node only exists once the Watches menu was opened.
+        watch = self.gui_context.gui_config.get_by_path(f"/watches/{view_id}")
+        if isinstance(watch, dict):
+            name = watch.get("name", "Default")
+            self.create_widget(WidgetName.TELEMETRY_WATCH, f"Watch {name}", params={"id": view_id})
 
     def _on_session_rotation_requested(self, request: _SessionRotationRequest):
         """A rotation asked for from another thread (see _SessionRotationBridge)."""

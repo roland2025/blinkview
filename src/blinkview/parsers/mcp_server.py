@@ -11,14 +11,17 @@ from blinkview.core.agent_log_read import current_sequence, list_modules, read_l
 from blinkview.core.agent_telemetry import telemetry_latest, telemetry_series
 from blinkview.core.config_schema import (
     CONFIG_ROOTS,
+    WATCHES_ROOT,
     ConfigPatchError,
     changed_entries,
     check_change,
+    check_gui_change,
     for_agent,
     schema_at,
 )
 from blinkview.core.configurable import configuration_property, override_property
 from blinkview.parsers.parser import BaseParser, ParserFactory
+from blinkview.utils.generate_id import generate_id
 
 MAX_SEND_CHARS = 4096
 # get_config's answer as JSON text. Above it the agent is told to narrow the path or pass 'depth'.
@@ -26,6 +29,9 @@ MAX_SEND_CHARS = 4096
 MAX_CONFIG_CHARS = 50_000
 
 _MISSING = object()
+
+# Key prefixes of the watch entries that need a key, as the watch window generates them.
+_WATCH_KEY_PREFIXES = {"row": "row", "button": "btn", "group_start": "grp_start", "group_end": "grp_end"}
 
 
 @ParserFactory.register("mcp_server")
@@ -82,10 +88,20 @@ _MISSING = object()
     "It cannot change this pipeline's own permissions.",
 )
 @configuration_property(
+    "allow_watches",
+    title="Agent may create and change watch lists",
+    type="boolean",
+    default=True,
+    required=True,
+    ui_order=7,
+    description="Lets the agent create, change and open watch lists (Watches menu). Each change is shown "
+    "with an Undo button.",
+)
+@configuration_property(
     "port",
     type="integer",
     default=0,
-    ui_order=7,
+    ui_order=8,
     description="Local TCP port to listen on (127.0.0.1 only). 0 picks a free one; `blink mcp` finds it either way.",
 )
 class McpServer(BaseParser):
@@ -97,6 +113,7 @@ class McpServer(BaseParser):
 * Reads telemetry: the latest value per module, and a module's numeric history.
 * Reads this profile's configuration (sources, pipelines, ...) as it is in effect now, and its schema.
 * Changes the configuration, when `allow_config` is on: checked against the schema, with Undo.
+* Creates, changes and opens watch lists.
 * Listens on 127.0.0.1 only and requires a per-run token; everything it does is logged.
 
 It is not a parser: no data flows through it. Connect an agent with `claude mcp add blinkview -- blink mcp`."""
@@ -106,6 +123,7 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
     allow_rotate: bool
     allow_read: bool
     allow_config: bool
+    allow_watches: bool
     port: int
 
     def run(self):
@@ -128,6 +146,8 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
                     "get_schema": self._tool_get_schema,
                     "list_types": self._tool_list_types,
                     "apply_config_patch": self._tool_apply_config_patch,
+                    "create_watch": self._tool_create_watch,
+                    "open_view": self._tool_open_view,
                 },
                 port=self.port,
                 run_info={
@@ -206,6 +226,7 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
             "can_rotate": bool(self.allow_rotate) and not registry.replay_mode,
             "can_read": bool(self.allow_read),
             "can_configure": bool(self.allow_config),
+            "can_edit_watches": bool(self.allow_watches) and registry.gui_config is not None,
             "seq": current_sequence(registry),
             "sources": sources,
         }
@@ -280,9 +301,10 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
             raise AgentApiError("'depth' must be an integer of 1 or more")
 
         # A copy: the answer is serialized after the config's lock is released.
-        config = self.shared.registry.config.get_by_path(path, _MISSING, make_deep_copy=True, depth=depth)
+        manager, target = self._config_target(args, write=False)
+        config = manager.get_by_path(path, _MISSING, make_deep_copy=True, depth=depth)
         if config is _MISSING:
-            raise AgentApiError(f"nothing at '{path}' in the profile's configuration")
+            raise AgentApiError(f"nothing at '{path}' in the {target} configuration")
 
         size = len(json.dumps(config))
         if size > MAX_CONFIG_CHARS:
@@ -343,9 +365,29 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
             )
         return result
 
+    def _config_target(self, args: dict, write: bool):
+        """(ConfigManager, name) of a tool's `target`: the profile, or the GUI's own config
+        (the watch lists). With `write`, refused unless the pipeline allows changing it."""
+        target = args.get("target", "profile")
+        registry = self.shared.registry
+        if target == "profile":
+            if write and not self.allow_config:
+                raise AgentApiError(f"changing the configuration is turned off on the '{self.name}' pipeline")
+            return registry.config, target
+        if target == "gui":
+            if write and not self.allow_watches:
+                raise AgentApiError(f"changing watch lists is turned off on the '{self.name}' pipeline")
+            if registry.gui_config is None:
+                raise AgentApiError("this BlinkView runs without a window: it has no watch lists")
+            return registry.gui_config, target
+        raise AgentApiError("'target' must be 'profile' or 'gui'")
+
+    def _known_modules(self) -> set:
+        """'device.module' of every module seen so far - a lookup that registers nothing."""
+        return {module.name_with_device() for module in self.shared.id_registry.get_all_modules()}
+
     def _tool_apply_config_patch(self, args: dict) -> dict:
-        if not self.allow_config:
-            raise AgentApiError(f"changing the configuration is turned off on the '{self.name}' pipeline")
+        manager, target = self._config_target(args, write=True)
         path, patch, dry_run = args.get("path", "/"), args.get("patch"), args.get("dry_run", False)
         if not isinstance(dry_run, bool):
             raise AgentApiError("'dry_run' must be true or false")
@@ -355,18 +397,23 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
             raise AgentApiError("'patch' must be a list of JSON Patch operations") from None
         if size > MAX_CONFIG_CHARS:
             raise AgentApiError(f"'patch' is {size} characters (max {MAX_CONFIG_CHARS}): apply it in parts")
+        return self._apply_patch(manager, target, path, patch, dry_run)
 
+    def _apply_patch(self, manager, target: str, path: str, patch: list, dry_run: bool = False) -> dict:
         registry = self.shared.registry
         changed, warnings = [], []
 
         def check(before: dict, after: dict):
-            warnings.extend(check_change(self.shared.factories, before, after))
+            if target == "gui":
+                warnings.extend(check_gui_change(before, after, self._known_modules()))
+            else:
+                warnings.extend(check_change(self.shared.factories, before, after))
             changed.extend(changed_entries(before, after))
 
         # Taken before the change, like send's: what the change does to the log is read from here on.
         seq = current_sequence(registry)
         try:
-            undo = registry.config.apply_patch_checked(path, patch, check=check, dry_run=dry_run)
+            undo = manager.apply_patch_checked(path, patch, check=check, dry_run=dry_run)
         except ConfigPatchError as e:
             raise AgentApiError(str(e)) from None
 
@@ -375,27 +422,74 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
             result["note"] = "the patch changes nothing"
         elif not dry_run:
             result["undo"] = undo
-            self.logger.info("config changed: %s, patch at '%s': %s", ", ".join(changed), path, json.dumps(patch))
+            self.logger.info(
+                "%s config changed: %s, patch at '%s': %s", target, ", ".join(changed), path, json.dumps(patch)
+            )
             registry.notify_user(
                 f"Agent changed {', '.join(changed)}",
                 "Undo",
                 # Clicked on the UI thread; applying a config may restart a source or pipeline.
-                lambda: self.shared.tasks.run_task(self._undo_config_change, undo, changed),
+                lambda: self.shared.tasks.run_task(self._undo_config_change, manager, undo, changed),
             )
         return result
 
-    def _undo_config_change(self, undo: list, changed: list):
+    def _undo_config_change(self, manager, undo: list, changed: list):
         """The Undo button of a change's notice. The undo patch tests what it is about to
         replace or remove, so it is refused as a whole once the same place was edited again."""
         registry = self.shared.registry
         try:
-            registry.config.apply_patch_checked("/", undo)
+            manager.apply_patch_checked("/", undo)
         except ConfigPatchError as e:
             self.logger.warning("could not undo the change to %s: %s", ", ".join(changed), e)
             registry.notify_user(f"Could not undo the change to {', '.join(changed)}: it was edited since")
             return
         self.logger.info("config change undone: %s", ", ".join(changed))
         registry.notify_user(f"Undone: {', '.join(changed)}")
+
+    def _tool_create_watch(self, args: dict) -> dict:
+        manager, target = self._config_target({"target": "gui"}, write=True)
+        name, entries, open_it = args.get("name"), args.get("entries", []), args.get("open", True)
+        if not isinstance(name, str) or not name.strip():
+            raise AgentApiError("'name' must be a non-empty string")
+        if not isinstance(entries, list):
+            raise AgentApiError("'entries' must be a list")
+        if not isinstance(open_it, bool):
+            raise AgentApiError("'open' must be true or false")
+
+        # Keys the agent left out are generated, like the watch window does for a new entry.
+        used = {entry.get("key") for entry in entries if isinstance(entry, dict)}
+        filled = []
+        for entry in entries:
+            if isinstance(entry, dict):
+                entry = {"type": "row", **entry}
+                prefix = _WATCH_KEY_PREFIXES.get(entry["type"]) if isinstance(entry["type"], str) else None
+                if prefix and "key" not in entry:
+                    entry["key"] = generate_id(prefix, list(used))
+                    used.add(entry["key"])
+            filled.append(entry)
+
+        watches = manager.get_by_path(f"/{WATCHES_ROOT}")
+        watch_id = generate_id("watch", list(watches or {}))
+        watch = {"id": watch_id, "name": name.strip(), "entries": filled}
+        if isinstance(watches, dict):
+            patch = [{"op": "add", "path": f"/{WATCHES_ROOT}/{watch_id}", "value": watch}]
+        else:
+            patch = [{"op": "add", "path": f"/{WATCHES_ROOT}", "value": {watch_id: watch}}]
+
+        result = self._apply_patch(manager, target, "/", patch)
+        result["id"] = watch_id
+        result["opened"] = open_it and self.shared.registry.open_view("watch", watch_id)
+        return result
+
+    def _tool_open_view(self, args: dict) -> dict:
+        manager, _target = self._config_target({"target": "gui"}, write=False)
+        kind, view_id = args.get("kind", "watch"), args.get("id")
+        if kind != "watch":
+            raise AgentApiError("'kind' must be 'watch'")
+        watches = manager.get_by_path(f"/{WATCHES_ROOT}") or {}
+        if view_id not in watches:
+            raise AgentApiError(f"no watch '{view_id}', have: {sorted(watches)}")
+        return {"kind": kind, "id": view_id, "opened": self.shared.registry.open_view(kind, view_id)}
 
     def _tool_command(self, args: dict) -> dict:
         source_id, source = self._resolve_source(args)

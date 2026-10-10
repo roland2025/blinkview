@@ -40,7 +40,8 @@ INSTRUCTIONS = (
     "history. `get_config` shows how the profile's sources and pipelines are set up. To change it "
     "(e.g. add a key/value extraction rule): `get_schema` for the fields an entry takes, `list_types` "
     "for the types that exist, then `apply_config_patch` - try it with `dry_run` first, and check the "
-    "effect with `read_logs(after_seq=<the returned seq>)`. For a whole "
+    "effect with `read_logs(after_seq=<the returned seq>)`. `create_watch` puts chosen values in "
+    "a live window for the user. For a whole "
     "recorded session use the shell command `blink export SESSION_ID` (see `blink export --help`)."
 )
 
@@ -86,6 +87,20 @@ _INSTANCE_PROPERTY = {
     "type": "integer",
     "description": "pid of the BlinkView instance, from `status`. Only needed when several are running.",
 }
+_TARGET_PROPERTY = {
+    "type": "string",
+    "enum": ["profile", "gui"],
+    "description": "Which configuration: 'profile' (default; sources, pipelines, storage) or 'gui' "
+    "(the watch lists, under `/watches/<id>`).",
+}
+_WATCH_ENTRIES_DESCRIPTION = (
+    "A watch's `entries` are shown top to bottom, each an object with a `type`: "
+    "`row` (`label`, `modules`: a list of 'device.module' names as `list_modules` gives them, joined with "
+    "a dot - the row shows their latest value), `section` (`label`: a heading), `button` (`label`, "
+    "`command_payload`: text sent when clicked, `target_device`: a source id), and `group_start` "
+    "(`label`) ... `group_end` around buttons that belong together. Every entry but a section has a "
+    "`key`, any string unique within the watch."
+)
 _SOURCE_PROPERTY = {
     "type": "string",
     "description": "Source id or name, from `status`. May be omitted when exactly one source is allowed.",
@@ -248,6 +263,7 @@ TOOLS = [
                     "description": "Only this many levels; objects and lists below that come back empty "
                     "({} or []). Default: everything under the path.",
                 },
+                "target": _TARGET_PROPERTY,
                 "instance": _INSTANCE_PROPERTY,
             },
         },
@@ -296,7 +312,9 @@ TOOLS = [
         "may change the configuration' on the mcp_server pipeline (`can_configure` in `status`). "
         "Returns `changed` (the entries that differ), `warnings` (e.g. a key the schema does not know - "
         "usually a typo), `undo` (the patch that reverts it; apply it with `path='/'`) and `seq`, the "
-        "log cursor from just before the change. A new entry needs an id of your choice as its key.",
+        "log cursor from just before the change. A new entry needs an id of your choice as its key. "
+        "With `target='gui'` it edits the watch lists instead (needs 'Agent may create and change watch "
+        "lists'; an open watch window follows the change at once). " + _WATCH_ENTRIES_DESCRIPTION,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -313,9 +331,48 @@ TOOLS = [
                     "configuration), e.g. '/pipelines/<id>'.",
                 },
                 "dry_run": {"type": "boolean", "description": "Check only, change nothing (default false)."},
+                "target": _TARGET_PROPERTY,
                 "instance": _INSTANCE_PROPERTY,
             },
             "required": ["patch"],
+        },
+    },
+    {
+        "name": "create_watch",
+        "description": "Creates a watch list - a window showing the latest value of chosen modules, live - "
+        "and opens it in BlinkView. Returns its `id`; change it later with "
+        "`apply_config_patch(target='gui', path='/watches/<id>')`, read the existing ones with "
+        "`get_config(target='gui', path='/watches')`. " + _WATCH_ENTRIES_DESCRIPTION + " Keys you leave "
+        "out are generated, and an entry without a `type` is a row. `warnings` names modules that have "
+        "not logged in this session: check the spelling against `list_modules`.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Shown as the watch's title and tab name."},
+                "entries": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": 'e.g. [{"type": "section", "label": "Battery"}, '
+                    '{"label": "Voltage", "modules": ["board.battery.vbat"]}].',
+                },
+                "open": {"type": "boolean", "description": "Open its window (default true)."},
+                "instance": _INSTANCE_PROPERTY,
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "open_view",
+        "description": "Opens a view in BlinkView's window, or brings it forward when it is open already. "
+        "`kind` 'watch' with a watch id from `get_config(target='gui', path='/watches', depth=2)`.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["watch"], "description": "Default 'watch'."},
+                "id": {"type": "string"},
+                "instance": _INSTANCE_PROPERTY,
+            },
+            "required": ["id"],
         },
     },
     {

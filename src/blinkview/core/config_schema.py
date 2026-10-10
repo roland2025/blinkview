@@ -31,6 +31,20 @@ CONFIG_ROOTS = {
     "reorder": (FactoryCategory.REORDER, False),
 }
 
+# The GUI config (a second ConfigManager, see BlinkMainWindow) holds the watch lists by id.
+WATCHES_ROOT = "watches"
+_BY_ID_ROOTS = frozenset([WATCHES_ROOT, *(root for root, (_category, by_id) in CONFIG_ROOTS.items() if by_id)])
+
+# What each kind of watch entry needs (ui/widgets/TelemetryWatch.py reads these without a default)
+# and may also have. A row shows the latest value of its modules; a button sends a command.
+WATCH_ENTRY_FIELDS = {
+    "section": (("label",), ("collapsed",)),
+    "row": (("key", "label"), ("modules", "is_expanded")),
+    "button": (("key", "label"), ("command_payload", "target_device")),
+    "group_start": (("key",), ("label",)),
+    "group_end": (("key",), ()),
+}
+
 # Pipelines an outside edit may not touch: they decide what the editor itself is allowed to do.
 PROTECTED_PIPELINE_TYPES = ("mcp_server",)
 
@@ -195,7 +209,7 @@ def changed_entries(before: dict, after: dict) -> List[str]:
         old, new = before.get(root), after.get(root)
         if old == new:
             continue
-        by_id = CONFIG_ROOTS.get(root, (None, False))[1]
+        by_id = root in _BY_ID_ROOTS
         if by_id and isinstance(old, dict) and isinstance(new, dict):
             changed.extend(f"/{root}/{key}" for key in sorted(set(old) | set(new)) if old.get(key) != new.get(key))
         else:
@@ -283,3 +297,88 @@ def for_agent(schema: Any) -> Any:
     if isinstance(schema, list):
         return [for_agent(item) for item in schema]
     return schema
+
+
+def check_watches(config: dict, known_modules=None) -> ConfigCheck:
+    """The watch lists of a GUI config: what the watch window needs to load them. A row's
+    module that is not in `known_modules` ('device.module' names) is a warning - it may only
+    not have logged yet, but opening the watch registers it under that name."""
+    check = ConfigCheck([], [])
+    watches = config.get(WATCHES_ROOT)
+    if watches is None:
+        return check
+    if not isinstance(watches, dict):
+        check.errors.append(f"/{WATCHES_ROOT}: expected an object of watches by id, got {_describe(watches)}")
+        return check
+
+    for watch_id, watch in watches.items():
+        path = f"/{WATCHES_ROOT}/{watch_id}"
+        if not isinstance(watch, dict):
+            check.errors.append(f"{path}: expected an object, got {_describe(watch)}")
+            continue
+        if not isinstance(watch.get("name"), str) or not watch["name"].strip():
+            check.errors.append(f"{path}: 'name' must be a non-empty string")
+        if watch.get("id", watch_id) != watch_id:
+            check.errors.append(f"{path}: 'id' must be the watch's key '{watch_id}', got {_describe(watch['id'])}")
+        entries = watch.get("entries", [])
+        if not isinstance(entries, list):
+            check.errors.append(f"{path}/entries: expected an array, got {_describe(entries)}")
+            continue
+
+        keys = set()
+        open_groups = 0
+        for index, entry in enumerate(entries):
+            entry_path = f"{path}/entries/{index}"
+            if not isinstance(entry, dict):
+                check.errors.append(f"{entry_path}: expected an object, got {_describe(entry)}")
+                continue
+            kind = entry.get("type", "row")
+            if kind not in WATCH_ENTRY_FIELDS:
+                check.errors.append(f"{entry_path}: unknown type {kind!r}, expected one of {list(WATCH_ENTRY_FIELDS)}")
+                continue
+            required, optional = WATCH_ENTRY_FIELDS[kind]
+            for field in required:
+                if not isinstance(entry.get(field), str) or not entry[field]:
+                    check.errors.append(f"{entry_path}: a {kind} needs '{field}', a non-empty string")
+            for field in entry:
+                if field != "type" and field not in required and field not in optional:
+                    known = ", ".join((*required, *optional))
+                    check.warnings.append(f"{entry_path}: unknown key '{field}' (a {kind} has: {known})")
+
+            key = entry.get("key")
+            if isinstance(key, str) and key:
+                if key in keys:
+                    check.errors.append(f"{entry_path}: key '{key}' is used twice in this watch")
+                keys.add(key)
+            if kind == "group_start":
+                open_groups += 1
+            elif kind == "group_end":
+                open_groups -= 1
+                if open_groups < 0:
+                    check.errors.append(f"{entry_path}: group_end without a group_start before it")
+                    open_groups = 0
+            elif kind == "row":
+                modules = entry.get("modules", [])
+                if not isinstance(modules, list) or not all(isinstance(m, str) and "." in m for m in modules):
+                    check.errors.append(f"{entry_path}/modules: expected a list of 'device.module' names")
+                elif known_modules is not None:
+                    for module in modules:
+                        if module not in known_modules:
+                            check.warnings.append(f"{entry_path}: no module '{module}' has logged in this session")
+        if open_groups:
+            check.errors.append(f"{path}/entries: {open_groups} group_start without a group_end")
+    return check
+
+
+def check_gui_change(before: dict, after: dict, known_modules=None) -> List[str]:
+    """check_change for the GUI config: only the watch lists may change. Raises
+    ConfigPatchError, or returns the warnings the edit adds."""
+    for path in changed_entries(before, after):
+        if split_path(path)[0] != WATCHES_ROOT:
+            raise ConfigPatchError(f"'{path}' cannot be changed here, only /{WATCHES_ROOT}")
+
+    old, new = check_watches(before, known_modules), check_watches(after, known_modules)
+    errors = [error for error in new.errors if error not in old.errors]
+    if errors:
+        raise ConfigPatchError("the patch was not applied, it would leave a watch unusable:\n" + "\n".join(errors))
+    return [warning for warning in new.warnings if warning not in old.warnings]

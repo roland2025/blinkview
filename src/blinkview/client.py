@@ -113,9 +113,10 @@ class BlinkView:
     def telemetry_series(self, device: str, module: str, **args) -> dict:
         return self.call("telemetry_series", device=device, module=module, **args)
 
-    def get_config(self, path: str = "/", depth: Optional[int] = None) -> Any:
-        """The profile configuration at `path` (e.g. "/pipelines"), as it is in effect now."""
-        return self.call("get_config", path=path, **_given(depth=depth))["config"]
+    def get_config(self, path: str = "/", depth: Optional[int] = None, target: str = "profile") -> Any:
+        """The profile configuration at `path` (e.g. "/pipelines"), as it is in effect now.
+        `target="gui"` reads the watch lists ("/watches") instead."""
+        return self.call("get_config", path=path, target=target, **_given(depth=depth))["config"]
 
     def list_types(self, category: Optional[str] = None) -> dict:
         """The categories and their type names, or one category's types with descriptions."""
@@ -127,11 +128,21 @@ class BlinkView:
         """The schema of the config at `path`, or of `type` in `category`."""
         return self.call("get_schema", **_given(path=path, category=category, type=type))["schema"]
 
-    def apply_config_patch(self, patch: list, path: str = "/", dry_run: bool = False) -> dict:
-        """Changes the profile configuration with a JSON Patch whose paths are relative to
-        `path`. Refused (AgentApiError, nothing changed) when it would leave the config
-        invalid. The result's "undo" is the patch that reverts it, applied with path "/"."""
-        return self.call("apply_config_patch", patch=patch, path=path, dry_run=dry_run)
+    def apply_config_patch(self, patch: list, path: str = "/", dry_run: bool = False, target: str = "profile") -> dict:
+        """Changes the profile configuration (or, with `target="gui"`, the watch lists) with a
+        JSON Patch whose paths are relative to `path`. Refused (AgentApiError, nothing changed)
+        when it would leave the config invalid. The result's "undo" is the patch that reverts
+        it, applied with path "/"."""
+        return self.call("apply_config_patch", patch=patch, path=path, dry_run=dry_run, target=target)
+
+    def create_watch(self, name: str, entries: Optional[list] = None, open: bool = True) -> dict:
+        """Creates a watch list and opens its window. The result's "id" names it under
+        "/watches" of the GUI config."""
+        return self.call("create_watch", name=name, entries=entries or [], open=open)
+
+    def open_view(self, id: str, kind: str = "watch") -> dict:
+        """Opens a view in BlinkView's window, or brings it forward."""
+        return self.call("open_view", id=id, kind=kind)
 
 
 def _given(**args) -> dict:

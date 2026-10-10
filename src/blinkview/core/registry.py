@@ -299,6 +299,11 @@ class Registry:
         # Set by the GUI (BlinkMainWindow): shows the user a message, see notify_user().
         self.user_notice_handler: Optional[Callable[[str, Optional[str], Optional[Callable[[], None]]], None]] = None
 
+        # Set by the GUI (BlinkMainWindow): its own config (the watch lists), a second
+        # ConfigManager next to `config`, and what opens a view of a kind - see open_view().
+        self.gui_config: Optional[ConfigManager] = None
+        self.open_view_handler: Optional[Callable[[str, str], None]] = None
+
         self.module_value_tracker: LatestModuleValueTracker = None
 
         self._subscribers = []
@@ -604,6 +609,15 @@ class Registry:
         if handler is not None:
             return handler(display_name)
         return self.rotate_session(display_name)
+
+    def open_view(self, kind: str, view_id: str) -> bool:
+        """Asks the GUI, from any thread, to open (or bring forward) a view: kind "watch" with
+        a watch id. Returns at once; False without a GUI."""
+        handler = self.open_view_handler
+        if handler is None:
+            return False
+        handler(kind, view_id)
+        return True
 
     def notify_user(self, message: str, action_text: Optional[str] = None, action: Optional[Callable] = None):
         """Tells the user something from any thread - with a GUI, a toast, optionally with one

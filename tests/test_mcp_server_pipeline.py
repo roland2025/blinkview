@@ -11,6 +11,7 @@ through a real tcp_client source to a socket this test listens on."""
 import json
 import socket
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -731,6 +732,137 @@ def test_a_key_value_pipeline_added_by_patch_extracts_from_new_lines(registry, r
     assert sorted(_messages(extracted)) == ["3.71", "80"]
     assert "log.vbat: 3.71" in extracted["text"] and "log.soc: 80" in extracted["text"]
     assert _profile_on_disk(registry)["pipelines"]["pipe_kv"] == pipeline
+
+
+# ---------------------------------------------------------------------------
+# Watch lists: create_watch, open_view, get_config / apply_config_patch with target='gui'
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gui(registry, run_dir, tmp_path):
+    """What BlinkMainWindow gives the registry: the GUI's own config and a way to open a view
+    (here a list of what was asked for). tests/test_mcp_watches_ui.py has the real window."""
+    from blinkview.core.config_manager import ConfigManager
+
+    _wait_for_server(run_dir)
+    with pytest.raises(AgentApiError, match="runs without a window"):
+        _call(run_dir, "create_watch", name="Battery")
+    assert _call(run_dir, "status")["instances"][0]["can_edit_watches"] is False
+
+    registry.gui_config = ConfigManager(tmp_path / "gui.json", tmp_path / "gui.autosave.json", {"watches": {}})
+    opened = []
+    registry.open_view_handler = lambda kind, view_id: opened.append((kind, view_id))
+    notices = []
+    registry.user_notice_handler = lambda message, action_text, action: notices.append((message, action_text, action))
+    return SimpleNamespace(config=registry.gui_config, opened=opened, notices=notices)
+
+
+def test_create_watch_writes_the_watch_and_opens_it(registry, run_dir, gui):
+    registry.id_registry.get_device("board").get_module("battery.vbat")
+    modules_before = len(registry.id_registry.get_all_modules())
+    assert _call(run_dir, "status")["instances"][0]["can_edit_watches"] is True
+
+    created = _call(
+        run_dir,
+        "create_watch",
+        name=" Battery ",
+        entries=[
+            {"type": "section", "label": "Pack"},
+            {"label": "Voltage", "modules": ["board.battery.vbat"]},
+            {"label": "Current", "modules": ["board.battery.ibat"], "key": "row_mine"},
+            {"type": "group_start", "label": "Actions"},
+            {"type": "button", "label": "Reset", "command_payload": "reset", "target_device": "src_board"},
+            {"type": "group_end"},
+        ],
+    )
+
+    watch_id = created["id"]
+    assert created["applied"] is True and created["opened"] is True
+    assert created["changed"] == [f"/watches/{watch_id}"]
+    assert created["warnings"] == [
+        f"/watches/{watch_id}/entries/2: no module 'board.battery.ibat' has logged in this session"
+    ]
+    assert gui.opened == [("watch", watch_id)]
+    assert gui.notices[0][:2] == (f"Agent changed /watches/{watch_id}", "Undo")
+    # Checking the names registered nothing: a misspelled module must not appear in the sidebar.
+    assert len(registry.id_registry.get_all_modules()) == modules_before
+
+    watch = json.loads((gui.config.filepath).read_text())["watches"][watch_id]
+    assert watch["id"] == watch_id and watch["name"] == "Battery"
+    assert [e["type"] for e in watch["entries"]] == ["section", "row", "row", "group_start", "button", "group_end"]
+    keys = [e.get("key") for e in watch["entries"]]
+    assert keys[0] is None and keys[2] == "row_mine"
+    assert keys[1].startswith("row_") and keys[3].startswith("grp_start_") and keys[4].startswith("btn_")
+    assert len(set(keys[1:])) == 5
+
+    assert _call(run_dir, "get_config", target="gui", path=f"/watches/{watch_id}/name")["config"] == "Battery"
+    assert _call(run_dir, "open_view", id=watch_id) == {"kind": "watch", "id": watch_id, "opened": True}
+    assert gui.opened == [("watch", watch_id)] * 2
+    assert _call(run_dir, "create_watch", name="Unopened", open=False)["opened"] is False
+    assert len(gui.opened) == 2
+
+
+def test_a_watch_is_edited_by_patch_and_bad_edits_are_refused(registry, run_dir, gui):
+    watch_id = _call(run_dir, "create_watch", name="Motor", entries=[{"label": "State", "modules": ["board.log"]}])[
+        "id"
+    ]
+    path = f"/watches/{watch_id}"
+    gui.config.apply_patch("/", [{"op": "add", "path": "/layout", "value": {"x": 1}}])
+    before = gui.config.get_full_config()
+
+    def patch(*ops, **args):
+        return _call(run_dir, "apply_config_patch", target="gui", path=path, patch=list(ops), **args)
+
+    for op, message in [
+        (
+            {"op": "add", "path": "/entries/-", "value": {"type": "gauge", "label": "x"}},
+            "entries/1: unknown type 'gauge'",
+        ),
+        ({"op": "add", "path": "/entries/-", "value": {"type": "row", "label": "x"}}, "entries/1: a row needs 'key'"),
+        ({"op": "add", "path": "/entries/-", "value": {"type": "group_end", "key": "g"}}, "group_end without"),
+        ({"op": "add", "path": "/entries/-", "value": {"type": "group_start", "key": "g"}}, "without a group_end"),
+        ({"op": "add", "path": "/entries/0/modules/-", "value": "nodot"}, "a list of 'device.module' names"),
+        ({"op": "replace", "path": "/name", "value": ""}, "'name' must be a non-empty string"),
+        ({"op": "replace", "path": "/id", "value": "other"}, "'id' must be the watch's key"),
+        ({"op": "replace", "path": "/entries/9/label", "value": "x"}, "the patch does not apply"),
+    ]:
+        with pytest.raises(AgentApiError, match=message):
+            patch(op)
+    with pytest.raises(AgentApiError, match="'/layout' cannot be changed here, only /watches"):
+        _call(run_dir, "apply_config_patch", target="gui", patch=[{"op": "remove", "path": "/layout"}])
+    with pytest.raises(AgentApiError, match="'target' must be 'profile' or 'gui'"):
+        _call(run_dir, "apply_config_patch", target="watches", patch=[{"op": "remove", "path": "/layout"}])
+    assert gui.config.get_full_config() == before
+
+    row = {"type": "row", "key": "row_speed", "label": "Speed", "modules": ["board.log"], "colour": "red"}
+    result = patch({"op": "add", "path": "/entries/-", "value": row})
+    assert result["changed"] == [path]
+    assert len(result["warnings"]) == 1 and "unknown key 'colour' (a row has: " in result["warnings"][0]
+    assert gui.config.get_by_path(f"{path}/entries/1/label") == "Speed"
+    # The profile is untouched, and stays closed to the agent: allow_config is off.
+    assert "watches" not in registry.config.get_full_config()
+    with pytest.raises(AgentApiError, match="changing the configuration is turned off"):
+        _call(run_dir, "apply_config_patch", patch=[{"op": "remove", "path": "/sources/src_other"}])
+
+    assert _call(run_dir, "apply_config_patch", target="gui", patch=result["undo"])["applied"] is True
+    assert gui.config.get_full_config() == before
+
+
+def test_allow_watches_off(registry, run_dir, gui):
+    registry.config.apply_patch("/pipelines/pipe_mcp", [{"op": "add", "path": "/allow_watches", "value": False}])
+    _wait_for(
+        lambda: [i for i in agent_api.list_instances(run_dir) if i["info"]["can_edit_watches"] is False],
+        what="the restarted server",
+    )
+    with pytest.raises(AgentApiError, match="changing watch lists is turned off"):
+        _call(run_dir, "create_watch", name="Battery")
+    with pytest.raises(AgentApiError, match="changing watch lists is turned off"):
+        _call(run_dir, "apply_config_patch", target="gui", patch=[{"op": "add", "path": "/watches/w", "value": {}}])
+    # Reading them is reading: allow_read.
+    assert _call(run_dir, "get_config", target="gui", path="/watches")["config"] == {}
+    with pytest.raises(AgentApiError, match="no watch 'nope'"):
+        _call(run_dir, "open_view", id="nope")
 
 
 # ---------------------------------------------------------------------------
