@@ -13,6 +13,26 @@ from typing import Any, Dict, List
 from blinkview.utils.atomic_json_dump import atomic_json_dump
 
 
+def _undo_patch(before: dict, after: dict) -> list:
+    """The patch (paths from the root) that turns `after` back into `before`. Each replace or
+    remove is preceded by a 'test' that the value is still the one `after` has there, so an
+    undo applied after someone else edited the same place fails as a whole instead of
+    removing the wrong list item."""
+    import jsonpatch
+    import jsonpointer
+
+    undo = []
+    doc = deepcopy(after)
+    for op in jsonpatch.make_patch(after, before).patch:
+        if op["op"] in ("replace", "remove"):
+            undo.append(
+                {"op": "test", "path": op["path"], "value": deepcopy(jsonpointer.resolve_pointer(doc, op["path"]))}
+            )
+        undo.append(op)
+        doc = jsonpatch.apply_patch(doc, [op], in_place=True)
+    return undo
+
+
 class ConfigManager:
     def __init__(self, filepath, autosave_path, default_config=None, params: Dict[str, Any] = None, param_type_of=None):
         self.filepath = filepath
@@ -151,53 +171,101 @@ class ConfigManager:
 
         with self._lock:
             try:
-                # Promote relative paths to absolute paths for the global data
-                base_path = "" if path == "/" else path.rstrip("/")
-                global_patch = []
-
-                for op in patch:
-                    new_op = op.copy()
-
-                    # We must prefix BOTH 'path' and 'from' (for move/copy ops)
-                    for key in ("path", "from"):
-                        if key in new_op:
-                            rel_path = new_op[key]
-                            if rel_path == "":
-                                # If relative path is empty, it points exactly to the base path
-                                new_op[key] = base_path if base_path != "" else "/"
-                            elif rel_path.startswith("/"):
-                                new_op[key] = f"{base_path}{rel_path}"
-                            else:
-                                new_op[key] = f"{base_path}/{rel_path}"
-
-                    global_patch.append(new_op)
-
-                # Apply the patch
-
                 import jsonpatch
 
-                self._data = jsonpatch.apply_patch(self._data, global_patch)
-                try:
-                    self._persist_patch(global_patch)
-                except Exception as e:
-                    print(f"[ConfigManager] Failed to save {self.filepath}: {e}")
-
-                # print(f"[ConfigManager] FULL CONFIG: {json.dumps(self._data, indent=4)}")  # Debug print after patch application
-
-                # Persistent Mirroring to Session
-                self.session_autosave()
-
-                # Notify Subscribers
-                self._notify_subscribers(global_patch)
-
-                if self.config_changed_cb is not None:
-                    new_config = self.get_by_path(path, make_deep_copy=True)
-                    # print(f"[Registry] Calling config_changed_cb for {path} with new_config: {new_config}")
-                    schema = self.get_schema_by_path(path) if self.get_schema_by_path else None
-                    self.config_changed_cb(path, new_config, schema)
-
+                global_patch = self._to_global_patch(path, patch)
+                self._commit(path, global_patch, jsonpatch.apply_patch(self._data, global_patch))
             except Exception as e:
                 print(f"[ConfigManager] Error applying patch: {e}")
+
+    def apply_patch_checked(self, path: str, patch: list, check=None, dry_run: bool = False) -> list:
+        """apply_patch for callers that need to know whether it worked (the mcp_server
+        pipeline): raises ConfigPatchError for a patch that is malformed or does not apply,
+        instead of printing and carrying on. Nothing is changed then.
+
+        `check(before, after)` sees the whole config before and after and may refuse the change
+        by raising ConfigPatchError. `dry_run` stops after it.
+
+        Returns the patch that undoes the change (see _undo_patch), [] when nothing changed."""
+        import jsonpatch
+        import jsonpointer
+
+        from blinkview.core.config_schema import ConfigPatchError
+
+        with self._lock:
+            global_patch = self._to_global_patch(path, patch, strict=True)
+            try:
+                after = jsonpatch.apply_patch(self._data, global_patch)
+            except jsonpatch.JsonPatchTestFailed as e:
+                raise ConfigPatchError(f"the patch was not applied, a 'test' did not hold: {e}") from None
+            except (jsonpatch.JsonPatchException, jsonpointer.JsonPointerException, TypeError, KeyError) as e:
+                raise ConfigPatchError(f"the patch does not apply: {e}") from None
+
+            if check is not None:
+                check(self._data, after)
+            undo = _undo_patch(self._data, after)
+            if undo and not dry_run:
+                self._commit(path, global_patch, after)
+            return undo
+
+    @staticmethod
+    def _to_global_patch(path: str, patch: list, strict: bool = False) -> list:
+        """`patch`, whose op paths are relative to `path`, with paths from the config's root.
+        `strict` raises ConfigPatchError for anything that is not a well-formed patch."""
+        from blinkview.core.config_schema import ConfigPatchError
+
+        if strict:
+            if not isinstance(path, str) or not path.startswith("/"):
+                raise ConfigPatchError("'path' must start with '/', e.g. '/pipelines'")
+            if not isinstance(patch, list) or not patch:
+                raise ConfigPatchError("'patch' must be a non-empty list of JSON Patch operations")
+
+        # Promote relative paths to absolute paths for the global data
+        base_path = "" if path == "/" else path.rstrip("/")
+        global_patch = []
+
+        for op in patch:
+            if strict and not (isinstance(op, dict) and isinstance(op.get("op"), str) and "path" in op):
+                raise ConfigPatchError(f"not a JSON Patch operation (needs 'op' and 'path'): {op!r}")
+            new_op = op.copy()
+
+            # We must prefix BOTH 'path' and 'from' (for move/copy ops)
+            for key in ("path", "from"):
+                if key in new_op:
+                    rel_path = new_op[key]
+                    if strict and not (isinstance(rel_path, str) and (rel_path == "" or rel_path.startswith("/"))):
+                        raise ConfigPatchError(f"'{key}' of an operation must be '' or start with '/': {rel_path!r}")
+                    if rel_path == "":
+                        # If relative path is empty, it points exactly to the base path
+                        new_op[key] = base_path if base_path != "" else "/"
+                    elif rel_path.startswith("/"):
+                        new_op[key] = f"{base_path}{rel_path}"
+                    else:
+                        new_op[key] = f"{base_path}/{rel_path}"
+
+            global_patch.append(new_op)
+        return global_patch
+
+    def _commit(self, path: str, global_patch: list, new_data: dict):
+        """Makes `new_data` (the config with `global_patch` applied) the config: saves it and
+        tells everyone. Called with the lock held."""
+        self._data = new_data
+        try:
+            self._persist_patch(global_patch)
+        except Exception as e:
+            print(f"[ConfigManager] Failed to save {self.filepath}: {e}")
+
+        # Persistent Mirroring to Session
+        self.session_autosave()
+
+        # Notify Subscribers
+        self._notify_subscribers(global_patch)
+
+        if self.config_changed_cb is not None:
+            new_config = self.get_by_path(path, make_deep_copy=True)
+            # print(f"[Registry] Calling config_changed_cb for {path} with new_config: {new_config}")
+            schema = self.get_schema_by_path(path) if self.get_schema_by_path else None
+            self.config_changed_cb(path, new_config, schema)
 
     def _notify_subscribers(self, global_patch: list):
         """Checks which subscribed paths were touched by the patch operations."""

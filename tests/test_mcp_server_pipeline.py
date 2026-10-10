@@ -535,6 +535,205 @@ def test_get_config_refuses_bad_requests(registry, run_dir, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# list_types, get_schema, apply_config_patch
+# ---------------------------------------------------------------------------
+
+
+def test_list_types_and_get_schema_describe_what_the_config_takes(registry, run_dir):
+    _wait_for_server(run_dir)
+
+    overview = _call(run_dir, "list_types")
+    assert overview["config_paths"] == {
+        "/sources/<id>": "source",
+        "/pipelines/<id>": "parser",
+        "/central": "central",
+        "/reorder": "reorder",
+    }
+    assert "anchor_word" in overview["categories"]["key_value_rule"]
+    assert "tcp_client" in overview["categories"]["source"]
+
+    rules = _call(run_dir, "list_types", category="KEY_VALUE_RULE")
+    assert rules["category"] == "key_value_rule"
+    assert set(rules["types"]) == set(overview["categories"]["key_value_rule"])
+    assert rules["types"]["anchor_word"] == "Extract values matching startswith/endswith/contains patterns."
+
+    by_type = _call(run_dir, "get_schema", category="key_value_rule", type="anchor_word")["schema"]
+    assert by_type["properties"]["match"]["enum"] == ["starts_with", "contains", "ends_with"]
+    assert "ui_order" not in by_type["properties"]["match"]
+
+    by_path = _call(run_dir, "get_schema", path="/pipelines/pipe_mcp")
+    assert by_path["path"] == "/pipelines/pipe_mcp"
+    assert by_path["schema"]["properties"]["allow_config"]["default"] is False
+    assert _call(run_dir, "get_schema", path="/sources/src_board/port")["schema"]["type"] == "integer"
+
+    for args, message in [
+        ({}, "pass 'path', or a 'category'"),
+        ({"category": "nope", "type": "x"}, "pass 'path', or a 'category'"),
+        ({"category": "source"}, "unknown type 'None' in 'source'"),
+        ({"category": "source", "type": "nope"}, "unknown type 'nope' in 'source'"),
+        ({"path": "/sources", "category": "source"}, "either 'path' or 'category' and 'type'"),
+        ({"path": "sources"}, "'path' must start with '/'"),
+        ({"path": "/sources/nope"}, "nothing at '/sources/nope'"),
+        ({"path": "/version"}, "no schema for '/version'"),
+    ]:
+        with pytest.raises(AgentApiError, match=message):
+            _call(run_dir, "get_schema", **args)
+    with pytest.raises(AgentApiError, match="unknown category 'nope'"):
+        _call(run_dir, "list_types", category="nope")
+
+
+@pytest.fixture
+def configurable(registry, run_dir):
+    """The registry with `allow_config` turned on (it is off unless the user turns it on), and
+    the notices it would show the user collected instead."""
+    _wait_for_server(run_dir)
+    assert _call(run_dir, "status")["instances"][0]["can_configure"] is False
+    with pytest.raises(AgentApiError, match="changing the configuration is turned off"):
+        _call(run_dir, "apply_config_patch", patch=[{"op": "remove", "path": "/sources/src_other"}])
+
+    registry.config.apply_patch("/pipelines/pipe_mcp", [{"op": "add", "path": "/allow_config", "value": True}])
+    _wait_for(
+        lambda: [i for i in agent_api.list_instances(run_dir) if i["info"]["can_configure"] is True],
+        what="the restarted server",
+    )
+    notices = []
+    registry.user_notice_handler = lambda message, action_text, action: notices.append((message, action_text, action))
+    return notices
+
+
+def _profile_on_disk(registry):
+    return json.loads(registry.config.filepath.read_text())
+
+
+def _rename_other(run_dir, name):
+    patch = [{"op": "replace", "path": "/sources/src_other/name", "value": name}]
+    return _call(run_dir, "apply_config_patch", patch=patch)
+
+
+def test_apply_config_patch_changes_the_running_source_and_the_profile_file(registry, run_dir, configurable):
+    before = registry.config.get_full_config()
+
+    result = _call(
+        run_dir,
+        "apply_config_patch",
+        path="/sources/src_other",
+        patch=[{"op": "replace", "path": "/name", "value": "spare"}],
+    )
+
+    assert result["applied"] is True
+    assert result["changed"] == ["/sources/src_other"]
+    assert result["warnings"] == []
+    assert isinstance(result["seq"], int)
+    assert registry.sources.get("src_other").name == "spare"
+    assert _profile_on_disk(registry)["sources"]["src_other"]["name"] == "spare"
+    logged = _wait_for(
+        lambda: _call(run_dir, "read_logs", include_system=True, contains="config changed: ")["text"],
+        what="the change in the log",
+    )
+    assert "/sources/src_other, patch at '/sources/src_other'" in logged
+
+    # The agent's own way back: the returned patch, from the root.
+    assert _call(run_dir, "apply_config_patch", patch=result["undo"])["applied"] is True
+    assert registry.config.get_full_config() == before
+    assert _profile_on_disk(registry) == before
+    assert registry.sources.get("src_other").name == "other"
+
+
+def test_the_user_is_told_of_each_change_and_can_undo_it(registry, run_dir, configurable):
+    before = registry.config.get_full_config()
+
+    _rename_other(run_dir, "spare")
+
+    assert [(message, action_text) for message, action_text, _ in configurable] == [
+        ("Agent changed /sources/src_other", "Undo")
+    ]
+    configurable.pop()[2]()  # the Undo button
+    _wait_for(lambda: configurable, what="the notice that it was undone")
+    assert configurable[0][:2] == ("Undone: /sources/src_other", None)
+    assert registry.config.get_full_config() == before
+    assert registry.sources.get("src_other").name == "other"
+
+    # Undo of a change that was edited over since: refused, and the later edit stays.
+    _rename_other(run_dir, "one")
+    undo_first = configurable.pop()[2]
+    _rename_other(run_dir, "two")
+    configurable.clear()
+    undo_first()
+    _wait_for(lambda: configurable, what="the notice that it could not be undone")
+    assert configurable[0][0].startswith("Could not undo the change to /sources/src_other")
+    assert registry.sources.get("src_other").name == "two"
+
+
+def test_apply_config_patch_refuses_what_would_break_the_config(registry, run_dir, configurable):
+    before, before_file = registry.config.get_full_config(), registry.config.filepath.read_text()
+
+    for patch, message in [
+        ([{"op": "replace", "path": "/sources/src_other/port", "value": "80"}], "port: expected integer, got string"),
+        ([{"op": "add", "path": "/sources/src_new", "value": {"type": "tcp"}}], "/sources/src_new: unknown type 'tcp'"),
+        ([{"op": "remove", "path": "/sources/src_board"}], "sources_/0: no entry 'src_board' in /sources"),
+        ([{"op": "replace", "path": "/version", "value": "9"}], "'/version' cannot be changed here"),
+        ([{"op": "add", "path": "/pipelines/pipe_mcp/send_to_any", "value": True}], "is a 'mcp_server' pipeline"),
+        ([{"op": "replace", "path": "/sources/src_gone/name", "value": "x"}], "the patch does not apply"),
+        ([{"op": "replace", "path": "sources/src_other/name", "value": "x"}], "must be '' or start with '/'"),
+        ("nope", "non-empty list"),
+    ]:
+        with pytest.raises(AgentApiError, match=message):
+            _call(run_dir, "apply_config_patch", patch=patch)
+
+    assert registry.config.get_full_config() == before
+    assert registry.config.filepath.read_text() == before_file
+    assert configurable == []
+
+
+def test_apply_config_patch_dry_run_and_warnings(registry, run_dir, configurable):
+    before = registry.config.get_full_config()
+    patch = [{"op": "add", "path": "/sources/src_other/hots", "value": "10.0.0.1"}]
+
+    checked = _call(run_dir, "apply_config_patch", patch=patch, dry_run=True)
+
+    assert checked["applied"] is False
+    assert checked["changed"] == ["/sources/src_other"]
+    assert len(checked["warnings"]) == 1 and "unknown key 'hots'" in checked["warnings"][0]
+    assert "undo" not in checked
+    assert registry.config.get_full_config() == before
+    assert configurable == []
+
+    same = _rename_other(run_dir, "other")
+    assert same["applied"] is False and same["note"] == "the patch changes nothing"
+    assert configurable == []
+
+
+def test_a_key_value_pipeline_added_by_patch_extracts_from_new_lines(registry, run_dir, device, configurable):
+    """The loop the config tools exist for: add a rule, then see its rows in the log."""
+    pipeline = {
+        "enabled": True,
+        "type": "multi_rule_key_value",
+        # Its own device name: the parser skips rows of the device it writes to.
+        "name": "telemetry",
+        "sources_": ["pipe_board"],
+        "rules": [{"type": "key_value", "module_name": "board.log"}],
+    }
+    patch = [{"op": "add", "path": "/pipelines/pipe_kv", "value": pipeline}]
+    result = _call(run_dir, "apply_config_patch", patch=patch)
+    assert result["changed"] == ["/pipelines/pipe_kv"] and result["warnings"] == []
+
+    _say(device, "vbat=3.71 soc=80")
+
+    def rows():
+        try:  # the device does not exist before its first row
+            found = _call(run_dir, "read_logs", device="telemetry", after_seq=result["seq"])
+        except AgentApiError:
+            return None
+        return found if found["lines"] == 2 else None
+
+    # Generous: the extraction kernel may have to compile first.
+    extracted = _wait_for(rows, timeout=120, what="the extracted rows")
+    assert sorted(_messages(extracted)) == ["3.71", "80"]
+    assert "log.vbat: 3.71" in extracted["text"] and "log.soc: 80" in extracted["text"]
+    assert _profile_on_disk(registry)["pipelines"]["pipe_kv"] == pipeline
+
+
+# ---------------------------------------------------------------------------
 # list_modules, and read_logs around a time
 # ---------------------------------------------------------------------------
 

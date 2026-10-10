@@ -88,6 +88,9 @@ from blinkview.utils.used_modules import print_used_modules
 SCREEN_CHANGE_SETTLE_MS = 2000
 SCREEN_CHANGE_PROMPT_SECONDS = 20.0
 
+# How long a notice with a button (Registry.notify_user, e.g. Undo of an agent's config change) stays up.
+USER_NOTICE_ACTION_SECONDS = 20.0
+
 # How often to check whether the profile files were saved by someone else (one stat() each).
 PROFILE_WATCH_INTERVAL_MS = 2000
 
@@ -541,6 +544,7 @@ class BlinkMainWindow(QMainWindow):
         self._session_rotation_bridge = _SessionRotationBridge(self)
         self._session_rotation_bridge.requested.connect(self._on_session_rotation_requested)
         registry.session_rotation_handler = self._session_rotation_bridge.request
+        registry.user_notice_handler = self._show_user_notice
 
         # Replay-load progress state (see start_replay) - same "keep it alive / dismissable"
         # reasoning as the shutdown-toast state above.
@@ -1345,6 +1349,19 @@ class BlinkMainWindow(QMainWindow):
         return True
 
     @Slot(object)
+    def _show_user_notice(self, message: str, action_text: Optional[str] = None, action=None):
+        """Registry.user_notice_handler: called on any thread, the dispatcher's signal takes the
+        toast to the UI thread. One with a button stays long enough to be clicked."""
+        from blinkview.ui.widgets.toast_dispatcher import toast_dispatcher
+
+        toast_dispatcher.notify(
+            message,
+            duration=USER_NOTICE_ACTION_SECONDS if action_text else 5.0,
+            action_text=action_text,
+            action_callback=action,
+            parent=self,
+        )
+
     def _on_session_rotation_requested(self, request: _SessionRotationRequest):
         """A rotation asked for from another thread (see _SessionRotationBridge)."""
         request.old_dir = self.gui_context.registry.file_manager.session_dir

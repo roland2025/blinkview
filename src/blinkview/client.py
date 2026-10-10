@@ -117,6 +117,22 @@ class BlinkView:
         """The profile configuration at `path` (e.g. "/pipelines"), as it is in effect now."""
         return self.call("get_config", path=path, **_given(depth=depth))["config"]
 
+    def list_types(self, category: Optional[str] = None) -> dict:
+        """The categories and their type names, or one category's types with descriptions."""
+        return self.call("list_types", **_given(category=category))
+
+    def get_schema(
+        self, path: Optional[str] = None, category: Optional[str] = None, type: Optional[str] = None
+    ) -> dict:
+        """The schema of the config at `path`, or of `type` in `category`."""
+        return self.call("get_schema", **_given(path=path, category=category, type=type))["schema"]
+
+    def apply_config_patch(self, patch: list, path: str = "/", dry_run: bool = False) -> dict:
+        """Changes the profile configuration with a JSON Patch whose paths are relative to
+        `path`. Refused (AgentApiError, nothing changed) when it would leave the config
+        invalid. The result's "undo" is the patch that reverts it, applied with path "/"."""
+        return self.call("apply_config_patch", patch=patch, path=path, dry_run=dry_run)
+
 
 def _given(**args) -> dict:
     return {key: value for key, value in args.items() if value is not None}

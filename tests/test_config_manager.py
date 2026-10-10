@@ -9,6 +9,7 @@ import json
 import pytest
 
 from blinkview.core.config_manager import ConfigManager
+from blinkview.core.config_schema import ConfigPatchError
 
 
 class DummyCallback:
@@ -369,3 +370,119 @@ class TestGetConfigSchema:
         config, schema = cm.get_config_schema("/a")
         assert config == 1
         assert schema == {"type": "integer"}
+
+
+class TestApplyPatchChecked:
+    @pytest.fixture
+    def cm(self, paths):
+        filepath, autosave = paths
+        filepath.write_text(json.dumps({"pipelines": {"p1": {"rules": ["a", "b"]}}, "version": "1"}))
+        return ConfigManager(filepath, autosave)
+
+    def test_applies_saves_and_notifies_like_apply_patch(self, cm, paths):
+        filepath, autosave = paths
+        subscriber = DummyCallback()
+        cm.subscribe("/pipelines", subscriber)
+        changes = []
+        cm.config_changed_cb = lambda path, config, schema: changes.append((path, config))
+
+        cm.apply_patch_checked("/pipelines/p1", [{"op": "add", "path": "/rules/-", "value": "c"}])
+
+        expected = {"pipelines": {"p1": {"rules": ["a", "b", "c"]}}, "version": "1"}
+        assert cm.get_full_config() == expected
+        assert json.loads(filepath.read_text()) == expected
+        assert json.loads(autosave.read_text()) == expected
+        assert subscriber.apply_config_calls == [{"p1": {"rules": ["a", "b", "c"]}}]
+        assert changes == [("/pipelines/p1", {"rules": ["a", "b", "c"]})]
+
+    def test_the_returned_patch_undoes_the_change_byte_for_byte(self, cm, paths):
+        filepath, _ = paths
+        before_text = filepath.read_text()
+        before = cm.get_full_config()
+
+        undo = cm.apply_patch_checked(
+            "/",
+            [
+                {"op": "add", "path": "/pipelines/p1/rules/-", "value": "c"},
+                {"op": "replace", "path": "/pipelines/p1/rules/0", "value": "A"},
+                {"op": "add", "path": "/pipelines/p2", "value": {"rules": []}},
+            ],
+        )
+        assert cm.get_full_config() != before
+
+        assert cm.apply_patch_checked("/", undo) != []
+        assert cm.get_full_config() == before
+        assert json.loads(filepath.read_text()) == json.loads(before_text)
+
+    def test_undo_is_refused_once_the_same_place_was_edited_again(self, cm):
+        undo = cm.apply_patch_checked("/pipelines/p1", [{"op": "add", "path": "/rules/-", "value": "c"}])
+        # Someone removes 'a': index 2, which the undo would remove, no longer exists.
+        cm.apply_patch_checked("/pipelines/p1", [{"op": "remove", "path": "/rules/0"}])
+        after_both = cm.get_full_config()
+
+        with pytest.raises(ConfigPatchError, match="does not apply|did not hold"):
+            cm.apply_patch_checked("/", undo)
+        assert cm.get_full_config() == after_both
+
+        # ... and with something else now at that index, the test before the remove stops it.
+        cm.apply_patch_checked("/pipelines/p1", [{"op": "add", "path": "/rules/-", "value": "d"}])
+        with pytest.raises(ConfigPatchError, match="a 'test' did not hold"):
+            cm.apply_patch_checked("/", undo)
+        assert cm.get_full_config()["pipelines"]["p1"]["rules"] == ["b", "c", "d"]
+
+    @pytest.mark.parametrize(
+        "path, patch, message",
+        [
+            ("/pipelines/p1", [{"op": "add", "path": "rules/-", "value": "c"}], "must be '' or start with '/'"),
+            ("pipelines", [{"op": "add", "path": "/x", "value": 1}], "'path' must start with '/'"),
+            ("/", [], "non-empty list"),
+            ("/", {"op": "add"}, "non-empty list"),
+            ("/", ["add"], "not a JSON Patch operation"),
+            ("/", [{"op": "replace", "path": "/nope/deeper", "value": 1}], "does not apply"),
+            ("/", [{"op": "remove", "path": "/pipelines/p1/rules/7"}], "does not apply"),
+            ("/", [{"op": "frobnicate", "path": "/version"}], "does not apply"),
+            (
+                "/",
+                [{"op": "test", "path": "/version", "value": "2"}, {"op": "remove", "path": "/version"}],
+                "a 'test' did not hold",
+            ),
+        ],
+    )
+    def test_a_bad_patch_raises_and_changes_nothing(self, cm, paths, path, patch, message):
+        filepath, _ = paths
+        before, before_text = cm.get_full_config(), filepath.read_text()
+        subscriber = DummyCallback()
+        cm.subscribe("/", subscriber)
+
+        with pytest.raises(ConfigPatchError, match=message):
+            cm.apply_patch_checked(path, patch)
+
+        assert cm.get_full_config() == before
+        assert filepath.read_text() == before_text
+        assert subscriber.apply_config_calls == []
+
+    def test_check_sees_before_and_after_and_can_refuse(self, cm):
+        seen = []
+
+        def check(before, after):
+            seen.append((before["version"], after["version"]))
+            raise ConfigPatchError("no")
+
+        with pytest.raises(ConfigPatchError, match="no"):
+            cm.apply_patch_checked("/", [{"op": "replace", "path": "/version", "value": "2"}], check=check)
+        assert seen == [("1", "2")]
+        assert cm.get_full_config()["version"] == "1"
+
+    def test_dry_run_and_a_patch_that_changes_nothing_leave_the_file_alone(self, cm, paths):
+        filepath, _ = paths
+        before_text = filepath.read_text()
+        subscriber = DummyCallback()
+        cm.subscribe("/", subscriber)
+
+        undo = cm.apply_patch_checked("/", [{"op": "replace", "path": "/version", "value": "2"}], dry_run=True)
+        assert [op["op"] for op in undo] == ["test", "replace"]
+        assert cm.apply_patch_checked("/", [{"op": "replace", "path": "/version", "value": "1"}]) == []
+
+        assert cm.get_full_config()["version"] == "1"
+        assert filepath.read_text() == before_text
+        assert subscriber.apply_config_calls == []

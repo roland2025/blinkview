@@ -39,6 +39,10 @@ class FactoryRegistry:
         """Returns the factory class itself if you need direct access."""
         return self._factories.get(category.lower())
 
+    def get_categories(self) -> list[str]:
+        """Returns the names of all registered categories."""
+        return list(self._factories.keys())
+
     def get_category_types(self, category: str) -> list[str]:
         """Returns a list of available types for a given category."""
         category = category.lower()  # Normalize category names to lowercase

@@ -8,7 +8,7 @@
 a running BlinkView (one whose profile has an enabled `mcp_server` pipeline - see
 parsers/mcp_server.py and core/agent_api.py).
 
-The protocol part is hand-written rather than built on the `mcp` SDK: four tools over
+The protocol part is hand-written rather than built on the `mcp` SDK: a dozen tools over
 newline-delimited JSON-RPC need no dependency, and this has to start fast. Standard library
 only - nothing here may pull in numba or Qt."""
 
@@ -37,7 +37,10 @@ INSTRUCTIONS = (
     "with a sequence cursor: pass the `next_seq` of one call as `after_seq` of the next. "
     "`summary` counts lines per module and level - start there to find where the errors are. "
     "`telemetry_latest` gives the current value of every module, `telemetry_series` a module's numeric "
-    "history. `get_config` shows how the profile's sources and pipelines are set up. For a whole "
+    "history. `get_config` shows how the profile's sources and pipelines are set up. To change it "
+    "(e.g. add a key/value extraction rule): `get_schema` for the fields an entry takes, `list_types` "
+    "for the types that exist, then `apply_config_patch` - try it with `dry_run` first, and check the "
+    "effect with `read_logs(after_seq=<the returned seq>)`. For a whole "
     "recorded session use the shell command `blink export SESSION_ID` (see `blink export --help`)."
 )
 
@@ -232,7 +235,7 @@ TOOLS = [
         "description": "Reads the running instance's profile configuration as JSON, as it is in effect "
         "now: `/sources` (the connections), `/pipelines` (parsers and their rules, by id), `/central`, "
         "`/reorder`. Start with `path='/'` and `depth=2` for an outline of what exists, then read one "
-        "entry in full, e.g. `/pipelines/<id>`. Read-only.",
+        "entry in full, e.g. `/pipelines/<id>`. Read-only; `apply_config_patch` changes it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -247,6 +250,72 @@ TOOLS = [
                 },
                 "instance": _INSTANCE_PROPERTY,
             },
+        },
+    },
+    {
+        "name": "list_types",
+        "description": "Lists what the configuration can be built from. Every source, pipeline and nested "
+        "part (frame decoder, key/value rule, ...) is an object whose `type` picks one type of a category. "
+        "Without arguments: which category each config path takes, and every category's type names. With "
+        "`category`: its types with a one-line description each. `get_schema` then gives a type's fields.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "e.g. 'parser', 'source', 'key_value_rule'."},
+                "instance": _INSTANCE_PROPERTY,
+            },
+        },
+    },
+    {
+        "name": "get_schema",
+        "description": "The JSON Schema of a piece of configuration: its fields, their types, defaults and "
+        "descriptions. Either of an existing place (`path`, e.g. `/pipelines/<id>` or "
+        "`/pipelines/<id>/rules/0`), or of a type that is not in the config yet (`category` and `type`, "
+        "from `list_types`). A field marked `_factory: <category>` takes an object with a `type` of that "
+        "category plus that type's own fields - ask for its schema separately. `_reference` marks a "
+        "field holding the id of another entry (`/sources`: a source id). `required` fields that have a "
+        "`default` may be left out.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "A path into the configuration, as for `get_config`."},
+                "category": {"type": "string", "description": "With `type`, instead of `path`."},
+                "type": {"type": "string", "description": "A type name of `category`."},
+                "instance": _INSTANCE_PROPERTY,
+            },
+        },
+    },
+    {
+        "name": "apply_config_patch",
+        "description": "Changes the running instance's profile configuration with a JSON Patch (RFC 6902). "
+        "It takes effect at once and is saved to the profile file, like an edit in BlinkView's own "
+        "settings. The result is checked against the schema first: a patch that adds an error (wrong "
+        "type, unknown `type`, a reference to an id that does not exist) is refused as a whole and "
+        "nothing changes. Only `/sources`, `/pipelines`, `/central` and `/reorder` can be changed, and "
+        "not an `mcp_server` pipeline. The user sees each change with an Undo button; it needs 'Agent "
+        "may change the configuration' on the mcp_server pipeline (`can_configure` in `status`). "
+        "Returns `changed` (the entries that differ), `warnings` (e.g. a key the schema does not know - "
+        "usually a typo), `undo` (the patch that reverts it; apply it with `path='/'`) and `seq`, the "
+        "log cursor from just before the change. A new entry needs an id of your choice as its key.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "patch": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": 'Operations, e.g. [{"op": "add", "path": "/rules/-", "value": {...}}]. '
+                    "`add` on an object key sets or creates it; `/-` appends to a list; `test` makes the "
+                    "whole patch depend on a value.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "The operations' paths are relative to this (default '/', the whole "
+                    "configuration), e.g. '/pipelines/<id>'.",
+                },
+                "dry_run": {"type": "boolean", "description": "Check only, change nothing (default false)."},
+                "instance": _INSTANCE_PROPERTY,
+            },
+            "required": ["patch"],
         },
     },
     {

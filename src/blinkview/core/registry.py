@@ -296,6 +296,9 @@ class Registry:
         # and returns once it finished - see request_session_rotation().
         self.session_rotation_handler: Optional[Callable[[Optional[str]], tuple[Path, Path]]] = None
 
+        # Set by the GUI (BlinkMainWindow): shows the user a message, see notify_user().
+        self.user_notice_handler: Optional[Callable[[str, Optional[str], Optional[Callable[[], None]]], None]] = None
+
         self.module_value_tracker: LatestModuleValueTracker = None
 
         self._subscribers = []
@@ -601,6 +604,14 @@ class Registry:
         if handler is not None:
             return handler(display_name)
         return self.rotate_session(display_name)
+
+    def notify_user(self, message: str, action_text: Optional[str] = None, action: Optional[Callable] = None):
+        """Tells the user something from any thread - with a GUI, a toast, optionally with one
+        button that runs `action` on the UI thread. Without a GUI nothing is shown: log the
+        same thing if it has to be on record."""
+        handler = self.user_notice_handler
+        if handler is not None:
+            handler(message, action_text, action)
 
     def stop(self, on_progress: Optional[Callable[[int, int, str], None]] = None):
         """Cleanly tear down the session.
