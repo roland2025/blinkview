@@ -33,7 +33,7 @@ INSTRUCTIONS = (
     "its reply, call `send` with `wait_s` (and `quiet_ms` or `until`). `read_logs` reads the live log "
     "with a sequence cursor: pass the `next_seq` of one call as `after_seq` of the next. "
     "`telemetry_latest` gives the current value of every module, `telemetry_series` a module's numeric "
-    "history. For a whole "
+    "history. `get_config` shows how the profile's sources and pipelines are set up. For a whole "
     "recorded session use the shell command `blink export SESSION_ID` (see `blink export --help`)."
 )
 
@@ -196,10 +196,33 @@ TOOLS = [
         },
     },
     {
+        "name": "get_config",
+        "description": "Reads the running instance's profile configuration as JSON, as it is in effect "
+        "now: `/sources` (the connections), `/pipelines` (parsers and their rules, by id), `/central`, "
+        "`/reorder`. Start with `path='/'` and `depth=2` for an outline of what exists, then read one "
+        "entry in full, e.g. `/pipelines/<id>`. Read-only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Where to read, '/'-separated keys and list indexes (default '/', everything).",
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "Only this many levels; objects and lists below that come back empty "
+                    "({} or []). Default: everything under the path.",
+                },
+                "instance": _INSTANCE_PROPERTY,
+            },
+        },
+    },
+    {
         "name": "command",
         "description": "Runs one of a source's own commands, as listed by `status` - for J-Link RTT: "
         "reset (reset the MCU), halt, restart (resume), rtt_restart. These act on the debug probe or "
-        "port, they are not sent to the firmware.",
+        "port, they are not sent to the firmware. The returned `seq` is the log cursor from just before "
+        "the command: `read_logs(after_seq=seq, wait_s=...)` reads what the device logged after it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -278,6 +301,12 @@ def call_tool(name: str, args: dict, run_dir: Optional[Path] = None, cwd: Option
 
     args = dict(args)
     instance = _pick_instance(instances, args.pop("instance", None), cwd or Path.cwd())
+    return call_instance_tool(instance, name, args)
+
+
+def call_instance_tool(instance: dict, name: str, args: dict) -> Any:
+    """One tool call on an already chosen instance, with an HTTP timeout that outlasts what the
+    tool itself may wait for. Shared with blinkview.client."""
     timeout = ROTATE_TIMEOUT_SECONDS if name == "rotate_session" else 10.0
     wait_s = args.get("wait_s")
     if isinstance(wait_s, (int, float)) and not isinstance(wait_s, bool):

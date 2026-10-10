@@ -4,6 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import json
+
 from blinkview.core.agent_api import AgentApiError, AgentApiServer
 from blinkview.core.agent_log_read import current_sequence, list_modules, read_logs
 from blinkview.core.agent_telemetry import telemetry_latest, telemetry_series
@@ -11,6 +13,10 @@ from blinkview.core.configurable import configuration_property, override_propert
 from blinkview.parsers.parser import BaseParser, ParserFactory
 
 MAX_SEND_CHARS = 4096
+# get_config's answer as JSON text. Above it the agent is told to narrow the path or pass 'depth'.
+MAX_CONFIG_CHARS = 50_000
+
+_MISSING = object()
 
 
 @ParserFactory.register("mcp_server")
@@ -47,12 +53,13 @@ MAX_SEND_CHARS = 4096
 )
 @configuration_property(
     "allow_read",
-    title="Agent may read logs and telemetry",
+    title="Agent may read logs, telemetry and config",
     type="boolean",
     default=True,
     required=True,
     ui_order=5,
-    description="Lets the agent read this session's log lines, module list and telemetry values.",
+    description="Lets the agent read this session's log lines, module list and telemetry values, "
+    "and this profile's configuration.",
 )
 @configuration_property(
     "port",
@@ -68,6 +75,7 @@ class McpServer(BaseParser):
 * Starts a new session.
 * Reads log lines, through the log viewer's own filters and formatter.
 * Reads telemetry: the latest value per module, and a module's numeric history.
+* Reads this profile's configuration (sources, pipelines, ...) as it is in effect now.
 * Listens on 127.0.0.1 only and requires a per-run token; everything it does is logged.
 
 It is not a parser: no data flows through it. Connect an agent with `claude mcp add blinkview -- blink mcp`."""
@@ -93,6 +101,7 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
                     "list_modules": self._tool_list_modules,
                     "telemetry_latest": self._tool_telemetry_latest,
                     "telemetry_series": self._tool_telemetry_series,
+                    "get_config": self._tool_get_config,
                 },
                 port=self.port,
                 run_info={
@@ -230,6 +239,28 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
             raise AgentApiError(f"reading logs is turned off on the '{self.name}' pipeline")
         return read_logs(self.shared.registry, args, self._stop_event.is_set)
 
+    def _tool_get_config(self, args: dict) -> dict:
+        self._require_read()
+        path = args.get("path", "/")
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise AgentApiError("'path' must start with '/', e.g. '/pipelines'")
+        depth = args.get("depth")
+        if depth is not None and (not isinstance(depth, int) or isinstance(depth, bool) or depth < 1):
+            raise AgentApiError("'depth' must be an integer of 1 or more")
+
+        # A copy: the answer is serialized after the config's lock is released.
+        config = self.shared.registry.config.get_by_path(path, _MISSING, make_deep_copy=True, depth=depth)
+        if config is _MISSING:
+            raise AgentApiError(f"nothing at '{path}' in the profile's configuration")
+
+        size = len(json.dumps(config))
+        if size > MAX_CONFIG_CHARS:
+            raise AgentApiError(
+                f"the configuration at '{path}' is {size} characters (max {MAX_CONFIG_CHARS}): "
+                "pass 'depth' for an outline, or a path further down"
+            )
+        return {"path": path, "config": config}
+
     def _tool_command(self, args: dict) -> dict:
         source_id, source = self._resolve_source(args)
         command = args.get("command")
@@ -237,9 +268,11 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
         if command not in commands:
             raise AgentApiError(f"unknown command '{command}' for '{source_id}', available: {sorted(commands)}")
 
+        # Taken before the command, like send's: a reset's boot log is read from here on.
+        seq = current_sequence(self.shared.registry)
         self.logger.info("command to '%s': %s", source_id, command)
         source.send_command(command)
-        return {"source": source_id, "command": command}
+        return {"source": source_id, "command": command, "seq": seq}
 
     def _tool_rotate_session(self, args: dict) -> dict:
         if not self.allow_rotate:

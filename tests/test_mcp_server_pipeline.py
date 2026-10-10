@@ -161,8 +161,12 @@ def test_command_must_be_one_the_source_offers(registry, run_dir):
     source.get_commands = lambda: [("reset", "Reset MCU")]
     source.send_command = received.append
 
-    assert _call(run_dir, "command", command="reset") == {"source": "src_board", "command": "reset"}
+    seq_before = _call(run_dir, "status")["instances"][0]["seq"]
+    result = _call(run_dir, "command", command="reset")
     assert received == ["reset"]
+    assert (result["source"], result["command"]) == ("src_board", "reset")
+    # The log cursor from just before the command (startup lines may still be arriving).
+    assert seq_before <= result["seq"] <= _call(run_dir, "status")["instances"][0]["seq"]
 
 
 def test_rotate_session_starts_a_new_session_folder(registry, run_dir):
@@ -367,6 +371,51 @@ def test_allow_read_off(registry, run_dir):
     )
     with pytest.raises(AgentApiError, match="reading logs is turned off"):
         _call(run_dir, "read_logs")
+    with pytest.raises(AgentApiError, match="reading logs is turned off"):
+        _call(run_dir, "get_config")
+
+
+# ---------------------------------------------------------------------------
+# get_config
+# ---------------------------------------------------------------------------
+
+
+def test_get_config_returns_the_profile_at_a_path(registry, run_dir):
+    _wait_for_server(run_dir)
+
+    assert _call(run_dir, "get_config", path="/pipelines/pipe_mcp/send_to") == {
+        "path": "/pipelines/pipe_mcp/send_to",
+        "config": ["src_board"],
+    }
+    assert _call(run_dir, "get_config", path="/pipelines/pipe_mcp/send_to/0")["config"] == "src_board"
+    assert _call(run_dir, "get_config", path="/sources/src_board")["config"]["host"] == "127.0.0.1"
+
+    whole = _call(run_dir, "get_config")
+    assert whole["path"] == "/"
+    assert whole["config"] == registry.config.get_full_config()
+
+    outline = _call(run_dir, "get_config", depth=2)["config"]
+    assert outline["sources"] == {"src_board": {}, "src_other": {}}
+    assert outline["version"] == "0.2"
+
+
+def test_get_config_refuses_bad_requests(registry, run_dir, monkeypatch):
+    from blinkview.parsers import mcp_server
+
+    _wait_for_server(run_dir)
+
+    with pytest.raises(AgentApiError, match="nothing at '/sources/nope'"):
+        _call(run_dir, "get_config", path="/sources/nope")
+    with pytest.raises(AgentApiError, match="'path' must start with '/'"):
+        _call(run_dir, "get_config", path="sources")
+    for depth in (0, True, "2"):
+        with pytest.raises(AgentApiError, match="'depth' must be"):
+            _call(run_dir, "get_config", depth=depth)
+
+    monkeypatch.setattr(mcp_server, "MAX_CONFIG_CHARS", 100)
+    with pytest.raises(AgentApiError, match=r"is \d+ characters \(max 100\): pass 'depth'"):
+        _call(run_dir, "get_config")
+    assert _call(run_dir, "get_config", depth=1)["config"]["sources"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -576,3 +625,87 @@ def test_telemetry_series_with_several_channels_and_bad_requests(registry, run_d
         _call(run_dir, "telemetry_series", device="board")
     with pytest.raises(AgentApiError, match="has no module 'nope'"):
         _call(run_dir, "telemetry_series", device="board", module="nope")
+
+
+# ---------------------------------------------------------------------------
+# blinkview.client (the scripting client) and examples/reset_connect_cycles.py
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def resettable(registry, device):
+    """Gives the board a `reset` command; each reset makes the "firmware" print a boot log
+    ending in a numbered 'network connected' line. Returns the list of resets received."""
+    source = registry.sources.get("src_board")
+    resets = []
+
+    def send_command(command):
+        resets.append(command)
+        _say(device, "booting", f"network connected {len(resets)}")
+
+    source.get_commands = lambda: [("reset", "Reset MCU")]
+    source.send_command = send_command
+    return resets
+
+
+def test_client_status_and_calls_reach_the_instance(registry, run_dir, device):
+    from blinkview.client import BlinkView
+
+    bv = BlinkView.connect()
+
+    assert bv.status()["session_id"] == registry.file_manager.session_dir.name
+    assert bv.seq() <= bv.status()["seq"]  # two calls: startup lines may land in between
+    assert bv.get_config("/pipelines/pipe_mcp/type") == "mcp_server"
+    assert bv.get_config("/pipelines", depth=1) == {"pipe_board": {}, "pipe_mcp": {}}
+    with pytest.raises(AgentApiError, match="unknown command 'reset'"):
+        bv.command("reset")
+
+
+def test_client_wait_for_finds_the_line_logged_after_a_command(registry, run_dir, device, resettable):
+    from blinkview.client import BlinkView
+
+    bv = BlinkView.connect()
+    _say(device, "network connected 0")  # an older boot: must not be mistaken for the new one
+    _wait_for(lambda: bv.read_logs(contains="network connected 0")["lines"], what="the old line")
+
+    seq = bv.command("reset")
+    match = bv.wait_for("network connected", after_seq=seq, timeout_s=10, device="board")
+
+    assert match.text.endswith("network connected 1")
+    # The cursor is just past the match: the next wait sees only the next boot.
+    assert bv.wait_for("network connected", after_seq=match.next_seq, timeout_s=0.3) is None
+    bv.command("reset")
+    assert bv.wait_for("network connected", after_seq=match.next_seq, timeout_s=10).text.endswith("connected 2")
+
+
+def test_client_wait_for_from_now_on_and_timeout(registry, run_dir, device):
+    from blinkview.client import BlinkView
+
+    bv = BlinkView.connect()
+    _say(device, "ready")
+    _wait_for(lambda: bv.read_logs(contains="ready")["lines"], what="the line")
+
+    started = time.monotonic()
+    assert bv.wait_for("ready", timeout_s=0.5) is None  # already logged: not "from now on"
+    assert 0.4 < time.monotonic() - started < 5
+
+
+def test_reset_connect_cycles_example_reports_each_cycle(registry, run_dir, device, resettable, monkeypatch, capsys):
+    import runpy
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "examples" / "reset_connect_cycles.py"
+    monkeypatch.setattr("sys.argv", [str(script), "network connected", "--cycles", "3", "--timeout", "10"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_path(str(script), run_name="__main__")
+
+    out = capsys.readouterr().out
+    assert exit_info.value.code == 0
+    assert resettable == ["reset"] * 3
+    assert [line.rsplit(": ", 1)[-1] for line in out.splitlines()[:3]] == [
+        "network connected 1",
+        "network connected 2",
+        "network connected 3",
+    ]
+    assert "3 of 3 cycles reached 'network connected'" in out
