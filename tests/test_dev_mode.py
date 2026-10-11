@@ -127,7 +127,7 @@ def test_real_registry_logs_central_stats_only_in_dev_mode(tmp_path, monkeypatch
         meta = json.loads((registry.file_manager.session_dir / "metadata.json").read_text())
         assert meta["environment"]["dev_mode"] is dev_mode
 
-        _push_for(registry, 1.5)
+        _push_for(registry, 3.0)
 
         assert ("central.stats" in registry.system_device.path_lookup) is dev_mode
     finally:
