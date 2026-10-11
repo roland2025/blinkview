@@ -6,6 +6,7 @@
 
 import re
 from copy import deepcopy
+from html import escape
 
 from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtWidgets import (
@@ -24,6 +25,8 @@ from qtpy.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStyle,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -33,6 +36,25 @@ from blinkview.ui.utils.window_title import titled
 from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.config_widget_factory import WidgetFactory
 from blinkview.ui.widgets.message_box import MessageBox
+
+# Global setting: help texts written out under each field (True), or behind an info button.
+SHOW_HELP_SETTING = "config.show_help"
+
+
+def reflow(description: str) -> str:
+    """A description with the line breaks it only has because its source was wrapped taken out,
+    so the form wraps it at its own width. Blank lines, indented lines (an example) and list
+    items keep theirs."""
+    lines = []
+    in_paragraph = False  # the last line is running text a wrapped line may continue
+    for line in description.strip().splitlines():
+        is_text = bool(line.strip()) and not line[0].isspace()
+        if is_text and in_paragraph and not line.startswith(("* ", "- ")):
+            lines[-1] += " " + line
+        else:
+            lines.append(line)
+        in_paragraph = is_text
+    return "\n".join(lines)
 
 
 @register_widget_factory(WidgetName.DYNAMIC_CONFIG)
@@ -67,6 +89,9 @@ class DynamicConfigWidget(QWidget):
         self.current_config = {}
 
         self._widget_registry = {}
+
+        settings = getattr(self.gui_context, "settings", None)
+        self.show_help = bool(settings.get(SHOW_HELP_SETTING, True)) if settings is not None else True
 
         self.main_layout = QVBoxLayout(self)
 
@@ -105,6 +130,15 @@ class DynamicConfigWidget(QWidget):
 
         # Add the button row at the bottom
         self.button_layout = QHBoxLayout()
+
+        self.cb_show_help = QCheckBox("Show help text")
+        self.cb_show_help.setToolTip(
+            "Off: the descriptions are hidden behind an info button - hover it, or click it, to read one."
+        )
+        self.cb_show_help.setChecked(self.show_help)
+        self.cb_show_help.toggled.connect(self._on_show_help_toggled)
+        self.button_layout.addWidget(self.cb_show_help)
+
         self.button_layout.addStretch()  # Pushes the button to the right
 
         self.btn_revert = QPushButton("Revert Changes")
@@ -270,6 +304,44 @@ class DynamicConfigWidget(QWidget):
         self.btn_apply.setEnabled(False)
         self.btn_revert.setEnabled(False)
 
+    def _make_help(self, title: str, description: str, style: str) -> tuple[QLabel, QToolButton]:
+        """A description twice: written out as a label, and as an info button showing it on hover
+        and on click. Only one of the two is visible, see `show_help`."""
+        description = reflow(description)
+        label = QLabel(description)
+        label.setObjectName("HelpText")
+        label.setWordWrap(True)
+        # Force Qt to respect the width/height of wrapped text
+        label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Minimum)
+        label.setStyleSheet(style)
+        # hide() only: showing a widget that has no parent yet would open it as a window.
+        if not self.show_help:
+            label.hide()
+
+        button = QToolButton()
+        button.setObjectName("HelpButton")
+        button.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxInformation))
+        button.setAutoRaise(True)
+        button.setCursor(Qt.PointingHandCursor)
+        # Rich text, so a long description wraps; pre-wrap keeps the lines of an example apart.
+        button.setToolTip(f"<p style='white-space: pre-wrap'>{escape(description)}</p>")
+        button.clicked.connect(lambda _=False: QMessageBox.information(self, titled(title), description))
+        if self.show_help:
+            button.hide()
+        return label, button
+
+    def _on_show_help_toggled(self, show: bool):
+        self.show_help = show
+        settings = getattr(self.gui_context, "settings", None)
+        if settings is not None:
+            settings.set(SHOW_HELP_SETTING, show, scope="global")
+
+        # Looked up, not remembered: a factory type change rebuilds parts of the form.
+        for label in self.form_container.findChildren(QLabel, "HelpText"):
+            label.setVisible(show)
+        for button in self.form_container.findChildren(QToolButton, "HelpButton"):
+            button.setVisible(not show)
+
     def _build_ui(self, schema_node: dict, data: dict, layout: QFormLayout, registry: dict, current_path: list = None):
         """Main dispatcher: Prepares the schema, then routes each property to the correct UI builder."""
         current_path = current_path or []
@@ -279,15 +351,16 @@ class DynamicConfigWidget(QWidget):
         if not current_path:  # Only true for the very first root call!
             description = schema_node.get("description", "").strip()
             if description:
-                desc_label = QLabel(description)
-                desc_label.setWordWrap(True)
-                desc_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Minimum)
-
                 # Slightly larger text (12px) and a bigger bottom margin for the main title
-                desc_label.setStyleSheet("color: #aaa; font-size: 12px; font-style: italic; margin-bottom: 12px;")
+                desc_label, help_button = self._make_help(
+                    schema_node.get("title", "Description"),
+                    description,
+                    "color: #aaa; font-size: 12px; font-style: italic; margin-bottom: 12px;",
+                )
 
                 # addRow with one widget spans the entire top of the form
                 layout.addRow(desc_label)
+                layout.addRow(help_button)
 
         # Prepare the schema (Inject factory types if necessary)
         self._inject_factory_schema(schema_node, data, registry)
@@ -847,11 +920,11 @@ class DynamicConfigWidget(QWidget):
         group_main_layout = QVBoxLayout(group_box)
 
         if description:
-            desc_label = QLabel(description)
-            desc_label.setWordWrap(True)
-            desc_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Minimum)
-            desc_label.setStyleSheet("color: #888; font-size: 11px; font-style: italic; margin-bottom: 6px;")
+            desc_label, help_button = self._make_help(
+                title, description, "color: #888; font-size: 11px; font-style: italic; margin-bottom: 6px;"
+            )
             group_main_layout.addWidget(desc_label)
+            group_main_layout.addWidget(help_button, 0, Qt.AlignLeft)
 
         group_layout = QFormLayout()
         group_layout.setContentsMargins(0, 0, 0, 0)  # Keep it flush
@@ -885,7 +958,20 @@ class DynamicConfigWidget(QWidget):
         field_layout = QVBoxLayout()
         field_layout.setContentsMargins(0, 0, 0, 0)
         field_layout.setSpacing(2)
-        field_layout.addWidget(widget)
+
+        desc_label = None
+        if description:
+            desc_label, help_button = self._make_help(
+                title, description, "color: #888; font-size: 11px; font-style: italic;"
+            )
+            widget_row = QHBoxLayout()
+            widget_row.setContentsMargins(0, 0, 0, 0)
+            widget_row.setSpacing(4)
+            widget_row.addWidget(widget, 1)
+            widget_row.addWidget(help_button, 0, Qt.AlignTop)
+            field_layout.addLayout(widget_row)
+        else:
+            field_layout.addWidget(widget)
 
         # Profile parameters (core/profile_params.py). A field set by --param/--params for this
         # run is read-only: an edit would not reach the profile (ConfigManager keeps the profile's
@@ -908,14 +994,7 @@ class DynamicConfigWidget(QWidget):
 
         row_label = self._make_row_label(title, abs_path, key)
 
-        if description:
-            desc_label = QLabel(description)
-            desc_label.setWordWrap(True)
-            desc_label.setStyleSheet("color: #888; font-size: 11px; font-style: italic;")
-
-            # --- FIX 2: Force Qt to respect the width/height of wrapped text ---
-            desc_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Minimum)
-
+        if desc_label is not None:
             field_layout.addWidget(desc_label)
         field_layout.addStretch()
         if is_required:

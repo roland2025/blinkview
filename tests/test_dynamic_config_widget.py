@@ -671,3 +671,133 @@ class TestProfileParamMenu:
         menu = w._build_param_menu("/sources/src_a/level", "level")
         menu.actions()[-1].trigger()
         assert qapp.clipboard().text() == "/sources/src_a/level"
+
+
+HELP_SCHEMA = {
+    "title": "Rule",
+    "description": "What the rule does.\n\nExample:\n    line:   a=1",
+    "properties": {
+        "name": {"type": "string", "description": "The rule's name."},
+        "level": {"type": "integer", "description": "How loud <it> is."},
+        "plain": {"type": "string"},
+        "nested": {
+            "type": "object",
+            "description": "A nested part.",
+            "properties": {"sub_field": {"type": "string", "description": "Inside the group."}},
+            "required": ["sub_field"],
+        },
+    },
+    "required": ["name", "nested"],
+}
+HELP_CONFIG = {"name": "test", "level": 3, "plain": "x", "nested": {"sub_field": "hi"}}
+
+
+class FakeSettings:
+    def __init__(self, values=None):
+        self.values = dict(values or {})
+        self.scopes = {}
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+    def set(self, key, value, scope="project"):
+        self.values[key] = value
+        self.scopes[key] = scope
+
+
+class TestHelpToggle:
+    """Descriptions are written out under each field, or - with 'Show help text' off - sit
+    behind an info button."""
+
+    def make(self, qtbot, gui_context, settings=None):
+        if settings is not None:
+            gui_context.settings = settings
+        w = DynamicConfigWidget(gui_context)
+        qtbot.addWidget(w)
+        _load(w, HELP_SCHEMA, HELP_CONFIG)
+        w.show()
+        qtbot.waitExposed(w)
+        return w
+
+    @staticmethod
+    def parts(w):
+        labels = w.form_container.findChildren(module.QLabel, "HelpText")
+        buttons = w.form_container.findChildren(module.QToolButton, "HelpButton")
+        return labels, buttons
+
+    def test_every_description_gets_a_label_and_a_button(self, qapp, qtbot, gui_context):
+        w = self.make(qtbot, gui_context)
+        labels, buttons = self.parts(w)
+
+        # The root, 'name', 'level', the 'nested' group and its 'sub_field'; not 'plain'.
+        assert sorted(label.text() for label in labels) == sorted(
+            [HELP_SCHEMA["description"], "The rule's name.", "How loud <it> is.", "A nested part.", "Inside the group."]
+        )
+        assert len(buttons) == len(labels)
+
+    def test_shown_by_default_with_the_buttons_hidden(self, qapp, qtbot, gui_context):
+        w = self.make(qtbot, gui_context)
+        labels, buttons = self.parts(w)
+
+        assert w.cb_show_help.isChecked()
+        assert all(label.isVisible() for label in labels)
+        assert not any(button.isVisible() for button in buttons)
+
+    def test_toggle_swaps_them_and_keeps_unsaved_edits(self, qapp, qtbot, gui_context):
+        settings = FakeSettings()
+        w = self.make(qtbot, gui_context, settings)
+        w._widget_registry["name"]["widget"].setText("edited")
+
+        w.cb_show_help.setChecked(False)
+
+        labels, buttons = self.parts(w)
+        assert not any(label.isVisible() for label in labels)
+        assert all(button.isVisible() for button in buttons)
+        assert w.get_config()["name"] == "edited"
+        assert w.btn_apply.isEnabled()
+        assert settings.values == {module.SHOW_HELP_SETTING: False}
+        assert settings.scopes == {module.SHOW_HELP_SETTING: "global"}
+
+        w.cb_show_help.setChecked(True)
+        assert all(label.isVisible() for label in self.parts(w)[0])
+
+    def test_setting_is_read_at_start_and_survives_a_rebuild(self, qapp, qtbot, gui_context):
+        w = self.make(qtbot, gui_context, FakeSettings({module.SHOW_HELP_SETTING: False}))
+        assert not w.cb_show_help.isChecked()
+
+        _load(w, HELP_SCHEMA, {**HELP_CONFIG, "name": "reloaded"})
+        qapp.processEvents()
+
+        labels, buttons = self.parts(w)
+        assert labels and not any(label.isVisible() for label in labels)
+        assert all(button.isVisible() for button in buttons)
+
+    def test_button_shows_the_description_on_hover_and_on_click(self, qapp, qtbot, gui_context, monkeypatch):
+        w = self.make(qtbot, gui_context, FakeSettings({module.SHOW_HELP_SETTING: False}))
+        buttons = {button.toolTip(): button for button in self.parts(w)[1]}
+
+        # Escaped, so '<it>' is text and not a tag.
+        level_tip = next(tip for tip in buttons if "How loud" in tip)
+        assert "How loud &lt;it&gt; is." in level_tip
+
+        shown = []
+        monkeypatch.setattr(module.QMessageBox, "information", lambda parent, title, text: shown.append((title, text)))
+        buttons[level_tip].click()
+        assert len(shown) == 1
+        assert "Level" in shown[0][0]
+        assert shown[0][1] == "How loud <it> is."
+
+    def test_reflow_joins_wrapped_lines_but_keeps_examples_and_lists(self):
+        wrapped = (
+            "First\nwrapped line.\n\nExample, with x\nand y:\n    line:   a=1\n    gives:  b\n\n* one\n* two\nmore"
+        )
+        assert module.reflow(wrapped).split("\n") == [
+            "First wrapped line.",
+            "",
+            "Example, with x and y:",
+            "    line:   a=1",
+            "    gives:  b",
+            "",
+            "* one",
+            "* two more",
+        ]
