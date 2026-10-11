@@ -371,7 +371,7 @@ class TestApplyConfigLoggingLifecycle:
         file_logger = FakeFileLogger()
         daemon = make_daemon_with_shared(file_logger)
 
-        daemon.apply_config({"logging": {"enabled": True, "processor": {"type": "log_row"}}})
+        daemon.apply_config({"enabled": True, "logging": {"enabled": True, "processor": {"type": "log_row"}}})
 
         assert daemon.file_logger is file_logger
         assert file_logger.started is True
@@ -380,9 +380,32 @@ class TestApplyConfigLoggingLifecycle:
     def test_disabling_logging_stops_and_clears_the_existing_file_logger(self):
         file_logger = FakeFileLogger()
         daemon = make_daemon_with_shared(file_logger)
-        daemon.apply_config({"logging": {"enabled": True, "processor": {"type": "log_row"}}})
+        daemon.apply_config({"enabled": True, "logging": {"enabled": True, "processor": {"type": "log_row"}}})
 
-        daemon.apply_config({"logging": {"enabled": False}})
+        daemon.apply_config({"enabled": True, "logging": {"enabled": False}})
+
+        assert file_logger.stopped is True
+        assert file_logger.cleared is True
+        assert daemon.file_logger is None
+        assert daemon.shared.registry.file_manager.removed == [file_logger]
+
+    def test_disabled_daemon_does_not_build_a_file_logger(self):
+        file_logger = FakeFileLogger()
+        daemon = make_daemon_with_shared(file_logger)
+
+        daemon.apply_config({"enabled": False, "logging": {"enabled": True, "processor": {"type": "log_row"}}})
+
+        assert daemon.file_logger is None
+        assert file_logger.started is False
+        assert daemon.shared.factories.build_calls == []
+
+    def test_disabling_the_daemon_stops_and_clears_its_file_logger(self):
+        file_logger = FakeFileLogger()
+        daemon = make_daemon_with_shared(file_logger)
+        logging_cfg = {"enabled": True, "processor": {"type": "log_row"}}
+        daemon.apply_config({"enabled": True, "logging": logging_cfg})
+
+        daemon.apply_config({"enabled": False, "logging": logging_cfg})
 
         assert file_logger.stopped is True
         assert file_logger.cleared is True

@@ -94,7 +94,9 @@ class BaseDaemon:
                 if self.logger and dev_mode:
                     self.logger.info("Logging conf: %s", logging_cfg)
                 replay_mode = getattr(self.shared.registry, "replay_mode", False)
-                if logging_cfg.get("enabled") and not replay_mode:
+                # A disabled daemon never distributes anything, so its file logger would only
+                # leave an empty part file in every session folder.
+                if logging_cfg.get("enabled") and self.enabled and not replay_mode:
                     if self.file_logger is None:
                         ns = SimpleNamespace(
                             get_logger=self.shared.registry.logger_creator("file_logging", self.local.logging_id),
