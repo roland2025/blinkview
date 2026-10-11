@@ -205,8 +205,6 @@ class Registry:
             else:
                 print(f"[Registry] Base class for '{key}' does not have a config schema or is None.")
 
-        self.session_name = session_name
-
         self.warmup_helper = None
 
         self.warmup_success = False
@@ -301,6 +299,13 @@ class Registry:
         self.module_value_tracker: LatestModuleValueTracker = None
 
         self._subscribers = []
+
+    @property
+    def session_name(self) -> str:
+        """The session's name as recorded in metadata.json. Read from the FileManager, not kept
+        from the constructor's argument: without -s that is None while the session is "Untitled"
+        or named by a params file, and a rotation renames it."""
+        return self.file_manager.session_display_name
 
     def _create_and_bind(self, cls, name, config):
         print(f"[Registry] _create_and_bind name={name} cls={cls.__name__}  config={config}")
@@ -732,10 +737,11 @@ class Registry:
 
     def configure_system(self):
         try:
-            print(f"[Registry] Configuring system with session name: {self.session_name}")
             # base configuration
             if self.initialized:
                 return
+
+            print(f"[Registry] Configuring system with session name: {self.session_name}")
 
             # print()
             self.plugins.apply_config(self.config.get_by_path("/plugins"))

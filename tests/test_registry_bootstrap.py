@@ -62,6 +62,45 @@ class TestFreshBootstrap:
         finally:
             registry.stop()
 
+    def test_unnamed_session_is_logged_under_its_recorded_name_not_none(self, tmp_path):
+        """Without -s the constructor's session_name is None, but the session is recorded as
+        "Untitled" (metadata.json display_name) - the log used to say "Starting Session: None"."""
+        from blinkview.core.registry import Registry
+
+        registry = Registry(log_dir=tmp_path, config_path=tmp_path / "test_config.json")
+        try:
+            assert registry.session_name == "Untitled"
+
+            registry.start()
+            registry.flush_log_queue()
+            msg = _poll_for_message(registry.central.log_pool, registry.system_device.id, b"Starting Session")
+            assert b"Untitled" in msg
+            assert b"None" not in msg
+        finally:
+            registry.stop()
+
+    def test_session_name_follows_a_rename(self, tmp_path):
+        """A params file's default name (and a rotation) renames the session after construction."""
+        registry = make_real_registry(tmp_path, "fresh_boot_test")
+        try:
+            registry.file_manager.session_display_name = "Left_board"
+
+            assert registry.session_name == "Left_board"
+        finally:
+            registry.stop()
+
+    def test_repeated_configure_system_is_silent(self, tmp_path, capsys):
+        """The GUI calls configure_system() three times per start; only the first does anything."""
+        registry = make_real_registry(tmp_path, "fresh_boot_test")
+        try:
+            capsys.readouterr()
+
+            registry.configure_system()
+
+            assert capsys.readouterr().out == ""
+        finally:
+            registry.stop()
+
     def test_live_message_after_start_also_lands_in_central_storage(self, tmp_path):
         """Confirms the post-configure_system() SystemLogger path (not just the pre-init
         _temp_log_queue-drain path) makes it all the way through too."""
