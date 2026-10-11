@@ -23,4 +23,5 @@ plugins:
             show_if_no_docstring: true
 
 nav:
+  - AI agent (MCP): mcp.md
   - API Reference: reference.md
