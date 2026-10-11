@@ -9,8 +9,6 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-os.environ["NUMBA_DEBUG_CACHE"] = "1"
-
 
 def register_desktop_entry():
     if sys.platform != "linux":

@@ -51,6 +51,13 @@ def export_numba_cache(settings, update_source=None):
 
     versioned_dir.mkdir(parents=True, exist_ok=True)
 
+    # Numba's own "[cache] index loaded from ..." line per kernel: only useful when working on
+    # the kernels. Like the cache dir, Numba reads this when it is first imported.
+    from blinkview.utils.dev_mode import resolve_dev_mode
+
+    if resolve_dev_mode(settings):
+        os.environ.setdefault("NUMBA_DEBUG_CACHE", "1")
+
     # Check if the variable is already defined in the environment
     if "NUMBA_CACHE_DIR" not in os.environ:
         # Ensure the directory exists before pointing Numba to it

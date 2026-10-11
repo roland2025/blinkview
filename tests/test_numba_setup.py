@@ -278,3 +278,36 @@ class TestPruneOldCaches:
         assert len(threads) == 1
         assert not old.exists()
         assert (tmp_path / ".numba_cache" / __version__).exists()
+
+
+class TestCacheDebugOutput:
+    """Numba's "[cache] index loaded from ..." lines are for working on the kernels: dev mode only."""
+
+    @pytest.fixture(autouse=True)
+    def clean_env(self, monkeypatch):
+        # setenv first: delenv on an unset variable records nothing to undo (see
+        # restore_numba_cache_dir above), and export_numba_cache() writes os.environ directly.
+        for name in ("NUMBA_DEBUG_CACHE", "NUMBA_CACHE_DIR", "BLINKVIEW_DEV"):
+            monkeypatch.setenv(name, "x")
+            monkeypatch.delenv(name)
+
+    def test_off_by_default(self, tmp_path):
+        numba_setup.export_numba_cache(FakeSettings(tmp_path), UpdateSource.GIT)
+
+        assert "NUMBA_DEBUG_CACHE" not in os.environ
+
+    def test_on_in_dev_mode(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BLINKVIEW_DEV", "1")
+
+        numba_setup.export_numba_cache(FakeSettings(tmp_path), UpdateSource.GIT)
+
+        assert os.environ["NUMBA_DEBUG_CACHE"] == "1"
+
+    def test_importing_the_gui_entry_point_does_not_turn_it_on(self):
+        import importlib
+
+        from blinkview.ui import run as run_module
+
+        importlib.reload(run_module)
+
+        assert "NUMBA_DEBUG_CACHE" not in os.environ
