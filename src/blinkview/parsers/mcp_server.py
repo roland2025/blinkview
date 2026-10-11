@@ -5,6 +5,8 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import json
+import secrets
+import threading
 
 from blinkview.core.agent_api import AgentApiError, AgentApiServer
 from blinkview.core.agent_log_read import current_sequence, list_modules, read_logs, summary
@@ -27,6 +29,8 @@ MAX_SEND_CHARS = 4096
 # get_config's answer as JSON text. Above it the agent is told to narrow the path or pass 'depth'.
 # Also the most a patch given to apply_config_patch may be.
 MAX_CONFIG_CHARS = 50_000
+# Changes whose undo token still works; older ones are forgotten.
+MAX_UNDO_TOKENS = 50
 
 _MISSING = object()
 
@@ -125,6 +129,12 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
     allow_config: bool
     allow_watches: bool
     port: int
+
+    def __init__(self):
+        super().__init__()
+        # token -> (ConfigManager, target, undo patch), oldest first; see _remember_undo().
+        self._undo_patches = {}
+        self._undo_lock = threading.Lock()
 
     def run(self):
         logger = self.logger
@@ -389,11 +399,47 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
         """'device.module' of every module seen so far - a lookup that registers nothing."""
         return {module.name_with_device() for module in self.shared.id_registry.get_all_modules()}
 
+    def _remember_undo(self, manager, target: str, undo: list) -> str:
+        """A token for `undo`, the patch reverting a change: what the agent gets instead of the
+        patch itself, which for a changed list is the whole list twice."""
+        token = secrets.token_hex(4)
+        with self._undo_lock:
+            self._undo_patches[token] = (manager, target, undo)
+            while len(self._undo_patches) > MAX_UNDO_TOKENS:
+                del self._undo_patches[next(iter(self._undo_patches))]
+        return token
+
+    def _undo_by_token(self, token, dry_run: bool) -> dict:
+        with self._undo_lock:
+            remembered = self._undo_patches.get(token) if isinstance(token, str) else None
+        if remembered is None:
+            raise AgentApiError(
+                f"no change with undo token {token!r}: it was undone already, or is older than the last "
+                f"{MAX_UNDO_TOKENS} changes of this run"
+            )
+        manager, target, undo = remembered
+        self._config_target({"target": target}, write=True)
+        try:
+            # The undo patch tests what it replaces, so it is refused once that was edited again.
+            result = self._apply_patch(manager, target, "/", undo, dry_run)
+        except AgentApiError as e:
+            raise AgentApiError(f"could not undo: {e}") from None
+        if result["applied"]:
+            with self._undo_lock:
+                self._undo_patches.pop(token, None)
+        return result
+
     def _tool_apply_config_patch(self, args: dict) -> dict:
-        manager, target = self._config_target(args, write=True)
-        path, patch, dry_run = args.get("path", "/"), args.get("patch"), args.get("dry_run", False)
+        dry_run = args.get("dry_run", False)
         if not isinstance(dry_run, bool):
             raise AgentApiError("'dry_run' must be true or false")
+        if args.get("undo") is not None:
+            if args.get("patch") is not None:
+                raise AgentApiError("pass either 'patch' or 'undo', not both")
+            return self._undo_by_token(args["undo"], dry_run)
+
+        manager, target = self._config_target(args, write=True)
+        path, patch = args.get("path", "/"), args.get("patch")
         try:
             size = len(json.dumps(patch))
         except (TypeError, ValueError):
@@ -424,7 +470,7 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
         if not undo:
             result["note"] = "the patch changes nothing"
         elif not dry_run:
-            result["undo"] = undo
+            result["undo"] = self._remember_undo(manager, target, undo)
             self.logger.info(
                 "%s config changed: %s, patch at '%s': %s", target, ", ".join(changed), path, json.dumps(patch)
             )

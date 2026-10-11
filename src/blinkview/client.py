@@ -128,11 +128,20 @@ class BlinkView:
         """The schema of the config at `path`, or of `type` in `category`."""
         return self.call("get_schema", **_given(path=path, category=category, type=type))["schema"]
 
-    def apply_config_patch(self, patch: list, path: str = "/", dry_run: bool = False, target: str = "profile") -> dict:
+    def apply_config_patch(
+        self,
+        patch: Optional[list] = None,
+        path: str = "/",
+        dry_run: bool = False,
+        target: str = "profile",
+        undo: Optional[str] = None,
+    ) -> dict:
         """Changes the profile configuration (or, with `target="gui"`, the watch lists) with a
         JSON Patch whose paths are relative to `path`. Refused (AgentApiError, nothing changed)
-        when it would leave the config invalid. The result's "undo" is the patch that reverts
-        it, applied with path "/"."""
+        when it would leave the config invalid. The result's "undo" is a token:
+        `apply_config_patch(undo=token)` reverts that change."""
+        if undo is not None:
+            return self.call("apply_config_patch", undo=undo, dry_run=dry_run, **_given(patch=patch))
         return self.call("apply_config_patch", patch=patch, path=path, dry_run=dry_run, target=target)
 
     def create_watch(self, name: str, entries: Optional[list] = None, open: bool = True) -> dict:

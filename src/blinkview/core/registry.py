@@ -747,7 +747,8 @@ class Registry:
             try:
                 reorder_config = self.config.get_by_path("/reorder")
                 if reorder_config:  # is not None and reorder_config.get("enabled", True):
-                    self.logger.info("[System] reorder_config: %s", reorder_config)
+                    if self.dev_mode:
+                        self.logger.info("[System] reorder_config: %s", reorder_config)
                     if reorder_config.get("type") is None:
                         reorder_config["type"] = "default"
 
@@ -765,7 +766,8 @@ class Registry:
             try:
                 central_storage_config = self.config.get_by_path("/central")
                 if central_storage_config:  # is not None and central_storage_config.get("enabled", True):
-                    self.logger.info("[System] central_storage_config: %s", central_storage_config)
+                    if self.dev_mode:
+                        self.logger.info("[System] central_storage_config: %s", central_storage_config)
                     if central_storage_config.get("type") is None:
                         central_storage_config["type"] = "default"
 

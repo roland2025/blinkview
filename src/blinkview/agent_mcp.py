@@ -311,7 +311,8 @@ TOOLS = [
         "not an `mcp_server` pipeline. The user sees each change with an Undo button; it needs 'Agent "
         "may change the configuration' on the mcp_server pipeline (`can_configure` in `status`). "
         "Returns `changed` (the entries that differ), `warnings` (e.g. a key the schema does not know - "
-        "usually a typo), `undo` (the patch that reverts it; apply it with `path='/'`) and `seq`, the "
+        "usually a typo), `undo` (a token: `apply_config_patch(undo=<token>)` reverts this change, as "
+        "long as the same place was not changed again) and `seq`, the "
         "log cursor from just before the change. A new entry needs an id of your choice as its key. "
         "With `target='gui'` it edits the watch lists instead (needs 'Agent may create and change watch "
         "lists'; an open watch window follows the change at once). " + _WATCH_ENTRIES_DESCRIPTION,
@@ -330,11 +331,14 @@ TOOLS = [
                     "description": "The operations' paths are relative to this (default '/', the whole "
                     "configuration), e.g. '/pipelines/<id>'.",
                 },
+                "undo": {
+                    "type": "string",
+                    "description": "Instead of `patch`: the `undo` token of an earlier change, to revert it.",
+                },
                 "dry_run": {"type": "boolean", "description": "Check only, change nothing (default false)."},
                 "target": _TARGET_PROPERTY,
                 "instance": _INSTANCE_PROPERTY,
             },
-            "required": ["patch"],
         },
     },
     {

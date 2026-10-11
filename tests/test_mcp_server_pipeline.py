@@ -633,8 +633,11 @@ def test_apply_config_patch_changes_the_running_source_and_the_profile_file(regi
     )
     assert "/sources/src_other, patch at '/sources/src_other'" in logged
 
-    # The agent's own way back: the returned patch, from the root.
-    assert _call(run_dir, "apply_config_patch", patch=result["undo"])["applied"] is True
+    # The agent's own way back: a token, not the patch (which repeats a changed list in full).
+    assert isinstance(result["undo"], str) and len(result["undo"]) < 20
+    assert _call(run_dir, "apply_config_patch", undo=result["undo"], dry_run=True)["applied"] is False
+    undone = _call(run_dir, "apply_config_patch", undo=result["undo"])
+    assert undone["applied"] is True and undone["changed"] == ["/sources/src_other"]
     assert registry.config.get_full_config() == before
     assert _profile_on_disk(registry) == before
     assert registry.sources.get("src_other").name == "other"
@@ -663,6 +666,44 @@ def test_the_user_is_told_of_each_change_and_can_undo_it(registry, run_dir, conf
     _wait_for(lambda: configurable, what="the notice that it could not be undone")
     assert configurable[0][0].startswith("Could not undo the change to /sources/src_other")
     assert registry.sources.get("src_other").name == "two"
+
+
+def test_an_undo_token_works_once_and_not_over_a_later_edit(registry, run_dir, configurable):
+    first = _rename_other(run_dir, "one")["undo"]
+    second = _rename_other(run_dir, "two")["undo"]
+
+    # 'first' would put back a name that is no longer the one it replaced.
+    with pytest.raises(AgentApiError, match="could not undo: .*'test' did not hold"):
+        _call(run_dir, "apply_config_patch", undo=first)
+    assert registry.sources.get("src_other").name == "two"
+
+    # Undoing gives a token of its own: the way forward again.
+    redo = _call(run_dir, "apply_config_patch", undo=second)["undo"]
+    assert registry.sources.get("src_other").name == "one"
+    with pytest.raises(AgentApiError, match="no change with undo token"):
+        _call(run_dir, "apply_config_patch", undo=second)
+    _call(run_dir, "apply_config_patch", undo=redo)
+    assert registry.sources.get("src_other").name == "two"
+
+    for args in ({"undo": "nope"}, {"undo": 7}):
+        with pytest.raises(AgentApiError, match="no change with undo token"):
+            _call(run_dir, "apply_config_patch", **args)
+    with pytest.raises(AgentApiError, match="either 'patch' or 'undo'"):
+        _call(run_dir, "apply_config_patch", undo=redo, patch=[{"op": "remove", "path": "/sources/src_other"}])
+
+
+def test_a_config_change_does_not_dump_the_config_into_the_log(registry, run_dir, configurable):
+    """Outside dev mode: every change used to log the whole entry it was applied to."""
+    if registry.dev_mode:
+        pytest.skip("dev mode (BLINKVIEW_DEV or the dev_mode setting) logs the config on purpose")
+    seq = _rename_other(run_dir, "quiet")["seq"]
+
+    logged = _wait_for(
+        lambda: _call(run_dir, "read_logs", after_seq=seq, include_system=True, contains="Applying config")["text"],
+        what="the source applying its config",
+    )
+    assert "Applying config:" not in logged and "'host'" not in logged
+    assert "Logging conf" not in _call(run_dir, "read_logs", after_seq=seq, include_system=True, max_lines=2000)["text"]
 
 
 def test_apply_config_patch_refuses_what_would_break_the_config(registry, run_dir, configurable):
@@ -845,7 +886,8 @@ def test_a_watch_is_edited_by_patch_and_bad_edits_are_refused(registry, run_dir,
     with pytest.raises(AgentApiError, match="changing the configuration is turned off"):
         _call(run_dir, "apply_config_patch", patch=[{"op": "remove", "path": "/sources/src_other"}])
 
-    assert _call(run_dir, "apply_config_patch", target="gui", patch=result["undo"])["applied"] is True
+    # The token knows which configuration it belongs to.
+    assert _call(run_dir, "apply_config_patch", undo=result["undo"])["applied"] is True
     assert gui.config.get_full_config() == before
 
 

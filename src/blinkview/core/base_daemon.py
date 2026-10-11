@@ -74,8 +74,13 @@ class BaseDaemon:
         return self._thread is not None and self._thread.is_alive()
 
     def apply_config(self, config: dict):
+        # The whole config only in dev mode (utils/dev_mode.py): it is long, and logged on every change.
+        dev_mode = getattr(getattr(getattr(self, "shared", None), "registry", None), "dev_mode", False)
         if self.logger:
-            self.logger.info("%s: Applying config: %s", self.__class__.__name__, config)
+            if dev_mode:
+                self.logger.info("%s: Applying config: %s", self.__class__.__name__, config)
+            else:
+                self.logger.info("%s: Applying config", self.__class__.__name__)
 
         changed = self.apply_base_config(config)
 
@@ -85,7 +90,7 @@ class BaseDaemon:
                 # logging_cfg["enabled"] = self.enabled
                 logging_cfg["name"] = self.name
 
-                if self.logger:
+                if self.logger and dev_mode:
                     self.logger.info("Logging conf: %s", logging_cfg)
                 replay_mode = getattr(self.shared.registry, "replay_mode", False)
                 if logging_cfg.get("enabled") and not replay_mode:
