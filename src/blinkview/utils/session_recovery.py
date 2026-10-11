@@ -416,7 +416,9 @@ def setup_recover_parser(parser) -> None:
     parser.description = RECOVER_DESCRIPTION
     parser.formatter_class = RawDescriptionHelpFormatter
     parser.add_argument("sessions", nargs="*", metavar="SESSION", help="session id or session folder (default: all)")
-    parser.add_argument("-l", "--logdir", default=None, help="log folder to look sessions up in (default: the project's)")
+    parser.add_argument(
+        "-l", "--logdir", default=None, help="log folder to look sessions up in (default: the project's)"
+    )
     parser.add_argument("--no-compress", action="store_true", help="leave uncompressed log parts as they are")
     parser.add_argument(
         "--force",
@@ -473,7 +475,10 @@ def _was_broken(result: RecoveryResult) -> bool:
     crashed but left alone (another host, a step failed, ...). Not one that is fine, or that an
     earlier run already recovered."""
     if result.skipped is not None:
-        healthy = result.skipped.startswith("session is ") or result.skipped in ("not a session folder", "not a directory")
+        healthy = result.skipped.startswith("session is ") or result.skipped in (
+            "not a session folder",
+            "not a directory",
+        )
         return not healthy
     return result.recovered or bool(result.errors)
 

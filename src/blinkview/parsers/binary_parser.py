@@ -164,9 +164,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
             codec = self._frame_codec
 
-            frame_state = FrameState(
-                pool, codec.frame_length_maximum, start_synced=not codec.frame_resync_on_start
-            )
+            frame_state = FrameState(pool, codec.frame_length_maximum, start_synced=not codec.frame_resync_on_start)
             f_state = frame_state.bundle
 
             o_config = OutputConfig(compact_buffer=getattr(self, "compact_buffer", True))

@@ -198,19 +198,25 @@ def main():
     setup_config_parser(config_parser)
     config_parser.set_defaults(func=handle_config)
 
-    export_parser = subparsers.add_parser("export", prog="blink export", help="Write a recorded session's log out as filtered text")
+    export_parser = subparsers.add_parser(
+        "export", prog="blink export", help="Write a recorded session's log out as filtered text"
+    )
     from blinkview.utils.session_export import run_export, setup_export_parser
 
     setup_export_parser(export_parser)
     export_parser.set_defaults(func=run_export)
 
-    recover_parser = subparsers.add_parser("recover", prog="blink recover", help="Finalize sessions whose recording was killed")
+    recover_parser = subparsers.add_parser(
+        "recover", prog="blink recover", help="Finalize sessions whose recording was killed"
+    )
     from blinkview.utils.session_recovery import run_recover, setup_recover_parser
 
     setup_recover_parser(recover_parser)
     recover_parser.set_defaults(func=run_recover)
 
-    mcp_parser = subparsers.add_parser("mcp", prog="blink mcp", help="MCP server (stdio) for AI agents to act on a running BlinkView")
+    mcp_parser = subparsers.add_parser(
+        "mcp", prog="blink mcp", help="MCP server (stdio) for AI agents to act on a running BlinkView"
+    )
     from blinkview.agent_mcp import run_mcp, setup_mcp_parser
 
     setup_mcp_parser(mcp_parser)

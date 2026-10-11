@@ -485,7 +485,17 @@ class TestFormatSessionTable:
 
         header, newest, oldest = format_session_table(list_sessions(tmp_path, "proj")).splitlines()
 
-        assert header.split() == ["SESSION", "ID", "STARTED", "(local)", "DURATION", "SIZE", "STATUS", "PROFILE", "NAME"]
+        assert header.split() == [
+            "SESSION",
+            "ID",
+            "STARTED",
+            "(local)",
+            "DURATION",
+            "SIZE",
+            "STATUS",
+            "PROFILE",
+            "NAME",
+        ]
         assert newest.startswith("20260929_100000_default_long_name_here  ")
         # "active" in metadata.json, but nothing is recording it - see session_status().
         assert newest.endswith("  crashed   -        long name here")

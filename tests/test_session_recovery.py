@@ -319,9 +319,7 @@ class TestLock:
 
     def test_lock_of_a_dead_recovery_is_taken_over(self, tmp_path):
         session_dir = _make_session(tmp_path)
-        (session_dir / LOCK_FILE_NAME).write_text(
-            json.dumps({"pid": 777, "host": platform.node()}), encoding="utf-8"
-        )
+        (session_dir / LOCK_FILE_NAME).write_text(json.dumps({"pid": 777, "host": platform.node()}), encoding="utf-8")
 
         with _recorder(running=False):
             result = recover_session(session_dir)

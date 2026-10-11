@@ -218,7 +218,10 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         # 2. Stats and Auto-Tuning Setup
         stats = Speedometer(logger=self.logger.stats_child("stats"))
         tuner = ThroughputAutoTuner(
-            speedometer=stats, default_buffer_bytes=read_size, msg_size_bytes=20, logger=self.logger.stats_child("tuner")
+            speedometer=stats,
+            default_buffer_bytes=read_size,
+            msg_size_bytes=20,
+            logger=self.logger.stats_child("tuner"),
         )
 
         pool_create = self.shared.array_pool.create
