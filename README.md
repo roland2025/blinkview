@@ -104,9 +104,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```bash
 uv tool install "blinkview[all]"
+blink setup
 ```
 
 `[all]` brings the GUI and every hardware backend. Narrower extras: `pyside6` (GUI only), `serial`, `can`, `jlink`, `hardware` (all three).
+
+`blink setup` compiles the data-processing kernels once per version, which takes about a minute. The first `blink` does it by itself if you skip it. On a machine without a display, use `blink setup --no-gui`.
 
 ### Updating
 
@@ -120,6 +123,7 @@ Only needed if you want to change BlinkView itself or run unreleased code:
 git clone https://github.com/roland2025/blinkview.git
 cd blinkview
 uv tool install ".[all]"
+blink setup
 ```
 
 A source install updates from the git tags in its checkout instead of PyPI. See [DEVELOPER.md](https://github.com/roland2025/blinkview/blob/main/DEVELOPER.md) for the development setup.
