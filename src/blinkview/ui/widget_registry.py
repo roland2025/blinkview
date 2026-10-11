@@ -24,6 +24,23 @@ def register_widget_factory(name: str):
     return decorator
 
 
+def import_registerable_widgets():
+    """Imports every module that defines a registered widget - the one place that lists them.
+    Each import fires the module's @register_widget_factory(...) and, for the ones with Numba
+    kernels, its @register_warmup callback (module_filter_table's comes in through the two log
+    viewers), so BlinkMainWindow and `blink setup` (ui/setup.py) get the same widgets and compile
+    the same kernels. A plain function, not top-level imports, for the same reason as
+    core/registry.py's _import_registerable_modules(): nothing here is referenced by name, so an
+    "optimize imports" pass would otherwise be free to drop it."""
+    from blinkview.ui.widgets import TelemetryWatch as TelemetryWatch
+    from blinkview.ui.widgets import log_table_viewer as log_table_viewer
+    from blinkview.ui.widgets import log_viewer as log_viewer
+    from blinkview.ui.widgets import plotter as plotter
+    from blinkview.ui.widgets import telemetry_table as telemetry_table
+    from blinkview.ui.widgets import update_widget as update_widget
+    from blinkview.ui.widgets.config import dynamic_config as dynamic_config
+
+
 def build_widget_factory_map() -> Dict[str, type]:
     """Builds a fresh {name: widget class} dict from every @register_widget_factory call seen
     so far, for BlinkMainWindow.widget_factories."""

@@ -9,6 +9,7 @@ import shutil
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 from blinkview import __version__
 
@@ -17,6 +18,9 @@ IS_CACHE_WARM = False
 # Touched on every launch in the running version's cache dir; prune_old_caches() reads it.
 LAST_USED_MARKER = ".last_used"
 PRUNE_AFTER_DAYS = 7
+
+# Written into the cache dir once a full warmup has finished; export_numba_cache() reads it.
+WARMUP_COMPLETE_MARKER = ".warmup_complete"
 
 
 def numba_cache_root(settings, update_source=None) -> Path:
@@ -38,22 +42,14 @@ def numba_cache_root(settings, update_source=None) -> Path:
 def export_numba_cache(settings, update_source=None):
     """
     Calculates the versioned cache path and exports it to the environment.
-    Sets a global flag indicating if the directory was empty upon initialization.
+    Sets a global flag indicating if a full warmup has already been cached there.
     """
     global IS_CACHE_WARM
 
     cache_root = numba_cache_root(settings, update_source)
     versioned_dir = cache_root / __version__
 
-    # Check if populated BEFORE creating/writing to it.
-    # IS_CACHE_WARM means "a warm cache from a previous run is already there", so the UI can
-    # skip the compiling-shaders toast/delays - not "the directory was just freshly created".
-    # Dotfiles (the .last_used marker) don't count as cache contents.
-    if not versioned_dir.exists():
-        IS_CACHE_WARM = False
-        versioned_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        IS_CACHE_WARM = any(not p.name.startswith(".") for p in versioned_dir.iterdir())
+    versioned_dir.mkdir(parents=True, exist_ok=True)
 
     # Check if the variable is already defined in the environment
     if "NUMBA_CACHE_DIR" not in os.environ:
@@ -74,7 +70,29 @@ def export_numba_cache(settings, update_source=None):
         versioned_dir = Path(os.environ["NUMBA_CACHE_DIR"])
         print(f"DEBUG: Using pre-existing NUMBA_CACHE_DIR: {versioned_dir}")
 
+    # IS_CACHE_WARM means "a whole warmup already finished into this dir", so the UI can skip the
+    # compiling-shaders toast - not "there are files in it": a warmup that was closed halfway
+    # leaves files too, and the rest then still compiles on the next start.
+    IS_CACHE_WARM = is_warmup_complete(versioned_dir)
+
     return versioned_dir
+
+
+def is_warmup_complete(cache_dir: Path) -> bool:
+    return (Path(cache_dir) / WARMUP_COMPLETE_MARKER).is_file()
+
+
+def mark_warmup_complete(cache_dir: Optional[Path] = None):
+    """Called after a warmup that compiled every kernel the GUI uses (the main window's, or
+    `blink setup`'s - not the CLI's, which has no widget kernels). Defaults to the dir Numba is
+    using; a no-op when export_numba_cache() never ran. Best effort."""
+    cache_dir = cache_dir or os.environ.get("NUMBA_CACHE_DIR")
+    if not cache_dir:
+        return
+    try:
+        (Path(cache_dir) / WARMUP_COMPLETE_MARKER).touch()
+    except OSError:
+        pass
 
 
 def prune_old_caches(cache_root: Path, current_version: str, max_age_days: float = PRUNE_AFTER_DAYS, now=None):

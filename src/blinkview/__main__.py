@@ -31,6 +31,12 @@ def run_gui(args):
     main(args)
 
 
+def run_setup(args):
+    from .ui.setup import run_setup as main
+
+    main(args)
+
+
 def run_cli(args):
     from .cli import main
 
@@ -209,6 +215,14 @@ def main():
 
     setup_mcp_parser(mcp_parser)
     mcp_parser.set_defaults(func=run_mcp)
+
+    setup_parser = subparsers.add_parser(
+        "setup", help="Compile everything ahead of time, so the next start is fast (runs after an update)"
+    )
+    from blinkview.ui.setup import setup_setup_parser
+
+    setup_setup_parser(setup_parser)
+    setup_parser.set_defaults(func=run_setup)
 
     update_parser = subparsers.add_parser("update", help="Manage BlinkView versions")
     from blinkview.utils.cli_updater import handle_update, setup_update_parser

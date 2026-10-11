@@ -216,6 +216,53 @@ class TestPyPIInstallCommand:
         assert settings.values["update.pending_version"] is None
 
 
+class TestRunInstallThenSetup:
+    """`blink setup` (ui/setup.py) follows a successful install as its own process, so the new
+    version's Numba kernels are compiled before its first start."""
+
+    def test_windows_chains_setup_behind_the_detached_install(self, monkeypatch):
+        u = PyPIUpdater(FakeSettings(), UV_PACKAGE)
+        calls = []
+        monkeypatch.setattr(updater_module.sys, "platform", "win32")
+        monkeypatch.setattr(subprocess, "DETACHED_PROCESS", 8, raising=False)
+        monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 512, raising=False)
+        monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: calls.append(cmd))
+
+        assert u._run_install(["uv", "tool", "install", "blinkview==1.0"]) is True
+
+        setup = subprocess.list2cmdline(u.setup_command())
+        assert calls == [f'cmd /c "timeout /t 2 > nul && uv tool install blinkview==1.0 && {setup}"']
+
+    def test_elsewhere_setup_starts_after_the_install(self, monkeypatch):
+        u = PyPIUpdater(FakeSettings(), UV_PACKAGE)
+        order = []
+        monkeypatch.setattr(updater_module.sys, "platform", "linux")
+        monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: order.append(("install", cmd)))
+        monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: order.append(("setup", cmd)))
+
+        assert u._run_install(["pip", "install", "x"]) is False
+
+        assert order == [("install", ["pip", "install", "x"]), ("setup", u.setup_command())]
+
+    def test_failed_install_does_not_run_setup(self, monkeypatch):
+        u = PyPIUpdater(FakeSettings(), UV_PACKAGE)
+        started = []
+        monkeypatch.setattr(updater_module.sys, "platform", "linux")
+
+        def _fail(cmd, **kw):
+            raise subprocess.CalledProcessError(1, cmd, stderr="no network")
+
+        monkeypatch.setattr(subprocess, "run", _fail)
+        monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: started.append(cmd))
+
+        with pytest.raises(UpdateError, match="no network"):
+            u._run_install(["pip", "install", "x"])
+        assert started == []
+
+    def test_setup_command_runs_the_setup_subcommand_of_this_interpreter(self):
+        assert PyPIUpdater.setup_command() == [sys.executable, "-m", "blinkview", "setup"]
+
+
 class TestUpgrade:
     def test_installs_newest_on_channel_when_newer(self, fake_index, monkeypatch):
         u = PyPIUpdater(FakeSettings(), UV_PACKAGE)

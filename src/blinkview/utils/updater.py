@@ -139,14 +139,24 @@ class Updater:
         versions = self.get_versions(remote=False)
         return versions[0] if versions else None
 
+    @staticmethod
+    def setup_command() -> list[str]:
+        """`blink setup` in the freshly installed version: compiles its Numba kernels right after
+        the install instead of on the next start. Through the interpreter (the install keeps its
+        path), not the `blink` script, which doesn't have to be on PATH."""
+        return [sys.executable, "-m", "blinkview", "setup"]
+
     def _run_install(self, cmd: list[str]) -> bool:
         """Windows can't replace the running blink.exe or loaded .pyds, so the install runs
-        detached after a short delay, once this process has exited (returns True = exit now)."""
+        detached after a short delay, once this process has exited (returns True = exit now).
+        Either way `blink setup` follows a successful install, as its own process: this one
+        still has the old version loaded."""
         import subprocess
 
         if sys.platform == "win32":
             cmd_str = subprocess.list2cmdline(cmd)
-            detached_cmd = f'cmd /c "timeout /t 2 > nul && {cmd_str}"'
+            setup_str = subprocess.list2cmdline(self.setup_command())
+            detached_cmd = f'cmd /c "timeout /t 2 > nul && {cmd_str} && {setup_str}"'
             subprocess.Popen(
                 detached_cmd,
                 shell=True,
@@ -156,9 +166,13 @@ class Updater:
         else:
             try:
                 subprocess.run(cmd, check=True, capture_output=True, text=True)
-                return False
             except subprocess.CalledProcessError as e:
                 raise UpdateError(f"Installation failed: {e.stderr or str(e)}")
+            try:
+                subprocess.Popen(self.setup_command(), start_new_session=True)
+            except OSError as e:
+                print(f"[Updater] Could not start `blink setup`: {e}")  # the next start compiles instead
+            return False
 
     def upgrade(self, current_version: str) -> tuple[bool, str]:
         self.fetch()

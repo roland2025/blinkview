@@ -31,7 +31,7 @@ from shiboken6 import isValid
 from blinkview import __version__ as blinkview_version
 from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.config_manager import ConfigManager
-from blinkview.core.numba_setup import IS_CACHE_WARM
+from blinkview.core.numba_setup import IS_CACHE_WARM, mark_warmup_complete
 from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.native_dark_mode import set_native_dark_mode
@@ -42,22 +42,13 @@ from blinkview.ui.utils.update_checker import check_for_updates_silently
 from blinkview.ui.utils.view_presets import ViewPresetStore, current_screen_fingerprint, screens_match
 from blinkview.ui.utils.window_manager import WindowManager
 from blinkview.ui.utils.window_title import set_title_prefix, titled
-from blinkview.ui.widget_registry import build_widget_factory_map
-
-# Each of these registers a widget class (@register_widget_factory(...)) as an import-time side
-# effect for build_widget_factory_map() above. The "as x" re-export alias is deliberate, not
-# decorative: it's the standard pyflakes/ruff/pyright signal for an intentional re-export.
-from blinkview.ui.widgets.config.dynamic_config import DynamicConfigWidget as DynamicConfigWidget
+from blinkview.ui.widget_registry import build_widget_factory_map, import_registerable_widgets
 from blinkview.ui.widgets.config.style_config import StyleConfig
 from blinkview.ui.widgets.config_tool_button_widget import SourcesToolButton
 from blinkview.ui.widgets.device_sidebar import DeviceSidebarWidget
-from blinkview.ui.widgets.log_table_viewer import LogTableViewerWidget as LogTableViewerWidget
-from blinkview.ui.widgets.log_viewer import LogViewerWidget as LogViewerWidget
 from blinkview.ui.widgets.message_box import MessageBox
 from blinkview.ui.widgets.pipelines_sidebar import PipelinesSidebarWidget
 from blinkview.ui.widgets.playback_control import PlaybackControlWidget
-from blinkview.ui.widgets.plotter import TelemetryPlotter as TelemetryPlotter
-from blinkview.ui.widgets.telemetry_table import TelemetryTable as TelemetryTable
 from blinkview.ui.widgets.TelemetryWatch import TelemetryWatch
 from blinkview.ui.widgets.title_bar import TitleBar
 from blinkview.ui.widgets.toast import ToastManager, ToastType
@@ -65,11 +56,14 @@ from blinkview.ui.widgets.toast import ToastManager, ToastType
 # Imported here, not where it is used: the dispatcher is created on first import and delivers
 # its toasts on the thread it was created on, which has to be this (the UI) thread.
 from blinkview.ui.widgets.toast_dispatcher import toast_dispatcher
-from blinkview.ui.widgets.update_widget import UpdateWidget as UpdateWidget
 from blinkview.ui.widgets.update_widget import check_post_update
 from blinkview.ui.windows.detached_tab_window import DetachedTabWindow
 from blinkview.utils.format_metric import format_metric
 from blinkview.utils.used_modules import print_used_modules
+
+# The widget classes behind build_widget_factory_map() (and their Numba warmups) register
+# themselves on import; the list of them lives in widget_registry, shared with `blink setup`.
+import_registerable_widgets()
 
 # import gc
 # Enable GC debugging to see when collections happen
@@ -637,6 +631,9 @@ class BlinkMainWindow(QMainWindow):
         if self._warmup_toast is not None:
             self._warmup_toast.dismiss()
             self._warmup_toast = None
+
+        if self.gui_context.registry.warmup_success is True:
+            mark_warmup_complete()  # the next start skips the toast
 
         if self.gui_context.is_shutting_down:
             return  # closed mid-warmup (see closeEvent) - don't build the UI we're tearing down

@@ -577,6 +577,36 @@ class TestBackgroundWarmup:
         controlled_warmup.release.set()
         qtbot.waitUntil(lambda: controlled_warmup.sidebars == [True], timeout=5000)
 
+    def test_successful_warmup_marks_the_cache_complete(
+        self, main_window, qtbot, controlled_warmup, monkeypatch, tmp_path
+    ):
+        from blinkview.core.numba_setup import WARMUP_COMPLETE_MARKER
+
+        monkeypatch.setenv("NUMBA_CACHE_DIR", str(tmp_path))
+        main_window.gui_context.registry.warmup_success = True  # what the real warmup() leaves behind
+
+        main_window._start_warmup()
+        controlled_warmup.release.set()
+        qtbot.waitUntil(lambda: controlled_warmup.sidebars == [True], timeout=5000)
+
+        assert (tmp_path / WARMUP_COMPLETE_MARKER).is_file()
+
+    def test_unfinished_warmup_leaves_the_cache_unmarked(
+        self, main_window, qtbot, controlled_warmup, monkeypatch, tmp_path
+    ):
+        """Failed or cancelled: the next start still has kernels to compile, so it must show the
+        toast again."""
+        cache_dir = tmp_path / "numba_cache"
+        cache_dir.mkdir()
+        monkeypatch.setenv("NUMBA_CACHE_DIR", str(cache_dir))
+        main_window.gui_context.registry.warmup_success = False
+
+        main_window._start_warmup()
+        controlled_warmup.release.set()
+        qtbot.waitUntil(lambda: controlled_warmup.sidebars == [True], timeout=5000)
+
+        assert list(cache_dir.iterdir()) == []
+
     def test_toolbar_is_enabled_again_once_the_registry_has_started(self, main_window, monkeypatch):
         main_window._set_startup_controls_enabled(False)
         monkeypatch.setattr(main_window.gui_context.registry, "start", lambda: None)
