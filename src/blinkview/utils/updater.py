@@ -20,6 +20,8 @@ PYPI_SIMPLE_URL = "https://pypi.org/simple"
 
 # How long the detached Windows install waits for this process to exit before it tries anyway.
 EXIT_WAIT_SECONDS = 60
+# ...and how long it waits before its one retry of a failed install.
+INSTALL_RETRY_DELAY_SECONDS = 3
 
 # "Close and Continue": how long another instance's window gets to finish its own shutdown (it
 # compresses its session on the way out), and how long a killed windowless one gets to disappear.
@@ -340,7 +342,12 @@ class Updater:
             cmd_str = subprocess.list2cmdline(cmd)
             setup_str = subprocess.list2cmdline(self.setup_command())
             # `&` after the wait: it reports failure when this process was already gone.
-            detached_cmd = f'cmd /c "{self.wait_for_exit_command()} & {cmd_str} && {setup_str}"'
+            # One retry: something else can hold the fresh blink.exe for a moment (a virus
+            # scanner, the launcher still unwinding), and a second run finishes what the first
+            # left half done.
+            retry_str = f"powershell -NoProfile -Command Start-Sleep {INSTALL_RETRY_DELAY_SECONDS}"
+            install_str = f"({cmd_str} || ({retry_str} & {cmd_str}))"
+            detached_cmd = f'cmd /c "{self.wait_for_exit_command()} & {install_str} && {setup_str}"'
             subprocess.Popen(
                 detached_cmd,
                 shell=True,

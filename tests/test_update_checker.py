@@ -126,6 +126,44 @@ class TestCheckForUpdatesSilently:
         assert call.toast_type == ToastType.INFO
         assert call.kwargs["action_text"] == "INSTALL"
 
+    def _toast_install(self, monkeypatch, closed_others):
+        """Clicks the toast's INSTALL with close_other_instances_for_update() answering
+        closed_others. Returns the versions registered for install."""
+        from blinkview.ui.widgets import update_widget
+
+        dispatcher = make_fake_dispatcher(monkeypatch)
+        monkeypatch.setattr(
+            updater_module,
+            "make_updater",
+            lambda settings: FakeUpdater(settings, latest_version="99.0.0", check_version_status_result=(None, None)),
+        )
+        asked = []
+        monkeypatch.setattr(
+            update_widget,
+            "close_other_instances_for_update",
+            lambda parent, updater, version, busy=None: asked.append(version) or closed_others,
+        )
+        gui_context, _run_task_calls = self.make_gui_context()
+        registered = []
+        gui_context.set_update_version = registered.append
+        update_checker.check_for_updates_silently(gui_context)
+
+        dispatcher.calls[0].kwargs["action_callback"]()
+
+        assert asked == ["99.0.0"]
+        return registered
+
+    def test_toast_install_registers_the_version_when_nothing_else_runs(self, qapp, monkeypatch):
+        assert self._toast_install(monkeypatch, closed_others=None) == ["99.0.0"]
+
+    def test_toast_install_continues_once_the_other_instances_are_closed(self, qapp, monkeypatch):
+        assert self._toast_install(monkeypatch, closed_others=True) == ["99.0.0"]
+
+    def test_toast_install_stops_when_another_instance_stays(self, qapp, monkeypatch):
+        """Cancelled, or one would not close: the window must stay open instead of exiting into
+        an install that is refused with nobody watching."""
+        assert self._toast_install(monkeypatch, closed_others=False) == []
+
     def test_background_worker_does_not_notify_when_already_up_to_date(self, qapp, monkeypatch):
         dispatcher = make_fake_dispatcher(monkeypatch)
 

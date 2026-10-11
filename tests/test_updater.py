@@ -418,7 +418,48 @@ class TestRunInstallThenSetup:
 
         setup = subprocess.list2cmdline(u.setup_command())
         wait = u.wait_for_exit_command()
-        assert calls == [f'cmd /c "{wait} & uv tool install blinkview==1.0 && {setup}"']
+        install = "uv tool install blinkview==1.0"
+        retry = "powershell -NoProfile -Command Start-Sleep 3"
+        assert calls == [f'cmd /c "{wait} & ({install} || ({retry} & {install})) && {setup}"']
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe's operators")
+    @pytest.mark.parametrize(
+        "install_results, expected",
+        [
+            ([0], ["install", "setup"]),
+            ([1, 0], ["install", "install", "setup"]),  # e.g. blink.exe still held for a moment
+            ([1, 1], ["install", "install"]),  # no setup for a version that isn't there
+        ],
+    )
+    def test_windows_chain_retries_a_failed_install_once(self, tmp_path, monkeypatch, install_results, expected):
+        """The real command line through the real cmd.exe, with stand-ins for uv and setup."""
+        log = tmp_path / "log.txt"
+        results = tmp_path / "results.txt"
+        results.write_text("\n".join(map(str, install_results)))
+        fake_install = tmp_path / "fake_install.py"
+        fake_install.write_text(
+            "import sys\n"
+            f"log, results = {str(log)!r}, {str(results)!r}\n"
+            "open(log, 'a').write('install\\n')\n"
+            "codes = open(results).read().split()\n"
+            "open(results, 'w').write('\\n'.join(codes[1:]))\n"
+            "sys.exit(int(codes[0]))\n"
+        )
+        fake_setup = tmp_path / "fake_setup.py"
+        fake_setup.write_text(f"open({str(log)!r}, 'a').write('setup\\n')\n")
+
+        u = PyPIUpdater(FakeSettings(), UV_PACKAGE)
+        monkeypatch.setattr(updater_module, "INSTALL_RETRY_DELAY_SECONDS", 0)
+        monkeypatch.setattr(u, "wait_for_exit_command", lambda: "ver > nul")
+        monkeypatch.setattr(u, "setup_command", lambda: [sys.executable, str(fake_setup)])
+        started = []
+        real_popen = subprocess.Popen
+        monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: started.append(real_popen(cmd, shell=True)))
+
+        u._run_install([sys.executable, str(fake_install)])
+        started[0].wait(timeout=60)
+
+        assert log.read_text().split() == expected
 
     def test_windows_install_waits_for_this_process_to_exit(self):
         """Not a fixed delay: uv can't overwrite blink.exe while a GUI that is still shutting

@@ -38,7 +38,7 @@ def check_for_updates_silently(gui_context, parent=None):
                     toast_type=ToastType.INFO,
                     duration=30,
                     action_text="INSTALL",
-                    action_callback=lambda: gui_context.set_update_version(latest),
+                    action_callback=lambda: install_from_toast(gui_context, updater, latest, parent),
                     click_callback=lambda: gui_context.create_widget(
                         WidgetName.UPDATE_WIDGET, "Updates", as_window=True, reattach_on_close=False
                     ),
@@ -51,6 +51,16 @@ def check_for_updates_silently(gui_context, parent=None):
             pass
 
     gui_context.registry.system_ctx.tasks.run_task(_bg_worker)
+
+
+def install_from_toast(gui_context, updater, version: str, parent=None):
+    """The toast's INSTALL: straight to the install, as before, unless something else from this
+    install is still running - then the update widget's "Close and Continue" question first."""
+    from blinkview.ui.widgets.update_widget import close_other_instances_for_update
+
+    if close_other_instances_for_update(parent, updater, version) is False:
+        return
+    gui_context.set_update_version(version)
 
 
 def check_post_update(updater, parent=None):
