@@ -556,7 +556,7 @@ def test_list_types_and_get_schema_describe_what_the_config_takes(registry, run_
     rules = _call(run_dir, "list_types", category="KEY_VALUE_RULE")
     assert rules["category"] == "key_value_rule"
     assert set(rules["types"]) == set(overview["categories"]["key_value_rule"])
-    assert rules["types"]["anchor_word"] == "Extract values matching startswith/endswith/contains patterns."
+    assert rules["types"]["anchor_word"] == "Takes one word (or a few) out of the lines that contain a given text."
 
     by_type = _call(run_dir, "get_schema", category="key_value_rule", type="anchor_word")["schema"]
     assert by_type["properties"]["match"]["enum"] == ["starts_with", "contains", "ends_with"]

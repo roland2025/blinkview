@@ -66,7 +66,9 @@ _ONE_CHAR = dict(type="string", minLength=1, maxLength=1)
 
 @configurable
 @bindable
-@configuration_property("enabled", type="boolean", default=True, ui_order=2, title="Enabled")
+@configuration_property(
+    "enabled", type="boolean", default=True, ui_order=2, title="Enabled", description="Off: the rule is skipped."
+)
 class ExtractionRule:
     """Base class for section-based polymorphic log extraction rules. bundle() returns a static
     (base_module_id, KvRuleID, KvRuleConfig) triple - all per-row dynamic work happens inside the
@@ -88,9 +90,23 @@ class ExtractionRuleFactory(BaseFactory[ExtractionRule]):
 
 
 @configuration_property("module_name", **_MATCH_MODULE)
-@configuration_property("module_suffix", type="string", default="", ui_order=10, title="Module Name Suffix")
 @configuration_property(
-    "prefix_strip", type="string", default="", ui_order=12, title="Prefix to Strip (e.g., 'Data: ')"
+    "module_suffix",
+    type="string",
+    default="",
+    ui_order=10,
+    title="Module Name Suffix",
+    description="The module the keys are put under, in this pipeline's device and without a device in front: "
+    "'power' gives 'power.vbat'. Empty: the matched module's own name ('app.battery.vbat').",
+)
+@configuration_property(
+    "prefix_strip",
+    type="string",
+    default="",
+    ui_order=12,
+    title="Prefix to Strip (e.g., 'Data: ')",
+    description="Text removed from the start of the line before it is split, when the line starts with it. "
+    "Lines without it are read all the same.",
 )
 @configuration_property(
     "field_delimiter",
@@ -112,9 +128,19 @@ class ExtractionRuleFactory(BaseFactory[ExtractionRule]):
 )
 @ExtractionRuleFactory.register("key_value")
 class KeyValueExtractionRule(ExtractionRule):
-    """Extracts key=value pairs with a delimiter. The only rule type needing a per-row dynamic
-    module lookup - the key text (and therefore the target submodule) varies per row, so it's
-    resolved at kernel time via the shared discovery tracker (core/types/kv_extraction.py)."""
+    __doc__ = """Splits a line into key=value pairs and logs each value as a module named after its key.
+
+The line is cut at every field delimiter. In each piece the first key-value delimiter separates the key from
+the value; a piece without one is skipped. Keys are lowercased, whitespace around a key and a value is dropped,
+and a value in quotes may contain the field delimiter. The keys need not be known in advance.
+
+Example, in a pipeline named 'kv', with module_name 'board.app.battery':
+    line:   vbat=3.71 soc=82 state="on charge"
+    gives:  device 'kv', app.battery.vbat = 3.71, app.battery.soc = 82, app.battery.state = on charge"""
+
+    # The only rule type needing a per-row dynamic module lookup - the key text (and therefore the
+    # target submodule) varies per row, so it's resolved at kernel time via the shared discovery
+    # tracker (core/types/kv_extraction.py).
 
     prefix_strip: str
     field_delimiter: str
@@ -146,7 +172,16 @@ class KeyValueExtractionRule(ExtractionRule):
 
 
 @configuration_property("module_name", **_MATCH_MODULE)
-@configuration_property("module_suffix", type="string", required=True, default="", ui_order=10, title="New module name")
+@configuration_property(
+    "module_suffix",
+    type="string",
+    required=True,
+    default="",
+    ui_order=10,
+    title="New module name",
+    description="The module the value is logged as, in this pipeline's device and without a device in front, "
+    "e.g. 'battery.voltage_mv'. Empty: '<matched module>.<pattern>_z<index>'.",
+)
 @configuration_property(
     "match",
     type="string",
@@ -154,6 +189,7 @@ class KeyValueExtractionRule(ExtractionRule):
     required=True,
     default="contains",
     ui_order=15,
+    description="Where in the line 'pattern' must be. Upper and lower case are different.",
 )
 @configuration_property(
     "pattern",
@@ -186,7 +222,17 @@ class KeyValueExtractionRule(ExtractionRule):
 )
 @ExtractionRuleFactory.register("anchor_word")
 class AnchorWordExtractionRule(ExtractionRule):
-    """Extract values matching startswith/endswith/contains patterns."""
+    __doc__ = """Takes one word (or a few) out of the lines that contain a given text.
+
+'pattern' only selects the lines. The word is found by its position in the whole line: words are separated by
+whitespace and 'index' counts from the start of the line, 0 being the first word - not from the pattern.
+
+Example, in a pipeline named 'kv', with module_name 'board.app.battery', match 'contains', pattern 'voltage',
+index 2, count 1, module_suffix 'battery.voltage_mv':
+    line:   Battery voltage 3712 mV
+    gives:  device 'kv', battery.voltage_mv = 3712
+    line:   Battery current 120 mA
+    gives:  nothing (no 'voltage' in it)"""
 
     match: str
     pattern: str
@@ -271,16 +317,48 @@ class JsonLiteExtractionRule(ExtractionRule):
 
 
 @configuration_property("module_name", **_MATCH_MODULE)
-@configuration_property("module_suffix", type="string", default="", ui_order=10, title="New Module Name")
-@configuration_property("startswith", type="string", default="", ui_order=8, title="Must start with signature")
-@configuration_property("prefix_strip", type="string", default="", ui_order=10, title="Prefix to Strip")
-@configuration_property("field_delimiter", **_ONE_CHAR, default=";", ui_order=15, title="Field Delimiter")
+@configuration_property(
+    "module_suffix",
+    type="string",
+    default="",
+    ui_order=10,
+    title="New Module Name",
+    description="The module the fields are put under, in this pipeline's device and without a device in front: "
+    "'imu' gives 'imu.ax'. Empty: the matched module's own name ('app.imu.ax').",
+)
+@configuration_property(
+    "startswith",
+    type="string",
+    default="",
+    ui_order=8,
+    title="Must start with signature",
+    description="Only lines starting with this text are read, and it is removed before the line is split. "
+    "Spaces at its ends are ignored. Empty: every line of the module.",
+)
+@configuration_property(
+    "prefix_strip",
+    type="string",
+    default="",
+    ui_order=10,
+    title="Prefix to Strip",
+    description="Text removed from the start of what 'startswith' left, when it is there.",
+)
+@configuration_property(
+    "field_delimiter",
+    **_ONE_CHAR,
+    default=";",
+    ui_order=15,
+    title="Field Delimiter",
+    description="The one character between two fields.",
+)
 @configuration_property(
     "field_names",
     type="array",
     required=True,
     ui_order=20,
     title="Field Names by Position",
+    description="One entry per field, in the line's order: a field is logged as '<module>.<name>'. A field marked "
+    "'ignore', or with an empty name, is skipped; fields beyond the list are dropped.",
     items={
         "type": "object",
         "title": "Field Mapping",
@@ -293,7 +371,14 @@ class JsonLiteExtractionRule(ExtractionRule):
 )
 @ExtractionRuleFactory.register("dsv")
 class DsvExtractionRule(ExtractionRule):
-    """Extract from CSV-like formats using object-mapped positional schema rules."""
+    __doc__ = """Splits a delimiter-separated line (CSV-like) into fields, each logged under its position's name.
+
+Whitespace around a field is dropped and an empty field gives nothing.
+
+Example, in a pipeline named 'kv', with module_name 'board.app.imu', startswith '$IMU;', field_delimiter ';',
+field_names [{"name": "ax"}, {"name": "ay", "ignore": true}, {"name": "az"}]:
+    line:   $IMU;0.01;-0.02;9.81
+    gives:  device 'kv', app.imu.ax = 0.01, app.imu.az = 9.81"""
 
     startswith: str
     prefix_strip: str
@@ -350,7 +435,15 @@ class DsvExtractionRule(ExtractionRule):
 
 
 @configuration_property("module_name", **_MATCH_MODULE)
-@configuration_property("module_suffix", type="string", required=True, ui_order=10, title="New Module Name")
+@configuration_property(
+    "module_suffix",
+    type="string",
+    required=True,
+    ui_order=10,
+    title="New Module Name",
+    description="The module the value is logged as, in this pipeline's device and without a device in front, "
+    "e.g. 'app.state'.",
+)
 @configuration_property(
     "word_index",
     type="integer",
@@ -359,10 +452,24 @@ class DsvExtractionRule(ExtractionRule):
     title="Word Index (Z)",
     description="The word to take, counted from the start of the line (0 = the first word).",
 )
-@configuration_property("word_count", type="integer", default=1, ui_order=20, title="Word Count (0 = All remaining)")
+@configuration_property(
+    "word_count",
+    type="integer",
+    default=1,
+    ui_order=20,
+    title="Word Count (0 = All remaining)",
+    description="How many words to take from 'word_index' on (0 = all that remain).",
+)
 @ExtractionRuleFactory.register("positional")
 class PositionalExtractionRule(ExtractionRule):
-    """Extracts a specific word or slice of words directly by its whitespace-split index."""
+    __doc__ = """Takes one word (or a few) by its position, out of every line of the module.
+
+Words are separated by whitespace and counted from the start of the line, 0 being the first.
+
+Example, in a pipeline named 'kv', with module_name 'board.app.status', word_index 1, word_count 1,
+module_suffix 'app.state':
+    line:   42 running 3.3
+    gives:  device 'kv', app.state = running"""
 
     word_index: int
     word_count: int
@@ -389,6 +496,8 @@ class PositionalExtractionRule(ExtractionRule):
     required=True,
     ui_order=10,
     title="Polymorphic Parsing Rules",
+    description="Each rule reads the lines of one module and says how values are taken out of them. Every rule "
+    "whose module matches a line is applied to it.",
     items={
         "type": "object",
         "_factory": FactoryCategory.KEY_VALUE_RULE,
@@ -398,12 +507,20 @@ class PositionalExtractionRule(ExtractionRule):
 @override_property(
     "sources_",
     items={"type": "string", "_reference": "/targets"},
+    description="The pipelines whose parsed lines this one reads (pipeline ids, not sources).",
 )
 @ParserFactory.register("multi_rule_key_value")
 class MultiRuleKeyValueParser(BaseParser):
-    __doc__ = """Extracts structured key=value/JSON/DSV/positional/anchor-word fields out of raw
-log rows into synthetic submodules, via a single Numba-JIT kernel call per input-batch chunk
-(ops/kv_extraction.py's nb_process_kv_batch) - see plans/kv-extractor-numba-backend.md."""
+    __doc__ = """Takes values out of the log lines of other pipelines and logs each as a module of its own.
+
+* Reads the parsed lines of the pipelines in `sources_`; the lines themselves stay as they are.
+* Each rule reads one module's lines, named as 'device.module'. The rule types (category `key_value_rule`):
+  `key_value` for key=value pairs, `anchor_word` and `positional` for a word at a fixed place, `dsv` for
+  delimiter-separated fields.
+* The values are logged under this pipeline's `name` as their device. Give it a name no other pipeline has:
+  it does not read lines of its own device."""
+
+    # One Numba kernel call per input-batch chunk (ops/kv_extraction.py's nb_process_kv_batch).
 
     rules: list
 

@@ -907,3 +907,129 @@ class TestMultiRuleKeyValueParserRealThread:
         temp_mod = device.get_module("sensor.temp").id
         first_word_mod = device.get_module("mrkv_multi_dev.other.first_word").id
         assert sorted(rows) == sorted([(b"25.0", temp_mod), (b"hello", first_word_mod)])
+
+
+# The worked example in each rule type's description (what `get_schema` shows an agent), run
+# through the real parser's rule construction and kernel. (rule type, rule config, line, result)
+DOCUMENTED_EXAMPLES = [
+    (
+        KeyValueExtractionRule,
+        {"type": "key_value", "module_name": "board.app.battery"},
+        'vbat=3.71 soc=82 state="on charge"',
+        {"app.battery.vbat": "3.71", "app.battery.soc": "82", "app.battery.state": "on charge"},
+    ),
+    (
+        AnchorWordExtractionRule,
+        {
+            "type": "anchor_word",
+            "module_name": "board.app.battery",
+            "match": "contains",
+            "pattern": "voltage",
+            "index": 2,
+            "count": 1,
+            "module_suffix": "battery.voltage_mv",
+        },
+        "Battery voltage 3712 mV",
+        {"battery.voltage_mv": "3712"},
+    ),
+    (
+        AnchorWordExtractionRule,
+        {
+            "type": "anchor_word",
+            "module_name": "board.app.battery",
+            "match": "contains",
+            "pattern": "voltage",
+            "index": 2,
+            "count": 1,
+            "module_suffix": "battery.voltage_mv",
+        },
+        "Battery current 120 mA",
+        {},
+    ),
+    (
+        DsvExtractionRule,
+        {
+            "type": "dsv",
+            "module_name": "board.app.imu",
+            "startswith": "$IMU;",
+            "field_delimiter": ";",
+            "field_names": [{"name": "ax"}, {"name": "ay", "ignore": True}, {"name": "az"}],
+        },
+        "$IMU;0.01;-0.02;9.81",
+        {"app.imu.ax": "0.01", "app.imu.az": "9.81"},
+    ),
+    (
+        PositionalExtractionRule,
+        {
+            "type": "positional",
+            "module_name": "board.app.status",
+            "word_index": 1,
+            "word_count": 1,
+            "module_suffix": "app.state",
+        },
+        "42 running 3.3",
+        {"app.state": "running"},
+    ),
+]
+
+
+class TestDocumentedExamples:
+    def run_rule(self, id_registry, rule_config: dict, line: str) -> dict:
+        """{module: value} a pipeline named 'kv' logs for `line`, a line of the rule's module."""
+        registry = FactoryRegistry()
+        registry.register("key_value_rule", ExtractionRuleFactory)
+        pool = NumpyArrayPool()
+
+        parser = MultiRuleKeyValueParser()
+        parser.logger = PrintLogger("test.kv_examples")
+        parser.shared = SimpleNamespace(
+            array_pool=pool, time_ns=time.time_ns, factories=registry, id_registry=id_registry
+        )
+        device = id_registry.get_device("kv")
+        parser.local = SimpleNamespace(device_id=device)
+        parser.apply_config({"delay": 20, "rules": [rule_config]})
+
+        board_name, module_name = rule_config["module_name"].split(".", 1)
+        board = id_registry.get_device(board_name)
+        in_batch = pool.create(PooledLogBatch, 4, 512, has_levels=True, has_modules=True, has_devices=True)
+        in_batch.insert(1000, 1000, line.encode("ascii"), module=board.get_module(module_name).id, device=board.id)
+        out_batch = _out_batch(pool)
+
+        out_is_full = nb_process_kv_batch(
+            in_batch.bundle,
+            parser._extract_state,
+            parser._build_rules_list(),
+            parser._tracker_state,
+            device.modules_table.bundle(),
+            out_batch.bundle,
+            device.id,
+            id_registry.get_device("SYSTEM").id,
+            device.id,
+        )
+        assert out_is_full is False
+        parser._post_process(out_batch)
+
+        logged = {}
+        for _ts, msg, _rx, _level, module, row_device, *_rest in out_batch:
+            assert int(row_device) == device.id
+            logged[id_registry.module_from_int(int(module)).name] = bytes(msg).decode("ascii")
+        in_batch.release()
+        out_batch.release()
+        return logged
+
+    def test_each_rule_type_does_what_its_description_shows(self, id_registry):
+        for rule_cls, rule_config, line, expected in DOCUMENTED_EXAMPLES:
+            assert self.run_rule(id_registry, rule_config, line) == expected, rule_config["type"]
+
+            # ...and the description shows exactly this line and this result.
+            description = rule_cls.get_config_schema()["description"]
+            assert f"line:   {line}" in description
+            for module, value in expected.items():
+                assert f"{module} = {value}" in description
+
+    def test_every_rule_type_has_an_example(self):
+        documented = {rule_cls for rule_cls, *_rest in DOCUMENTED_EXAMPLES}
+        for name, _doc in ExtractionRuleFactory.get_available_types():
+            rule_cls = ExtractionRuleFactory._registry[name]
+            assert rule_cls in documented, name
+            assert "Example" in rule_cls.get_config_schema()["description"], name

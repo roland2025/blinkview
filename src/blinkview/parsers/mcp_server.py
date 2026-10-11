@@ -327,8 +327,11 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
             }
         if not isinstance(category, str) or factories.get_factory(category) is None:
             raise AgentApiError(f"unknown category '{category}', one of: {factories.get_categories()}")
-        # The first line of each type's description; get_schema has the whole of it.
-        types = {name: doc.strip().split("\n", 1)[0] for name, doc in factories.get_category_types(category)}
+        # The first paragraph of each type's description (it may wrap); get_schema has the whole of it.
+        types = {
+            name: " ".join(doc.strip().split("\n\n", 1)[0].split())
+            for name, doc in factories.get_category_types(category)
+        }
         return {"category": category.lower(), "types": types}
 
     def _type_names(self, category: str) -> list:

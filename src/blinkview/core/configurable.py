@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import inspect
 from copy import deepcopy
 
 
@@ -72,7 +73,8 @@ def configurable(cls):
         schema = {
             "type": "object",
             "title": f"{cls_.__name__} Configuration",
-            "description": cls_.__doc__ or "",
+            # Without the indentation a docstring's later lines have in the source.
+            "description": inspect.cleandoc(cls_.__doc__ or ""),
             "properties": final_properties,
         }
 

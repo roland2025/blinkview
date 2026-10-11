@@ -42,6 +42,10 @@ from blinkview.utils.log_level import LogLevel
     },
 )
 class LevelMap(FrameSectionParser):
+    """Reads the log level from a single letter: T, D, I, W, E, F or C. The mapping can be changed.
+
+    The text must be the next thing in the line and be followed by something other than a letter or digit."""
+
     mapping: dict
 
     def __init__(self):
@@ -114,7 +118,7 @@ class LevelMap(FrameSectionParser):
     },
 )
 class NrfLevelMap(LevelMap):
-    pass
+    """Reads the log level as the Nordic nRF5 SDK prints it: <debug>, <info>, <warning>, <error>."""
 
 
 @FrameSectionParserFactory.register("log_level_zephyr")
@@ -131,7 +135,7 @@ class NrfLevelMap(LevelMap):
     },
 )
 class ZephyrLevelMap(LevelMap):
-    pass
+    """Reads the log level as Zephyr prints it: <dbg>, <inf>, <wrn>, <err>."""
 
 
 @FrameSectionParserFactory.register("log_level_zephyr_minimal")
@@ -148,7 +152,7 @@ class ZephyrLevelMap(LevelMap):
     },
 )
 class ZephyrMinimalLevelMap(LevelMap):
-    pass
+    """Reads the log level as Zephyr's minimal logging prints it: 'D:', 'I:', 'W:', 'E:'."""
 
 
 @FrameSectionParserFactory.register("log_level_idf")
@@ -166,14 +170,14 @@ class ZephyrMinimalLevelMap(LevelMap):
     },
 )
 class EspIdfLevelMap(LevelMap):
-    pass
+    """Reads the log level as ESP-IDF prints it: the single letter E, W, I, D or V."""
 
 
 @FrameSectionParserFactory.register("log_level_custom")
 @frame_section_warmup("log_level_custom", warmup_weight=SHARED_KERNEL_WARMUP_WEIGHT)
 @override_property("mapping", title="Custom level Mappings", description="Custom mapping for logs.", default={})
 class CustomLevelMap(LevelMap):
-    pass
+    """Reads the log level from the texts you list in `mapping`, which starts empty."""
 
 
 @FrameSectionParserFactory.register("log_level_python")
@@ -191,4 +195,4 @@ class CustomLevelMap(LevelMap):
     },
 )
 class PythonLoggingLevelMap(LevelMap):
-    pass
+    """Reads the log level as Python's `logging` prints it: DEBUG, INFO, WARNING, ERROR, CRITICAL."""

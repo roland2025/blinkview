@@ -36,7 +36,7 @@ from blinkview.utils.log_level import LogLevel
 @override_property("frame_length_maximum", default=32 * 1024)
 @override_property("frame_resync_on_start", default=False)  # logcat output always starts on a line boundary
 class AdbDecoder(FrameDecoder):
-    """Frame processor for SLIP-encoded frames"""
+    """Splits `adb logcat -v long` output into messages: a '[ ... ]' header line and the text lines after it."""
 
     def __init__(self):
         super().__init__()
@@ -48,7 +48,7 @@ class AdbDecoder(FrameDecoder):
 @FrameSectionParserFactory.register("module_name_adb_long_frame")
 @frame_section_warmup("module_name_adb_long_frame")
 class AdbModuleName(ModuleNameParserBase):
-    """This parser extracts module names from variable-width fields by scanning for common delimiters (spaces, tabs, brackets) and normalizing them. It is designed for log formats where module names may be of varying lengths and may include hierarchical components separated by dots or enclosed in brackets."""
+    """Reads the tag of an `adb logcat -v long` header as the module name."""
 
     max_length: int
     max_depth: int
@@ -65,6 +65,8 @@ class AdbModuleName(ModuleNameParserBase):
 @FrameSectionParserFactory.register("timestamp_adb_long_frame")
 @frame_section_warmup("timestamp_adb_long_frame")
 class AdbLongTimestamp(TimestampParser):
+    """Reads the monotonic timestamp that opens an `adb logcat -v long` header, e.g. '[ 1726228.928'."""
+
     def kernel(self, octx, fctx, n):
         nb_parse_adb_timestamp_monotonic_stage(octx, fctx, n, self.sync_state)
 
@@ -72,6 +74,8 @@ class AdbLongTimestamp(TimestampParser):
 @FrameSectionParserFactory.register("process_pid_tid_adb_long_frame")
 @frame_section_warmup("process_pid_tid_adb_long_frame")
 class AdbPidTid(FrameSectionParser):
+    """Reads the process and thread id of an `adb logcat -v long` header, e.g. '2680: 2701'."""
+
     def kernel(self, octx, fctx, n):
         nb_parse_adb_pid_tid_stage(octx, fctx, n)
 
@@ -79,6 +83,8 @@ class AdbPidTid(FrameSectionParser):
 @FrameSectionParserFactory.register("log_level_adb_long_frame")
 @frame_section_warmup("log_level_adb_long_frame")
 class LevelMap(FrameSectionParser):
+    """Reads the level letter of an `adb logcat -v long` header: V, D, I, W, E, F or S."""
+
     def __init__(self):
         super().__init__()
 

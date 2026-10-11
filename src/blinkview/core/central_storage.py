@@ -152,6 +152,10 @@ class CentralFactory(BaseFactory[BaseCentralStorage]):
     "logging", hidden=False, required=True, default={"enabled": True, "processor": {"type": "log_row"}}, ui_order=30
 )
 class CentralStorage(BaseCentralStorage):
+    """The session's log lines, which every view reads from: the newest in memory, older ones on disk.
+
+    The settings size the two tiers (cold storage is the disk one). The oldest lines are dropped when both are full."""
+
     maxlen: int
     max_pieces: int
     buffer_size_mb: int

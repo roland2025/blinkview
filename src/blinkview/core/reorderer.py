@@ -32,6 +32,10 @@ class QueuedBatch(NamedTuple):
 
 @ReorderFactory.register("default")
 class Reorder(BaseReorder):
+    """Merges the pipelines' lines into one stream in time order.
+
+    Lines are held back for `delay` ms, so one arriving late from a slower source still lands in its place."""
+
     def __init__(self):
         super().__init__()
         self.input_queue = BatchQueue()

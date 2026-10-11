@@ -126,7 +126,7 @@ class BaseFactory(Generic[T]):
         available = []
         for name in cls._registry.keys():
             builder = cls._registry[name]
-            doc = builder.__doc__.strip() if builder.__doc__ else "No description"
+            doc = inspect.cleandoc(builder.__doc__) if builder.__doc__ else "No description"
             # print(f"get_available_types - {name}: {doc}")
             available.append((name, doc))
 

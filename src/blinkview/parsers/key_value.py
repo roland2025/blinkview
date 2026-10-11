@@ -20,6 +20,12 @@ if TYPE_CHECKING:
     items={"type": "string", "_reference": "/targets"},
 )
 class KeyValueEqualParser(BaseParser):
+    __doc__ = """Takes every space-separated key=value pair out of the lines of other pipelines, with no settings.
+
+Each value is logged as '<the line's module>.<key>' under this pipeline's `name` as device; a ',' or ';' ending
+a value is dropped. It reads every module of the pipelines in `sources_`. For one module only, other
+delimiters or other line formats, use `multi_rule_key_value`."""
+
     def __init__(self):
         super().__init__()
 

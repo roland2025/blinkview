@@ -23,6 +23,10 @@ if TYPE_CHECKING:
     description="Number of unique modules to generate and log to per second",
 )
 class ModuleGenParser(BaseParser):
+    """A test generator, not a parser: keeps creating new modules ('mod_1', 'mod_2', ...) and logs a line to each.
+
+    For trying BlinkView with a very large number of modules. It needs no source."""
+
     def __init__(self):
         super().__init__()
 

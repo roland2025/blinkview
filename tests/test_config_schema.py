@@ -225,5 +225,29 @@ def test_for_agent_drops_only_the_editor_only_keys(factories):
         "type": "string",
         "enum": ["starts_with", "contains", "ends_with"],
         "default": "contains",
+        "description": schema["properties"]["match"]["description"],
     }
     assert cleaned["required"] == schema["required"]
+
+
+# Unfinished time-sync work; they get a description when they are done.
+_UNDESCRIBED_TYPES = {
+    ("time_sync", "adb_time_syncer"),
+    ("time_sync", "serial_time_syncer"),
+    ("parser", "adb_time_syncer"),
+    ("parser", "serial_time_syncer"),
+    ("parser", "time_sync_profiler"),
+}
+
+
+def test_every_type_has_a_description(factories):
+    """`list_types` shows the first line of a type's description and `get_schema` all of it:
+    for an agent that is the only documentation of what a type is for."""
+    missing = []
+    for category in factories.get_categories():
+        for name, doc in factories.get_category_types(category):
+            schema = factories.get_schema(category, name)  # {} for a type without settings
+            described = doc != "No description" and (not schema or bool(schema.get("description")))
+            if not described and (category, name) not in _UNDESCRIBED_TYPES:
+                missing.append(f"{category}/{name}")
+    assert missing == []

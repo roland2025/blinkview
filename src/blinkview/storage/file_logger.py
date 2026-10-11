@@ -383,6 +383,8 @@ class BatchProcessorFactory(BaseFactory[BaseBatchProcessor]):
 
 @BatchProcessorFactory.register("binary")
 class BinaryBatchProcessor(BaseBatchProcessor):
+    """Writes the data as it arrived, each chunk behind a 16-byte binary header (.bin). Not readable as text."""
+
     is_binary = True
     extension = "bin"
 
@@ -402,6 +404,8 @@ class BinaryBatchProcessor(BaseBatchProcessor):
 
 @BatchProcessorFactory.register("log_row")
 class LogRowBatchProcessor(BaseBatchProcessor):
+    """Writes one text line per log row: time, device, module, level and message (.log)."""
+
     is_binary = True
     extension = "log"
 

@@ -496,6 +496,10 @@ TS_PRECISIONS_DESC = [
 @FrameSectionParserFactory.register("timestamp_integer")
 @frame_section_warmup("timestamp_integer")
 class IntegerTimestampParser(TimestampParser):
+    """Reads the timestamp as a plain integer at the current place in the line, e.g. '123456 '.
+
+    It is the device's uptime in the unit `precision` gives, or Unix time with `unix_timestamp`."""
+
     precision: int
 
     def __init__(self):
@@ -519,6 +523,8 @@ class IntegerTimestampParser(TimestampParser):
 @frame_section_warmup("timestamp_idf_v1")
 @override_property("unix_timestamp", hidden=True, default=False)
 class Esp32V1IntegerTimestampParser(IntegerTimestampParser):
+    """Reads ESP-IDF's uptime timestamp, an integer in parentheses: '(12345)'."""
+
     precision: int
 
     def apply_config(self, config: dict):
@@ -565,6 +571,8 @@ class SkipWordsParser(FrameSectionParser):
 @FrameSectionParserFactory.register("timestamp_zephyr_uptime_formatted")
 @frame_section_warmup("timestamp_zephyr_uptime_formatted")
 class ZephyrUptimeFormattedParser(TimestampParser):
+    """Reads Zephyr's formatted uptime timestamp '[hh:mm:ss.mmm,uuu]', e.g. '[00:00:01.234,567]'."""
+
     def kernel(self, octx, fctx, n):
         nb_parse_zephyr_uptime_formatted_stage(octx, fctx, n, self.sync_state)
 
@@ -572,6 +580,8 @@ class ZephyrUptimeFormattedParser(TimestampParser):
 @FrameSectionParserFactory.register("timestamp_zephyr_realtime")
 @frame_section_warmup("timestamp_zephyr_realtime")
 class ZephyrRealTimeParser(TimestampParser):
+    """Reads Zephyr's real-time timestamp, e.g. '[2026-01-02 15:04:05.678,901]'."""
+
     def kernel(self, octx, fctx, n):
         nb_parse_zephyr_realtime_stage(octx, fctx, n, self.sync_state)
 
