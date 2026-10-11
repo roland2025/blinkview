@@ -26,7 +26,7 @@ class MessageBox:
     Btn: "QMessageBox.StandardButton" = _BtnProxy()
 
     @staticmethod
-    def _show(parent, title, text, icon_type, buttons, default_btn):
+    def _show(parent, title, text, icon_type, buttons, default_btn, button_texts=None):
         # Local import: Only happens when a dialog is actually shown
         from qtpy.QtWidgets import QMessageBox
 
@@ -42,6 +42,8 @@ class MessageBox:
         msg.setIcon(icon)
 
         msg.setStandardButtons(buttons)
+        for button, button_text in (button_texts or {}).items():
+            msg.button(button).setText(button_text)
         if default_btn:
             msg.setDefaultButton(default_btn)
 
@@ -58,7 +60,8 @@ class MessageBox:
         return MessageBox._show(parent, title, text, "Information", buttons, buttons)
 
     @staticmethod
-    def question(parent, title, text, buttons=None, default_btn=None):
+    def question(parent, title, text, buttons=None, default_btn=None, button_texts=None):
+        """button_texts relabels standard buttons: {MessageBox.Btn.Yes: "Close and Continue"}."""
         from qtpy.QtWidgets import QMessageBox
 
         # Handle Defaults inside the method to avoid definition-time imports
@@ -67,7 +70,7 @@ class MessageBox:
         if default_btn is None:
             default_btn = QMessageBox.StandardButton.No
 
-        return MessageBox._show(parent, title, text, "Question", buttons, default_btn)
+        return MessageBox._show(parent, title, text, "Question", buttons, default_btn, button_texts)
 
     @staticmethod
     def warning(parent, title, text, buttons=None):

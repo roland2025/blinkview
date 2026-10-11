@@ -4,9 +4,11 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -14,7 +16,7 @@ import pytest
 from blinkview import __version__
 from blinkview.utils import updater as updater_module
 from blinkview.utils.install_info import Installer, InstallInfo, UpdateSource
-from blinkview.utils.updater import GitUpdater, PyPIUpdater, UpdateError, make_updater
+from blinkview.utils.updater import GitUpdater, PyPIUpdater, RunningInstance, UpdateError, make_updater
 
 UV_PACKAGE = InstallInfo(Installer.UV_TOOL, None, False, ("all",))
 PIP_PACKAGE = InstallInfo(Installer.PIP, None, False, ())
@@ -51,6 +53,12 @@ PYPI_RESPONSE = {
         "not-a-version": [_file()],
     },
 }
+
+
+@pytest.fixture(autouse=True)
+def no_other_instances(monkeypatch):
+    """No scan of the machine's real processes, whatever the developer has running."""
+    monkeypatch.setattr(updater_module, "find_other_instances", lambda: [])
 
 
 class FakeResponse:
@@ -216,6 +224,184 @@ class TestPyPIInstallCommand:
         assert settings.values["update.pending_version"] is None
 
 
+class TestOtherInstances:
+    """A second BlinkView process of the same install (`blink mcp`, another window) keeps
+    blink.exe locked on Windows: the install is refused up front instead of failing halfway."""
+
+    def test_windows_install_is_refused_while_another_instance_runs(self, monkeypatch):
+        settings = FakeSettings()
+        u = PyPIUpdater(settings, UV_PACKAGE)
+        ran = []
+        monkeypatch.setattr(updater_module.sys, "platform", "win32")
+        monkeypatch.setattr(updater_module, "find_other_instances", lambda: [RunningInstance(42, "blink mcp")])
+        monkeypatch.setattr(u, "_run_install", lambda cmd: ran.append(cmd) or True)
+
+        with pytest.raises(UpdateError, match=r"blink mcp \(pid 42\)"):
+            u.install("0.19.0")
+        assert ran == []
+        assert "update.pending_version" not in settings.values
+
+    def test_elsewhere_running_instances_do_not_block(self, monkeypatch):
+        u = PyPIUpdater(FakeSettings(), UV_PACKAGE)
+        monkeypatch.setattr(updater_module.sys, "platform", "linux")
+        monkeypatch.setattr(updater_module, "find_other_instances", lambda: [RunningInstance(42, "blink mcp")])
+        monkeypatch.setattr(u, "_run_install", lambda cmd: False)
+
+        assert u.install("0.19.0") is False
+
+    def test_close_other_instances_kills_what_is_running(self, monkeypatch):
+        running = [RunningInstance(42, "blink mcp")]
+        killed = []
+        monkeypatch.setattr(updater_module.sys, "platform", "win32")
+        monkeypatch.setattr(updater_module, "find_other_instances", lambda: list(running))
+
+        def _terminate(instances, on_wait=None):
+            killed.extend(instances)
+            running.clear()
+
+        monkeypatch.setattr(updater_module, "close_instances", _terminate)
+
+        PyPIUpdater.close_other_instances()
+
+        assert killed == [RunningInstance(42, "blink mcp")]
+
+    def test_close_other_instances_reports_survivors(self, monkeypatch):
+        monkeypatch.setattr(updater_module.sys, "platform", "win32")
+        monkeypatch.setattr(updater_module, "find_other_instances", lambda: [RunningInstance(42, "blink mcp")])
+        monkeypatch.setattr(updater_module, "close_instances", lambda instances, on_wait=None: None)
+
+        with pytest.raises(UpdateError, match=r"blink mcp \(pid 42\)"):
+            PyPIUpdater.close_other_instances()
+
+    def test_close_instances_kills_the_whole_chain_of_a_windowless_one(self, tmp_path):
+        """A real process tree standing in for blink.exe -> python.exe -> python.exe: the
+        instance is the middle one, and its child must not outlive it."""
+        psutil = pytest.importorskip("psutil")
+
+        child_code = "import time; time.sleep(60)"
+        parent_code = (
+            f"import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', {child_code!r}]); time.sleep(60)"
+        )
+        parent = subprocess.Popen([sys.executable, "-c", parent_code])
+        try:
+            proc = psutil.Process(parent.pid)
+            deadline = time.monotonic() + 10
+            while not proc.children(recursive=True) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            tree = [proc, *proc.children(recursive=True)]
+            assert len(tree) >= 2
+
+            updater_module.close_instances([RunningInstance(parent.pid, "blink mcp")])
+
+            assert not any(p.is_running() and p.status() != psutil.STATUS_ZOMBIE for p in tree)
+        finally:
+            parent.kill()
+            parent.wait()
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="WM_CLOSE: only Windows needs the others closed")
+    def test_close_instances_asks_a_window_to_close_instead_of_killing_it(self, tmp_path):
+        """A real window in a real process: its closeEvent must run (that is where BlinkView
+        saves its layout and stops the registry), which a kill would skip."""
+        pytest.importorskip("psutil")
+        pytest.importorskip("qtpy")
+
+        shown, closed = tmp_path / "shown", tmp_path / "closed"
+        code = f"""
+import sys
+from qtpy.QtWidgets import QApplication, QWidget
+
+class Window(QWidget):
+    def closeEvent(self, event):
+        open({str(closed)!r}, "w").close()
+        event.accept()
+
+app = QApplication([])
+window = Window()
+window.show()
+open({str(shown)!r}, "w").close()
+sys.exit(app.exec())
+"""
+        env = {k: v for k, v in os.environ.items() if k != "QT_QPA_PLATFORM"}  # a real window, not offscreen
+        child = subprocess.Popen([sys.executable, "-c", code], env=env)
+        try:
+            deadline = time.monotonic() + 30
+            while not shown.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert shown.exists()
+            time.sleep(0.3)  # shown() has returned; let the window reach the screen
+
+            waited = []
+            updater_module.close_instances(
+                [RunningInstance(child.pid, "blink")], window_timeout=20, on_wait=lambda: waited.append(1)
+            )
+
+            assert closed.exists()
+            assert child.wait(timeout=5) == 0  # exited by itself; a kill reports 15 / 1
+            assert waited
+        finally:
+            child.kill()
+            child.wait()
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="WM_CLOSE: only Windows needs the others closed")
+    def test_a_window_that_refuses_to_close_is_left_running(self, tmp_path):
+        """Not killed after the timeout: it may be in the middle of saving. The caller reports
+        it as still running instead."""
+        psutil = pytest.importorskip("psutil")
+        pytest.importorskip("qtpy")
+
+        shown = tmp_path / "shown"
+        code = f"""
+import sys
+from qtpy.QtWidgets import QApplication, QWidget
+
+class Window(QWidget):
+    def closeEvent(self, event):
+        event.ignore()
+
+app = QApplication([])
+window = Window()
+window.show()
+open({str(shown)!r}, "w").close()
+sys.exit(app.exec())
+"""
+        env = {k: v for k, v in os.environ.items() if k != "QT_QPA_PLATFORM"}
+        child = subprocess.Popen([sys.executable, "-c", code], env=env)
+        try:
+            deadline = time.monotonic() + 30
+            while not shown.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert shown.exists()
+            time.sleep(0.3)
+
+            updater_module.close_instances([RunningInstance(child.pid, "blink")], window_timeout=1.5)
+
+            assert psutil.pid_exists(child.pid) and child.poll() is None
+        finally:
+            child.kill()
+            child.wait()
+
+    def test_close_instances_ignores_one_that_already_exited(self):
+        pytest.importorskip("psutil")
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+
+        updater_module.close_instances([RunningInstance(gone.pid, "blink mcp")])  # must not raise
+
+    @pytest.mark.parametrize(
+        "cmdline, expected",
+        [
+            (["python.exe", r"C:\Users\x\.local\bin\blink.exe", "mcp"], "blink mcp"),
+            (["python.exe", "/home/x/.local/bin/blink"], "blink"),
+            (["python.exe", "-m", "blinkview", "setup", "--no-gui"], "blink setup --no-gui"),
+            (["python.exe", "-m", "pip", "list"], None),
+            (["python.exe"], None),
+            ([], None),
+        ],
+    )
+    def test_describe_blink_command(self, cmdline, expected):
+        assert updater_module._describe_blink_command(cmdline) == expected
+
+
 class TestRunInstallThenSetup:
     """`blink setup` (ui/setup.py) follows a successful install as its own process, so the new
     version's Numba kernels are compiled before its first start."""
@@ -231,7 +417,33 @@ class TestRunInstallThenSetup:
         assert u._run_install(["uv", "tool", "install", "blinkview==1.0"]) is True
 
         setup = subprocess.list2cmdline(u.setup_command())
-        assert calls == [f'cmd /c "timeout /t 2 > nul && uv tool install blinkview==1.0 && {setup}"']
+        wait = u.wait_for_exit_command()
+        assert calls == [f'cmd /c "{wait} & uv tool install blinkview==1.0 && {setup}"']
+
+    def test_windows_install_waits_for_this_process_to_exit(self):
+        """Not a fixed delay: uv can't overwrite blink.exe while a GUI that is still shutting
+        down keeps it running, and the install then fails after swapping the package."""
+        wait = PyPIUpdater.wait_for_exit_command()
+
+        assert f"Wait-Process -Id {os.getpid()} " in wait
+        assert '"' not in wait  # it sits inside cmd /c "..."
+
+    def test_child_env_drops_the_cache_dir_this_version_exported(self, monkeypatch):
+        """The new version's `blink setup` must compile into its own versioned dir."""
+        from blinkview.core import numba_setup
+
+        monkeypatch.setenv("NUMBA_CACHE_DIR", "/cache/0.1")
+        monkeypatch.setattr(numba_setup, "EXPORTED_CACHE_DIR", "/cache/0.1")
+
+        assert "NUMBA_CACHE_DIR" not in PyPIUpdater.child_env()
+
+    def test_child_env_keeps_a_cache_dir_the_user_chose(self, monkeypatch):
+        from blinkview.core import numba_setup
+
+        monkeypatch.setenv("NUMBA_CACHE_DIR", "/my/cache")
+        monkeypatch.setattr(numba_setup, "EXPORTED_CACHE_DIR", None)
+
+        assert PyPIUpdater.child_env()["NUMBA_CACHE_DIR"] == "/my/cache"
 
     def test_elsewhere_setup_starts_after_the_install(self, monkeypatch):
         u = PyPIUpdater(FakeSettings(), UV_PACKAGE)

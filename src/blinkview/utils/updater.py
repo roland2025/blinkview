@@ -5,8 +5,9 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from time import time
+from typing import Callable, NamedTuple
 
 from packaging.version import InvalidVersion
 from packaging.version import parse as parse_version
@@ -16,6 +17,14 @@ from blinkview.utils.install_info import Installer, InstallInfo, UpdateSource, d
 
 DEFAULT_INDEX_URL = "https://pypi.org/pypi"
 PYPI_SIMPLE_URL = "https://pypi.org/simple"
+
+# How long the detached Windows install waits for this process to exit before it tries anyway.
+EXIT_WAIT_SECONDS = 60
+
+# "Close and Continue": how long another instance's window gets to finish its own shutdown (it
+# compresses its session on the way out), and how long a killed windowless one gets to disappear.
+WINDOW_CLOSE_SECONDS = 60
+KILL_WAIT_SECONDS = 5
 
 
 class UpdateError(Exception):
@@ -32,6 +41,126 @@ def make_updater(settings: SettingsManager | None = None, info: InstallInfo | No
     if resolve_update_source(settings, info) == UpdateSource.GIT:
         return GitUpdater(settings, info)
     return PyPIUpdater(settings, info)
+
+
+def _describe_blink_command(cmdline: list[str]) -> str | None:
+    """`python.exe <...>/blink.exe mcp` -> "blink mcp"; None for a process that isn't BlinkView
+    (the environment's Python running something else)."""
+    args = cmdline[1:]
+    if args[:2] == ["-m", "blinkview"]:
+        args = args[2:]
+    elif args and PureWindowsPath(args[0]).stem.lower() == "blink":  # splits on / as well
+        args = args[1:]
+    else:
+        return None
+    return " ".join(["blink", *args])
+
+
+class RunningInstance(NamedTuple):
+    pid: int  # of the environment's python.exe, the middle of blink.exe -> python.exe -> python.exe
+    command: str  # "blink mcp"
+
+    def __str__(self) -> str:
+        return f"{self.command} (pid {self.pid})"
+
+
+def find_other_instances() -> list[RunningInstance]:
+    """Other running BlinkView processes of this install - a second window, `blink mcp`. Each
+    one keeps blink.exe (and whatever .pyds it loaded) locked on Windows, so an install next to
+    it fails halfway. Found by their interpreter living in this environment; without psutil (an
+    install with no GUI extra) nothing is found."""
+    try:
+        import psutil
+    except ImportError:
+        return []
+
+    prefix = Path(sys.prefix)
+    this_process = psutil.Process()
+    # The launcher chain above us (blink.exe -> the venv's python.exe -> us) exits with us.
+    own = {this_process.pid, *(p.pid for p in this_process.parents())}
+
+    found = []
+    for proc in psutil.process_iter(["pid", "exe", "cmdline"]):
+        exe = proc.info["exe"]
+        if proc.info["pid"] in own or not exe or not Path(exe).is_relative_to(prefix):
+            continue
+        command = _describe_blink_command(proc.info["cmdline"] or [])
+        if command is not None:
+            found.append(RunningInstance(proc.info["pid"], command))
+    return found
+
+
+def post_close_to_windows(pids: set[int]) -> set[int]:
+    """Asks the visible top-level windows of these processes to close, as a click on their X
+    does (WM_CLOSE): BlinkMainWindow.closeEvent then saves the layout and stops the registry
+    before it exits. Returns the pids that had such a window. Windows only; nothing elsewhere."""
+    if sys.platform != "win32":
+        return set()
+
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    WM_CLOSE = 0x0010
+    GW_OWNER = 4
+    asked = set()
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def on_window(hwnd, _lparam):
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        # Unowned and visible: the main window and detached tab windows, not Qt's hidden
+        # helper windows or a dialog (whose owner gets the message instead).
+        if pid.value in pids and user32.IsWindowVisible(hwnd) and not user32.GetWindow(hwnd, GW_OWNER):
+            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+            asked.add(pid.value)
+        return True
+
+    user32.EnumWindows(on_window, 0)
+    return asked
+
+
+def close_instances(
+    instances: list[RunningInstance],
+    window_timeout: float = WINDOW_CLOSE_SECONDS,
+    on_wait: Callable[[], None] | None = None,
+):
+    """Ends each instance's whole chain: the interpreter found by find_other_instances(), the
+    real one below it and the blink.exe launcher above it (the locked file).
+
+    One with a window is asked to close and given window_timeout to finish its own shutdown;
+    it is never killed, so one that doesn't make it is simply still running afterwards. One
+    without a window (`blink mcp`, a headless `blink`) can't be asked from outside on Windows
+    and is killed. on_wait is called a few times a second while waiting (the GUI's event loop)."""
+    import psutil
+
+    closing, doomed = [], []
+    for instance in instances:
+        try:
+            proc = psutil.Process(instance.pid)
+            chain = [*proc.children(recursive=True), proc]
+            parent = proc.parent()
+            if parent is not None and PureWindowsPath(parent.name()).stem.lower() == "blink":
+                chain.append(parent)
+        except psutil.Error:
+            continue  # gone by itself since it was found
+        if post_close_to_windows({p.pid for p in chain}):
+            closing.extend(chain)
+        else:
+            doomed.extend(chain)
+
+    for proc in doomed:
+        try:
+            proc.terminate()
+        except psutil.Error:
+            pass
+    psutil.wait_procs(doomed, timeout=KILL_WAIT_SECONDS)
+
+    deadline = time() + window_timeout
+    while closing and time() < deadline:
+        _gone, closing = psutil.wait_procs(closing, timeout=0.1)
+        if on_wait is not None:
+            on_wait()
 
 
 class Updater:
@@ -146,9 +275,63 @@ class Updater:
         path), not the `blink` script, which doesn't have to be on PATH."""
         return [sys.executable, "-m", "blinkview", "setup"]
 
+    @staticmethod
+    def other_instances() -> list[RunningInstance]:
+        """What has to be gone before an install can work: the detached Windows install only
+        waits for this process. Always empty elsewhere, where a running program's files can be
+        replaced."""
+        if sys.platform != "win32":
+            return []
+        return find_other_instances()
+
+    @classmethod
+    def ensure_no_other_instances(cls):
+        """Raises UpdateError naming whatever else is still running from this install."""
+        others = cls.other_instances()
+        if others:
+            raise UpdateError(
+                "BlinkView is still running elsewhere, and Windows can't replace its files until it "
+                f"has closed: {', '.join(map(str, others))}. Close it and try again."
+            )
+
+    @classmethod
+    def close_other_instances(cls, on_wait: Callable[[], None] | None = None):
+        """The update widget's "Close and Continue" (see close_instances). Raises UpdateError
+        naming the ones that are still there afterwards: a window that didn't finish closing in
+        time or has a dialog open, a process of another user."""
+        close_instances(cls.other_instances(), on_wait=on_wait)
+        cls.ensure_no_other_instances()
+
+    @staticmethod
+    def wait_for_exit_command() -> str:
+        """Blocks until this process is gone (a GUI with a session to flush takes longer to exit
+        than any fixed delay), plus a moment for the blink.exe launcher above it, which is the
+        file the installer can't overwrite while it runs."""
+        import os
+
+        return (
+            "powershell -NoProfile -Command Wait-Process -Id "
+            f"{os.getpid()} -Timeout {EXIT_WAIT_SECONDS} -ErrorAction SilentlyContinue; Start-Sleep 1"
+        )
+
+    @staticmethod
+    def child_env() -> dict[str, str]:
+        """The environment for the install and the `blink setup` behind it. Without the Numba
+        cache dir this process exported for its own version (core/numba_setup.py): the new
+        version's setup would compile into it, and its first start would look in its own dir and
+        compile everything again. A dir the user chose is kept."""
+        import os
+
+        env = dict(os.environ)
+        numba_setup = sys.modules.get("blinkview.core.numba_setup")  # not imported = nothing exported
+        exported = getattr(numba_setup, "EXPORTED_CACHE_DIR", None)
+        if exported is not None and env.get("NUMBA_CACHE_DIR") == exported:
+            del env["NUMBA_CACHE_DIR"]
+        return env
+
     def _run_install(self, cmd: list[str]) -> bool:
         """Windows can't replace the running blink.exe or loaded .pyds, so the install runs
-        detached after a short delay, once this process has exited (returns True = exit now).
+        detached, once this process has exited (returns True = exit now).
         Either way `blink setup` follows a successful install, as its own process: this one
         still has the old version loaded."""
         import subprocess
@@ -156,10 +339,12 @@ class Updater:
         if sys.platform == "win32":
             cmd_str = subprocess.list2cmdline(cmd)
             setup_str = subprocess.list2cmdline(self.setup_command())
-            detached_cmd = f'cmd /c "timeout /t 2 > nul && {cmd_str} && {setup_str}"'
+            # `&` after the wait: it reports failure when this process was already gone.
+            detached_cmd = f'cmd /c "{self.wait_for_exit_command()} & {cmd_str} && {setup_str}"'
             subprocess.Popen(
                 detached_cmd,
                 shell=True,
+                env=self.child_env(),
                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
             )
             return True
@@ -169,7 +354,7 @@ class Updater:
             except subprocess.CalledProcessError as e:
                 raise UpdateError(f"Installation failed: {e.stderr or str(e)}")
             try:
-                subprocess.Popen(self.setup_command(), start_new_session=True)
+                subprocess.Popen(self.setup_command(), start_new_session=True, env=self.child_env())
             except OSError as e:
                 print(f"[Updater] Could not start `blink setup`: {e}")  # the next start compiles instead
             return False
@@ -300,6 +485,8 @@ class GitUpdater(Updater):
     def install(self, version: str) -> bool:
         import subprocess
 
+        self.ensure_no_other_instances()
+
         # Mark that we are attempting an upgrade to this specific version
         self.settings.set("update.pending_version", version, scope="global")
 
@@ -397,6 +584,7 @@ class PyPIUpdater(Updater):
         return (base[: -len("/pypi")] if base.endswith("/pypi") else base) + "/simple"
 
     def install(self, version: str) -> bool:
+        self.ensure_no_other_instances()
         self.settings.set("update.pending_version", version, scope="global")
         try:
             return self._run_install(self.install_command(version))

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from qtpy.QtCore import QObject, QTimer, Signal
 from qtpy.QtWidgets import (
+    QApplication,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -238,19 +239,54 @@ class UpdateWidget(QWidget):
         # Clean the version string (removes " (Latest)")
         version = selected.text().split(" ")[0]
 
-        msg = (
-            f"BlinkView will now register version <b>{version}</b> for installation "
-            "and close immediately to complete the process.\n\n"
-            "Do you want to proceed?"
-        )
+        # Asked before this window closes: the install itself runs after it has, with nobody to
+        # tell that something else from this install still has its files locked.
+        others = self.updater.other_instances()
+        if others:
+            running = "".join(f"<li>{instance}</li>" for instance in others)
+            msg = (
+                f"BlinkView is still running elsewhere, and version <b>{version}</b> can't be "
+                f"installed until it has closed:<ul>{running}</ul>"
+                "<b>Close and Continue</b> closes other BlinkView windows normally (they save "
+                "their layout and session) and waits for them, ends the ones without a window, "
+                "then closes this window to install the update. An MCP client (Claude, an editor) "
+                "does not restart its <code>blink mcp</code> server by itself: reconnect it there "
+                "afterwards."
+            )
+            confirm = MessageBox.question(
+                self,
+                "Confirm Update",
+                msg,
+                buttons=MessageBox.Btn.Yes | MessageBox.Btn.Cancel,
+                default_btn=MessageBox.Btn.Cancel,
+                button_texts={MessageBox.Btn.Yes: "Close and Continue"},
+            )
+        else:
+            msg = (
+                f"BlinkView will now register version <b>{version}</b> for installation "
+                "and close immediately to complete the process.\n\n"
+                "Do you want to proceed?"
+            )
 
-        confirm = MessageBox.question(
-            self,
-            "Confirm Update",
-            msg,
-        )
+            confirm = MessageBox.question(
+                self,
+                "Confirm Update",
+                msg,
+            )
 
         if confirm == MessageBox.Btn.Yes:
+            if others:
+                # Another window compresses its session before it exits, which can take a while:
+                # keep this one painting meanwhile.
+                self._set_loading(True)
+                try:
+                    self.updater.close_other_instances(on_wait=QApplication.processEvents)
+                except UpdateError as e:
+                    MessageBox.critical(self, "Update Error", str(e))
+                    return
+                finally:
+                    self._set_loading(False)
+
             try:
                 # Execute the registration callback (e.g., writing to a config or starting a shim)
                 self.gui_context.set_update_version(version)

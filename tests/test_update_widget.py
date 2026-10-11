@@ -64,6 +64,12 @@ class FakeUpdater:
             raise FakeUpdater.fetch_should_raise
         return True
 
+    def other_instances(self):
+        return []
+
+    def close_other_instances(self, on_wait=None):
+        pass
+
 
 @pytest.fixture(autouse=True)
 def _reset_fake_updater():
@@ -236,6 +242,65 @@ class TestHandleInstallRequest:
         widget.handle_install_request()
 
         assert received == ["v1.0.0"]  # " (Local)" suffix stripped
+
+    def _with_another_instance(self, widget, gui_context, monkeypatch, answer):
+        """Another instance is running and the user answers the dialog with `answer`. Returns
+        (question calls, closed, received versions)."""
+        from blinkview.ui.widgets.message_box import MessageBox
+
+        widget.list_local_versions()
+        widget.version_list.setCurrentRow(0)
+
+        asked, closed, received = [], [], []
+        monkeypatch.setattr(widget.updater, "other_instances", lambda: ["blink mcp (pid 42)"])
+        monkeypatch.setattr(widget.updater, "close_other_instances", lambda on_wait=None: closed.append(True))
+        monkeypatch.setattr(MessageBox, "question", staticmethod(lambda *a, **kw: asked.append((a, kw)) or answer))
+        gui_context.set_update_version = lambda v: received.append(v)
+        return asked, closed, received
+
+    def test_another_running_instance_offers_close_and_continue(self, widget, gui_context, monkeypatch):
+        """The install runs after this window has closed, so this is asked now - in the one
+        confirmation, naming what will be killed."""
+        from blinkview.ui.widgets.message_box import MessageBox
+
+        asked, closed, received = self._with_another_instance(widget, gui_context, monkeypatch, MessageBox.Btn.Yes)
+
+        widget.handle_install_request()
+
+        assert len(asked) == 1
+        (_, _, text), kwargs = asked[0]
+        assert "blink mcp (pid 42)" in text
+        assert kwargs["button_texts"] == {MessageBox.Btn.Yes: "Close and Continue"}
+        assert kwargs["default_btn"] == MessageBox.Btn.Cancel
+        assert closed == [True]
+        assert received == ["v1.0.0"]
+
+    def test_cancelling_leaves_the_other_instance_running(self, widget, gui_context, monkeypatch):
+        from blinkview.ui.widgets.message_box import MessageBox
+
+        asked, closed, received = self._with_another_instance(widget, gui_context, monkeypatch, MessageBox.Btn.Cancel)
+
+        widget.handle_install_request()
+
+        assert len(asked) == 1
+        assert closed == [] and received == []
+
+    def test_an_instance_that_survives_stops_the_install(self, widget, gui_context, monkeypatch):
+        from blinkview.ui.widgets.message_box import MessageBox
+
+        _, _, received = self._with_another_instance(widget, gui_context, monkeypatch, MessageBox.Btn.Yes)
+
+        def _fail(on_wait=None):
+            raise UpdateError("still running: blink mcp (pid 42)")
+
+        monkeypatch.setattr(widget.updater, "close_other_instances", _fail)
+        shown = []
+        monkeypatch.setattr(MessageBox, "critical", staticmethod(lambda *a, **kw: shown.append(a[-1])))
+
+        widget.handle_install_request()
+
+        assert shown == ["still running: blink mcp (pid 42)"]
+        assert received == []
 
     def test_declined_confirmation_does_not_install(self, widget, gui_context, monkeypatch):
         from blinkview.ui.widgets.message_box import MessageBox
