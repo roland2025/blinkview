@@ -33,6 +33,7 @@ from blinkview.ui.widgets.log_view_mode import LogViewMode
 from blinkview.ui.widgets.module_filter_sidebar import ModuleFilterSidebar
 from blinkview.ui.widgets.searchable_log_area import SearchableLogArea
 from blinkview.ui.widgets.telemetry_table import TelemetryTable
+from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
 from blinkview.utils.utc_offset import get_local_utc_offset_seconds
@@ -161,7 +162,7 @@ QToolButton[filterEnabled="true"] {
         self.toolbar.setMovable(False)
         self.layout.addWidget(self.toolbar)
 
-        print(
+        dev_print(
             f"[LogViewer] Initializing allowed_device={self.allowed_device} filtered_module={self.filtered_module} children={self.filtered_module_children} log_level={self.log_level}"
         )
         self.action_toggle_filter = QAction("⧨ Filter", self)

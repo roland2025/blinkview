@@ -15,6 +15,7 @@ from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.id_registry import NO_PARENT
 from blinkview.ops.module_filter import nb_inherit_states, nb_rebuild_from_explicit, nb_update_subtree
 from blinkview.ui.widgets.module_filter_model import FastModuleFilterModel
+from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.log_level import LevelIdentity, LogLevel
 
 
@@ -338,7 +339,7 @@ class TempLogFilter(QObject):
         """Triggers compilation for nb_inherit_states, nb_update_subtree, and
         nb_rebuild_from_explicit against a small dummy mask set, mirroring how a real
         TempLogFilter builds/updates its enabled/level/filter arrays."""
-        print("[Warmup] TempLogFilter ...")
+        dev_print("[Warmup] TempLogFilter ...")
 
         registry = helper.registry
         count = max(registry._parent_capacity, registry.module_count())
@@ -392,7 +393,7 @@ class TempLogFilter(QObject):
             LogLevel.OFF.value,
         )
 
-        print("[Warmup] TempLogFilter ... done")
+        dev_print("[Warmup] TempLogFilter ... done")
 
 
 class LevelDelegate(QStyledItemDelegate):

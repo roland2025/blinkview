@@ -31,6 +31,7 @@ from blinkview.parsers.parser import BaseParser, ParserFactory
 from blinkview.parsers.state import FrameState
 from blinkview.storage.file_logger import BinaryBatchProcessor, LogRowBatchProcessor
 from blinkview.utils import level_map  # noqa: F401  (registers the log_level_* sections and their warmups)
+from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 if TYPE_CHECKING:
@@ -105,7 +106,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         if self.sync_state is None:
             self.sync_state: SyncState = create_default_sync(self.shared.time_ns())
 
-            print(f"BinaryParser initial sync state: {self.sync_state}")
+            dev_print(f"BinaryParser initial sync state: {self.sync_state}")
 
         factory_build = self.shared.factories.build
 
@@ -438,7 +439,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         Each registered decoder (core/frame_warmup_registry.py) runs with an empty pipeline, which also compiles the
         shared finish kernel and the batch processors. Each registered section then runs behind the default line
         decoder. Sections are independent kernels, so there is no per-pipeline-length compilation to cover."""
-        print("[Warmup] BinaryParser frame decoders and sections ...")
+        dev_print("[Warmup] BinaryParser frame decoders and sections ...")
 
         no_steps = {"type": "default", "parser_errors_hidden": False, "steps": [], "filter_squash_spaces": False}
 
@@ -459,7 +460,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             BinaryParser._warmup_config(helper, decoder_config, parser_config)
             done_weight += weight
 
-        print("[Warmup] BinaryParser frame decoders and sections ... done")
+        dev_print("[Warmup] BinaryParser frame decoders and sections ... done")
 
 
 @ParserFactory.register("serial_default")

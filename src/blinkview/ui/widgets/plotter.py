@@ -42,6 +42,7 @@ from blinkview.core.device_identity import ModuleIdentity
 from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.widget_registry import register_widget_factory
+from blinkview.utils.dev_mode import dev_print
 
 
 @dataclass
@@ -1586,7 +1587,7 @@ class TelemetryPlotter(QWidget):
         nb_downsample_inplace). Requires data in the pool, provided by
         NumbaWarmupHelper.exercise_logging_kernels()."""
 
-        print("[Warmup] TelemetryPlotter ...")
+        dev_print("[Warmup] TelemetryPlotter ...")
 
         discovery_ws = allocate_discovery_workspace()
         warmup_max_points = 50000
@@ -1680,4 +1681,4 @@ class TelemetryPlotter(QWidget):
                 mode=PLOT_INTERPOLATION_MODE_LINEAR,
             )
 
-        print("[Warmup] TelemetryPlotter ... done")
+        dev_print("[Warmup] TelemetryPlotter ... done")

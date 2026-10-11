@@ -20,6 +20,7 @@ from blinkview.ops.module_snapshot import (
     nb_copy_snapshot_state,
     nb_update_master_arrays_reverse,
 )
+from blinkview.utils.dev_mode import dev_print
 
 if TYPE_CHECKING:
     from blinkview.core.id_registry.tables import IndexedStringTable
@@ -246,7 +247,7 @@ class LatestModuleValueTracker:
         Assigns the tracker onto helper.tracker so other warmup callbacks (e.g.
         TelemetryTableModel.warmup) can reuse it."""
 
-        print("[Warmup] LatestModuleValueTracker ...")
+        dev_print("[Warmup] LatestModuleValueTracker ...")
 
         tracker = LatestModuleValueTracker(
             helper.log_pool, helper.registry.modules_table, helper.array_pool, helper.time_ns
@@ -287,7 +288,7 @@ class LatestModuleValueTracker:
             for _ in replay_snap:
                 break
 
-        print("[Warmup] LatestModuleValueTracker ... done")
+        dev_print("[Warmup] LatestModuleValueTracker ... done")
 
     def _allocate_snapshot(self, capacity: int, count: int, last_known_seq: int) -> ModuleSnapshot:
         """Acquires pool arrays and constructs a snapshot."""

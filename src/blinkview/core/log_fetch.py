@@ -33,6 +33,7 @@ from blinkview.ops.formatting import nb_segment_estimate_out_size, nb_segment_fo
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
 from blinkview.ops.segments import segment_filter, segment_filter_reversed
 from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
+from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.log_level import LogLevel
 
 if TYPE_CHECKING:
@@ -385,7 +386,7 @@ class LogSegmentScanner:
         np.frombuffer(b"", ...) rather than np.empty(...) so their buffer fields are already
         read-only - the same type Numba sees for a real, non-empty query. That means the single
         EMPTY_* combo exercised below covers the "real kv/text present" case too."""
-        print("[Warmup] LogSegmentScanner ...")
+        dev_print("[Warmup] LogSegmentScanner ...")
 
         mod_count = helper.registry.module_count()
         safe_capacity = max(10, mod_count)
@@ -432,7 +433,7 @@ class LogSegmentScanner:
                 )
                 break
 
-        print("[Warmup] LogSegmentScanner ... done")
+        dev_print("[Warmup] LogSegmentScanner ... done")
 
 
 class LiveFetchResult(NamedTuple):
@@ -550,7 +551,7 @@ class LogTextFetcher:
     def warmup(helper: "NumbaWarmupHelper"):
         """Covers nb_segment_estimate_out_size/nb_segment_format - the terminal text-formatting
         kernels LogSegmentScanner.warmup doesn't exercise."""
-        print("[Warmup] LogTextFetcher ...")
+        dev_print("[Warmup] LogTextFetcher ...")
 
         mod_count = helper.registry.module_count()
         safe_capacity = max(10, mod_count)
@@ -588,4 +589,4 @@ class LogTextFetcher:
                         )
                 break
 
-        print("[Warmup] LogTextFetcher ... done")
+        dev_print("[Warmup] LogTextFetcher ... done")

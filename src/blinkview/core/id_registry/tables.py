@@ -13,6 +13,7 @@ from blinkview.core.id_registry.types import StringTableParams
 from blinkview.core.types.empty import EMPTY_ID, EMPTY_INDEX
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.string_table import nb_insert_item, nb_insert_item_no_index, nb_rebuild_index
+from blinkview.utils.dev_mode import dev_print
 
 if TYPE_CHECKING:
     from blinkview.core.warmup import NumbaWarmupHelper
@@ -217,7 +218,7 @@ class IndexedStringTable:
         here. A second insert past initial_capacity=1 forces growth, triggering
         _rebuild_index() -> nb_rebuild_index (a no-op for the use_hashes=False table, which
         skips it by design - exercised on the use_hashes=True table only)."""
-        print("[Warmup] IndexedStringTable ...")
+        dev_print("[Warmup] IndexedStringTable ...")
 
         with_hashes = IndexedStringTable(initial_capacity=1, buffer_size_bytes=64, use_hashes=True)
         without_hashes = IndexedStringTable(initial_capacity=1, buffer_size_bytes=64, use_hashes=False)
@@ -232,4 +233,4 @@ class IndexedStringTable:
         with_hashes.release()
         without_hashes.release()
 
-        print("[Warmup] IndexedStringTable ... done")
+        dev_print("[Warmup] IndexedStringTable ... done")

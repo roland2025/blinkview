@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from blinkview.utils.atomic_json_dump import atomic_json_dump
+from blinkview.utils.dev_mode import dev_print
 
 
 def _undo_patch(before: dict, after: dict) -> list:
@@ -38,7 +39,7 @@ class ConfigManager:
         self.filepath = filepath
         self.autosave_path = autosave_path
 
-        print(f"[ConfigManager] Initialized with filepath: {self.filepath}, autosave_path: {self.autosave_path}")
+        dev_print(f"[ConfigManager] Initialized with filepath: {self.filepath}, autosave_path: {self.autosave_path}")
 
         self._lock = threading.RLock()
 

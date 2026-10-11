@@ -5,6 +5,9 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 
+from blinkview.utils.dev_mode import dev_print
+
+
 def check_for_updates_silently(gui_context, parent=None):
     from packaging.version import parse as parse_version
 
@@ -24,7 +27,7 @@ def check_for_updates_silently(gui_context, parent=None):
 
     def _bg_worker():
         try:
-            print("checking for updates...")
+            dev_print("checking for updates...")
             updater.fetch(force=False)
             latest = updater.get_latest_version()
 

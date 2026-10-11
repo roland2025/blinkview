@@ -62,6 +62,7 @@ def blink(tmp_path):
         USERPROFILE=str(fake_home),
         BLINK_PROJECT_ROOT=str(tmp_path / "fake_project_root"),
         PYTHONUNBUFFERED="1",
+        BLINKVIEW_DEV="1",  # the startup marker is a trace line, only printed in dev mode
     )
     # The child must resolve its own Numba cache (update.path above -> this repo's warm cache);
     # an inherited value may point at another test's tmp dir and force a >60s cold compile.

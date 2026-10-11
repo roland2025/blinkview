@@ -132,3 +132,76 @@ def test_real_registry_logs_central_stats_only_in_dev_mode(tmp_path, monkeypatch
         assert ("central.stats" in registry.system_device.path_lookup) is dev_mode
     finally:
         registry.stop()
+
+
+class TestConsoleTracing:
+    """BlinkView's own tracing (what was configured, which thread started, ...) is only printed in
+    dev mode - see dev_print() and PrintLogger."""
+
+    @pytest.fixture
+    def dev_mode(self, monkeypatch):
+        """Sets the process-wide flag for one test (is_dev_mode() resolves it once per process)."""
+        from blinkview.utils import dev_mode as dev_mode_module
+
+        def set_(value):
+            monkeypatch.setattr(dev_mode_module, "_process_dev_mode", value)
+
+        return set_
+
+    def test_dev_print_is_silent_outside_dev_mode(self, dev_mode, capsys):
+        from blinkview.utils.dev_mode import dev_print
+
+        dev_mode(False)
+        dev_print("[Registry] config={'token': 'secret'}")
+
+        assert capsys.readouterr().out == ""
+
+    def test_dev_print_prints_in_dev_mode(self, dev_mode, capsys):
+        from blinkview.utils.dev_mode import dev_print
+
+        dev_mode(True)
+        dev_print("[Warmup] Reorder ...", "done")
+
+        assert capsys.readouterr().out == "[Warmup] Reorder ... done\n"
+
+    def test_is_dev_mode_follows_the_env_var_and_asks_once(self, dev_mode, monkeypatch):
+        from blinkview.utils.dev_mode import is_dev_mode
+
+        dev_mode(None)  # not asked yet
+        monkeypatch.setenv(DEV_MODE_ENV, "1")
+        assert is_dev_mode() is True
+
+        monkeypatch.setenv(DEV_MODE_ENV, "0")
+        assert is_dev_mode() is True  # resolved once per process, like Registry.dev_mode
+
+    def test_print_logger_keeps_info_off_the_console_but_still_queues_it(self, dev_mode, capsys):
+        dev_mode(False)
+        queued = []
+        logger = PrintLogger("id_registry", queue_put=queued.append, time_ns=lambda: 7)
+
+        logger.info("id=%d tm_ms=0.03", 0)
+        logger.warn("pool is full")
+
+        out = capsys.readouterr().out
+        assert "tm_ms" not in out
+        assert "pool is full" in out
+        assert [msg for _ts, _ctx, _level, msg in queued] == ["id=0 tm_ms=0.03", "pool is full"]
+
+    def test_print_logger_prints_everything_in_dev_mode(self, dev_mode, capsys):
+        dev_mode(True)
+
+        PrintLogger("id_registry").info("id=%d tm_ms=0.03", 0)
+
+        assert "tm_ms" in capsys.readouterr().out
+
+    def test_real_registry_start_prints_no_config_dump(self, dev_mode, tmp_path, capsys, monkeypatch):
+        """The whole profile used to be printed twice per start ([Registry] _create_and_bind and
+        [SourcesManager] Applying config) - noise, and anything secret in a profile with it."""
+        monkeypatch.setenv(DEV_MODE_ENV, "0")
+        dev_mode(False)
+        registry = make_real_registry(tmp_path, "console_test", start=True)
+        registry.stop()
+
+        out = capsys.readouterr().out
+        for needle in ("config=", "Applying config", "Thread starting", "apply_config", "tm_ms="):
+            assert needle not in out, needle

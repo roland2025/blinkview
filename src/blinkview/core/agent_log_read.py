@@ -29,6 +29,7 @@ from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
 from blinkview.ops.segments import LEVEL_SLOTS, nb_count_rows_by_module_level, segment_filter
 from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
+from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
 from blinkview.utils.utc_offset import get_local_utc_offset_seconds
@@ -471,7 +472,7 @@ def summary(registry, args: dict) -> dict:
 def warmup_summary(helper: "NumbaWarmupHelper"):
     """Compiles nb_count_rows_by_module_level with the argument types summary() passes. Needs
     rows already in helper.log_pool (CircularLogPool.warmup, priority=100)."""
-    print("[Warmup] agent summary ...")
+    dev_print("[Warmup] agent summary ...")
 
     mod_count = max(10, helper.registry.module_count())
     effective_mask = np.full(mod_count, LogLevel.ALL.value, dtype=dtypes.LEVEL_TYPE)
@@ -496,7 +497,7 @@ def warmup_summary(helper: "NumbaWarmupHelper"):
             )
             break
 
-    print("[Warmup] agent summary ... done")
+    dev_print("[Warmup] agent summary ... done")
 
 
 def current_sequence(registry) -> Optional[int]:

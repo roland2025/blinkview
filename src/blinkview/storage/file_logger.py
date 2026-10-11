@@ -26,6 +26,7 @@ from blinkview.ops.formatting import (
 )
 from blinkview.storage.log_file_archive import compress_log_part_file
 from blinkview.subscribers.subscriber import BaseSubscriber
+from blinkview.utils.dev_mode import dev_print
 
 
 def _compress_and_delete_log_part(path: Path, logger=None) -> bool:
@@ -218,7 +219,7 @@ class FileLogger(BaseFileLogger):
         return len_data
 
     def run(self):
-        print(
+        dev_print(
             f"[{self.name}] FileLogger thread started with batch processor: {self.batch_processor.__class__.__name__}"
         )
         bytes_total = self.open_file()

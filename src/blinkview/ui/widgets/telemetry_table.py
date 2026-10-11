@@ -48,6 +48,7 @@ from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.in_development import set_as_in_development
 from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.action_button_delegate import TelemetryCol, TelemetryDelegate
+from blinkview.utils.dev_mode import dev_print
 
 if TYPE_CHECKING:
     from blinkview.core.warmup import NumbaWarmupHelper
@@ -139,7 +140,7 @@ class TelemetryTableModel(QAbstractTableModel):
         helper's dummy pool/registry, using scratch arrays sized to it instead of a real
         TelemetryTableModel. Kept private rather than reusing helper.tracker so this warmup
         doesn't depend on callback registration order."""
-        print("[Warmup] TelemetryTableModel ...")
+        dev_print("[Warmup] TelemetryTableModel ...")
 
         tracker = LatestModuleValueTracker(
             helper.log_pool, helper.registry.modules_table, helper.array_pool, helper.time_ns
@@ -156,7 +157,7 @@ class TelemetryTableModel(QAbstractTableModel):
 
             n_mods = len(sequences)
             if n_mods == 0:
-                print("[Warmup] TelemetryTableModel ... done")
+                dev_print("[Warmup] TelemetryTableModel ... done")
                 return
 
             painted_seqs = np.zeros(n_mods, dtype=dtypes.SEQ_TYPE)
@@ -207,7 +208,7 @@ class TelemetryTableModel(QAbstractTableModel):
                 MAX_MSG_BYTES,
             )
 
-        print("[Warmup] TelemetryTableModel ... done")
+        dev_print("[Warmup] TelemetryTableModel ... done")
 
     def _init_memoryviews(self):
         """Wraps numpy arrays to avoid scalar boxing overhead during pure-Python UI lookups."""

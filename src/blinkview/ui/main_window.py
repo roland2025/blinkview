@@ -58,6 +58,7 @@ from blinkview.ui.widgets.toast import ToastManager, ToastType
 from blinkview.ui.widgets.toast_dispatcher import toast_dispatcher
 from blinkview.ui.widgets.update_widget import check_post_update
 from blinkview.ui.windows.detached_tab_window import DetachedTabWindow
+from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.format_metric import format_metric
 from blinkview.utils.used_modules import print_used_modules
 
@@ -565,7 +566,7 @@ class BlinkMainWindow(QMainWindow):
         self._replay_start_ts_ns: Optional[int] = None  # set by start_replay's on_finished
         self._replay_end_ts_ns: Optional[int] = None  # set by start_replay's on_finished
 
-        print("[BlinkMainWindow] Initialization complete.")
+        dev_print("[BlinkMainWindow] Initialization complete.")
 
     def load_ui_state(self):
         """Staged startup sequence, run once the window is shown:
@@ -1200,7 +1201,7 @@ class BlinkMainWindow(QMainWindow):
 
         # window or tab doesnt exist, we need to create it
 
-        print(f"[BlinkMainWindow] Opening widget: {cls_name} with name: {name} (as_window={as_window})")
+        dev_print(f"[BlinkMainWindow] Opening widget: {cls_name} with name: {name} (as_window={as_window})")
         factory = self.widget_factories.get(cls_name)
 
         if not factory:

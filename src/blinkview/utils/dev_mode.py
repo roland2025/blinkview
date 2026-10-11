@@ -35,3 +35,29 @@ def resolve_dev_mode(settings) -> bool:
     if settings is None:
         return False
     return parse_flag(settings.get(DEV_MODE_SETTING))
+
+
+# Resolved once per process by is_dev_mode(); None = not asked yet.
+_process_dev_mode: Optional[bool] = None
+
+
+def is_dev_mode() -> bool:
+    """Dev mode for code that has no Registry or settings at hand (console tracing, startup). Same
+    answer as Registry.dev_mode: both read BLINKVIEW_DEV and the same settings files. The
+    settings are read on first use, and like there not re-read afterwards."""
+    global _process_dev_mode
+    if _process_dev_mode is None:
+        try:
+            from blinkview.core.settings_manager import SettingsManager
+
+            _process_dev_mode = resolve_dev_mode(SettingsManager())
+        except Exception:
+            _process_dev_mode = resolve_dev_mode(None)  # unreadable settings: the env var still counts
+    return _process_dev_mode
+
+
+def dev_print(*args, **kwargs):
+    """print() for BlinkView's own tracing (what was configured, which thread started, what was
+    fetched): shown in dev mode only. Errors and anything the user has to act on use print()."""
+    if is_dev_mode():
+        print(*args, **kwargs)

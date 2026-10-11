@@ -51,6 +51,7 @@ from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.kv_filter_line_edit import KvFilterLineEdit
 from blinkview.ui.widgets.log_view_mode import LogViewMode
 from blinkview.ui.widgets.module_filter_sidebar import ModuleFilterSidebar
+from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.log_filter import LogFilter
 from blinkview.utils.log_level import LogLevel
 from blinkview.utils.utc_offset import get_local_utc_offset_seconds
@@ -298,7 +299,7 @@ class LogTableStore:
         (core/log_fetch.py) instead of duplicated here - both callbacks are registered
         independently and NumbaWarmupHelper.run_all() runs every registered callback, so no
         explicit ordering/dependency between them is needed."""
-        print("[Warmup] LogTableStore ...")
+        dev_print("[Warmup] LogTableStore ...")
 
         # _format_ts's per-cell-paint kernel - precision=9 alone compiles every branch (branches
         # aren't literal-specialized on a runtime bool/int, see numba-njit skill §3).
@@ -348,7 +349,7 @@ class LogTableStore:
                 break
                 break
 
-        print("[Warmup] LogTableStore ... done")
+        dev_print("[Warmup] LogTableStore ... done")
 
     # --- Row access ------------------------------------------------------------------------
 

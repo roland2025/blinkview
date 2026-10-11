@@ -13,6 +13,7 @@ from blinkview.core.configurable import configurable
 from blinkview.core.constants import FactoryCategory, SysCat
 from blinkview.core.system_context import SystemContext
 from blinkview.parsers.parser import BaseParser
+from blinkview.utils.dev_mode import dev_print
 
 
 @configurable
@@ -81,7 +82,7 @@ class PipelineManager:
 
                     self.subscribe(name, item)
 
-                    print(f"[PipelineManager] apply_config: {self.pipelines.keys()}")
+                    dev_print(f"[PipelineManager] apply_config: {self.pipelines.keys()}")
                 else:
                     # Update existing pipeline and check for changes.
                     # A disabled pipeline holds no links, so enable/disable rewires too.
@@ -155,14 +156,14 @@ class PipelineManager:
         if not item.enabled:
             return
 
-        print(f"Applying targets for pipeline '{item_id}'")
+        dev_print(f"Applying targets for pipeline '{item_id}'")
         if hasattr(item, "sources_"):
-            print(f"Pipeline '{item_id}' has sources: {item.sources_}")
+            dev_print(f"Pipeline '{item_id}' has sources: {item.sources_}")
             # check if its a list or a single string
             self.logger.warn("Source '%s' has sources: %s", item_id, item.sources_)
             sources = [item.sources_] if isinstance(item.sources_, str) else item.sources_
             for source in sources:
-                print(f"Source '{item_id}' has source: {source}")
+                dev_print(f"Source '{item_id}' has source: {source}")
                 self.logger.debug("Source '%s' has source: %s", item_id, source)
                 self.shared.registry.get_reference_target(source).subscribe(item)
 
@@ -227,7 +228,7 @@ class PipelineManager:
                     break
 
         # Connect Sources (Where 'ref' gets data FROM)
-        print(f"sources: {getattr(ref, 'sources', [])}")
+        dev_print(f"sources: {getattr(ref, 'sources', [])}")
         for source_key in getattr(ref, "sources", []):
             print(f"{name_debug}: {source_key}")
             source_obj = mapped_sources.get(source_key)
@@ -257,7 +258,7 @@ class PipelineManager:
 
     def get_schema(self, name: str):
 
-        print(f"[PipelineManager] get_schema: {self.pipelines.keys()}")
+        dev_print(f"[PipelineManager] get_schema: {self.pipelines.keys()}")
         try:
             return self.pipelines[name].get_config_schema()
         except KeyError:
@@ -265,5 +266,5 @@ class PipelineManager:
             return self.shared.factories.get_base_schema(FactoryCategory.PARSER)
 
     def get(self, id_: str):
-        print(f"PipelineManager: Retrieving pipeline with ID '{id_}' all: {list(self.pipelines.keys())}")
+        dev_print(f"PipelineManager: Retrieving pipeline with ID '{id_}' all: {list(self.pipelines.keys())}")
         return self.pipelines.get(id_)

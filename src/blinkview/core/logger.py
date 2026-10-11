@@ -7,6 +7,7 @@
 from traceback import format_exc
 from typing import Callable, Optional, Protocol
 
+from blinkview.utils.dev_mode import is_dev_mode
 from blinkview.utils.log_level import LevelIdentity, LogLevel
 
 
@@ -200,7 +201,8 @@ class PrintLogger(BaseLogger):
         essential: bool = False,
     ):
         """
-        Dummy Logger: Bypasses Registry/Queue and prints directly to console.
+        Dummy Logger: Bypasses Registry/Queue and prints directly to console (in dev mode
+        everything, otherwise warnings and errors).
         Supports hierarchical child loggers.
         """
         self.is_essential = essential
@@ -228,11 +230,16 @@ class PrintLogger(BaseLogger):
         q_put = self.queue_put
         t_ns = self.time_ns
 
+        # Outside dev mode the console only gets warnings and errors; everything still goes to
+        # the queue, and so into the session log.
+        console_min_level = 0 if is_dev_mode() else LogLevel.WARN.value
+
         def fast_log(level_name: LevelIdentity, fmt: str, *args):
             # Format: [TIME] LEVEL SYSTEM [CONTEXT] MESSAGE
             msg = fmt % args if args else fmt
-            t = strftime_("%H:%M:%S", localtime_())
-            print_(f"{t} {level_name} SYSTEM {ctx_} \t{msg}")
+            if level_name.value >= console_min_level:
+                t = strftime_("%H:%M:%S", localtime_())
+                print_(f"{t} {level_name} SYSTEM {ctx_} \t{msg}")
 
             if q_put is not None and t_ns is not None:
                 q_put((t_ns(), ctx_, level_name, msg))

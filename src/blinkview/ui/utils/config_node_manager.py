@@ -12,6 +12,7 @@ from blinkview.core.config_manager import ConfigManager
 from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.utils.config_node import ConfigNode
+from blinkview.utils.dev_mode import dev_print
 
 
 class ConfigNodeManager(QObject):
@@ -49,7 +50,7 @@ class ConfigNodeManager(QObject):
         on_update=None,
     ) -> ConfigNode:
         """Creates a ConfigNode and wires it securely to the backend registry."""
-        print(f"[ConfigManager] Creating node for {path}")
+        dev_print(f"[ConfigManager] Creating node for {path}")
         node = ConfigNode(self, path, name, drop_keys=drop_keys, depth=depth, on_update=on_update)
 
         # Extract backend functions
@@ -61,7 +62,7 @@ class ConfigNodeManager(QObject):
         # Wire the GET function
         def fetch(path_):
             try:
-                print(f"[ConfigManager] Fetching '{path_}'")
+                dev_print(f"[ConfigManager] Fetching '{path_}'")
                 config, schema = get_config_schema(path_, drop_keys=drop_keys, editable=editable)
                 # Feed the result directly back into the node
                 node.recv_config_schema(path_, config, schema)

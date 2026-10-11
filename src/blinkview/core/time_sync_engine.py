@@ -26,6 +26,7 @@ from blinkview.ops.timesync import (
     EngineState,
     nb_sync_kernel,
 )
+from blinkview.utils.dev_mode import dev_print
 
 if TYPE_CHECKING:
     from blinkview.core.warmup import NumbaWarmupHelper
@@ -112,7 +113,7 @@ class TimeSyncEngine:
         """Triggers compilation for the TimeSyncEngine (nb_sync_kernel via feed/soft_reset) and
         the module-lookup kernels used alongside timesync projection. Requires data in the pool,
         provided by NumbaWarmupHelper.exercise_logging_kernels()."""
-        print("[Warmup] TimeSyncEngine ...")
+        dev_print("[Warmup] TimeSyncEngine ...")
 
         now_ns = helper.time_ns()
         sync_state = create_default_sync(now_ns, start_enabled=True)
@@ -142,4 +143,4 @@ class TimeSyncEngine:
                 nb_find_next_module_index(b, dtypes.ID_TYPE(helper.warmup_mod.id), dtypes.SEQ_TYPE(SEQ_NONE))
                 break
 
-        print("[Warmup] TimeSyncEngine ... done")
+        dev_print("[Warmup] TimeSyncEngine ... done")

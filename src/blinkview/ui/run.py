@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from blinkview.utils.dev_mode import dev_print
+
 
 def register_desktop_entry():
     if sys.platform != "linux":
@@ -107,10 +109,10 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
         app.setStyle("Fusion")
         use_qdarktheme = True
         if use_qdarktheme:
-            print("DEBUG: About to import qdarktheme...")
+            dev_print("DEBUG: About to import qdarktheme...")
             import qdarktheme
 
-            print("DEBUG: qdarktheme imported!")
+            dev_print("DEBUG: qdarktheme imported!")
 
             qdarktheme.setup_theme("dark", corner_shape="sharp")
             custom_tooltips = """
@@ -124,7 +126,7 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
             """
             app.setStyleSheet(app.styleSheet() + custom_tooltips)
 
-        print(f"ICON_PATH: {ICON_PATH}")
+        dev_print(f"ICON_PATH: {ICON_PATH}")
         # Set the global application icon
         app.setWindowIcon(QIcon(str(ICON_PATH)))
 
@@ -149,7 +151,7 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
         from blinkview.core.numba_setup import export_numba_cache
 
         cache_path = export_numba_cache(settings, update_source)
-        print(f"Numba cache exported to: {cache_path}")
+        dev_print(f"Numba cache exported to: {cache_path}")
 
         from blinkview.core.profile_params import ProfileParamError
         from blinkview.core.registry import Registry

@@ -16,6 +16,7 @@ from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.reorder import MergeChunk, nb_find_split_idx, nb_hybrid_merge_and_copy, nb_sum_lengths
+from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 # =========================================================================
@@ -251,7 +252,7 @@ class Reorder(BaseReorder):
     def warmup(helper: "NumbaWarmupHelper"):
         """Triggers compilation for the Reorder kernel (Hybrid Merge & Copy, plus the
         nb_find_split_idx/nb_sum_lengths helpers) against small dummy scratchpads."""
-        print("[Warmup] Reorder ...")
+        dev_print("[Warmup] Reorder ...")
 
         pool_create = helper.array_pool.create
         time_ns = helper.time_ns
@@ -299,4 +300,4 @@ class Reorder(BaseReorder):
             # Warm up the Hybrid Merge & Copy kernel
             nb_hybrid_merge_and_copy(warmup_chunks, w_ts_scr, w_b_idx_scr, w_r_idx_scr, w_sort_scr, dummy_out.bundle)
 
-        print("[Warmup] Reorder ... done")
+        dev_print("[Warmup] Reorder ... done")

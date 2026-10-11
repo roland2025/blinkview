@@ -25,6 +25,7 @@ from blinkview.core.types.modules import MODULE_ID_UNKNOWN, MODULE_TEMP_ID_BASE,
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.kv_extraction import nb_process_kv_batch
 from blinkview.parsers.parser import BaseParser, ParserFactory
+from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 if TYPE_CHECKING:
@@ -741,7 +742,7 @@ class MultiRuleKeyValueParser(BaseParser):
         """Triggers compilation for every KvRuleID branch (including the KEY_VALUE dynamic
         tracker/resolve path) via one real nb_process_kv_batch call - the single-kernel-call
         entry point every real MultiRuleKeyValueParser.run() iteration actually uses."""
-        print("[Warmup] MultiRuleKeyValueParser ...")
+        dev_print("[Warmup] MultiRuleKeyValueParser ...")
 
         device = helper.warmup_mod.device
         local_ctx = SimpleNamespace(device_id=device)
@@ -832,4 +833,4 @@ class MultiRuleKeyValueParser(BaseParser):
                 device.id,
             )
 
-        print("[Warmup] MultiRuleKeyValueParser ... done")
+        dev_print("[Warmup] MultiRuleKeyValueParser ... done")

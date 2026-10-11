@@ -28,6 +28,7 @@ from blinkview.ops.telemetry import (
     nb_extract_telemetry_segment_window_forward,
     nb_peek_segment_channels_backwards,
 )
+from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.log_level import LogLevel
 
 if TYPE_CHECKING:
@@ -758,7 +759,7 @@ class CircularLogPool:
         every other callback's log/telemetry kernels need rows already present in
         helper.log_pool."""
 
-        print("[Warmup] CircularLogPool ...")
+        dev_print("[Warmup] CircularLogPool ...")
 
         log_level = LogLevel.INFO.value
 
@@ -792,7 +793,7 @@ class CircularLogPool:
             # Trigger: Batch Append Logic
             helper.log_pool.batch_append(batch)
 
-        print("[Warmup] CircularLogPool ... done")
+        dev_print("[Warmup] CircularLogPool ... done")
 
 
 def allocate_telemetry_workspace(num_channels: int) -> np.ndarray:

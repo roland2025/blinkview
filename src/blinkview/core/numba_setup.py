@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from blinkview import __version__
+from blinkview.utils.dev_mode import dev_print
 
 IS_CACHE_WARM = False
 
@@ -65,7 +66,7 @@ def export_numba_cache(settings, update_source=None):
 
         # Resolve and set the environment variable
         os.environ["NUMBA_CACHE_DIR"] = str(versioned_dir.resolve())
-        print(f"DEBUG: Numba cache redirected to: {os.environ['NUMBA_CACHE_DIR']}")
+        dev_print(f"DEBUG: Numba cache redirected to: {os.environ['NUMBA_CACHE_DIR']}")
 
         _touch_last_used(versioned_dir)
         # Background: rmtree of a 100+ MB dir shouldn't delay startup.
@@ -75,7 +76,7 @@ def export_numba_cache(settings, update_source=None):
     else:
         # Someone else (tests, the user) chose the cache dir - don't touch anything around it.
         versioned_dir = Path(os.environ["NUMBA_CACHE_DIR"])
-        print(f"DEBUG: Using pre-existing NUMBA_CACHE_DIR: {versioned_dir}")
+        dev_print(f"DEBUG: Using pre-existing NUMBA_CACHE_DIR: {versioned_dir}")
 
     # IS_CACHE_WARM means "a whole warmup already finished into this dir", so the UI can skip the
     # compiling-shaders toast - not "there are files in it": a warmup that was closed halfway

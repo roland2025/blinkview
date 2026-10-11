@@ -15,6 +15,7 @@ from blinkview.core.constants import FactoryCategory, SysCat
 from blinkview.core.logger import BaseLogger
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.system_context import SystemContext
+from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.generate_id import generate_id
 from blinkview.utils.settings_updater import update_object_from_config
 
@@ -154,7 +155,7 @@ class BaseDaemon:
             if self.logger:
                 self.logger.warn(msg)
 
-        print(f"[{self.__class__.__name__}] Thread starting...")
+        dev_print(f"[{self.__class__.__name__}] Thread starting...")
 
         self._thread.start()
 

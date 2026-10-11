@@ -8,6 +8,8 @@ from qtpy.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, QVariantAn
 from qtpy.QtGui import QColor, QFontMetricsF, QPainter, QPen
 from qtpy.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QWidget
 
+from blinkview.utils.dev_mode import dev_print
+
 
 class ToastType:
     # (x, y) offset: +x moves right, +y moves down
@@ -359,7 +361,7 @@ class ToastManager:
         click_callback=None,
         parent=None,
     ):
-        print(f"[ToastManager]: show: {message}")
+        dev_print(f"[ToastManager]: show: {message}")
         return cls._show(message, toast_type, duration, action_text, action_callback, click_callback, parent, False)
 
     @classmethod
@@ -372,7 +374,7 @@ class ToastManager:
         ToastWidget.set_progress) instead of with the cosmetic countdown. Only safe to call from
         the main/UI thread (unlike notify()/ToastDispatcher, there's no cross-thread signal
         marshalling here - the returned widget must be usable synchronously by the caller)."""
-        print(f"[ToastManager]: show_persistent: {message}")
+        dev_print(f"[ToastManager]: show_persistent: {message}")
         toast = cls._show(message, toast_type, duration, None, None, None, parent, True)
         if toast is not None and progress is not None:
             toast.set_progress(progress)

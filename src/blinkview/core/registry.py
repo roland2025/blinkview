@@ -28,7 +28,7 @@ from blinkview.core.system_context import SystemContext
 from blinkview.core.task_manager import TaskManager
 from blinkview.storage.file_manager import FileManager
 from blinkview.subscribers.subscriber import SubscriberFactory
-from blinkview.utils.dev_mode import resolve_dev_mode
+from blinkview.utils.dev_mode import dev_print, resolve_dev_mode
 from blinkview.utils.time_utils import TimeUtils
 
 if TYPE_CHECKING:
@@ -308,7 +308,7 @@ class Registry:
         return self.file_manager.session_display_name
 
     def _create_and_bind(self, cls, name, config):
-        print(f"[Registry] _create_and_bind name={name} cls={cls.__name__}  config={config}")
+        dev_print(f"[Registry] _create_and_bind name={name} cls={cls.__name__}  config={config}")
         local_ctx = SimpleNamespace(get_logger=self.logger_creator(name))
         instance = cls()
         if hasattr(instance, "bind_system"):
@@ -378,7 +378,7 @@ class Registry:
                 required.append("reorder")
 
             schema["required"] = required
-            print(f"[Registry] get_schema_by_path: path={path} drop_keys={drop_keys} root_keys={root_keys}")
+            dev_print(f"[Registry] get_schema_by_path: path={path} drop_keys={drop_keys} root_keys={root_keys}")
 
             for key in root_keys:
                 sub_schema = self.get_registry_schema(key)
@@ -387,7 +387,7 @@ class Registry:
 
         else:
             splitted = path.strip("/").split("/")
-            print(f"[Registry] get_schema_by_path: path={path}, splitted={splitted}")
+            dev_print(f"[Registry] get_schema_by_path: path={path}, splitted={splitted}")
             if len(splitted) == 1:
                 schema = self.get_registry_schema(splitted[0])
             elif len(splitted) == 2:
@@ -741,11 +741,11 @@ class Registry:
             if self.initialized:
                 return
 
-            print(f"[Registry] Configuring system with session name: {self.session_name}")
+            dev_print(f"[Registry] Configuring system with session name: {self.session_name}")
 
             # print()
             self.plugins.apply_config(self.config.get_by_path("/plugins"))
-            print("[Registry] Applied plugin configuration.")
+            dev_print("[Registry] Applied plugin configuration.")
 
             system_ctx = self.system_ctx
             factories = system_ctx.factories
@@ -815,7 +815,7 @@ class Registry:
             self.reinit_logger(self.central)
 
             try:
-                print("[Registry] Configuring sources")
+                dev_print("[Registry] Configuring sources")
                 self.sources = self._create_and_bind(SourcesManager, "sources", self.config.get_by_path("/sources"))
                 self.config.subscribe("/sources", self.sources)
             except Exception as e:
@@ -928,11 +928,11 @@ class Registry:
         # self.reinit_logger(self.pipelines)
 
         if self.central is not None:
-            print("[Registry] Starting central storage...")
+            dev_print("[Registry] Starting central storage...")
             self.central.start()
 
         if self.reorder is not None:
-            print("[Registry] Starting reorder buffer...")
+            dev_print("[Registry] Starting reorder buffer...")
             self.reorder.start()
         # self.parser_thread.start()
         # Start Hardware Pipelines (Readers + Parsers)

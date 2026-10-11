@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from blinkview.core.bindable import bindable
 from blinkview.core.configurable import configurable
 from blinkview.core.constants import FactoryCategory
+from blinkview.utils.dev_mode import dev_print
 
 
 @bindable
@@ -22,10 +23,10 @@ class SourcesManager:
 
         self.needs_delayed_init = True  # Flag to indicate if delayed initialization is needed
 
-        print("[SourcesManager] __init__ done")
+        dev_print("[SourcesManager] __init__ done")
 
     def apply_config(self, config: dict) -> bool:
-        print(f"[SourcesManager] Applying config: {config}")
+        dev_print(f"[SourcesManager] Applying config: {config}")
         config = config or {}  # profile JSON without a "sources" key
         changed = self.apply_base_config(config)
 
@@ -146,7 +147,7 @@ class SourcesManager:
                 self.apply_target(item_id, item)
 
     def apply_target(self, item_id, item):
-        print(f"Applying targets for source '{item_id}'")
+        dev_print(f"Applying targets for source '{item_id}'")
         if hasattr(item, "sources_"):
             # check if its a list or a single string
             self.logger.warn("Source '%s' has sources: %s", item_id, item.sources_)

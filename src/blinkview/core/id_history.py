@@ -10,6 +10,7 @@ import numpy as np
 
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.id_history import NOT_FOUND, nb_resolve_id_at
+from blinkview.utils.dev_mode import dev_print
 
 if TYPE_CHECKING:
     from blinkview.core.warmup import NumbaWarmupHelper
@@ -134,7 +135,7 @@ class IdHistory:
     @register_warmup
     def warmup(helper: "NumbaWarmupHelper"):
         """Triggers compilation for nb_resolve_id_at against a tiny dummy history."""
-        print("[Warmup] IdHistory ...")
+        dev_print("[Warmup] IdHistory ...")
 
         history = IdHistory(initial_capacity=4)
         history.update(1, "warmup", 0)
@@ -144,4 +145,4 @@ class IdHistory:
         history.resolve(1, 999)
         history.resolve(999, 0)  # unknown key
 
-        print("[Warmup] IdHistory ... done")
+        dev_print("[Warmup] IdHistory ... done")
