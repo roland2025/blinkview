@@ -6,7 +6,8 @@
 
 """`blink setup`: compiles every Numba kernel into the on-disk cache ahead of time, so the next
 `blink` starts without the cold-cache compile (~75 s, plans/background-warmup.md). The updater
-runs it after installing a new version; it can also be run by hand."""
+runs it after installing a new version; it can also be run by hand. A GUI start that finds the
+cache incomplete anyway shows the same window first (ui/run.py)."""
 
 import os
 import sys
@@ -125,6 +126,42 @@ def _print_progress():
     return on_progress
 
 
+def run_setup_window(app, settings) -> Optional[str]:
+    """The progress window over a whole warmup: `blink setup`'s, and a GUI start's when the cache
+    isn't complete (ui/run.py). Runs the event loop until the window has closed. Returns None when
+    every kernel compiled, "cancelled", or what went wrong. Needs export_numba_cache() first."""
+    from qtpy.QtCore import QTimer
+
+    from blinkview.ui.windows.setup_window import SetupWindow
+
+    helper = None
+
+    def compile_fn(on_progress, cancel):
+        return compile_kernels(helper, on_progress=on_progress, cancel=cancel)
+
+    def begin():
+        # Importing every kernel and widget module takes a few seconds by itself, so the
+        # window is shown first. On this thread, not the compile thread: some of those
+        # modules create QObjects on import.
+        nonlocal helper
+        try:
+            helper = build_warmup_helper(settings)
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            window.fail(str(e) or type(e).__name__)
+            return
+        window.start()
+
+    window = SetupWindow(compile_fn)
+    window.center_on_screen()
+    window.show()
+    QTimer.singleShot(50, begin)
+    app.exec()
+    return window.error or ("cancelled" if window.exit_code != 0 else None)
+
+
 def run_setup(args):
     from blinkview import ICON_PATH, __app_name__, __version__
 
@@ -171,36 +208,7 @@ def run_setup(args):
         print(f"Compiling {__app_name__} v{__version__} kernels into {cache_path} ...")
         error = compile_kernels(build_warmup_helper(settings), on_progress=_print_progress())
     else:
-        from qtpy.QtCore import QTimer
-
-        from blinkview.ui.windows.setup_window import SetupWindow
-
-        helper = None
-
-        def compile_fn(on_progress, cancel):
-            return compile_kernels(helper, on_progress=on_progress, cancel=cancel)
-
-        def begin():
-            # Importing every kernel and widget module takes a few seconds by itself, so the
-            # window is shown first. On this thread, not the compile thread: some of those
-            # modules create QObjects on import.
-            nonlocal helper
-            try:
-                helper = build_warmup_helper(settings)
-            except Exception as e:
-                import traceback
-
-                traceback.print_exc()
-                window.fail(str(e) or type(e).__name__)
-                return
-            window.start()
-
-        window = SetupWindow(compile_fn)
-        window.center_on_screen()
-        window.show()
-        QTimer.singleShot(50, begin)
-        app.exec()
-        error = window.error or ("cancelled" if window.exit_code != 0 else None)
+        error = run_setup_window(app, settings)
 
     if error:
         print(f"Setup did not finish: {error}", file=sys.stderr)

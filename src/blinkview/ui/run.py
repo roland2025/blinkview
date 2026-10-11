@@ -153,6 +153,27 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
         cache_path = export_numba_cache(settings, update_source)
         dev_print(f"Numba cache exported to: {cache_path}")
 
+        # Nobody ran `blink setup` for this version (a first start, or a source checkout that was
+        # updated with git): compile behind setup's window before the main window comes up,
+        # instead of in the main window behind a toast.
+        from blinkview.core import numba_setup
+
+        setup_error = None
+        if not numba_setup.is_warmup_complete(cache_path):
+            from blinkview.ui.setup import run_setup_window
+
+            setup_error = run_setup_window(app, settings)
+            if setup_error == "cancelled":
+                print("Kernel compilation cancelled by user. Exiting.")
+                sys.exit(0)
+            if setup_error is None:
+                # main_window copies this when it is imported, which is below.
+                numba_setup.IS_CACHE_WARM = True
+            else:
+                # The window has shown the message. Start anyway, as with a failed warmup in the
+                # main window: what did not compile does so on first use.
+                print(f"Kernel compilation did not finish: {setup_error}", file=sys.stderr)
+
         from blinkview.core.profile_params import ProfileParamError
         from blinkview.core.registry import Registry
 
@@ -176,6 +197,9 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
         except ProfileParamError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)
+
+        if setup_error is not None:
+            registry.mark_warmup_failed(setup_error)
 
         from blinkview.ui.main_window import BlinkMainWindow
 

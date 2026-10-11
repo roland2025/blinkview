@@ -109,7 +109,11 @@ class FakeRegistry:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.file_manager = FakeFileManager()
+        self.warmup_failed_with = None
         FakeRegistry.instances.append(self)
+
+    def mark_warmup_failed(self, error):
+        self.warmup_failed_with = error
 
 
 class FakeMainWindow:
@@ -170,6 +174,10 @@ def isolate_run_dependencies(qapp, monkeypatch):
         "blinkview.utils.install_info.resolve_update_source", lambda settings, info=None: UpdateSource.GIT
     )
     monkeypatch.setattr("qdarktheme.setup_theme", lambda *a, **kw: None)
+    # "fake_cache_path" has no completed warmup, so run() shows setup's window first - see
+    # TestSetupWindowOnAColdCache. run() sets IS_CACHE_WARM after it; restored by monkeypatch.
+    monkeypatch.setattr("blinkview.ui.setup.run_setup_window", lambda app, settings: None)
+    monkeypatch.setattr("blinkview.core.numba_setup.IS_CACHE_WARM", False)
 
 
 class TestNormalLaunch:
@@ -298,6 +306,70 @@ class TestPackageInstallSkipsUpdatePath:
 
         assert len(FakeRegistry.instances) == 1
         assert seen == [UpdateSource.PYPI]
+
+
+class TestSetupWindowOnAColdCache:
+    """Without a completed warmup in the cache dir, the kernels are compiled behind `blink setup`'s
+    window before the Registry and the main window exist."""
+
+    @pytest.fixture
+    def setup_window(self, monkeypatch):
+        state = SimpleNamespace(calls=[], result=None, registries_at_call=None)
+
+        def fake_run_setup_window(app, settings):
+            state.calls.append(app)
+            state.registries_at_call = len(FakeRegistry.instances)
+            return state.result
+
+        monkeypatch.setattr("blinkview.ui.setup.run_setup_window", fake_run_setup_window)
+        return state
+
+    def test_compiles_before_the_registry_is_built_and_marks_the_cache_warm(self, setup_window):
+        from blinkview.core import numba_setup
+
+        with pytest.raises(SystemExit):
+            run_module.run(make_args())
+
+        assert setup_window.calls == [FakeApp.instances[0]]
+        assert setup_window.registries_at_call == 0
+        assert numba_setup.IS_CACHE_WARM is True  # no compile toast in the main window
+        assert FakeMainWindow.instances[0].shown is True
+        assert FakeRegistry.instances[0].warmup_failed_with is None
+
+    def test_a_complete_cache_shows_no_setup_window(self, setup_window, monkeypatch, tmp_path):
+        from blinkview.core.numba_setup import WARMUP_COMPLETE_MARKER
+
+        (tmp_path / WARMUP_COMPLETE_MARKER).touch()
+        monkeypatch.setattr(
+            "blinkview.core.numba_setup.export_numba_cache", lambda settings, update_source=None: tmp_path
+        )
+
+        with pytest.raises(SystemExit):
+            run_module.run(make_args())
+
+        assert setup_window.calls == []
+        assert FakeMainWindow.instances[0].shown is True
+
+    def test_cancelling_exits_without_a_registry(self, setup_window):
+        setup_window.result = "cancelled"
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_module.run(make_args())
+
+        assert exc_info.value.code == 0
+        assert FakeRegistry.instances == []
+
+    def test_a_failed_compile_still_starts_but_is_not_a_successful_warmup(self, setup_window):
+        from blinkview.core import numba_setup
+
+        setup_window.result = "typing failed"
+
+        with pytest.raises(SystemExit):
+            run_module.run(make_args())
+
+        assert FakeRegistry.instances[0].warmup_failed_with == "typing failed"
+        assert FakeMainWindow.instances[0].shown is True
+        assert numba_setup.IS_CACHE_WARM is False
 
 
 class TestInstallVersionOnExit:

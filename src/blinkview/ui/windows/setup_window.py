@@ -57,7 +57,7 @@ class SetupWindow(QFrame):
         title_font.setPointSize(title_font.pointSize() + 3)
         title_font.setBold(True)
         title.setFont(title_font)
-        subtitle = QLabel("Compiling shaders. This is needed once after an update.")
+        subtitle = QLabel("Compiling shaders. This is needed once after an install or update.")
 
         titles = QVBoxLayout()
         titles.setSpacing(2)
