@@ -47,7 +47,7 @@ from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
     hidden=False,
     required=True,
     default={"enabled": True, "processor": {"type": "binary"}},
-    description="Enable logging of raw byte data. Uses a custom 'binary' processor that formats bytes as hex strings for readability.",
+    description="Record the incoming bytes to a session file. The file is not a plain byte dump and not text: each received chunk is stored as a timestamped header followed by its bytes.",
 )
 class UDPReader(BaseReader):
     __doc__ = """The primary data ingestion source for UDP datagram streams.

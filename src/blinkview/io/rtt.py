@@ -125,7 +125,7 @@ def _list_jlink_serials() -> list[str]:
     hidden=False,
     required=True,
     default={"enabled": True, "processor": {"type": "binary"}},
-    description="Enable logging of raw byte data. Uses a custom 'binary' processor that formats bytes as hex strings for readability.",
+    description="Record the incoming bytes to a session file. The file is not a plain byte dump and not text: each received chunk is stored as a timestamped header followed by its bytes.",
 )
 @configuration_property(
     "target_rtt_buffer_size",

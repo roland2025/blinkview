@@ -47,7 +47,7 @@ from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
     hidden=False,
     required=True,
     default={"enabled": True, "processor": {"type": "binary"}},
-    description="Enable logging of raw byte data.",
+    description="Record the incoming bytes to a session file. The file is not a plain byte dump and not text: each received chunk is stored as a timestamped header followed by its bytes.",
 )
 class TCPReader(BaseReader):
     __doc__ = """The data ingestion source for continuous TCP streaming sockets.
