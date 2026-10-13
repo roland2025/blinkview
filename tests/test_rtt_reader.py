@@ -4,12 +4,14 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import threading
 from types import SimpleNamespace
 
 import pylink
 import pytest
 
 from blinkview.core.logger import PrintLogger
+from blinkview.io import rtt
 from blinkview.io.rtt import JLinkRTTReader
 
 
@@ -110,6 +112,28 @@ def fake_jlink_class(monkeypatch):
 
     monkeypatch.setattr(pylink, "JLink", factory)
     return holder
+
+
+@pytest.fixture
+def probe_held_by_another_thread(monkeypatch):
+    """A reader whose _jlink_lock is held by another thread for the whole test, like a reader
+    thread inside a J-Link DLL call that does not return."""
+    monkeypatch.setattr(rtt, "JLINK_LOCK_TIMEOUT_S", 0.05)
+    reader = make_reader()
+    reader.jlink = FakeJLink()
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with reader._jlink_lock:
+            held.set()
+            release.wait()
+
+    thread = threading.Thread(target=hold, daemon=True)
+    thread.start()
+    held.wait()
+    yield reader
+    release.set()
+    thread.join()
 
 
 class TestApplyConfig:
@@ -280,8 +304,22 @@ class TestSendData:
 
         assert reader.send_data("hello") == 0
 
+    def test_gives_up_when_the_reader_thread_never_lets_go_of_the_probe(self, probe_held_by_another_thread):
+        reader = probe_held_by_another_thread
+
+        assert reader.send_data("hello") == 0  # must return instead of waiting forever
+
+        assert reader.jlink.rtt_write_calls == []
+
 
 class TestSendCommand:
+    def test_dropped_when_the_reader_thread_never_lets_go_of_the_probe(self, probe_held_by_another_thread):
+        reader = probe_held_by_another_thread
+
+        reader.send_command("reset")  # must return instead of waiting forever
+
+        assert reader.jlink.reset_calls == []
+
     def test_dropped_without_an_active_jlink(self):
         reader = make_reader()
         reader.jlink = None

@@ -4,6 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import sys
+import traceback
 from threading import Event, Lock, Thread
 from time import sleep
 from types import SimpleNamespace
@@ -18,6 +20,17 @@ from blinkview.core.system_context import SystemContext
 from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.generate_id import generate_id
 from blinkview.utils.settings_updater import update_object_from_config
+
+# Threads a stop() gave up waiting for - see stuck_threads().
+_stuck_threads: list = []
+
+
+def stuck_threads() -> list:
+    """The daemon threads that outlived their stop() timeout and still run. Such a thread sits in
+    a call that does not return (a driver DLL, a blocking read), so whatever it holds was never
+    released - utils/process_exit.py ends the process without waiting for it."""
+    _stuck_threads[:] = [thread for thread in _stuck_threads if thread.is_alive()]
+    return list(_stuck_threads)
 
 
 @configuration_property(
@@ -186,14 +199,27 @@ class BaseDaemon:
         if self._thread:
             self._thread.join(timeout)
             if self._thread.is_alive():
-                if self.logger:
-                    self.logger.warn("Did not stop within %s seconds.", timeout)
+                self._report_stuck_thread(self._thread, timeout)
             else:
                 if self.logger:
                     self.logger.info("Stopped cleanly.")
             self._thread = None  # Clean up the reference
 
         self._stop_children()
+
+    def _report_stuck_thread(self, thread: Thread, timeout):
+        """Says where a thread that ignored stop() is blocked. Also on stderr: at shutdown the
+        session log is already closing, and the line would otherwise be lost with it."""
+        _stuck_threads.append(thread)
+
+        frame = sys._current_frames().get(thread.ident)
+        stack = traceback.extract_stack(frame) if frame is not None else []
+        where = f"{stack[-1].filename}:{stack[-1].lineno} in {stack[-1].name}" if stack else "unknown"
+
+        if self.logger:
+            self.logger.warn("Did not stop within %s seconds. Blocked at %s", timeout, where)
+        frames = "".join(traceback.format_list(stack))
+        print(f"[{thread.name}] did not stop within {timeout} seconds, blocked at:\n{frames}", file=sys.stderr)
 
     def restart(self):
         self.thread_needs_restart = False

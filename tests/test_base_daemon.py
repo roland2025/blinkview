@@ -4,9 +4,11 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import threading
 import time
 from types import SimpleNamespace
 
+from blinkview.core import base_daemon
 from blinkview.core.base_daemon import BaseDaemon
 from blinkview.core.logger import PrintLogger
 
@@ -122,6 +124,26 @@ class TestStartStop:
 
         assert daemon.is_running is False
         assert daemon._thread is None
+
+    def test_a_thread_that_ignores_stop_is_reported_as_stuck(self, capsys):
+        daemon = make_daemon()
+        release = threading.Event()
+        daemon.run = lambda: release.wait()  # ignores the stop event
+        daemon.enabled = True
+        daemon.start()
+        thread = daemon._thread
+        try:
+            daemon.stop(timeout=0.05)
+
+            assert base_daemon.stuck_threads() == [thread]
+            captured = capsys.readouterr()
+            assert "Did not stop within 0.05 seconds. Blocked at" in captured.out  # the logger
+            assert "release.wait()" in captured.err  # the stack
+        finally:
+            release.set()
+            thread.join()
+
+        assert base_daemon.stuck_threads() == []  # it ended after all
 
     def test_stop_is_a_noop_when_not_running(self):
         daemon = make_daemon()

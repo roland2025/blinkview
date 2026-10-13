@@ -40,3 +40,14 @@ def _reset_window_title_prefix():
 
     yield
     window_title._prefix = ""
+
+
+@pytest.fixture(autouse=True)
+def _forget_stuck_threads():
+    """A daemon thread a test left behind on purpose must not make a later test's
+    blinkview.__main__.main() take the stuck-thread exit (utils/process_exit.py) - that would
+    end the whole test run."""
+    from blinkview.core import base_daemon
+
+    yield
+    base_daemon._stuck_threads.clear()

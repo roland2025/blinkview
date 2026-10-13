@@ -51,6 +51,13 @@ SWD_SPEED_DESCRIPTIONS = [
 ]
 
 
+# How long a call from another thread (UI, agent) waits for the probe. The reader thread holds it
+# for the length of every DLL call, and one that does not return must not freeze the caller too.
+JLINK_LOCK_TIMEOUT_S = 2.0
+
+# A read normally returns at once, with or without data.
+SLOW_READ_NS = 1_000_000_000
+
 _enumerator_lock = Lock()
 _enumerator_jlink: Optional["pylink.JLink"] = None
 
@@ -199,6 +206,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
     def run(self):
         # 1. Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
+        stop_wait = self._stop_event.wait
         time_ns = self.shared.time_ns
         logger = self.logger
         jlink_lock = self._jlink_lock
@@ -238,7 +246,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                 if self.jlink is None:
                     created_jl = self.open()
                     if created_jl is None:
-                        sleep(1.0)
+                        stop_wait(1.0)
                         continue
 
                     # Safely bind the localized function pointers under lock assignment
@@ -263,6 +271,10 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
                         now = time_ns()
                         bytes_read = _dll_rtterminal_read(channel, c_buf, read_size)
+
+                    read_ns = time_ns() - now
+                    if read_ns > SLOW_READ_NS:
+                        self.logger_link.warn("RTT read blocked for %.1f s.", read_ns / 1e9)
 
                     if bytes_read > 0:
                         # 5. Insert Chunk
@@ -293,7 +305,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                 except Exception as e:
                     self.logger_link.error("Problem.", exc=e)
                     self.cleanup_jlink()
-                    sleep(1.0)
+                    stop_wait(1.0)
 
         except Exception as e:
             logger.exception("Fatal error in J-Link RTT Reader loop", exc=e)
@@ -427,7 +439,10 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         Sends data to the target's RTT Down-buffer.
         Can be called from other threads or downstream logic.
         """
-        with self._jlink_lock:
+        if not self._jlink_lock.acquire(timeout=JLINK_LOCK_TIMEOUT_S):
+            self.logger_link.error("RTT Write dropped: the J-Link is busy.")
+            return 0
+        try:
             if self.jlink and self.jlink.opened():
                 try:
                     encoded = data.encode()
@@ -437,6 +452,8 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                 except Exception as e:
                     self.logger_link.error("RTT Write failed", exc=e)
             return 0
+        finally:
+            self._jlink_lock.release()
 
     def get_commands(self) -> list[tuple[str, str]]:
         """Exposes expanded J-Link RTT runtime capabilities to GUI/CLI layers."""
@@ -453,7 +470,10 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
         self.logger.debug("send_command: %s", command)
 
-        with self._jlink_lock:
+        if not self._jlink_lock.acquire(timeout=JLINK_LOCK_TIMEOUT_S):
+            self.logger.warn("Command dropped: the J-Link is busy.")
+            return
+        try:
             if not self.jlink:
                 self.logger.warn("Command dropped: No active J-Link session initialized.")
                 return
@@ -495,3 +515,5 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                 case _:
                     # Fall back to raw string transmission over RTT Down-buffer channel 0
                     self.send_data(command)
+        finally:
+            self._jlink_lock.release()

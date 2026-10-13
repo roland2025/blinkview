@@ -140,6 +140,17 @@ def enable_fault_handler():
 
 
 def main():
+    from blinkview.utils.process_exit import terminate_if_threads_stuck
+
+    try:
+        _main()
+    except SystemExit as e:
+        terminate_if_threads_stuck(e.code)
+        raise
+    terminate_if_threads_stuck()
+
+
+def _main():
     enable_fault_handler()
 
     parser = ArgumentParser(description="BlinkView Telemetry Suite - 2026")
