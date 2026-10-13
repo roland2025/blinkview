@@ -170,7 +170,18 @@ class TestPyPIInstallCommand:
     def test_uv_tool_reinstalls_pinned_with_recorded_extras(self):
         cmd = PyPIUpdater(FakeSettings(), UV_PACKAGE).install_command("0.19.0")
 
-        assert cmd == ["uv", "tool", "install", "blinkview[all]==0.19.0", "--python", sys.executable, "--force"]
+        assert cmd == [
+            "uv",
+            "tool",
+            "install",
+            "blinkview[all]==0.19.0",
+            "--python",
+            sys.executable,
+            "--force",
+            # A version the fetch just found must not be hidden by uv's cached index page.
+            "--refresh-package",
+            "blinkview",
+        ]
 
     def test_pip_uses_this_interpreter(self):
         cmd = PyPIUpdater(FakeSettings(), PIP_PACKAGE).install_command("0.19.0")

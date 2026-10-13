@@ -13,7 +13,14 @@ from packaging.version import InvalidVersion
 from packaging.version import parse as parse_version
 
 from blinkview.core.settings_manager import SettingsManager
-from blinkview.utils.install_info import Installer, InstallInfo, UpdateSource, detect_install, resolve_update_source
+from blinkview.utils.install_info import (
+    DIST_NAME,
+    Installer,
+    InstallInfo,
+    UpdateSource,
+    detect_install,
+    resolve_update_source,
+)
 
 DEFAULT_INDEX_URL = "https://pypi.org/pypi"
 PYPI_SIMPLE_URL = "https://pypi.org/simple"
@@ -576,6 +583,10 @@ class PyPIUpdater(Updater):
 
         if self.info.installer == Installer.UV_TOOL:
             cmd = ["uv", "tool", "install", requirement, "--python", sys.executable, "--force"]
+            # uv keeps an index's version list for ten minutes, so a release the fetch above
+            # just found (it asks the JSON API, uncached) may not exist for uv yet: "no solution
+            # found". Only blinkview's entry, not the whole dependency tree's.
+            cmd += ["--refresh-package", DIST_NAME]
             if self.index_url != DEFAULT_INDEX_URL:
                 cmd += ["--index", self._simple_url()]
             return cmd
