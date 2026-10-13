@@ -333,6 +333,11 @@ class ProfileParamsDialog(QDialog):
             MessageBox.warning(self, "Profile Parameters", "No parameter has a value - nothing to save.")
             return False
         session = self.session_edit.text().strip() or None
+        # The field starts out holding the session name of the set this instance was started
+        # with. Left as it is, that name belongs to that set: another set saved from here would
+        # otherwise start under it too ("board-2" recording as "board").
+        if session == getattr(self.fm, "params_session", None) and path != self.current_set_file():
+            session = None
         write_params_file(path, values, session)
         return True
 

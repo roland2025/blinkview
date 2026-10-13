@@ -249,6 +249,23 @@ class TestSave:
         assert dlg.save_as_new_set() == "right"
         assert json.loads((tmp_path / "rtt.right.params.json").read_text()) == {"rtt_serial": "51024923"}
 
+    def test_save_as_new_set_does_not_inherit_the_started_sets_session(self, make_dialog, tmp_path, monkeypatch):
+        dlg, _ = make_dialog()
+        assert dlg.session_edit.text() == "Left board"  # from the set this instance started with
+        monkeypatch.setattr(dlg, "_ask_set_name", lambda default: ("right", True))
+        assert dlg.save_as_new_set() == "right"
+        assert json.loads((tmp_path / "rtt.right.params.json").read_text()) == {"rtt_serial": "51024923"}
+
+    def test_save_as_new_set_keeps_a_session_typed_for_it(self, make_dialog, tmp_path, monkeypatch):
+        dlg, _ = make_dialog()
+        dlg.session_edit.setText("Right board")
+        monkeypatch.setattr(dlg, "_ask_set_name", lambda default: ("right", True))
+        assert dlg.save_as_new_set() == "right"
+        assert json.loads((tmp_path / "rtt.right.params.json").read_text()) == {
+            "session": "Right board",
+            "params": {"rtt_serial": "51024923"},
+        }
+
     def test_save_as_existing_set_asks_before_overwriting(self, make_dialog, tmp_path, monkeypatch):
         dlg, _ = make_dialog()
         before = (tmp_path / "rtt.left.params.json").read_text()
