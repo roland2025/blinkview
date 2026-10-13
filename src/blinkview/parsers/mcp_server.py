@@ -34,6 +34,13 @@ MAX_UNDO_TOKENS = 50
 
 _MISSING = object()
 
+# Ends the answer to a change the pipeline does not allow: the agent can usually reach the
+# profile's files too, and must not take that way round.
+_NO_FILE_EDIT_HINT = (
+    "Do not edit the profile's files directly instead: the user turned this off. "
+    "Tell them what you wanted to change; they can allow it in this pipeline's settings."
+)
+
 # Key prefixes of the watch entries that need a key, as the watch window generates them.
 _WATCH_KEY_PREFIXES = {"row": "row", "button": "btn", "group_start": "grp_start", "group_end": "grp_end"}
 
@@ -385,11 +392,15 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
         registry = self.shared.registry
         if target == "profile":
             if write and not self.allow_config:
-                raise AgentApiError(f"changing the configuration is turned off on the '{self.name}' pipeline")
+                raise AgentApiError(
+                    f"changing the configuration is turned off on the '{self.name}' pipeline. {_NO_FILE_EDIT_HINT}"
+                )
             return registry.config, target
         if target == "gui":
             if write and not self.allow_watches:
-                raise AgentApiError(f"changing watch lists is turned off on the '{self.name}' pipeline")
+                raise AgentApiError(
+                    f"changing watch lists is turned off on the '{self.name}' pipeline. {_NO_FILE_EDIT_HINT}"
+                )
             if registry.gui_config is None:
                 raise AgentApiError("this BlinkView runs without a window: it has no watch lists")
             return registry.gui_config, target

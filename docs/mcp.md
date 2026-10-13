@@ -76,6 +76,9 @@ The `mcp_server` pipeline's options are the permissions. The agent cannot change
 Every configuration and watch list change is checked before it is applied and shown in BlinkView
 with an Undo button.
 
+When a change is turned off, the agent is told not to make it by editing the profile's files
+instead, and to ask you. This is an instruction to the agent, not a lock on the files.
+
 ## Tools the agent gets
 
 | Tool | Does |
