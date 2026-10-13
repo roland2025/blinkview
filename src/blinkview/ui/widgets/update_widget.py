@@ -99,18 +99,28 @@ class UpdateWidget(QWidget):
         self.signals.error_occurred.connect(self._on_error)
 
         self.tab_name = "Updater"
+        self._post_update_checked = False
         self._setup_ui()
 
         if self.ensure_updater():
             # Show local cache immediately
 
-            QTimer.singleShot(0, lambda: check_post_update(self.updater, parent=self))
             QTimer.singleShot(0, self.list_local_versions)
             self.update_status()
 
             # Always attempt an auto-fetch; the Updater will skip it if
             # the cooldown hasn't expired internally.
             QTimer.singleShot(100, lambda: self.request_fetch(is_auto=True))
+
+    def showEvent(self, event):
+        """The "updated to X" / "upgrade failed" toast, once this widget is on screen. Not from
+        __init__: the widget is put into its window (DetachedTabWindow) a moment after it is
+        built, and a window restored at startup is placed and shown later still - a toast made
+        before that is owned by a native window that is about to be replaced."""
+        super().showEvent(event)
+        if not self._post_update_checked and self.updater:
+            self._post_update_checked = True
+            QTimer.singleShot(0, lambda: check_post_update(self.updater, parent=self))
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)

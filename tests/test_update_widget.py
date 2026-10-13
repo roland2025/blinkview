@@ -4,6 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from types import SimpleNamespace
+
 import pytest
 
 from blinkview import __version__
@@ -109,6 +111,25 @@ class TestConstruction:
         assert f"v{__version__}" in widget.status_label.text()
         assert widget.fetch_btn.isEnabled() is True
         assert widget.config_btn.isVisible() is False
+
+    def test_post_update_toast_waits_until_the_widget_is_shown(self, qapp, qtbot, gui_context, monkeypatch):
+        """Its toast is anchored to the window this widget is in, and it is only put into that
+        window (and the window placed and shown) after construction."""
+        checked = []
+        monkeypatch.setattr(module, "check_post_update", lambda updater, parent=None: checked.append(parent))
+        # Timers run at once: no event loop spinning, which would also run other tests' leftovers.
+        monkeypatch.setattr(module, "QTimer", SimpleNamespace(singleShot=lambda ms, fn: fn()))
+        w = UpdateWidget(gui_context)
+        qtbot.addWidget(w)
+
+        assert checked == []
+
+        w.show()
+        assert checked == [w]
+
+        w.hide()
+        w.show()
+        assert checked == [w]  # once, not on every show
 
     def test_channel_combo_reflects_saved_setting(self, qapp, qtbot, settings):
         settings.values["update.channel"] = "rc"
