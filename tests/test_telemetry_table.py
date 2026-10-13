@@ -327,6 +327,16 @@ class TestTriggerModuleAction:
 
         assert qapp.clipboard().text() == "hello-value"
 
+    def test_copy_name_value_sets_clipboard_when_present(self, table, registry, qapp):
+        dev = registry.id_registry.get_device("clipnamevaldev")
+        mod = dev.get_module("clipnamevalmod")
+        _emit(registry, dev, mod, "hello-value")
+        table.model.apply_updates(force=True)
+
+        table._trigger_module_action("copy_name_value", mod)
+
+        assert qapp.clipboard().text() == "clipnamevalmod: hello-value"
+
     def test_view_logs_creates_log_viewer_widget(self, table, registry):
         dev = registry.id_registry.get_device("viewlogsdev")
         mod = dev.get_module("viewlogsmod")

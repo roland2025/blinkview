@@ -1083,13 +1083,16 @@ class TelemetryTable(QWidget):
             case "copy_name":
                 QApplication.clipboard().setText(module.name)
 
-            case "copy_value":
+            case "copy_value" | "copy_name_value":
                 for row, mod_id in enumerate(self.model.visible_mod_ids):
                     if self.model.modules[mod_id] == module:
                         idx = self.model.index(row, TelemetryCol.VALUE)
                         val = idx.data(Qt.DisplayRole)
                         if val and val != "---":
-                            QApplication.clipboard().setText(str(val))
+                            text = str(val)
+                            if action_id == "copy_name_value":
+                                text = f"{module.name}: {text}"
+                            QApplication.clipboard().setText(text)
                         break
 
             case "view_graph" | "view_graph_with_children":
@@ -1127,6 +1130,7 @@ class TelemetryTable(QWidget):
             (None, None, False, None),
             ("Copy Module Name", "copy_name", False, None),
             ("Copy Value", "copy_value", False, None),
+            ("Copy Name and Value", "copy_name_value", False, None),
         ]
 
         for label, action_id, is_wip, issue_no in actions:

@@ -1704,6 +1704,11 @@ class TelemetryWatch(QWidget):
         copy_val.triggered.connect(lambda: QApplication.clipboard().setText(widget.text()))
         menu.addAction(copy_val)
 
+        # Action: Copy Name and Value
+        copy_name_val = QAction("Copy Name and Value", self)
+        copy_name_val.triggered.connect(lambda: QApplication.clipboard().setText(f"{entry.label}: {widget.text()}"))
+        menu.addAction(copy_name_val)
+
         # Module-specific actions (if the row has modules assigned)
         if entry.modules:
             menu.addSeparator()
