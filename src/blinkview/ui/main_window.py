@@ -4,6 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import gc
 import signal
 import sys
 import threading
@@ -66,20 +67,8 @@ from blinkview.utils.used_modules import print_used_modules
 # themselves on import; the list of them lives in widget_registry, shared with `blink setup`.
 import_registerable_widgets()
 
-# import gc
-# Enable GC debugging to see when collections happen
-# gc.set_debug(gc.DEBUG_STATS)
-#
-#
-# # Or, even better, use a callback to see exactly how long it took
-# def gc_callback(phase, info):
-#     if phase == "stop":
-#         # info contains: 'generation', 'collected', 'uncollectable'
-#         # If generation == 2, this is your 25ms spike
-#         print(f"GC event: gen={info['generation']} took time!")
-#
-#
-# gc.callbacks.append(gc_callback)
+# poll_queue collects the young generations once a second and everything this often.
+FULL_GC_INTERVAL_S = 60
 
 
 # Layout presets (plans/view-layout-presets.md): how long the screen set must stay unchanged before
@@ -213,17 +202,19 @@ class _ReplayLoadBridge(QObject):
 
 
 class BlinkMainWindow(QMainWindow):
-    def __init__(self, registry, set_update_version=None):
+    def __init__(self, registry, set_update_version=None, main_thread_gc=False):
         super().__init__()
         self.resize(1280, 800)
         set_native_dark_mode(self)
 
         registry.configure_system()
 
+        # The GUI process runs the cyclic GC on this thread only, once startup is over (see
+        # _freeze_startup_objects, _start_timers and poll_queue). A pass on a worker thread can
+        # free a Qt wrapper there; shiboken then deletes the C++ object from this thread later -
+        # a second time, if Qt got to it first (deleteLater, WA_DeleteOnClose).
+        self._main_thread_gc = main_thread_gc
         self._full_gc_counter = 0
-        # gc.disable()
-        # gc.set_threshold(10_000, 20, 10)
-        # gc.set_threshold(1_000_000, 50_000, 50_000)
 
         use_frameless = False  # Set to False to see the standard window frame (useful for debugging)
 
@@ -638,7 +629,23 @@ class BlinkMainWindow(QMainWindow):
 
         if self.gui_context.is_shutting_down:
             return  # closed mid-warmup (see closeEvent) - don't build the UI we're tearing down
+        if self._main_thread_gc:
+            self._freeze_startup_objects()
         self._add_sidebars()
+
+    def _freeze_startup_objects(self):
+        """Takes everything alive now - modules, classes, the registry, the loaded kernels - out
+        of the collector's sight, so poll_queue's full collections don't walk it every time. It
+        all lives as long as the process; the widgets a user can close are created after this."""
+        gc_start = perf_counter()
+        collected = gc.collect()
+        gc.freeze()
+        self.logger_gc.debug(
+            "freeze | %.3f ms | collected %d | frozen %d",
+            (perf_counter() - gc_start) * 1000,
+            collected,
+            gc.get_freeze_count(),
+        )
 
     def _set_startup_controls_enabled(self, enabled):
         """The toolbar (and the frameless title bar's menu) opens widgets and dialogs that need
@@ -683,6 +690,11 @@ class BlinkMainWindow(QMainWindow):
         # Set last_poll_time to the future to avoid false lag detection on the first tick
         self.last_poll_time = registry.now_ns() + self.timeout_fast * 1_000_000
         self.timer_fast.start(self.timeout_fast)
+
+        if self._main_thread_gc:
+            # Automatic until here: the warmup's compiler garbage is far too much to pile up
+            # between two passes. From now on poll_queue is the only collector.
+            gc.disable()
 
         self._show_ready_toast()
 
@@ -1264,22 +1276,19 @@ class BlinkMainWindow(QMainWindow):
             elapsed = current_stats["now"] - self._last_stats["now"]
 
             if elapsed >= 1.0:
-                # self._full_gc_counter += 1
-                #
-                # gc_level = 1
-                #
-                # if self._full_gc_counter >= 300:
-                #     gc_level = 2
-                #     self._full_gc_counter = 0
-                #
-                # gc_start = now_ns()
-                # prev0, prev1, prev2 = gc.get_count()
-                # gc.collect(gc_level)
-                # gc_duration = now_ns() - gc_start
-                # count0, count1, count2 = gc.get_count()
-                # self.logger_gc.debug(
-                #     f"gc {gc_level} | {gc_duration / 1_000_000:.3f} ms {prev0} >> {count0} | {prev1} >> {count1} | {prev2} >> {count2}"
-                # )
+                if self._main_thread_gc:
+                    self._full_gc_counter += 1
+
+                    gc_level = 1
+
+                    if self._full_gc_counter >= FULL_GC_INTERVAL_S:
+                        gc_level = 2
+                        self._full_gc_counter = 0
+
+                    gc_start = now_ns()
+                    collected = gc.collect(gc_level)
+                    gc_duration_ms = (now_ns() - gc_start) / 1_000_000
+                    self.logger_gc.debug("gc %d | %.3f ms | collected %d", gc_level, gc_duration_ms, collected)
 
                 # Calculate Deltas
                 new_msgs = current_stats["pushed"] - self._last_stats["pushed"]
@@ -1649,7 +1658,7 @@ class BlinkMainWindow(QMainWindow):
                 pass
 
     def _rebuild_menu(self, menu: QMenu, config: Optional[dict]):
-        print(f"[UI] Rebuilding menu for: {config}")
+        # print(f"[UI] Rebuilding menu for: {config}")
         """Wipes the menu and populates it with current data."""
         if not menu:
             return

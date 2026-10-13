@@ -119,9 +119,10 @@ class FakeRegistry:
 class FakeMainWindow:
     instances = []
 
-    def __init__(self, registry, set_update_version=None):
+    def __init__(self, registry, set_update_version=None, main_thread_gc=False):
         self.registry = registry
         self.set_update_version = set_update_version
+        self.main_thread_gc = main_thread_gc
         self.opacity = None
         self.shown = False
         self.load_ui_state_called = False
@@ -232,6 +233,12 @@ class TestNormalLaunch:
         assert win.shown is True
         assert win.load_ui_state_called is True
         assert win.start_replay_calls == []
+
+    def test_the_real_gui_process_keeps_the_cyclic_gc_on_the_main_thread(self):
+        with pytest.raises(SystemExit):
+            run_module.run(make_args())
+
+        assert FakeMainWindow.instances[0].main_thread_gc is True
 
     def test_exits_with_the_app_exec_return_code(self):
         args = make_args()
@@ -384,8 +391,8 @@ class TestInstallVersionOnExit:
 
         original_init = FakeMainWindow.__init__
 
-        def init_and_request_update(self, registry, set_update_version=None):
-            original_init(self, registry, set_update_version=set_update_version)
+        def init_and_request_update(self, registry, set_update_version=None, **kwargs):
+            original_init(self, registry, set_update_version=set_update_version, **kwargs)
             set_update_version("9.9.9")  # simulates the user picking an update in the UI
 
         monkeypatch.setattr(FakeMainWindow, "__init__", init_and_request_update)

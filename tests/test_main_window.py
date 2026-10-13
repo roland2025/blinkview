@@ -494,6 +494,28 @@ class TestPollQueue:
         assert main_window._last_stats == new_stats
         assert main_window.mps_label.text() != ""
 
+    def test_each_elapsed_second_collects_garbage_on_the_ui_thread(self, main_window, monkeypatch):
+        """With main_thread_gc (run.py passes it) the automatic cyclic GC is off once startup is
+        over - a pass on a worker thread can make shiboken double-delete a Qt object - so this
+        once-a-second pass is the only one there is: young generations every time, everything
+        every FULL_GC_INTERVAL_S."""
+        import blinkview.ui.main_window as main_window_module
+
+        levels = []
+        monkeypatch.setattr(main_window_module.gc, "collect", lambda level=2: levels.append(level) or 0)
+        monkeypatch.setattr(main_window_module, "FULL_GC_INTERVAL_S", 3)
+        base_stats = {"pushed": 0, "popped": 0, "dropped": 0, "total": 0, "maxlen": 1000, "now": 0.0}
+        main_window._last_stats = dict(base_stats)
+        main_window._main_thread_gc = True
+        main_window._full_gc_counter = 0
+
+        for second in range(1, 5):
+            stats = dict(base_stats, now=float(second) * 1.5)
+            main_window.gui_context.registry.central.input_queue.get_stats = lambda stats=stats: stats
+            main_window.poll_queue()
+
+        assert levels == [1, 1, 2, 1]
+
     def test_swallows_exceptions_from_a_broken_registry_state(self, main_window, monkeypatch):
         def boom():
             raise RuntimeError("simulated failure")

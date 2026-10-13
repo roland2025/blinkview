@@ -203,7 +203,7 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
 
         from blinkview.ui.main_window import BlinkMainWindow
 
-        viewer = BlinkMainWindow(registry, set_update_version=set_update_version)
+        viewer = BlinkMainWindow(registry, set_update_version=set_update_version, main_thread_gc=True)
         viewer.setWindowOpacity(0)
         viewer.show()
 
