@@ -13,9 +13,12 @@ LogTextFetcher and the FormattingConfig formatter (core/log_fetch.py) - so an ag
 same filtering and the same lines a log tab shows. Only the request parsing, the cursor
 bookkeeping, the wait loop and summary's totals live here."""
 
+import os
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from datetime import time as dt_time
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
 import numpy as np
@@ -23,7 +26,7 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.agent_api import AgentApiError
 from blinkview.core.dtypes import SEQ_NONE, SEQ_TYPE, TS_TYPE, TS_UNSPECIFIED
-from blinkview.core.log_fetch import LogSegmentScanner, LogTextFetcher
+from blinkview.core.log_fetch import LogRowTextFetcher, LogSegmentScanner, LogTextFetcher
 from blinkview.core.types.formatting import FormattingConfig
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
@@ -39,6 +42,12 @@ if TYPE_CHECKING:
 
 DEFAULT_MAX_LINES = 200
 HARD_MAX_LINES = 2000
+# With `to_file` the lines go to a file instead of the reply, so the cap only bounds the file.
+FILE_MAX_LINES = 1_000_000
+# ... and they are fetched this many at a time, so no more than a page of text is held in memory.
+FILE_PAGE_LINES = 50_000
+# to_file's files are deleted once they are this old, whenever another one is written.
+FILE_KEEP_SECONDS = 24 * 3600
 DEFAULT_LAST_N = 50
 DEFAULT_AROUND_LINES = 50
 DEFAULT_MAX_MODULES = 500
@@ -97,6 +106,64 @@ def _string(args: dict, key: str) -> str:
     if not isinstance(value, str):
         raise AgentApiError(f"'{key}' must be a string")
     return value
+
+
+def _flag(args: dict, key: str) -> bool:
+    value = args.get(key, False)
+    if not isinstance(value, bool):
+        raise AgentApiError(f"'{key}' must be true or false")
+    return value
+
+
+def to_file_dir() -> Path:
+    """Where `to_file` results are written: the user's temp folder, never a session folder (a
+    recording) or the project."""
+    return Path(tempfile.gettempdir()) / "blinkview" / "read_logs"
+
+
+class _LogFile:
+    """`to_file`'s output: the lines of one request, written as they are fetched. The file is
+    created with the first line, so a request that matches nothing leaves none behind."""
+
+    def __init__(self, session_id: str):
+        self._session_id = session_id
+        self._file = None
+        self.path: Optional[Path] = None
+        self.bytes = 0
+        self.first_time = None
+        self.last_time = None
+
+    def write(self, text: str):
+        if not text:
+            return
+        if self._file is None:
+            folder = to_file_dir()
+            folder.mkdir(parents=True, exist_ok=True)
+            _delete_old_files(folder)
+            handle, name = tempfile.mkstemp(prefix=f"{self._session_id}_", suffix=".log", dir=folder)
+            self._file = os.fdopen(handle, "wb")
+            self.path = Path(name)
+            self.first_time = text[:27]
+        # The rows' own bytes, as LogRowTextFetcher decoded them.
+        data = text.encode("utf-8", errors="surrogateescape")
+        self._file.write(data)
+        self.bytes += len(data)
+        self.last_time = text[text.rfind("\n", 0, -1) + 1 :][:27]
+
+    def close(self):
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+
+def _delete_old_files(folder: Path):
+    oldest_kept = time.time() - FILE_KEEP_SECONDS
+    for path in folder.glob("*.log"):
+        try:
+            if path.stat().st_mtime < oldest_kept:
+                path.unlink()
+        except OSError:
+            pass  # still open in an editor, or another instance deleted it first
 
 
 def _find_device(id_registry, name: str):
@@ -253,7 +320,12 @@ def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: Fa
     id_registry = registry.id_registry
     scanner = _make_scanner(registry, args)
     log_pool = registry.central.log_pool
-    fetcher = LogTextFetcher(scanner, registry.system_ctx.array_pool, tables_provider=id_registry.bundle)
+    # to_file: the session log's own lines (what `blink export` prints) written to a file, and
+    # only its path returned.
+    to_file = _flag(args, "to_file")
+    fetcher_type = LogRowTextFetcher if to_file else LogTextFetcher
+    fetcher = fetcher_type(scanner, registry.system_ctx.array_pool, tables_provider=id_registry.bundle)
+    hard_max_lines = FILE_MAX_LINES if to_file else HARD_MAX_LINES
 
     # --- Formatting: the log viewer's formatter ---
     format_cfg = _format_config(args)
@@ -261,7 +333,8 @@ def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: Fa
     tz_offset_sec = 0 if utc else get_local_utc_offset_seconds()
 
     # --- Range and waiting ---
-    max_lines = int(_number(args, "max_lines", DEFAULT_MAX_LINES, 1, HARD_MAX_LINES))
+    default_max_lines = FILE_MAX_LINES if to_file else DEFAULT_MAX_LINES
+    max_lines = int(_number(args, "max_lines", default_max_lines, 1, hard_max_lines))
     wait_s = _number(args, "wait_s", 0, 0, MAX_WAIT_SECONDS)
     quiet_s = _number(args, "quiet_ms", 0, 0, MAX_WAIT_SECONDS * 1000) / 1000.0
     until = _string(args, "until")
@@ -272,9 +345,24 @@ def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: Fa
         "utc_offset_minutes": tz_offset_sec // 60,
     }
 
+    log_file = _LogFile(result["session_id"]) if to_file else None
+
     def finish(text: str, rows: int, cursor: int, **extra) -> dict:
         result.update(lines=rows, next_seq=int(cursor), **extra)
-        result["text"] = text
+        if log_file is None:
+            result["text"] = text
+            return result
+        try:
+            log_file.write(text)
+        finally:
+            log_file.close()
+        if log_file.path is not None:
+            result.update(
+                file=str(log_file.path),
+                bytes=log_file.bytes,
+                first_time=log_file.first_time,  # UTC, as in the file
+                last_time=log_file.last_time,
+            )
         return result
 
     around = _string(args, "around")
@@ -283,8 +371,8 @@ def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: Fa
         if after_seq is not None or wait_s:
             raise AgentApiError("'around' cannot be combined with 'after_seq' or 'wait_s'")
         anchor_ts = _parse_time(around, tz_offset_sec)
-        before = int(_number(args, "before", DEFAULT_AROUND_LINES, 0, HARD_MAX_LINES))
-        after = int(_number(args, "after", DEFAULT_AROUND_LINES, 0, HARD_MAX_LINES))
+        before = int(_number(args, "before", DEFAULT_AROUND_LINES, 0, hard_max_lines))
+        after = int(_number(args, "after", DEFAULT_AROUND_LINES, 0, hard_max_lines))
         latest = int(log_pool.latest_sequence())
         window = fetcher.fetch_history_window(
             anchor_ts=anchor_ts, before_cap=before, after_cap=after, format_cfg=format_cfg, tz_offset_sec=tz_offset_sec
@@ -301,7 +389,7 @@ def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: Fa
 
     if after_seq is None and not wait_s:
         # No cursor yet: the newest matching rows, like opening a log tab.
-        last_n = min(int(_number(args, "last_n", DEFAULT_LAST_N, 1, HARD_MAX_LINES)), max_lines)
+        last_n = min(int(_number(args, "last_n", DEFAULT_LAST_N, 1, hard_max_lines)), max_lines)
         tail = fetcher.fetch_live_tail(max_rows=last_n, format_cfg=format_cfg, tz_offset_sec=tz_offset_sec)
         return finish(
             tail.text, tail.total_new_rows, tail.highest_seq_seen, older_rows_exist=not tail.reached_live_edge
@@ -333,46 +421,57 @@ def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: Fa
 
     chunks = []
     rows = 0
-    truncated = False
+    more_pending = False
     stopped_on = None
     deadline = time.monotonic() + (wait_s or 0)
     last_row_time = None
+    # A file is filled a page at a time; a reply is one page of at most max_lines.
+    page_lines = FILE_PAGE_LINES if to_file else max_lines
 
-    while True:
-        new = step(cursor, max_lines - rows)
-        cursor = new.cursor
-        if new.rows:
-            chunks.append(new.text)
-            rows += new.rows
-            last_row_time = time.monotonic()
+    try:
+        while True:
+            new = step(cursor, min(max_lines - rows, page_lines))
+            cursor = new.cursor
+            more_pending = new.more_pending
+            if new.rows:
+                if log_file is None:
+                    chunks.append(new.text)
+                else:
+                    log_file.write(new.text)
+                rows += new.rows
+                last_row_time = time.monotonic()
 
-        if new.more_pending or rows >= max_lines:
-            truncated = new.more_pending
-            stopped_on = "max_lines"
-            break
-        if not wait_s:
-            break
-        if until:
-            if new.rows and until in new.text:
+            if rows >= max_lines:
+                stopped_on = "max_lines"
+                break
+            if wait_s and until and new.rows and until in new.text:
                 stopped_on = "until"
                 break
-        elif not quiet_s and rows:
-            stopped_on = "first_lines"
-            break
+            if more_pending:
+                continue  # to_file: the next page
+            if not wait_s:
+                break
+            if not until and not quiet_s and rows:
+                stopped_on = "first_lines"
+                break
 
-        now = time.monotonic()
-        if quiet_s and last_row_time is not None and now - last_row_time >= quiet_s:
-            stopped_on = "quiet"
-            break
-        if now >= deadline:
-            stopped_on = "timeout"
-            break
-        if stop_is_set():
-            stopped_on = "shutdown"
-            break
-        time.sleep(POLL_SECONDS)
+            now = time.monotonic()
+            if quiet_s and last_row_time is not None and now - last_row_time >= quiet_s:
+                stopped_on = "quiet"
+                break
+            if now >= deadline:
+                stopped_on = "timeout"
+                break
+            if stop_is_set():
+                stopped_on = "shutdown"
+                break
+            time.sleep(POLL_SECONDS)
+    except BaseException:
+        if log_file is not None:
+            log_file.close()
+        raise
 
-    extra = {"truncated": truncated}
+    extra = {"truncated": more_pending}
     if wait_s:
         extra["stopped_on"] = stopped_on
     return finish("".join(chunks), rows, cursor, **extra)

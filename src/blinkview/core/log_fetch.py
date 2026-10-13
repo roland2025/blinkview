@@ -29,7 +29,12 @@ from blinkview.core import dtypes
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.types.formatting import FormattingConfig
 from blinkview.core.warmup_registry import register_warmup
-from blinkview.ops.formatting import nb_segment_estimate_out_size, nb_segment_format
+from blinkview.ops.formatting import (
+    nb_segment_estimate_log_rows_size,
+    nb_segment_estimate_out_size,
+    nb_segment_format,
+    nb_segment_format_log_rows,
+)
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
 from blinkview.ops.segments import segment_filter, segment_filter_reversed
 from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
@@ -590,3 +595,56 @@ class LogTextFetcher:
                 break
 
         dev_print("[Warmup] LogTextFetcher ... done")
+
+
+class LogRowTextFetcher(LogTextFetcher):
+    """LogTextFetcher whose lines are the recorded session log's (`blink export`'s format, see
+    nb_write_log_row) instead of the viewer's: `format_cfg` and `tz_offset_sec` are ignored.
+
+    The text is decoded with `surrogateescape`, so encoding it the same way gives back the bytes
+    as stored, invalid UTF-8 included."""
+
+    def _make_format_consumer(self, format_cfg: FormattingConfig, tz_offset_sec: int, out_batches, out_seqs):
+        array_pool = self._array_pool
+        tables = self._tables_provider()
+
+        def _consume(segment, indices_array, match_count):
+            req_bytes = nb_segment_estimate_log_rows_size(indices_array, match_count, segment.bundle, tables)
+            with array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
+                bytes_written = nb_segment_format_log_rows(
+                    handle.array, indices_array, match_count, segment.bundle, tables
+                )
+                out_batches.append(handle.array[:bytes_written].tobytes().decode("utf-8", errors="surrogateescape"))
+            out_seqs.append(segment.bundle.sequences[indices_array[:match_count]].copy())
+
+        return _consume
+
+    @staticmethod
+    @register_warmup
+    def warmup(helper: "NumbaWarmupHelper"):
+        """Compiles nb_segment_estimate_log_rows_size/nb_segment_format_log_rows. Needs rows
+        already in helper.log_pool (CircularLogPool.warmup, priority=100)."""
+        dev_print("[Warmup] LogRowTextFetcher ...")
+
+        effective_mask = np.full(max(10, helper.registry.module_count()), LogLevel.ALL.value, dtype=dtypes.LEVEL_TYPE)
+        tables = helper.registry.bundle()
+
+        with helper.log_pool.get_snapshot() as segments, helper.log_pool.acquire_indices_buffer() as indices:
+            for segment in segments:
+                match_count = segment_filter(
+                    segment.bundle,
+                    effective_mask=effective_mask,
+                    out_indices=indices.array,
+                    max_matches=1000,
+                    start_seq=0,
+                    kv=EMPTY_KV_CONDITIONS,
+                    text=EMPTY_TEXT_SEARCH,
+                )
+
+                if match_count > 0:
+                    req_bytes = nb_segment_estimate_log_rows_size(indices.array, match_count, segment.bundle, tables)
+                    with helper.array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
+                        nb_segment_format_log_rows(handle.array, indices.array, match_count, segment.bundle, tables)
+                break
+
+        dev_print("[Warmup] LogRowTextFetcher ... done")

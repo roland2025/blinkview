@@ -29,6 +29,8 @@ ROTATE_TIMEOUT_SECONDS = 150
 _TOOL_TIMEOUT_SECONDS = {"rotate_session": ROTATE_TIMEOUT_SECONDS, "summary": 60.0}
 # Same cap as core/agent_log_read.py's MAX_WAIT_SECONDS (not imported: that module loads numba).
 MAX_WAIT_SECONDS = 60
+# Extra HTTP timeout for `to_file`, which may format and write up to a million lines.
+TO_FILE_TIMEOUT_SECONDS = 60
 
 INSTRUCTIONS = (
     "Controls a running BlinkView (embedded log viewer). Call `status` first: it lists the running "
@@ -82,7 +84,7 @@ _FILTER_PROPERTIES = {
         "type": "boolean",
         "description": "Also return BlinkView's own lines (device 'system'), hidden by default.",
     },
-    "max_lines": {"type": "integer", "description": "Default 200, max 2000."},
+    "max_lines": {"type": "integer", "description": "Default 200, max 2000. With to_file: up to 1000000, the default."},
 }
 _FORMAT_PROPERTIES = {
     "show_ts": {"type": "boolean", "description": "Timestamp column (default true)."},
@@ -93,6 +95,17 @@ _FORMAT_PROPERTIES = {
     "show_lvl": {"type": "boolean", "description": "Level column (default true)."},
     "show_mod": {"type": "boolean", "description": "Module column (default true)."},
     "utc": {"type": "boolean", "description": "Timestamps in UTC instead of local time (default false)."},
+    "to_file": {
+        "type": "boolean",
+        "description": "Write the lines to a file and return its path (`file`) with `lines`, `bytes`, "
+        "`first_time` and `last_time` instead of the lines themselves - for a long stretch you will grep "
+        "rather than read. The file has `blink export`'s lines, `2026-10-02T13:28:27.664524Z I board "
+        "app.sensor: message` (level, device, module), whatever the options above say. Its times, and "
+        "`first_time`/`last_time`, are always UTC - unlike `around` and the lines returned without "
+        "to_file, which are local time unless utc=true; `utc_offset_minutes` is the difference. It is a "
+        "temporary file, deleted after a day. Not worth it for a short reply: reading the file is a "
+        "second call.",
+    },
 }
 
 _INSTANCE_PROPERTY = {
@@ -152,7 +165,8 @@ TOOLS = [
         "cursor, oldest first. The result's `next_seq` is the cursor for the next call; `truncated` means "
         "more lines are waiting behind it. With `wait_s` it waits for new lines (from now on, unless "
         "`after_seq` is given). With `around`: the lines just before and after a point in time - what "
-        "happened around an error. Device and module names for the filters come from `list_modules`.",
+        "happened around an error. Device and module names for the filters come from `list_modules`. "
+        "To go through more than a few hundred lines, pass `to_file` and search the file.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -485,6 +499,8 @@ def call_instance_tool(instance: dict, name: str, args: dict) -> Any:
     wait_s = args.get("wait_s")
     if isinstance(wait_s, (int, float)) and not isinstance(wait_s, bool):
         timeout += min(max(wait_s, 0), MAX_WAIT_SECONDS)
+    if args.get("to_file") is True:
+        timeout += TO_FILE_TIMEOUT_SECONDS
     try:
         return call_instance(instance, name, args, timeout=timeout)
     except ConnectionError as e:

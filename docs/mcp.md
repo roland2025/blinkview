@@ -92,6 +92,11 @@ instead, and to ask you. This is an instruction to the agent, not a lock on the 
 | `create_watch`, `open_view` | Builds a watch list and opens its window. |
 | `rotate_session` | Starts a new session. |
 
+For a long stretch of log, `read_logs` and `send` take `to_file`: the lines go to a file in the
+temp folder (`<temp>/blinkview/read_logs/`, deleted after a day) and the agent gets its path and
+searches it, instead of reading up to a million lines. The file has the same lines as
+`blink export`.
+
 ## Security
 
 - The server listens on `127.0.0.1` only and requires a token that is new on every run.

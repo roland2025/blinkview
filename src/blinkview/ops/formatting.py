@@ -590,6 +590,111 @@ def nb_format_log_row_batch(
     return curr
 
 
+@app_njit()
+def nb_segment_estimate_log_rows_size(
+    indices: np.ndarray,
+    count,
+    segment: LogBundle,
+    tables: RegistryParams,
+) -> int:
+    """Upper bound of what nb_segment_format_log_rows writes for the same rows."""
+    m_len, m_count = tables.modules.lens, tables.modules.count
+    d_len, d_count = tables.devices.lens, tables.devices.count
+    s_lens, s_devs, s_mods = segment.lengths, segment.devices, segment.modules
+
+    # 27 timestamp bytes, the three spaces between the fields, ": " and the '\n'.
+    fixed = 27 + 3 + 2 + 1 + nb_table_get_max_string_len(tables.levels, 3)
+
+    total_size = 0
+    for i in range(count):
+        idx = indices[i]
+        d_id = s_devs[idx]
+        m_id = s_mods[idx]
+        total_size += fixed + s_lens[idx]
+        total_size += d_len[d_id] if d_id < d_count else 3
+        total_size += m_len[m_id] if m_id < m_count else 7
+
+    return total_size
+
+
+@app_njit()
+def nb_segment_format_log_rows(
+    out: np.ndarray,
+    indices: np.ndarray,
+    count,
+    segment: LogBundle,
+    tables: RegistryParams,
+) -> int:
+    """nb_format_log_row_batch for chosen rows of a segment: the recorded session log's lines
+    (what `blink export` prints), whatever the viewer's FormattingConfig is. The two must write
+    the same bytes - tests/test_mcp_server_pipeline.py compares them."""
+    last_sec = dtypes.TS_TYPE(-1)
+    ts_cache = np.zeros(19, dtype=dtypes.BYTE)
+
+    # Unpack Segment
+    s_ts, s_lvls = segment.timestamps, segment.levels
+    s_mods, s_devs = segment.modules, segment.devices
+    s_offs, s_lens, s_buf = segment.offsets, segment.lengths, segment.buffer
+
+    # Constant Fallbacks
+    UNKNOWN_LEVEL = (CHAR_QUESTION, CHAR_QUESTION, CHAR_QUESTION)
+    UNKNOWN_DEV = (CHAR_QUESTION, CHAR_QUESTION, CHAR_QUESTION)
+    UNKNOWN_MOD = (117, 110, 107, 110, 111, 119, 110)  # "unknown"
+
+    curr = 0
+    for row in range(count):
+        idx = indices[row]
+
+        # --- 1. Timestamp ---
+        ts_ns = s_ts[idx]
+        total_sec = ts_ns // 1_000_000_000
+
+        if total_sec != last_sec:
+            nb_update_iso8601_timestamp_cache(total_sec, ts_cache)
+            last_sec = total_sec
+
+        # Copy 19 bytes: YYYY-MM-DDTHH:MM:SS
+        for i in range(19):
+            out[curr + i] = ts_cache[i]
+        curr += 19
+
+        # --- Microseconds (.uuuuuuZ ) ---
+        us = (ts_ns // 1_000) % 1_000_000
+
+        out[curr] = CHAR_DOT
+        out[curr + 1] = CHAR_ZERO + (us // 100000)
+        out[curr + 2] = CHAR_ZERO + ((us // 10000) % 10)
+        out[curr + 3] = CHAR_ZERO + ((us // 1000) % 10)
+        out[curr + 4] = CHAR_ZERO + ((us // 100) % 10)
+        out[curr + 5] = CHAR_ZERO + ((us // 10) % 10)
+        out[curr + 6] = CHAR_ZERO + (us % 10)
+        out[curr + 7] = CHAR_Z
+        out[curr + 8] = CHAR_SPACE
+        curr += 9
+
+        # --- 2. Level (Lookup) ---
+        curr = nb_table_lookup_copy_entry(out, curr, tables.levels, s_lvls[idx], UNKNOWN_LEVEL)
+        out[curr] = CHAR_SPACE
+        curr += 1
+
+        # --- 3. Device (Direct) ---
+        curr = nb_table_copy_entry(out, curr, tables.devices, s_devs[idx], UNKNOWN_DEV)
+        out[curr] = CHAR_SPACE
+        curr += 1
+
+        # --- 4. Module (Direct) ---
+        curr = nb_table_copy_entry(out, curr, tables.modules, s_mods[idx], UNKNOWN_MOD)
+        out[curr], out[curr + 1] = CHAR_COLON, CHAR_SPACE
+        curr += 2
+
+        # --- 5. Message ---
+        curr = nb_copy_bytes(out, curr, s_buf, s_offs[idx], s_lens[idx])
+        out[curr] = CHAR_LF
+        curr += 1
+
+    return curr
+
+
 @app_njit(inline="always")
 def nb_set_u32_le(arr: np.ndarray, offset: int, value: int):
     """Writes a 32-bit unsigned integer in Little Endian."""

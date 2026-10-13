@@ -9,15 +9,18 @@ through the real HTTP server and the same client code `blink mcp` uses, and `sen
 through a real tcp_client source to a socket this test listens on."""
 
 import json
+import os
 import socket
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from blinkview import agent_mcp
-from blinkview.core import agent_api
+from blinkview.core import agent_api, agent_log_read
 from blinkview.core.agent_api import AgentApiError
+from blinkview.utils.session_export import line_timestamp
 from tests.fakes.real_registry import make_real_registry
 
 
@@ -299,6 +302,123 @@ def test_more_new_lines_than_max_lines_pages_forward_without_skipping(registry, 
         ([f"row {i:02d}" for i in range(10, 20)], True),
         ([f"row {i:02d}" for i in range(20, 25)], False),
     ]
+
+
+@pytest.fixture
+def to_file_dir(tmp_path, monkeypatch):
+    """to_file's files go under tmp_path, not the developer's real temp folder."""
+    path = tmp_path / "read_logs"
+    monkeypatch.setattr(agent_log_read, "to_file_dir", lambda: path)
+    return path
+
+
+def _recorded_lines(registry, containing: bytes):
+    """Lines of the session's own log (what `blink export` prints), once they are on disk."""
+
+    def read():
+        parts = sorted(registry.file_manager.session_dir.glob("session.*.log"))
+        lines = [line for part in parts for line in part.read_bytes().splitlines() if containing in line]
+        return lines
+
+    return read
+
+
+def test_to_file_writes_the_session_logs_own_lines_and_returns_the_path(registry, run_dir, device, to_file_dir):
+    seq = _call(run_dir, "status")["instances"][0]["seq"]
+    _say(device, "filed one", "skipped", "filed two")
+    _wait_for(lambda: _call(run_dir, "read_logs", device="board", contains="filed two")["lines"], what="the rows")
+
+    result = _call(run_dir, "read_logs", after_seq=seq, device="board", contains="filed", to_file=True, show_ts=False)
+
+    assert "text" not in result
+    assert result["lines"] == 2 and result["truncated"] is False
+    path = Path(result["file"])
+    assert path.parent == to_file_dir and path.name.startswith(result["session_id"])
+    written = path.read_bytes()
+    assert result["bytes"] == len(written)
+    lines = written.splitlines()
+    assert [line.split(b": ", 1)[1] for line in lines] == [b"filed one", b"filed two"]
+    assert result["first_time"] == lines[0][:27].decode() and result["last_time"] == lines[1][:27].decode()
+    assert line_timestamp(lines[0]) is not None  # blink export's own check of a line's shape
+
+    # Byte for byte what the session's log file holds for the same rows (flushed every few seconds).
+    recorded = _wait_for(
+        lambda: len(r := _recorded_lines(registry, b"filed")()) == 2 and r, timeout=30, what="the session log"
+    )
+    assert lines == recorded
+
+    # The cursor works as without to_file, and nothing new leaves no file behind.
+    again = _call(run_dir, "read_logs", after_seq=result["next_seq"], device="board", to_file=True)
+    assert again["lines"] == 0 and "file" not in again
+    assert list(to_file_dir.iterdir()) == [path]
+
+
+def test_to_file_lifts_the_line_cap_and_pages_without_skipping(registry, run_dir, device, to_file_dir, monkeypatch):
+    monkeypatch.setattr(agent_log_read, "HARD_MAX_LINES", 10)
+    monkeypatch.setattr(agent_log_read, "FILE_PAGE_LINES", 7)
+    seq = _call(run_dir, "status")["instances"][0]["seq"]
+    _say(device, *[f"row {i:02d}" for i in range(25)])
+    _wait_for(lambda: _call(run_dir, "read_logs", device="board", contains="row 24")["lines"], what="all rows")
+
+    def messages(result):
+        return [line.rsplit(": ", 1)[-1] for line in Path(result["file"]).read_text().splitlines()]
+
+    everything = _call(run_dir, "read_logs", after_seq=seq, device="board", to_file=True)
+    assert messages(everything) == [f"row {i:02d}" for i in range(25)]
+    assert everything["lines"] == 25 and everything["truncated"] is False
+
+    capped = _call(run_dir, "read_logs", after_seq=seq, device="board", to_file=True, max_lines=16)
+    assert messages(capped) == [f"row {i:02d}" for i in range(16)]
+    assert capped["truncated"] is True
+    rest = _call(run_dir, "read_logs", after_seq=capped["next_seq"], device="board", to_file=True)
+    assert messages(rest) == [f"row {i:02d}" for i in range(16, 25)]
+
+    # Without a cursor, and around a time: more than the reply's cap of 10 as well.
+    assert messages(_call(run_dir, "read_logs", device="board", contains="row", to_file=True, last_n=20)) == [
+        f"row {i:02d}" for i in range(5, 25)
+    ]
+    around = _call(
+        run_dir, "read_logs", device="board", contains="row", to_file=True, around="00:00:00", before=0, after=20
+    )
+    assert messages(around) == [f"row {i:02d}" for i in range(20)]
+    assert _call(run_dir, "read_logs", after_seq=seq, device="board", max_lines=500)["lines"] == 10
+
+
+def test_to_file_deletes_its_old_files_and_refuses_a_non_boolean(registry, run_dir, device, to_file_dir):
+    to_file_dir.mkdir()
+    old, recent, other = to_file_dir / "old.log", to_file_dir / "recent.log", to_file_dir / "notes.txt"
+    for path in (old, recent, other):
+        path.write_text("x")
+    long_ago = time.time() - agent_log_read.FILE_KEEP_SECONDS - 60
+    os.utime(old, (long_ago, long_ago))
+    os.utime(other, (long_ago, long_ago))
+
+    _say(device, "fresh line")
+    _wait_for(lambda: _call(run_dir, "read_logs", device="board", contains="fresh line")["lines"], what="the row")
+    result = _call(run_dir, "read_logs", device="board", contains="fresh line", to_file=True)
+
+    assert sorted(p.name for p in to_file_dir.iterdir()) == sorted(
+        ["recent.log", "notes.txt", Path(result["file"]).name]
+    )
+    with pytest.raises(AgentApiError, match="'to_file' must be true or false"):
+        _call(run_dir, "read_logs", to_file="yes")
+
+
+def test_send_with_to_file_puts_the_reply_in_a_file(registry, run_dir, device, to_file_dir):
+    import threading
+
+    def reply():
+        assert device.recv(100) == b"ver" + NL
+        _say(device, "version 9.9")
+
+    thread = threading.Thread(target=reply, daemon=True)
+    thread.start()
+    result = _call(run_dir, "send", text="ver", device="board", wait_s=10, quiet_ms=300, to_file=True)
+    thread.join(10)
+
+    reply_lines = Path(result["reply"]["file"]).read_text().splitlines()
+    assert [line.rsplit(": ", 1)[-1] for line in reply_lines] == ["version 9.9"]
+    assert "text" not in result["reply"]
 
 
 def test_send_with_wait_returns_the_devices_reply(registry, run_dir, device):
