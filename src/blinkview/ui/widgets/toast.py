@@ -4,9 +4,11 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from qtpy.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, QVariantAnimation
+from qtpy.QtCore import QEasingCurve, QEvent, QObject, QPropertyAnimation, QRectF, Qt, QVariantAnimation
 from qtpy.QtGui import QColor, QFontMetricsF, QPainter, QPen
 from qtpy.QtWidgets import QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QWidget
+
+QWIDGETSIZE_MAX = 16777215  # Qt's unbounded widget size; not exported by every qtpy binding
 
 from blinkview.utils.dev_mode import dev_print
 
@@ -126,6 +128,7 @@ class ToastWidget(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
 
         self.is_hovered = False
+        self.hidden_with_parent = False  # hidden while the parent window is minimized
 
         self.action_callback = action_callback
         self.click_callback = click_callback
@@ -336,10 +339,25 @@ class ToastWidget(QWidget):
         total_width = max(self.MIN_WIDTH, min(self.MAX_WIDTH, chrome_width + text_width))
         label_width = total_width - chrome_width
         self.msg_label.setFixedWidth(label_width)
+        # QLabel's heightForWidth() never goes below its minimum height, so the previous message's
+        # fixed height would keep a shorter one from shrinking the toast back down.
+        self.msg_label.setMinimumHeight(0)
         self.msg_label.setFixedHeight(self.msg_label.heightForWidth(label_width))
 
+        # The label's new height only invalidates the frame's layout; the toast's own layout keeps
+        # the frame's old size hint until a posted LayoutRequest runs. Activate both now so the
+        # height below is the new one - otherwise a shown toast gets resized to the stale height
+        # and that deferred pass resizes it again mid-SetWindowPos, which Windows reports as
+        # "QWindowsWindow::setGeometry: Unable to set geometry ... Resulting geometry".
+        frame_layout.activate()
+        self.layout().activate()
+
+        # One resize to the final size, before the width constraints: setFixedWidth() on its own
+        # would resize at the old height first, and it sets the minimum before the maximum, so
+        # growing a shown toast would briefly have min > max - both trip the same warning.
+        self.setMaximumWidth(QWIDGETSIZE_MAX)
+        self.resize(total_width, self.sizeHint().height())
         self.setFixedWidth(total_width)
-        self.adjustSize()
 
     def dismiss(self):
         """Clearer-named alias for hide_toast(), for external callers (e.g. once the work a
@@ -347,8 +365,34 @@ class ToastWidget(QWidget):
         self.hide_toast()
 
 
+class _ParentWindowWatcher(QObject):
+    """Toasts are top-level windows placed in screen coordinates, so they don't follow their
+    parent window on their own. Re-anchors them when the parent moves or resizes (e.g. Windows
+    moving the main window after a monitor change, under the "Apply layout?" toast), and hides
+    them while it is minimized."""
+
+    def eventFilter(self, obj, event):
+        etype = event.type()
+        if etype == QEvent.WindowStateChange:
+            minimized = obj.isMinimized()
+            for toast in ToastManager._toasts:
+                if toast.parentWidget() is not obj:
+                    continue
+                if minimized and toast.isVisible():
+                    toast.hide()
+                    toast.hidden_with_parent = True
+                elif not minimized and toast.hidden_with_parent:
+                    toast.hidden_with_parent = False
+                    toast.show()
+            ToastManager._reposition_toasts()
+        elif etype in (QEvent.Move, QEvent.Resize):
+            ToastManager._reposition_toasts()
+        return False
+
+
 class ToastManager:
     _toasts = []
+    _watcher = None
 
     @classmethod
     def show(
@@ -402,6 +446,9 @@ class ToastManager:
         )
 
         cls._toasts.append(toast)
+        if cls._watcher is None:
+            cls._watcher = _ParentWindowWatcher(QApplication.instance())
+        target_window.installEventFilter(cls._watcher)  # a repeat install is a no-op in Qt
 
         # Cleanup connections
         toast.destroyed.connect(lambda: cls._toasts.remove(toast) if toast in cls._toasts else None)

@@ -110,6 +110,74 @@ class TestToastSizing:
         self._assert_text_not_clipped(toast)
         assert toast.width() == ToastWidget.MAX_WIDTH
 
+    def test_growing_never_resizes_with_min_width_above_max_width(self, qapp, qtbot):
+        """setFixedWidth() raises the minimum before the maximum, so growing a shown toast used
+        to resize it with min > max - Windows rejected that geometry on some monitors
+        ("QWindowsWindow::setGeometry: Unable to set geometry ... maximum size: 300x...")."""
+        from qtpy.QtCore import QEvent, QObject
+
+        toast = ToastWidget("short", persistent=True)
+        qtbot.addWidget(toast)
+        toast.show()
+
+        bounds_at_resize = []
+
+        class _ResizeSpy(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Resize:
+                    bounds_at_resize.append((obj.minimumWidth(), obj.maximumWidth()))
+                return False
+
+        spy = _ResizeSpy()
+        toast.installEventFilter(spy)
+        toast.set_message(self.LONG)
+
+        assert bounds_at_resize
+        assert all(min_w <= max_w for min_w, max_w in bounds_at_resize)
+
+    def test_growing_a_shown_toast_resizes_straight_to_the_final_height(self, qapp, qtbot):
+        """set_message() used to resize to a stale height (the toast's layout still held the
+        frame's old size hint) and a deferred layout pass then resized it again - on Windows
+        mid-SetWindowPos, logged as "Unable to set geometry 426x52 ... Resulting geometry:
+        426x54" when the shutdown-compression toast's text wrapped."""
+        from qtpy.QtCore import QEvent, QObject
+
+        toast = ToastWidget("short", persistent=True)
+        qtbot.addWidget(toast)
+        toast.show()
+
+        sizes_at_resize = []
+
+        class _ResizeSpy(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Resize:
+                    sizes_at_resize.append((event.size().width(), event.size().height()))
+                return False
+
+        spy = _ResizeSpy()
+        toast.installEventFilter(spy)
+        toast.set_message("word " * 40)
+        final = (toast.width(), toast.height())
+        qapp.processEvents()
+
+        assert final[1] == toast.sizeHint().height()
+        assert sizes_at_resize and all(size == final for size in sizes_at_resize)
+        assert (toast.width(), toast.height()) == final
+
+    def test_shorter_message_shrinks_the_toast_back(self, qapp, qtbot):
+        """QLabel.heightForWidth() never goes below the label's minimum height, so the previous
+        message's fixed height used to keep the toast tall after a long message."""
+        toast = ToastWidget("short", persistent=True)
+        qtbot.addWidget(toast)
+        short_height = toast.height()
+
+        toast.set_message("word " * 40)
+        assert toast.height() > short_height
+
+        toast.set_message("short")
+        assert toast.height() == short_height
+        assert toast.msg_label.height() == toast.msg_label.heightForWidth(toast.msg_label.width())
+
 
 class TestToastWidgetInteraction:
     def test_mouse_press_triggers_click_callback_and_hides(self, qapp, qtbot):
@@ -470,3 +538,79 @@ class TestToastManager:
 
         assert (toast.x(), toast.y()) == (999, 999)  # untouched - reposition must skip it
         assert original_pos != (999, 999)
+
+
+class TestToastFollowsParentWindow:
+    """Toasts are top-level windows placed in screen coordinates - they used to stay where they
+    were shown when the parent window moved (e.g. Windows moving the main window after a monitor
+    change, under the "Apply layout?" toast)."""
+
+    @staticmethod
+    def _parent(qtbot):
+        from qtpy.QtWidgets import QWidget
+
+        parent = QWidget()
+        qtbot.addWidget(parent)
+        parent.setGeometry(100, 100, 400, 300)
+        parent.show()
+        return parent
+
+    @staticmethod
+    def _anchored(toast, parent):
+        return toast.x() == parent.geometry().right() - toast.width() - 20 and toast.y() == (
+            parent.geometry().bottom() - 20 - toast.height()
+        )
+
+    def test_toast_follows_a_moved_parent(self, qapp, qtbot):
+        parent = self._parent(qtbot)
+        toast = ToastManager.show("hello", parent=parent)
+        assert self._anchored(toast, parent)
+
+        parent.move(300, 250)
+        qtbot.waitUntil(lambda: parent.geometry().left() == 300 or parent.x() == 300, timeout=1000)
+
+        assert self._anchored(toast, parent)
+
+    def test_toast_follows_a_resized_parent(self, qapp, qtbot):
+        parent = self._parent(qtbot)
+        toast = ToastManager.show("hello", parent=parent)
+
+        parent.resize(700, 500)
+        qtbot.waitUntil(lambda: parent.width() == 700, timeout=1000)
+
+        assert self._anchored(toast, parent)
+
+    def test_hovered_toast_stays_put_when_the_parent_moves(self, qapp, qtbot):
+        parent = self._parent(qtbot)
+        toast = ToastManager.show("hello", parent=parent)
+        toast.is_hovered = True
+        before = toast.pos()
+
+        parent.move(300, 250)
+        qtbot.waitUntil(lambda: parent.x() == 300 or parent.geometry().left() == 300, timeout=1000)
+
+        assert toast.pos() == before
+
+    def test_toast_hides_while_the_parent_is_minimized(self, qapp, qtbot):
+        parent = self._parent(qtbot)
+        toast = ToastManager.show("hello", parent=parent)
+        assert toast.isVisible()
+
+        parent.showMinimized()
+        qtbot.waitUntil(lambda: not toast.isVisible(), timeout=1000)
+
+        parent.showNormal()
+        qtbot.waitUntil(toast.isVisible, timeout=1000)
+        assert self._anchored(toast, parent)
+
+    def test_a_toast_dismissed_before_minimizing_is_not_brought_back(self, qapp, qtbot):
+        parent = self._parent(qtbot)
+        toast = ToastManager.show("hello", parent=parent)
+        toast.hide()
+
+        parent.showMinimized()
+        qtbot.waitUntil(parent.isMinimized, timeout=1000)
+        parent.showNormal()
+        qtbot.waitUntil(lambda: not parent.isMinimized(), timeout=1000)
+
+        assert not toast.isVisible()
