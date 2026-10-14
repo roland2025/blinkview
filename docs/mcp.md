@@ -27,6 +27,17 @@ blink
 Then start the agent in the same folder and ask it to set up your board, for example: "I have
 an STM32 on J-Link RTT printing `[ms] MODULE: text`, set it up".
 
+If you don't know the format, say so: "it's on COM5 at 115200, I don't know
+what it sends, work it out". The agent then adds a `raw_hex` pipeline to the source, which shows
+the bytes as hexdump rows next to the normal output, works out the framing and message layout
+from the dump, sets up the parser, and turns `raw_hex` off again. The dump stops by itself after
+`max_bytes` (a million bytes by default).
+
+Once the lines come through, the agent can also take values out of them, for example "plot the
+battery voltage from the `bat:` lines". It adds extraction rules that turn `key=value` pairs,
+a word after a given text, a word at a given position, or CSV-like fields into values of their
+own. Open the telemetry table, a plot or a watch list in BlinkView to see them.
+
 `--mcp` is a second spelling of `--agent`.
 
 ## A new profile in an existing project
