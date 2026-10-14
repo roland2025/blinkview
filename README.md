@@ -109,6 +109,10 @@ blink setup
 
 `[all]` brings the GUI and every hardware backend. Narrower extras: `pyside6` (GUI only), `serial`, `can`, `jlink`, `hardware` (all three).
 
+For SEGGER RTT, also install the J-Link software from SEGGER. It isn't included in BlinkView. See [SEGGER J-Link and RTT](docs/jlink.md), which also covers running several probes and known problems.
+
+For CAN, install the driver for your adapter (PEAK, Kvaser) from its maker. See [CAN bus](docs/can.md).
+
 `blink setup` compiles the data-processing kernels once per version, which takes about a minute. The first `blink` does it by itself if you skip it. On a machine without a display, use `blink setup --no-gui`.
 
 ### Updating
@@ -160,8 +164,8 @@ To store logs somewhere else, set a log directory with `blink config --global lo
 
 * **Multi-Source Ingestion:** Supported source types include:
   * Serial / UART
-  * CAN-bus (with DBC decoding)
-  * SEGGER RTT
+  * CAN-bus (with DBC decoding; see [CAN bus](docs/can.md))
+  * SEGGER RTT (J-Link; see [SEGGER J-Link and RTT](docs/jlink.md))
   * TCP/UDP sockets
   * ADB logcat
   * Live file tailing

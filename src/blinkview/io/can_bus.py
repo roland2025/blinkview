@@ -91,8 +91,8 @@ class CanLogBatch(PooledLogBatch):
     default="virtual",
     required=True,
     ui_order=10,
-    enum=["virtual", "socketcan", "pcan", "ixxat", "slcan"],
-    description="The python-can interface to use (e.g., 'socketcan' for Linux, 'pcan' for Windows/Peak).",
+    enum=["virtual", "socketcan", "pcan", "kvaser", "ixxat", "slcan"],
+    description="The python-can interface to use (e.g., 'socketcan' for Linux, 'pcan' for PEAK, 'kvaser' for Kvaser).",
 )
 @configuration_property(
     "channel",

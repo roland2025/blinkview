@@ -1,0 +1,107 @@
+# SEGGER J-Link and RTT
+
+BlinkView reads SEGGER RTT through a J-Link probe with a source of type `jlink_rtt`. This page
+covers what has to be installed, the source's settings, running several probes, and the
+problems seen so far.
+
+## Install the J-Link software separately
+
+BlinkView talks to the probe through SEGGER's J-Link library (via
+[pylink](https://github.com/square/pylink)), which is **not** part of BlinkView. Install it
+from SEGGER first:
+
+1. Download the **J-Link Software and Documentation Pack** from
+   [segger.com/downloads/jlink](https://www.segger.com/downloads/jlink/) and install it in its
+   default location. This also installs the USB driver for the probe.
+2. Install BlinkView with the J-Link backend: the `all`, `hardware` or `jlink` extra, e.g.
+   `uv tool install "blinkview[all]"`.
+
+To check the installation, open **J-Link Commander** (`JLink.exe`) from the SEGGER pack and
+connect to the probe. If that works, BlinkView can use the probe too.
+
+## Source settings
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `target_device` | `NRF52840_XXAA` | Exact name from SEGGER's device list, e.g. `STM32F407VG`. A family name such as `NRF52` does not connect. |
+| `serial_number` | empty | The probe's serial number. Empty means the first J-Link found, so set it whenever more than one probe is attached. |
+| `interface` | `swd` | `swd` or `jtag`. |
+| `speed` | `4000` | Interface speed in kHz. |
+| `channel` | `0` | RTT up-channel to read. 0 is the standard terminal channel. |
+| `target_rtt_buffer_size` | `8192` | Size of the RTT up-buffer in the firmware (`BUFFER_SIZE_UP`). When it connects, BlinkView uses it to drop the stale data still in the buffer, without discarding live data. |
+| `delay` | `100` | Longest time (ms) incoming bytes are held before they're passed on. |
+
+The serial number list in the settings editor shows the probes attached right now.
+
+When the probe drops off or the connection is lost, BlinkView retries once a second until the
+probe answers again. You don't need to restart it.
+
+An RTT source offers these commands, which an AI agent can also send over
+[MCP](mcp.md): `reset` (reset the MCU), `halt`, `restart` (resume after a halt) and
+`rtt_restart` (restart RTT on the probe).
+
+## Several probes
+
+There are two ways to use several probes. Either way, give every source its own
+`serial_number`.
+
+**In one BlinkView:** add a `jlink_rtt` source for each probe, so all the boards share one
+timeline. For now each probe's source and pipeline are set up by hand, since there are no
+device or pipeline templates yet.
+
+**One BlinkView per board:** for identical boards, keep one profile and give each run its own
+serial number with
+[profile parameters](../README.md#several-identical-devices-profile-parameters):
+
+```bash
+blink switch rtt --add-param rtt_serial /sources/src_1eb62594/serial_number
+blink switch rtt --save-params left  --param rtt_serial=51024923
+blink switch rtt --save-params right --param rtt_serial=51099999
+
+blink -p rtt --params left
+blink -p rtt --params right
+```
+
+### Too many probes on one USB hub
+
+Five J-Links sharing a single 6-port hub made one of them unreliable. The errors came and went
+for minutes, in any order:
+
+- `Cannot connect to J-Link` (each attempt takes about 10 s)
+- `Communication timed out: Requested 4 bytes, received 0 bytes !`
+- `No emulator with serial number ... found.` (the probe briefly drops off USB)
+- `Target system has no power.`
+- the probe stops answering in the middle of a session (see the next section)
+
+Moving the probe to another hub fixed it. If these errors flap like this, spread the probes over
+several hubs or USB ports, or use a hub with its own power supply, before suspecting the probe,
+the cable or BlinkView.
+
+## Troubleshooting
+
+### The probe stops answering
+
+The J-Link library can hang inside a call when the probe stops responding. BlinkView can't
+interrupt that call, so while it lasts:
+
+- no RTT data arrives and nothing is logged,
+- commands are refused with `Command dropped: the J-Link is busy.`,
+- when you close BlinkView, it prints where the reader is stuck and ends with
+  `Exiting without unloading drivers: still blocked in a call: JLinkRTTReader(...)`.
+
+That last message is expected. Unloading the J-Link driver while a call is stuck in it would
+leave the process hanging, so BlinkView saves the session and ends the process without unloading
+it. Unplug and replug the probe, and check the USB setup (see above).
+
+### `J-Link is already open.`
+
+Another process has the probe open through pylink: usually another BlinkView with the same
+serial number, or an earlier BlinkView process that is still running. Check Task Manager (or
+`ps`) for a leftover `blink` or `python` process. pylink keeps a lock file per probe,
+`.pylink-usb-<serial>.lck`, in the temp folder, and ignores it once the process that wrote it
+has exited.
+
+### `J-Link does not know the target device '...'`
+
+`target_device` isn't a name from SEGGER's device list. Use the full part name, e.g.
+`NRF52840_XXAA`, not `NRF52`.
