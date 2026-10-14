@@ -908,7 +908,12 @@ class BlinkMainWindow(QMainWindow):
         menu = self.view_menu
         menu.clear()
 
-        names = self.view_presets.names()
+        params = self._params_label()
+        # This params set's presets first, then untagged ones, then other sets' (labelled).
+        names = sorted(
+            self.view_presets.names(),
+            key=lambda n: {params: 0, None: 1}.get(self.view_presets.params_of(n), 2),
+        )
         current_screens = current_screen_fingerprint()
         ready = self._layout_restored
 
@@ -917,6 +922,9 @@ class BlinkMainWindow(QMainWindow):
                 preset = self.view_presets.get(name) or {}
                 saved_screens = preset.get("screens") or []
                 label = f"{name}  ({len(saved_screens)} screen{'s' if len(saved_screens) != 1 else ''})"
+                saved_params = preset.get("params")
+                if saved_params is not None and saved_params != params:
+                    label += f"  [{saved_params}]"
                 if not screens_match(saved_screens, current_screens):
                     label += "  - different screens"
                 act = menu.addAction(label)
@@ -949,6 +957,11 @@ class BlinkMainWindow(QMainWindow):
         offer_act.setToolTip("When monitors are connected or disconnected, offer the saved layout matching them")
         offer_act.toggled.connect(lambda on: setattr(self.view_presets, "offer_on_screen_change", on))
 
+    def _params_label(self):
+        """This instance's params set label (`--params left`), or None - tags the layout presets
+        it saves, so each board's instance is offered its own layout."""
+        return getattr(self.gui_context.registry.file_manager, "params_label", None)
+
     def apply_view_preset(self, name: str):
         preset = self.view_presets.get(name)
         if not preset:
@@ -975,6 +988,9 @@ class BlinkMainWindow(QMainWindow):
     def save_view_preset_as(self):
         screens = current_screen_fingerprint()
         default = f"{len(screens)} screen{'s' if len(screens) != 1 else ''}"
+        params = self._params_label()
+        if params:  # presets are shared by all sets - keep this one's from overwriting another's
+            default = f"{params} - {default}"
         name, ok = QInputDialog.getText(self, titled("Save layout"), "Layout name:", text=default)
         name = name.strip()
         if not ok or not name:
@@ -987,7 +1003,9 @@ class BlinkMainWindow(QMainWindow):
 
     def _store_view_preset(self, name: str):
         try:
-            self.view_presets.save(name, self.gui_context.gui_state.get_data(), current_screen_fingerprint())
+            self.view_presets.save(
+                name, self.gui_context.gui_state.get_data(), current_screen_fingerprint(), params=self._params_label()
+            )
         except Exception as e:
             ToastManager.show(f"Could not save layout: {e}", ToastType.ERROR, 5, parent=self)
             return
@@ -1027,7 +1045,7 @@ class BlinkMainWindow(QMainWindow):
 
         if not self._layout_restored or not self.view_presets.offer_on_screen_change:
             return
-        name = self.view_presets.best_match(screens)
+        name = self.view_presets.best_match(screens, params=self._params_label())
         if name is None:
             return
 

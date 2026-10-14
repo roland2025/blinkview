@@ -118,17 +118,25 @@ class ViewPresetStore:
         data["offer_on_screen_change"] = bool(value)
         self._commit(data)
 
-    def best_match(self, screens: list) -> Optional[str]:
-        """The preset to offer for `screens`: among presets saved with exactly this screen
-        arrangement, the most recently saved one. Presets without a fingerprint never match here -
-        they can't tell which setup they belong to."""
+    def best_match(self, screens: list, params: Optional[str] = None) -> Optional[str]:
+        """The preset to offer for `screens` in an instance started with params set `params`
+        (`--params left`): among presets saved with exactly this screen arrangement, the most
+        recently saved one. One saved by this set beats an untagged one, and one saved by another
+        set is never offered - its windows sit where that instance's windows go. Presets without
+        a fingerprint never match here - they can't tell which setup they belong to."""
         self._refresh()
         matches = [
-            (preset.get("saved_at", ""), name)
+            (preset.get("params") is not None, preset.get("saved_at", ""), name)
             for name, preset in self._presets.items()
-            if preset.get("screens") and screens_match(preset["screens"], screens)
+            if preset.get("screens")
+            and screens_match(preset["screens"], screens)
+            and preset.get("params") in (None, params)
         ]
-        return max(matches)[1] if matches else None
+        return max(matches)[2] if matches else None
+
+    def params_of(self, name: str) -> Optional[str]:
+        """The params set label of the instance that saved `name`, or None if it had none."""
+        return (self.get(name) or {}).get("params")
 
     def names(self) -> list[str]:
         self._refresh()
@@ -142,13 +150,16 @@ class ViewPresetStore:
         self._refresh()
         return self._presets.get(name)
 
-    def save(self, name: str, state: dict, screens: list[dict]):
-        """Adds or overwrites preset `name`."""
+    def save(self, name: str, state: dict, screens: list[dict], params: Optional[str] = None):
+        """Adds or overwrites preset `name`. `params` is the saving instance's params set label,
+        so instances of other sets aren't offered it (see best_match)."""
         entry = {
             "saved_at": datetime.now().isoformat(timespec="seconds"),
             "screens": screens,
             "state": state,
         }
+        if params:
+            entry["params"] = params
         self._commit(self._mutate(lambda presets: presets.__setitem__(name, entry)))
 
     def rename(self, old: str, new: str):

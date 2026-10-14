@@ -153,6 +153,33 @@ class TestScreenChangeSupport:
         assert store.best_match(SCREENS_3[:1]) == "laptop"
         assert store.best_match(SCREENS_3[:2]) is None
 
+    def test_best_match_prefers_this_params_set_and_skips_other_sets(self, tmp_path):
+        """One profile, one instance per board (--params left/right): each is offered the layout
+        its own set saved, an untagged one as a fallback, never the other board's."""
+        store = ViewPresetStore(tmp_path / "p.json")
+        store._presets = {
+            "shared": {"saved_at": "2026-12-01T00:00:00", "screens": SCREENS_3, "state": {}},
+            "left desk": {"saved_at": "2026-01-01T00:00:00", "screens": SCREENS_3, "state": {}, "params": "left"},
+            "right desk": {"saved_at": "2026-02-01T00:00:00", "screens": SCREENS_3, "state": {}, "params": "right"},
+        }
+        assert store.best_match(SCREENS_3, params="left") == "left desk"  # beats the newer untagged one
+        assert store.best_match(SCREENS_3, params="right") == "right desk"
+        assert store.best_match(SCREENS_3, params="other") == "shared"
+        assert store.best_match(SCREENS_3) == "shared"
+        del store._presets["shared"]
+        assert store.best_match(SCREENS_3) is None
+
+    def test_save_records_the_params_set(self, tmp_path):
+        path = tmp_path / "p.json"
+        store = ViewPresetStore(path)
+        store.save("left desk", {}, SCREENS_3, params="left")
+        store.save("plain", {}, SCREENS_3)
+        presets = json.loads(path.read_text())["presets"]
+        assert presets["left desk"]["params"] == "left"
+        assert "params" not in presets["plain"]
+        assert store.params_of("left desk") == "left"
+        assert store.params_of("plain") is None
+
     def test_best_match_ignores_presets_without_a_fingerprint(self, tmp_path):
         store = ViewPresetStore(tmp_path / "p.json")
         store.save("legacy", {}, [])

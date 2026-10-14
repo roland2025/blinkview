@@ -184,6 +184,21 @@ class TestViewMenu:
         saved_tabs = main_window.view_presets.get("Desk")["state"]["open_tabs"]
         assert [t["name"] for t in saved_tabs] == ["A"]
 
+    def test_presets_are_tagged_and_listed_by_params_set(self, main_window, registry, monkeypatch):
+        """Started with --params left: saves are tagged 'left', this set's presets are listed
+        first, and another set's are marked with its label."""
+        monkeypatch.setattr(registry.file_manager, "params_label", "left", raising=False)
+        main_window._layout_restored = True
+        main_window.view_presets.save("A right", {}, [], params="right")
+        main_window.view_presets.save("B plain", {}, [])
+        main_window._store_view_preset("C mine")
+
+        assert main_window.view_presets.params_of("C mine") == "left"
+        presets = [text for text, _ in self._labels(main_window) if text.split()[0] in "ABC"]
+        assert [p.split("  (")[0] for p in presets] == ["C mine", "B plain", "A right"]
+        assert not presets[0].endswith("]") and not presets[1].endswith("]")
+        assert presets[2].endswith("  [right]")
+
     def test_apply_preset_round_trip(self, main_window, qtbot, monkeypatch):
         """Save with A floating, dock it back by hand, apply the preset -> A floats again."""
         messages = []
