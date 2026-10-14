@@ -129,6 +129,7 @@ class ToastWidget(QWidget):
 
         self.is_hovered = False
         self.hidden_with_parent = False  # hidden while the parent window is minimized
+        self.held = False  # created while its window was held (ToastManager.hold), not shown yet
 
         self.action_callback = action_callback
         self.click_callback = click_callback
@@ -287,6 +288,11 @@ class ToastWidget(QWidget):
             self.prog_anim.start()
 
     def hide_toast(self):
+        if self.held:
+            # Dismissed before it was ever shown.
+            self.held = False
+            self.deleteLater()
+            return
         if self.fade_anim.state() == QPropertyAnimation.Running and self.fade_anim.endValue() == 0:
             return  # Already hiding
 
@@ -398,6 +404,23 @@ class _ParentWindowWatcher(QObject):
 class ToastManager:
     _toasts = []
     _watcher = None
+    _held_windows = set()
+
+    @classmethod
+    def hold(cls, window):
+        """Toasts for `window` are created but not shown until release(window) - for a window
+        that is up but still invisible (the startup splash's opacity-0 main window,
+        plans/startup-splash.md), where they would float over nothing."""
+        cls._held_windows.add(window)
+
+    @classmethod
+    def release(cls, window):
+        cls._held_windows.discard(window)
+        for toast in list(cls._toasts):
+            if toast.held and toast.parentWidget() is window:
+                toast.held = False
+                toast.show_toast()
+        cls._reposition_toasts()
 
     @classmethod
     def show(
@@ -458,6 +481,10 @@ class ToastManager:
         # Cleanup connections
         toast.destroyed.connect(lambda: cls._toasts.remove(toast) if toast in cls._toasts else None)
         toast.destroyed.connect(cls._reposition_toasts)
+
+        if target_window in cls._held_windows:
+            toast.held = True
+            return toast
 
         cls._reposition_toasts()
         toast.show_toast()

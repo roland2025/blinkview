@@ -26,6 +26,9 @@ class UIStateHandler:
     def __init__(self, main_window):
         self.window = main_window
         self.ui_restored_cb = None
+        # Floating windows load_ui_state(keep_hidden=True) placed but left at opacity 0, for
+        # reveal_hidden_windows().
+        self._hidden_windows = []
 
     def get_data(self):
         """Captures geometry and dock states to JSON."""
@@ -126,9 +129,11 @@ class UIStateHandler:
         dh = abs(self.window.height() - client_size[1])
         return dx < threshold and dy < threshold and dw < threshold and dh < threshold
 
-    def load_ui_state(self, file_path, ui_state_restored_cb=None):
+    def load_ui_state(self, file_path, ui_state_restored_cb=None, keep_hidden=False):
         """Restores dock/tab/floating-window states from JSON. Assumes restore_window_geometry()
-        has already positioned the main window."""
+        has already positioned the main window. With keep_hidden, the floating windows are placed
+        but stay invisible until reveal_hidden_windows() (the startup splash's single reveal,
+        plans/startup-splash.md)."""
         self.ui_restored_cb = ui_state_restored_cb
 
         if not file_path.exists():
@@ -176,7 +181,9 @@ class UIStateHandler:
                 if new_win:
                     placements.append((new_win, win_info.get("window_geometry", {})))
 
-            self._place_floating_windows(placements, self.on_ui_restoration_complete)
+            if keep_hidden:
+                self._hidden_windows = [win for win, _geo in placements]
+            self._place_floating_windows(placements, self.on_ui_restoration_complete, reveal=not keep_hidden)
 
         except Exception:
             print("Could not restore UI state")
@@ -204,11 +211,22 @@ class UIStateHandler:
             replay_mode = getattr(registry, "replay_mode", False)
             self.window.action_view_playback.setChecked(bool(data["playback_visible"] or replay_mode))
 
+    def reveal_hidden_windows(self):
+        """Makes the floating windows load_ui_state(keep_hidden=True) left invisible visible."""
+        windows, self._hidden_windows = self._hidden_windows, []
+        for win in windows:
+            # A WA_DeleteOnClose window may have been closed while invisible.
+            if _is_alive(win):
+                win.raise_()
+                win.activateWindow()
+                win.setWindowOpacity(1.0)
+
     @staticmethod
-    def _place_floating_windows(placements, on_complete):
+    def _place_floating_windows(placements, on_complete, reveal=True):
         """Shows each (window, geometry dict) invisibly ("ghost mode"), then moves it into place
-        after giving the OS 100ms, so it doesn't visibly jump. on_complete fires once every window
-        is placed (immediately if there are none)."""
+        after giving the OS 100ms, so it doesn't visibly jump. Without reveal it stays invisible
+        (see reveal_hidden_windows). on_complete fires once every window is placed (immediately
+        if there are none)."""
         remaining = len(placements)
         if remaining == 0:
             on_complete()
@@ -225,9 +243,10 @@ class UIStateHandler:
                     if geo_dict:
                         restore_window_geometry_safe(win, geo_dict)
 
-                    win.raise_()
-                    win.activateWindow()
-                    win.setWindowOpacity(1.0)
+                    if reveal:
+                        win.raise_()
+                        win.activateWindow()
+                        win.setWindowOpacity(1.0)
                 remaining -= 1
                 if remaining <= 0:
                     on_complete()

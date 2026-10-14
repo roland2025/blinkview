@@ -29,6 +29,17 @@ def main_window(qapp, qtbot, registry):
     return w
 
 
+@pytest.fixture
+def splash(main_window, qtbot):
+    """The startup splash as run.py hands it over (plans/startup-splash.md)."""
+    from blinkview.ui.windows.startup_splash import StartupSplash
+
+    s = StartupSplash()
+    qtbot.addWidget(s)
+    main_window._splash = s
+    return s
+
+
 class FakeWidget(QWidget):
     """Stand-in registered under a throwaway name in widget_factories - a real widget
     (LogViewerWidget, TelemetryTable, ...) would drag in a lot of unrelated backend wiring/
@@ -529,7 +540,7 @@ class TestPollQueue:
 
 
 class TestBackgroundWarmup:
-    """registry.warmup() runs on the TaskManager pool behind a progress toast, and the rest of the
+    """registry.warmup() runs on the TaskManager pool behind the startup splash, and the rest of the
     startup chain (sidebars, UI-state restore, registry.start()) only runs once it has finished -
     see plans/background-warmup.md. registry.warmup is replaced by a fake that blocks until the
     test releases it, so these tests control exactly when the "compile" ends."""
@@ -572,62 +583,39 @@ class TestBackgroundWarmup:
         qtbot.waitUntil(lambda: controlled_warmup.sidebars == [True], timeout=5000)
         assert main_window._warmup_bridge is None
 
-    def test_cold_cache_shows_a_progress_toast_that_is_dismissed_at_the_end(
-        self, main_window, qtbot, controlled_warmup, monkeypatch
+    def test_a_long_warmup_says_it_is_compiling_and_for_how_long(
+        self, main_window, qtbot, controlled_warmup, splash, monkeypatch
     ):
         from blinkview.ui import main_window as main_window_module
 
-        monkeypatch.setattr(main_window_module, "IS_CACHE_WARM", False)
+        monkeypatch.setattr(main_window_module, "COMPILING_AFTER_S", 0.0)
         main_window._start_warmup()
-        toast = main_window._warmup_toast
-        assert toast is not None
 
-        qtbot.waitUntil(lambda: toast.icon_widget.determinate == 0.25, timeout=5000)
+        qtbot.waitUntil(lambda: splash.progress_bar.value() == 250, timeout=5000)
+        assert splash.progress_area.isVisibleTo(splash)
+        assert splash.status_label.text() == "Compiling kernels. Needed once after an install or update."
+        assert splash.step_label.text() == "25% - BinaryParser"
+        assert splash.elapsed_label.text().endswith(" s")
 
         controlled_warmup.release.set()
         qtbot.waitUntil(lambda: controlled_warmup.sidebars == [True], timeout=5000)
-        assert main_window._warmup_toast is None
-        assert toast.fade_anim.endValue() == 0  # dismissed
+        assert splash.status_label.text() == "Restoring windows..."
+        assert not splash.progress_area.isVisibleTo(splash)
+        assert splash.elapsed_label.text() == ""
+        assert not main_window._warmup_clock.isActive()
+        assert main_window._reveal_watchdog.isActive()
 
-    def test_warm_cache_shows_no_toast(self, main_window, qtbot, controlled_warmup, monkeypatch):
+    def test_a_quick_warmup_only_loads_the_kernels(self, main_window, qtbot, controlled_warmup, splash, monkeypatch):
         from blinkview.ui import main_window as main_window_module
 
-        monkeypatch.setattr(main_window_module, "IS_CACHE_WARM", True)
+        monkeypatch.setattr(main_window_module, "COMPILING_AFTER_S", 3600.0)
         main_window._start_warmup()
 
-        assert main_window._warmup_toast is None
+        qtbot.waitUntil(lambda: splash.step_label.text() == "25% - BinaryParser", timeout=5000)
+        assert splash.status_label.text() == "Loading kernels..."
+        assert splash.elapsed_label.text() == ""
         controlled_warmup.release.set()
         qtbot.waitUntil(lambda: controlled_warmup.sidebars == [True], timeout=5000)
-
-    def test_successful_warmup_marks_the_cache_complete(
-        self, main_window, qtbot, controlled_warmup, monkeypatch, tmp_path
-    ):
-        from blinkview.core.numba_setup import WARMUP_COMPLETE_MARKER
-
-        monkeypatch.setenv("NUMBA_CACHE_DIR", str(tmp_path))
-        main_window.gui_context.registry.warmup_success = True  # what the real warmup() leaves behind
-
-        main_window._start_warmup()
-        controlled_warmup.release.set()
-        qtbot.waitUntil(lambda: controlled_warmup.sidebars == [True], timeout=5000)
-
-        assert (tmp_path / WARMUP_COMPLETE_MARKER).is_file()
-
-    def test_unfinished_warmup_leaves_the_cache_unmarked(
-        self, main_window, qtbot, controlled_warmup, monkeypatch, tmp_path
-    ):
-        """Failed or cancelled: the next start still has kernels to compile, so it must show the
-        toast again."""
-        cache_dir = tmp_path / "numba_cache"
-        cache_dir.mkdir()
-        monkeypatch.setenv("NUMBA_CACHE_DIR", str(cache_dir))
-        main_window.gui_context.registry.warmup_success = False
-
-        main_window._start_warmup()
-        controlled_warmup.release.set()
-        qtbot.waitUntil(lambda: controlled_warmup.sidebars == [True], timeout=5000)
-
-        assert list(cache_dir.iterdir()) == []
 
     def test_toolbar_is_enabled_again_once_the_registry_has_started(self, main_window, monkeypatch):
         main_window._set_startup_controls_enabled(False)
@@ -663,6 +651,77 @@ class TestBackgroundWarmup:
 
         assert saves == [True]
         qtbot.waitUntil(lambda: main_window._shutdown_ready_to_close, timeout=5000)
+
+
+class TestStartupReveal:
+    """plans/startup-splash.md: every window stays invisible behind the splash until the layout
+    restore has finished, then all turn visible at once, and only then do the devices start."""
+
+    @pytest.fixture
+    def hidden_startup(self, main_window, splash, qtbot, monkeypatch):
+        main_window.setWindowOpacity(0.0)
+        main_window.show()
+        floating = QWidget()
+        qtbot.addWidget(floating)
+        floating.setWindowOpacity(0.0)
+        floating.show()
+        main_window.gui_context.gui_state._hidden_windows = [floating]
+        starts = []
+        monkeypatch.setattr(main_window, "_start_registry", lambda: starts.append(True))
+        return SimpleNamespace(floating=floating, starts=starts)
+
+    def test_layout_restored_reveals_every_window_then_starts_the_devices(
+        self, main_window, splash, qtbot, hidden_startup
+    ):
+        main_window._on_layout_restored()
+
+        assert main_window.windowOpacity() == 1.0
+        assert hidden_startup.floating.windowOpacity() == 1.0
+        assert not splash.isVisible()
+        assert main_window._splash is None
+        assert hidden_startup.starts == []  # not in the same tick as the reveal
+        qtbot.waitUntil(lambda: hidden_startup.starts == [True], timeout=5000)
+
+    def test_watchdog_reveals_a_stuck_restore_without_starting_the_devices(
+        self, main_window, splash, qtbot, hidden_startup
+    ):
+        main_window._reveal_watchdog.setInterval(10)
+        main_window._reveal_watchdog.start()
+
+        qtbot.waitUntil(lambda: main_window._splash is None, timeout=5000)
+        assert main_window.windowOpacity() == 1.0
+        assert hidden_startup.floating.windowOpacity() == 1.0
+        assert hidden_startup.starts == []  # left to the restore chain
+
+    def test_toasts_wait_for_the_reveal(self, main_window, splash):
+        from blinkview.ui.widgets.toast import ToastManager
+
+        main_window.show()
+        ToastManager.hold(main_window)
+        try:
+            toast = ToastManager.show("Device found", parent=main_window)
+            assert toast.held and not toast.isVisible()
+
+            main_window._reveal()
+
+            assert not toast.held and toast.isVisible()
+        finally:
+            ToastManager.release(main_window)
+
+    def test_closing_the_splash_closes_the_app_and_it_says_so_until_closed(
+        self, main_window, splash, qtbot, monkeypatch
+    ):
+        monkeypatch.setattr(main_window.gui_context.registry.file_manager, "save_gui", lambda: None)
+        splash.close_requested = main_window.close
+        splash.show()
+
+        splash.close()  # Alt+F4
+
+        assert main_window.gui_context.is_shutting_down
+        assert splash.status_label.text() == "Closing..."
+        assert splash.isVisible()  # until the window has really closed
+        qtbot.waitUntil(lambda: not splash.isVisible(), timeout=5000)
+        assert main_window._splash is None
 
 
 class TestCloseEvent:

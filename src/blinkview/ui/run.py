@@ -152,32 +152,23 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
                 print("Update path setup aborted by user. Exiting.")
                 sys.exit(0)
 
+        # Up until BlinkMainWindow reveals every restored window at once (plans/startup-splash.md).
+        # After the update-path dialog, so the two don't overlap.
+        from blinkview.ui.windows.startup_splash import StartupSplash
+
+        splash = StartupSplash()
+        splash.center_on_cursor_screen()
+        splash.show()
+        splash.paint_now()
+
         # 2. Export Numba Cache BEFORE importing Registry/Kernels
         from blinkview.core.numba_setup import export_numba_cache
 
         cache_path = export_numba_cache(settings, update_source)
         dev_print(f"Numba cache exported to: {cache_path}")
 
-        # Nobody ran `blink setup` for this version (a first start, or a source checkout that was
-        # updated with git): compile behind setup's window before the main window comes up,
-        # instead of in the main window behind a toast.
-        from blinkview.core import numba_setup
-
-        setup_error = None
-        if not numba_setup.is_warmup_complete(cache_path):
-            from blinkview.ui.setup import run_setup_window
-
-            setup_error = run_setup_window(app, settings)
-            if setup_error == "cancelled":
-                print("Kernel compilation cancelled by user. Exiting.")
-                sys.exit(0)
-            if setup_error is None:
-                # main_window copies this when it is imported, which is below.
-                numba_setup.IS_CACHE_WARM = True
-            else:
-                # The window has shown the message. Start anyway, as with a failed warmup in the
-                # main window: what did not compile does so on first use.
-                print(f"Kernel compilation did not finish: {setup_error}", file=sys.stderr)
+        splash.set_status("Loading profile...")
+        splash.paint_now()
 
         from blinkview.core.profile_params import ProfileParamError
         from blinkview.core.registry import Registry
@@ -203,12 +194,12 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)
 
-        if setup_error is not None:
-            registry.mark_warmup_failed(setup_error)
+        splash.set_status("Loading interface...")
+        splash.paint_now()
 
         from blinkview.ui.main_window import BlinkMainWindow
 
-        viewer = BlinkMainWindow(registry, set_update_version=set_update_version, main_thread_gc=True)
+        viewer = BlinkMainWindow(registry, set_update_version=set_update_version, main_thread_gc=True, splash=splash)
         viewer.setWindowOpacity(0)
         viewer.show()
 

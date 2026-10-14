@@ -29,7 +29,9 @@ Both are fixed; the tests below cover the previously-broken paths plus the surro
 restore_window_geometry()/load_ui_state() branches that had no coverage at all."""
 
 import json
+from types import SimpleNamespace
 
+import pytest
 from qtpy.QtCore import QByteArray
 
 from blinkview.ui.utils.ui_state_handler import UIStateHandler
@@ -338,6 +340,50 @@ class TestLoadUiStateFloatingWindows:
         handler.load_ui_state(state_file, ui_state_restored_cb=lambda: calls.append(True))
 
         assert calls == [True]
+
+
+class TestLoadUiStateKeepHidden:
+    """The startup splash's restore (plans/startup-splash.md): floating windows are shown and
+    placed at opacity 0, and only turn visible on reveal_hidden_windows()."""
+
+    @pytest.fixture
+    def restored(self, tmp_path, monkeypatch):
+        created = []
+
+        def create_widget(**kwargs):
+            win = _FakeFloatingWindow(**kwargs)
+            created.append(win)
+            return win
+
+        handler = UIStateHandler(FakeWindow(create_widget_result=create_widget))
+        state_file = tmp_path / "gui_state.json"
+        state_file.write_text(
+            json.dumps(
+                {
+                    "floating_windows": [
+                        {"class": "LogViewerWidget", "name": "A", "params": {}},
+                        {"class": "PlotterWidget", "name": "B", "params": {}},
+                    ]
+                }
+            )
+        )
+        monkeypatch.setattr("blinkview.ui.utils.ui_state_handler.QTimer.singleShot", lambda ms, cb: cb())
+        calls = []
+        handler.load_ui_state(state_file, ui_state_restored_cb=lambda: calls.append(True), keep_hidden=True)
+        return SimpleNamespace(handler=handler, created=created, calls=calls)
+
+    def test_windows_are_placed_but_stay_invisible(self, restored):
+        assert restored.calls == [True]
+        assert all(w.shown and w.opacity == 0.0 for w in restored.created)
+
+    def test_reveal_makes_every_window_visible_once(self, restored):
+        restored.handler.reveal_hidden_windows()
+
+        assert all(w.opacity == 1.0 and w.raised for w in restored.created)
+        for w in restored.created:
+            w.opacity = None
+        restored.handler.reveal_hidden_windows()
+        assert all(w.opacity is None for w in restored.created)
 
 
 class TestGetData:

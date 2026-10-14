@@ -6,8 +6,8 @@
 
 """`blink setup`: compiles every Numba kernel into the on-disk cache ahead of time, so the next
 `blink` starts without the cold-cache compile (~75 s, plans/background-warmup.md). The updater
-runs it after installing a new version; it can also be run by hand. A GUI start that finds the
-cache incomplete anyway shows the same window first (ui/run.py)."""
+runs it after installing a new version; it can also be run by hand. A GUI start on a cold cache
+compiles behind its startup splash instead (plans/startup-splash.md)."""
 
 import os
 import sys
@@ -60,9 +60,7 @@ def compile_kernels(
     on_progress: Optional[Callable[[float, str], None]] = None,
     cancel: Optional[Event] = None,
 ) -> Optional[str]:
-    """Runs the whole warmup. Returns None when every kernel compiled (and marks the cache
-    complete, so the GUI skips its compile toast), else what went wrong."""
-    from blinkview.core.numba_setup import mark_warmup_complete
+    """Runs the whole warmup. Returns None when every kernel compiled, else what went wrong."""
     from blinkview.core.warmup import WarmupCancelled
 
     try:
@@ -77,7 +75,6 @@ def compile_kernels(
     finally:
         helper.shared.tasks.shutdown()
 
-    mark_warmup_complete()
     return None
 
 
@@ -127,9 +124,9 @@ def _print_progress():
 
 
 def run_setup_window(app, settings) -> Optional[str]:
-    """The progress window over a whole warmup: `blink setup`'s, and a GUI start's when the cache
-    isn't complete (ui/run.py). Runs the event loop until the window has closed. Returns None when
-    every kernel compiled, "cancelled", or what went wrong. Needs export_numba_cache() first."""
+    """`blink setup`'s progress window over a whole warmup. Runs the event loop until the window
+    has closed. Returns None when every kernel compiled, "cancelled", or what went wrong. Needs
+    export_numba_cache() first."""
     from qtpy.QtCore import QTimer
 
     from blinkview.ui.windows.setup_window import SetupWindow
@@ -187,7 +184,7 @@ def run_setup(args):
     update_source = resolve_update_source(settings)
 
     QLoggingCategory.setFilterRules("qt.gui.icc=false")  # unparseable monitor profiles; see ui/run.py
-    app =QApplication.instance() or QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(__app_name__)
     if not headless:
         import qdarktheme

@@ -13,7 +13,7 @@ from time import perf_counter, time
 from types import SimpleNamespace
 from typing import Optional
 
-from qtpy.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Signal, Slot
+from qtpy.QtCore import QCoreApplication, QEvent, QObject, Qt, QThread, QTimer, Signal, Slot
 from qtpy.QtGui import QAction, QFont, QGuiApplication
 from qtpy.QtWidgets import (
     QDockWidget,
@@ -32,7 +32,6 @@ from shiboken6 import isValid
 from blinkview import __version__ as blinkview_version
 from blinkview.core.batch_queue import BatchQueue
 from blinkview.core.config_manager import ConfigManager
-from blinkview.core.numba_setup import IS_CACHE_WARM, mark_warmup_complete
 from blinkview.ui.constants import WidgetName
 from blinkview.ui.gui_context import GUIContext
 from blinkview.ui.native_dark_mode import set_native_dark_mode
@@ -59,6 +58,7 @@ from blinkview.ui.widgets.toast import ToastManager, ToastType
 from blinkview.ui.widgets.toast_dispatcher import toast_dispatcher
 from blinkview.ui.widgets.update_widget import check_post_update
 from blinkview.ui.windows.detached_tab_window import DetachedTabWindow
+from blinkview.ui.windows.startup_splash import COMPILING_STATUS, StartupSplash
 from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.format_metric import format_metric
 from blinkview.utils.used_modules import print_used_modules
@@ -201,8 +201,24 @@ class _ReplayLoadBridge(QObject):
     finished = Signal()
 
 
+# The startup splash (plans/startup-splash.md): how long after the warmup the layout restore may
+# take before the windows are revealed anyway, and the pause between the reveal and starting the
+# devices, so a frame with the windows on it is painted first.
+REVEAL_WATCHDOG_MS = 20_000
+START_AFTER_REVEAL_MS = 100
+# A warm cache loads every kernel in about 2 s; a warmup still running after this is compiling
+# (a first start, or the first after an update), and the splash says so.
+COMPILING_AFTER_S = 5.0
+
+
 class BlinkMainWindow(QMainWindow):
-    def __init__(self, registry, set_update_version=None, main_thread_gc=False):
+    def __init__(
+        self,
+        registry,
+        set_update_version=None,
+        main_thread_gc=False,
+        splash: Optional[StartupSplash] = None,
+    ):
         super().__init__()
         self.resize(1280, 800)
         set_native_dark_mode(self)
@@ -495,7 +511,19 @@ class BlinkMainWindow(QMainWindow):
         # Background Numba warmup (see _start_warmup) - kept alive until it finishes.
         self._warmup_bridge: Optional[_WarmupBridge] = None
         self._warmup_cancel: Optional[threading.Event] = None
-        self._warmup_toast = None
+        self._warmup_started = 0.0
+        self._warmup_label = ""
+        self._warmup_clock = QTimer(self)  # the splash's elapsed seconds during a compile
+        self._warmup_clock.setInterval(1000)
+        self._warmup_clock.timeout.connect(self._update_warmup_status)
+
+        # Up until _reveal(); run.py's, or load_ui_state() makes one. While it is, this window
+        # and the restored floating windows are shown at opacity 0.
+        self._splash: Optional[StartupSplash] = splash
+        self._reveal_watchdog = QTimer(self)
+        self._reveal_watchdog.setSingleShot(True)
+        self._reveal_watchdog.setInterval(REVEAL_WATCHDOG_MS)
+        self._reveal_watchdog.timeout.connect(self._on_reveal_watchdog)
 
         # UI Poller (Runs here, updates the log window)
         self.gui_context.set_theme(StyleConfig())
@@ -560,45 +588,57 @@ class BlinkMainWindow(QMainWindow):
         dev_print("[BlinkMainWindow] Initialization complete.")
 
     def load_ui_state(self):
-        """Staged startup sequence, run once the window is shown:
+        """Staged startup sequence, run once the window is shown (at opacity 0, behind the
+        startup splash - plans/startup-splash.md):
         1. move the window to its final position
-        2. numba warmup on a background thread, with a progress toast on a cold cache; the
-           toolbar stays disabled until step 6
+        2. numba warmup on a background thread, its progress on the splash; the toolbar stays
+           disabled until step 7
         3. add the sources/pipelines sidebars
-        4. restore other windows and tabs
-        5. registry.start()
-        6. re-enable the toolbar, start main-window timers
-        7. show the ready toast
-        8. check for updates
+        4. restore other windows and tabs, the floating ones invisible too
+        5. reveal: every window turns visible at once, the splash closes
+        6. registry.start() - the devices start once the windows are on screen
+        7. re-enable the toolbar, start main-window timers
+        8. show the ready toast
+        9. check for updates
 
         Steps 3+ only run once the warmup has finished: nothing on the GUI thread may call a
         Numba kernel while it runs (it would block on Numba's compiler lock or compile the kernel
         itself), and the restored widgets do.
         """
+        if self._splash is None:
+            self._splash = StartupSplash()
+            self._splash.center_on_cursor_screen()
+            self._splash.show()
+        self._splash.close_requested = self.close
+        # Toasts raised before the reveal (user notices, replay-load progress) wait for it.
+        ToastManager.hold(self)
+
         self.gui_context.gui_state.restore_window_geometry(
             self.gui_context.registry.file_manager.get_gui_state_path(for_load=True),
             self._on_window_positioned,
         )
 
     def _on_window_positioned(self):
-        self.raise_()
-        self.activateWindow()
-        # Materialize the window in its perfect location
-        self.setWindowOpacity(1.0)
+        if self._splash is not None:
+            # Stays where it started (the cursor's screen) - moving it after the main window's
+            # geometry is known was a visible jump.
+            self._splash.raise_()
 
         self._start_warmup()
 
     def _start_warmup(self):
-        """Runs registry.warmup() on the TaskManager pool so the window keeps painting during a
+        """Runs registry.warmup() on the TaskManager pool so the splash keeps painting during a
         cold-cache compile (~75 s; measured in plans/background-warmup.md). A warm cache takes the
-        same path, just without the toast."""
+        same path, it only loads the kernels."""
         registry = self.gui_context.registry
         self._set_startup_controls_enabled(False)
 
-        if not IS_CACHE_WARM:
-            self._warmup_toast = ToastManager.show_persistent(
-                "Compiling shaders", ToastType.WARNING, parent=self, progress=0.0
-            )
+        self._warmup_started = perf_counter()
+        self._warmup_label = ""
+        if self._splash is not None:
+            self._splash.set_progress(0.0)
+            self._update_warmup_status()
+            self._warmup_clock.start()
 
         bridge = _WarmupBridge(self)
         bridge.progress.connect(self._on_warmup_progress)
@@ -613,24 +653,35 @@ class BlinkMainWindow(QMainWindow):
         # Worker thread: only emit, the slot runs on the main thread.
         future.add_done_callback(lambda _future: bridge.finished.emit())
 
+    def _update_warmup_status(self):
+        if self._splash is None:
+            return
+        elapsed = perf_counter() - self._warmup_started
+        compiling = elapsed >= COMPILING_AFTER_S
+        self._splash.set_status(COMPILING_STATUS if compiling else "Loading kernels...")
+        self._splash.set_elapsed(elapsed if compiling else None)
+
     def _on_warmup_progress(self, fraction, label):
-        if self._warmup_toast is not None:
-            self._warmup_toast.set_progress(fraction)
+        if label:
+            self._warmup_label = label
+        if self._splash is not None:
+            self._splash.set_progress(fraction, self._warmup_label)
+            self._update_warmup_status()
 
     def _on_warmup_finished(self):
         self._numba_compile_end = self.gui_context.registry.now_ns()
         self._warmup_bridge = None
-        if self._warmup_toast is not None:
-            self._warmup_toast.dismiss()
-            self._warmup_toast = None
-
-        if self.gui_context.registry.warmup_success is True:
-            mark_warmup_complete()  # the next start skips the toast
+        self._warmup_clock.stop()
 
         if self.gui_context.is_shutting_down:
             return  # closed mid-warmup (see closeEvent) - don't build the UI we're tearing down
         if self._main_thread_gc:
             self._freeze_startup_objects()
+        if self._splash is not None:
+            self._splash.set_progress(None)
+            self._splash.set_elapsed(None)
+            self._splash.set_status("Restoring windows...")
+            self._reveal_watchdog.start()
         self._add_sidebars()
 
     def _freeze_startup_objects(self):
@@ -674,8 +725,47 @@ class BlinkMainWindow(QMainWindow):
     def _restore_docks_and_tabs(self):
         self.gui_context.gui_state.load_ui_state(
             self.gui_context.registry.file_manager.get_gui_state_path(for_load=True),
-            self._start_registry,
+            self._on_layout_restored,
+            keep_hidden=self._splash is not None,
         )
+
+    def _on_layout_restored(self):
+        self._reveal()
+        QTimer.singleShot(START_AFTER_REVEAL_MS, self._start_registry_unless_closing)
+
+    def _start_registry_unless_closing(self):
+        if not self.gui_context.is_shutting_down:
+            self._start_registry()
+
+    def _reveal(self):
+        """Every window turns visible at once and the splash closes. Runs once."""
+        splash, self._splash = self._splash, None
+        if splash is None:
+            return
+        self._reveal_watchdog.stop()
+
+        self.setWindowOpacity(1.0)
+        self.raise_()
+        self.activateWindow()
+        self.gui_context.gui_state.reveal_hidden_windows()
+        ToastManager.release(self)
+        splash.finish()
+
+    def _on_reveal_watchdog(self):
+        # A restore step dropped its callback, or one is stuck: an app with every window
+        # invisible is worse than a half-restored one. registry.start() is still left to the
+        # restore chain.
+        self.logger.warn(
+            "Layout restore did not finish within %d ms - revealing the windows anyway", REVEAL_WATCHDOG_MS
+        )
+        self._reveal()
+
+    def changeEvent(self, event):
+        # Before the reveal this window is invisible but owns the taskbar button: clicking it
+        # should bring the splash up, not activate nothing.
+        if event.type() == QEvent.ActivationChange and self._splash is not None and self.isActiveWindow():
+            self._splash.raise_()
+        super().changeEvent(event)
 
     def _start_registry(self):
         self._layout_restored = True
@@ -1483,6 +1573,9 @@ class BlinkMainWindow(QMainWindow):
           finished by this point, never before, no matter how long it took.
         """
         if self._shutdown_ready_to_close:
+            if self._splash is not None:
+                self._splash.finish()  # closed before the reveal
+                self._splash = None
             event.accept()
             return
 
@@ -1501,6 +1594,14 @@ class BlinkMainWindow(QMainWindow):
         print("Closing BlinkView...")
         self.gui_context.is_shutting_down = True
         event.ignore()
+
+        if self._splash is not None:
+            # Closed before the reveal: the splash stays up until the window has really closed.
+            self._reveal_watchdog.stop()
+            self._warmup_clock.stop()
+            self._splash.set_progress(None)
+            self._splash.set_elapsed(None)
+            self._splash.set_status("Closing...")
 
         if self._warmup_cancel is not None:
             # Stops a still-running warmup at its next callback/sub-step, so Registry.stop()'s

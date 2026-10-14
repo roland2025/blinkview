@@ -23,10 +23,6 @@ class FakeSettings:
         return default
 
 
-def setup_function(_):
-    numba_setup.IS_CACHE_WARM = False
-
-
 @pytest.fixture(autouse=True)
 def restore_numba_cache_dir():
     """export_numba_cache() writes os.environ["NUMBA_CACHE_DIR"] directly, and the tests'
@@ -50,7 +46,6 @@ def test_creates_versioned_cache_dir_and_sets_env_var(tmp_path, monkeypatch):
     expected = tmp_path / ".numba_cache" / __version__
     assert result == expected
     assert result.exists()
-    assert numba_setup.IS_CACHE_WARM is False
 
 
 def test_sets_numba_cache_dir_environment_variable(tmp_path, monkeypatch):
@@ -60,64 +55,6 @@ def test_sets_numba_cache_dir_environment_variable(tmp_path, monkeypatch):
     result = numba_setup.export_numba_cache(settings, UpdateSource.GIT)
 
     assert os.environ["NUMBA_CACHE_DIR"] == str(result.resolve())
-
-
-def test_marks_cache_warm_when_a_full_warmup_was_cached(tmp_path, monkeypatch):
-    monkeypatch.delenv("NUMBA_CACHE_DIR", raising=False)
-    versioned_dir = tmp_path / ".numba_cache" / __version__
-    versioned_dir.mkdir(parents=True)
-    (versioned_dir / "cached_kernel.o").write_bytes(b"x")
-    numba_setup.mark_warmup_complete(versioned_dir)
-
-    settings = FakeSettings(tmp_path)
-    numba_setup.export_numba_cache(settings, UpdateSource.GIT)
-
-    assert numba_setup.IS_CACHE_WARM is True
-
-
-def test_cache_files_without_the_marker_are_not_warm(tmp_path, monkeypatch):
-    """A warmup that was closed halfway leaves kernel files too; the rest still has to compile, so
-    the GUI must show its toast."""
-    monkeypatch.delenv("NUMBA_CACHE_DIR", raising=False)
-    versioned_dir = tmp_path / ".numba_cache" / __version__
-    versioned_dir.mkdir(parents=True)
-    (versioned_dir / "cached_kernel.o").write_bytes(b"x")
-
-    numba_setup.export_numba_cache(FakeSettings(tmp_path), UpdateSource.GIT)
-
-    assert numba_setup.IS_CACHE_WARM is False
-
-
-def test_marker_is_read_from_a_pre_existing_numba_cache_dir(tmp_path, monkeypatch):
-    existing = tmp_path / "already_set_dir"
-    existing.mkdir()
-    monkeypatch.setenv("NUMBA_CACHE_DIR", str(existing))
-
-    numba_setup.export_numba_cache(FakeSettings(tmp_path / "unused"), UpdateSource.GIT)
-    assert numba_setup.IS_CACHE_WARM is False
-
-    numba_setup.mark_warmup_complete()  # defaults to the dir Numba is using
-    numba_setup.export_numba_cache(FakeSettings(tmp_path / "unused"), UpdateSource.GIT)
-
-    assert (existing / numba_setup.WARMUP_COMPLETE_MARKER).is_file()
-    assert numba_setup.IS_CACHE_WARM is True
-
-
-def test_mark_warmup_complete_without_a_cache_dir_is_a_no_op(monkeypatch):
-    monkeypatch.delenv("NUMBA_CACHE_DIR", raising=False)
-
-    numba_setup.mark_warmup_complete()  # must not raise
-
-
-def test_marks_cache_not_warm_when_versioned_dir_exists_but_is_empty(tmp_path, monkeypatch):
-    monkeypatch.delenv("NUMBA_CACHE_DIR", raising=False)
-    versioned_dir = tmp_path / ".numba_cache" / __version__
-    versioned_dir.mkdir(parents=True)
-
-    settings = FakeSettings(tmp_path)
-    numba_setup.export_numba_cache(settings, UpdateSource.GIT)
-
-    assert numba_setup.IS_CACHE_WARM is False
 
 
 def test_reuses_existing_numba_cache_dir_env_var_instead_of_recomputing(tmp_path, monkeypatch):
@@ -157,17 +94,12 @@ class TestCacheRoot:
         assert os.environ["NUMBA_CACHE_DIR"] == str(result.resolve())
         assert not (tmp_path / "ignored").exists()
 
-    def test_last_used_marker_is_written_but_does_not_count_as_warm(self, tmp_path, monkeypatch):
+    def test_last_used_marker_is_written(self, tmp_path, monkeypatch):
         from blinkview.utils.install_info import UpdateSource
 
         monkeypatch.delenv("NUMBA_CACHE_DIR", raising=False)
         result = numba_setup.export_numba_cache(FakeSettings(tmp_path), UpdateSource.GIT)
         assert (result / numba_setup.LAST_USED_MARKER).is_file()
-
-        os.environ.pop("NUMBA_CACHE_DIR")
-        numba_setup.export_numba_cache(FakeSettings(tmp_path), UpdateSource.GIT)
-
-        assert numba_setup.IS_CACHE_WARM is False
 
 
 class TestPruneOldCaches:

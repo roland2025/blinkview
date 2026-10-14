@@ -13,7 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from blinkview.core.numba_setup import WARMUP_COMPLETE_MARKER
 from blinkview.core.warmup import WarmupCancelled
 from blinkview.ui import setup as blink_setup
 from blinkview.ui.windows.setup_window import PROGRESS_STEPS, SetupWindow
@@ -38,8 +37,7 @@ class FakeHelper:
 
 
 class TestCompileKernels:
-    def test_success_marks_the_cache_complete(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("NUMBA_CACHE_DIR", str(tmp_path))
+    def test_success_reports_progress_and_no_error(self):
         helper = FakeHelper()
         seen = []
 
@@ -47,23 +45,18 @@ class TestCompileKernels:
 
         assert error is None
         assert seen == [(0.5, "BinaryParser")]
-        assert (tmp_path / WARMUP_COMPLETE_MARKER).is_file()
         assert helper.shutdowns == [True]
 
-    def test_cancelled_is_reported_and_leaves_the_cache_unmarked(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("NUMBA_CACHE_DIR", str(tmp_path))
+    def test_cancelled_is_reported(self):
         helper = FakeHelper(raises=WarmupCancelled())
 
         assert blink_setup.compile_kernels(helper) == "cancelled"
-        assert list(tmp_path.iterdir()) == []
         assert helper.shutdowns == [True]
 
-    def test_a_failing_kernel_is_reported_and_leaves_the_cache_unmarked(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.setenv("NUMBA_CACHE_DIR", str(tmp_path))
+    def test_a_failing_kernel_is_reported(self, capsys):
         helper = FakeHelper(raises=RuntimeError("typing failed"))
 
         assert blink_setup.compile_kernels(helper) == "typing failed"
-        assert list(tmp_path.iterdir()) == []
         assert "typing failed" in capsys.readouterr().err  # the traceback, for a bug report
 
 

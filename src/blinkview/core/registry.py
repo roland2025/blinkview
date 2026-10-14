@@ -911,15 +911,6 @@ class Registry:
                 self.warmup_helper = None
                 self._warmup_done = True
 
-    def mark_warmup_failed(self, error: str):
-        """For a caller that ran the whole warmup itself before this Registry existed and saw it
-        fail (ui/run.py's setup window). run_all() has cleared the callback registry by then, so
-        warmup() would find nothing to compile and report a success."""
-        with self._warmup_lock:
-            self.warmup_error = error
-            self.warmup_success = False
-            self._warmup_done = True
-
     def start(self, configure=True):
         if self._is_running:
             return

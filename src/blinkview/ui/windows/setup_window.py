@@ -20,6 +20,30 @@ PROGRESS_STEPS = 1000
 CompileFn = Callable[[Callable[[float, str], None], threading.Event], Optional[str]]
 
 
+def app_header(subtitle: QLabel) -> QHBoxLayout:
+    """Icon, name and version over `subtitle` - the top of setup's window and of the startup
+    splash (startup_splash.py)."""
+    icon = QLabel()
+    icon.setPixmap(QPixmap(str(ICON_PATH)).scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    title = QLabel(f"{__app_name__} v{__version__}")
+    title_font = title.font()
+    title_font.setPointSize(title_font.pointSize() + 3)
+    title_font.setBold(True)
+    title.setFont(title_font)
+
+    titles = QVBoxLayout()
+    titles.setSpacing(2)
+    titles.addWidget(title)
+    titles.addWidget(subtitle)
+
+    header = QHBoxLayout()
+    header.setSpacing(12)
+    header.addWidget(icon)
+    header.addLayout(titles, 1)
+    return header
+
+
 class _CompileBridge(QObject):
     """Marshals the compile thread's progress and result onto the main thread (queued signals),
     like main_window's _WarmupBridge."""
@@ -49,25 +73,7 @@ class SetupWindow(QFrame):
         self.setStyleSheet("#SetupWindow { border: 1px solid #4e5157; }")
         self.setFixedWidth(460)
 
-        icon = QLabel()
-        icon.setPixmap(QPixmap(str(ICON_PATH)).scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-
-        title = QLabel(f"{__app_name__} v{__version__}")
-        title_font = title.font()
-        title_font.setPointSize(title_font.pointSize() + 3)
-        title_font.setBold(True)
-        title.setFont(title_font)
-        subtitle = QLabel("Compiling shaders. This is needed once after an install or update.")
-
-        titles = QVBoxLayout()
-        titles.setSpacing(2)
-        titles.addWidget(title)
-        titles.addWidget(subtitle)
-
-        header = QHBoxLayout()
-        header.setSpacing(12)
-        header.addWidget(icon)
-        header.addLayout(titles, 1)
+        header = app_header(QLabel("Compiling shaders. This is needed once after an install or update."))
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, PROGRESS_STEPS)
