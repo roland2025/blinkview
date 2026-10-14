@@ -15,6 +15,13 @@ from blinkview.io import rtt
 from blinkview.io.rtt import JLinkRTTReader
 
 
+@pytest.fixture(autouse=True)
+def _fresh_reader_jlinks(monkeypatch):
+    """open() reuses one JLink per serial number for the life of the process; give each test
+    its own, built from that test's monkeypatched pylink.JLink."""
+    monkeypatch.setattr(rtt, "_reader_jlinks", {})
+
+
 def _fast_forward_clock():
     """A shared.time_ns stand-in that jumps straight past _drain_stale_data's 1.5s absolute
     timeout after its first couple of calls, so open()'s real drain call exits after only a
@@ -148,6 +155,53 @@ class TestApplyConfig:
         assert reader.logger_send is first
 
 
+class TestReaderJlinkReuse:
+    """A JLink dropped after a failed open left the DLL holding its freed OpenEx callbacks,
+    and the next JLink() faulted (access violation) on every retry - so a reader never drops
+    the JLink it opens its probe with."""
+
+    def test_retries_after_a_failed_open_reuse_the_same_jlink(self, fake_jlink_class):
+        reader = make_reader(serial_number="50110259")
+        fake_jlink_class.open_raises = pylink.errors.JLinkException("Cannot connect to J-Link")
+
+        assert reader.open() is None
+        first = fake_jlink_class.instance
+        assert reader.open() is None
+
+        assert fake_jlink_class.instance is first
+        assert first.calls.count(("open", 50110259)) == 2
+
+    def test_reconnect_after_cleanup_reuses_the_same_jlink(self, fake_jlink_class):
+        reader = make_reader(serial_number="")
+        reader.shared = SimpleNamespace(time_ns=_fast_forward_clock())
+        reader.jlink = reader.open()
+        first = reader.jlink
+
+        reader.cleanup_jlink()
+        reader.shared = SimpleNamespace(time_ns=_fast_forward_clock())
+
+        assert reader.open() is first
+        assert fake_jlink_class.instance is first
+
+    def test_another_reader_on_the_same_probe_shares_it(self, fake_jlink_class):
+        fake_jlink_class.open_raises = pylink.errors.JLinkException("Cannot connect to J-Link")
+        make_reader(serial_number="111").open()
+        first = fake_jlink_class.instance
+
+        make_reader(serial_number="111").open()
+
+        assert fake_jlink_class.instance is first
+
+    def test_each_probe_gets_its_own_jlink(self, fake_jlink_class):
+        fake_jlink_class.open_raises = pylink.errors.JLinkException("Cannot connect to J-Link")
+        make_reader(serial_number="111").open()
+        first = fake_jlink_class.instance
+
+        make_reader(serial_number="222").open()
+
+        assert fake_jlink_class.instance is not first
+
+
 class TestOpen:
     def test_happy_path_connects_and_drains_then_returns_the_jlink(self, fake_jlink_class):
         reader = make_reader(serial_number="", interface="swd", target_device="NRF52840_XXAA", speed=4000)
@@ -157,7 +211,7 @@ class TestOpen:
 
         jl = fake_jlink_class.instance
         assert result is jl
-        assert ("exec_command", "SuppressGUI") in jl.calls
+        assert ("exec_command", "SuppressGUI = 1") in jl.calls
         assert ("open", None) in jl.calls  # no serial_number configured
         assert jl.connected_target == "NRF52840_XXAA"
         assert jl.connected_speed == 4000

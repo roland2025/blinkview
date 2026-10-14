@@ -61,6 +61,29 @@ SLOW_READ_NS = 1_000_000_000
 _enumerator_lock = Lock()
 _enumerator_jlink: Optional["pylink.JLink"] = None
 
+_reader_jlinks_lock = Lock()
+_reader_jlinks: dict[str, "pylink.JLink"] = {}
+
+
+def _reader_jlink(serial_number: str) -> "pylink.JLink":
+    """The JLink a reader opens its probe with, one per serial number for the life of the
+    process and reused on every reconnect.
+
+    JLINKARM_OpenEx() keeps the log/error ctypes callbacks of the JLink that called it, and a
+    failed open leaves them registered (pylink only calls JLINKARM_Close() after a successful
+    one). A JLink dropped after "Cannot connect to J-Link" so left the DLL holding freed
+    callbacks - and while anything else keeps the DLL loaded (the _enumerator_jlink does),
+    the next JLink() faulted on its first DLL call (an access violation in JLINKARM_IsOpen
+    inside JLink.__init__), on every retry. A JLink that is never dropped keeps them valid.
+    """
+    with _reader_jlinks_lock:
+        jl = _reader_jlinks.get(serial_number)
+        if jl is None:
+            import pylink
+
+            jl = _reader_jlinks[serial_number] = pylink.JLink()
+        return jl
+
 
 def _list_jlink_serials() -> list[str]:
     """Serial numbers of the J-Links currently attached over USB.
@@ -391,8 +414,8 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                 import pylink
 
                 self.logger_link.info("Connecting to J-Link: %s", self.serial_number)
-                jl = pylink.JLink()
-                jl.exec_command("SuppressGUI")
+                jl = _reader_jlink(self.serial_number)
+                jl.exec_command("SuppressGUI = 1")  # bare "SuppressGUI" makes the DLL print an "Info: No parameter" line per open
 
                 if self.serial_number:
                     jl.open(serial_no=int(self.serial_number))
