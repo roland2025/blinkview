@@ -176,6 +176,7 @@ def run_setup(args):
     elif sys.platform == "linux":
         os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
+    from qtpy.QtCore import QLoggingCategory
     from qtpy.QtGui import QIcon
     from qtpy.QtWidgets import QApplication
 
@@ -185,7 +186,8 @@ def run_setup(args):
     settings = SettingsManager()
     update_source = resolve_update_source(settings)
 
-    app = QApplication.instance() or QApplication(sys.argv)
+    QLoggingCategory.setFilterRules("qt.gui.icc=false")  # unparseable monitor profiles; see ui/run.py
+    app =QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(__app_name__)
     if not headless:
         import qdarktheme

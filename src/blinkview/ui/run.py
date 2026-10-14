@@ -54,7 +54,7 @@ StartupWMClass={__app_id__}
 
 
 def run(args, replay_mode: bool = False, replay_session_info=None):
-    from qtpy.QtCore import Qt, QTimer
+    from qtpy.QtCore import QLoggingCategory, Qt, QTimer
     from qtpy.QtGui import QIcon
     from qtpy.QtWidgets import (
         QApplication,
@@ -100,6 +100,11 @@ def run(args, replay_mode: bool = False, replay_session_info=None):
                 QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
         else:
             register_desktop_entry()
+
+        # Some monitors' color profiles (e.g. Samsung U32J59x) have a description tag Qt can't
+        # parse; Qt skips the profile but logs "qt.gui.icc: fromIccProfile: Failed to parse
+        # description" each time it reads it. QT_LOGGING_RULES still overrides this.
+        QLoggingCategory.setFilterRules("qt.gui.icc=false")
 
         app = QApplication(sys.argv)
 
