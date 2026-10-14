@@ -603,6 +603,38 @@ class TestToastFollowsParentWindow:
         qtbot.waitUntil(toast.isVisible, timeout=1000)
         assert self._anchored(toast, parent)
 
+    def test_countdown_is_held_while_the_parent_is_minimized(self, qapp, qtbot):
+        """The countdown used to keep running while hidden, so a short toast (e.g. "Apply
+        layout?") expired unseen and was gone by the time the window came back."""
+        from qtpy.QtCore import QVariantAnimation
+
+        parent = self._parent(qtbot)
+        toast = ToastManager.show("hello", duration=0.3, parent=parent)
+
+        parent.showMinimized()
+        qtbot.waitUntil(lambda: not toast.isVisible(), timeout=1000)
+        assert toast.prog_anim.state() == QVariantAnimation.Paused
+        qtbot.wait(500)  # past the duration
+
+        parent.showNormal()
+        qtbot.waitUntil(toast.isVisible, timeout=1000)
+        assert toast in ToastManager._toasts
+        assert toast.prog_anim.state() == QVariantAnimation.Running
+
+    def test_a_hovered_toast_stays_paused_after_restore(self, qapp, qtbot):
+        from qtpy.QtCore import QVariantAnimation
+
+        parent = self._parent(qtbot)
+        toast = ToastManager.show("hello", parent=parent)
+
+        parent.showMinimized()
+        qtbot.waitUntil(lambda: not toast.isVisible(), timeout=1000)
+        toast.is_hovered = True
+        parent.showNormal()
+        qtbot.waitUntil(toast.isVisible, timeout=1000)
+
+        assert toast.prog_anim.state() == QVariantAnimation.Paused
+
     def test_a_toast_dismissed_before_minimizing_is_not_brought_back(self, qapp, qtbot):
         parent = self._parent(qtbot)
         toast = ToastManager.show("hello", parent=parent)

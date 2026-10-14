@@ -381,9 +381,14 @@ class _ParentWindowWatcher(QObject):
                 if minimized and toast.isVisible():
                     toast.hide()
                     toast.hidden_with_parent = True
+                    # Hold the countdown too, or the toast expires unseen while minimized.
+                    if toast.prog_anim.state() == QVariantAnimation.Running:
+                        toast.prog_anim.pause()
                 elif not minimized and toast.hidden_with_parent:
                     toast.hidden_with_parent = False
                     toast.show()
+                    if not toast.is_hovered and toast.prog_anim.state() == QVariantAnimation.Paused:
+                        toast.prog_anim.resume()
             ToastManager._reposition_toasts()
         elif etype in (QEvent.Move, QEvent.Resize):
             ToastManager._reposition_toasts()
