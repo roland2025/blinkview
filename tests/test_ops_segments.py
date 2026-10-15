@@ -10,6 +10,7 @@ from blinkview.core import dtypes
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.log_batch import LogBundle
+from blinkview.ops.buffers import nb_copy_buf
 from blinkview.ops.constants import CHAR_EQUALS, CHAR_SPACE
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS, build_kv_condition_arrays
 from blinkview.ops.segments import (
@@ -1325,3 +1326,76 @@ def test_bundle_extend_fails_when_buffer_would_overflow():
     ok = nb_bundle_extend(bundle, too_much)
 
     assert not ok
+
+
+def test_bundle_push_copies_large_payloads_byte_for_byte():
+    """Stage 1 of plans/bundle-push-fast-path.md replaced the push kernel's byte-at-a-time copy
+    loop with nb_copy_buf (llvm.memmove). 64 KB exercises the vectorized path; the odd length
+    pins the tail handling that a 32-byte-at-a-time copy would get wrong."""
+    for payload_len in (64 * 1024, 64 * 1024 + 17, 4097, 1 + 32 * 3):
+        payload = bytes((i * 7 + 3) & 0xFF for i in range(payload_len))
+        batch = _pool_batch(capacity=2, buffer_bytes=payload_len * 2, has_levels=True)
+        msg = np.frombuffer(payload, dtype=dtypes.BYTE)
+
+        ok = nb_bundle_push(
+            batch.bundle, 100, 100, msg, level=2, module=0, device=0, seq=0, ext_u32_1=0, ext_u32_2=0, ext_u64_1=0
+        )
+
+        assert ok, payload_len
+        assert batch.msg_cursor == payload_len
+        off = int(batch.bundle.offsets[0])
+        length = int(batch.bundle.lengths[0])
+        assert length == payload_len
+        assert batch.bundle.buffer[off : off + length].tobytes() == payload
+        batch.release()
+
+
+def test_bundle_push_back_to_back_large_payloads_stay_separate():
+    """Two large rows in one buffer: the second must land at the first one's cursor, with
+    neither overwriting the other - the cursor advance moved into the memmove branch."""
+    first = bytes((i & 0xFF) for i in range(40_000))
+    second = bytes(((i * 3 + 1) & 0xFF) for i in range(24_577))
+    batch = _pool_batch(capacity=4, buffer_bytes=len(first) + len(second), has_levels=True)
+
+    for payload in (first, second):
+        assert nb_bundle_push(
+            batch.bundle,
+            100,
+            100,
+            np.frombuffer(payload, dtype=dtypes.BYTE),
+            level=1,
+            module=0,
+            device=0,
+            seq=0,
+            ext_u32_1=0,
+            ext_u32_2=0,
+            ext_u64_1=0,
+        )
+
+    assert batch.size == 2
+    assert batch.msg_cursor == len(first) + len(second)
+    for idx, payload in enumerate((first, second)):
+        off = int(batch.bundle.offsets[idx])
+        length = int(batch.bundle.lengths[idx])
+        assert batch.bundle.buffer[off : off + length].tobytes() == payload
+    batch.release()
+
+
+def test_copy_buf_handles_overlapping_src_and_dst():
+    """memmove (not memcpy) semantics: no current push caller overlaps, but the kernel's copy is
+    now a memmove and the guarantee is worth pinning so a future caller can rely on it."""
+    size = 64 * 1024 + 17
+    base = bytes((i * 11 + 5) & 0xFF for i in range(size))
+
+    for src_off, dst_off, length in (
+        (0, 1024, size - 1024),  # forward overlap: dst after src
+        (1024, 0, size - 1024),  # backward overlap: dst before src
+        (0, 33, 4097),  # unaligned, odd length
+        (100, 100, 2048),  # identical regions
+    ):
+        arr = np.frombuffer(bytearray(base), dtype=dtypes.BYTE)
+        nb_copy_buf(arr, src_off, arr, dst_off, length)
+
+        expected = bytearray(base)
+        expected[dst_off : dst_off + length] = base[src_off : src_off + length]
+        assert arr.tobytes() == bytes(expected), (src_off, dst_off, length)

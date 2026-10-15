@@ -18,7 +18,13 @@ _HIGH = np.uint64(0x8080808080808080)
 if NUMBA_DISABLE:
 
     def nb_memmove(dst, dst_off, src, src_off, length):
-        """memmove between (possibly identical) arrays; numpy slice assignment handles overlap."""
+        """memmove between (possibly identical) arrays; numpy slice assignment handles overlap.
+
+        `src` may also be a plain buffer (the push kernel's `bytes` message), which numpy will
+        not assign into a uint8 slice directly - the jitted path takes its address instead, so
+        wrap it to match."""
+        if not isinstance(src, np.ndarray):
+            src = np.frombuffer(src, dtype=dst.dtype)
         dst[dst_off : dst_off + length] = src[src_off : src_off + length]
 
     def nb_find_byte(buf, start, end, value):
@@ -54,6 +60,25 @@ else:
         return sig, codegen
 
     @intrinsic
+    def _nb_buf_addr(typingctx, buf):
+        """Data pointer of any Numba buffer, as an int64.
+
+        `arr.ctypes.data` only exists for `types.Array`, but `PooledLogBatch.insert()` hands the
+        push kernel a plain Python `bytes` object, which Numba types as `types.Bytes` - same
+        array struct underneath, no `.ctypes` attribute. Reading `.data` off the struct directly
+        covers both, so nb_memmove works for a bytes/bytearray source as well as an ndarray
+        one."""
+        if not isinstance(buf, types.Buffer):
+            return None
+        sig = types.int64(buf)
+
+        def codegen(context, builder, sig, args):
+            ary = context.make_helper(builder, sig.args[0], value=args[0])
+            return builder.ptrtoint(ary.data, ir.IntType(64))
+
+        return sig, codegen
+
+    @intrinsic
     def _nb_load_u64(typingctx, addr):
         sig = types.uint64(types.int64)
 
@@ -70,8 +95,8 @@ else:
         payloads that dominate log parsing. Arrays must be C-contiguous."""
         size = dst.itemsize
         _nb_memmove_addr(
-            np.int64(dst.ctypes.data) + dst_off * size,
-            np.int64(src.ctypes.data) + src_off * size,
+            _nb_buf_addr(dst) + dst_off * size,
+            _nb_buf_addr(src) + src_off * size,
             length * size,
         )
 

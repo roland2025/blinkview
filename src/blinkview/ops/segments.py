@@ -14,6 +14,7 @@ from blinkview.core.dtypes import (
 )
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.log_batch import LogBundle
+from blinkview.ops.buffers import nb_copy_buf
 from blinkview.ops.constants import CHAR_EQUALS, CHAR_SPACE
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS, nb_row_matches_kv_conditions
 from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH, nb_bytes_contains_ci
@@ -671,9 +672,7 @@ def nb_bundle_push_len(
 
     # 3. Vectorized Copy with Hoisted Pointer
     if msg_len > 0:
-        for i in range(msg_len):
-            bundle_buffer[cursor + i] = msg_bytes[i]
-
+        nb_copy_buf(msg_bytes, 0, bundle_buffer, cursor, msg_len)
         cursor_ptr[0] += msg_len
 
     size_ptr[0] += 1
