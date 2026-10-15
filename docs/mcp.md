@@ -82,6 +82,7 @@ The `mcp_server` pipeline's options are the permissions. The agent cannot change
 | `allow_read` | on | Reading log lines, the module list, telemetry values and the configuration. |
 | `allow_config` | off | Changing sources, pipelines and storage settings. `blink init --agent` and `blink switch --agent` turn this on. |
 | `allow_watches` | on | Creating, changing and opening watch lists. |
+| `allow_post` | on | Logging its progress as lines of its own (see `post` below). |
 | `port` | 0 | Local TCP port. 0 picks a free one; `blink mcp` finds it either way. |
 
 Every configuration and watch list change is checked before it is applied and shown in BlinkView
@@ -101,7 +102,10 @@ instead, and to ask you. This is an instruction to the agent, not a lock on the 
 | `get_config`, `list_types`, `get_schema` | Reads the configuration and what can be configured. |
 | `apply_config_patch` | Changes the configuration, or reverts an earlier change. |
 | `create_watch`, `open_view` | Builds a watch list and opens its window. |
+| `post` | Logs the agent's progress as lines and values of its own, to follow in the log, telemetry and watch windows. |
 | `rotate_session` | Starts a new session. |
+
+The agent's own lines are logged under the `mcp_server` pipeline's name (`mcp` in a profile made by `blink init --agent`), on modules it picks, such as `mcp dut2.flash` or `mcp dut2.flash.progress` for a value. Its `send`s and `command`s are logged there too, under `tx.<source name>`, just before the device's reply. Add them to a watch list, or filter the log view on a device and `mcp`, to see what the agent is doing on each device. They are recorded with the session like any other line. When one agent works with several BlinkView instances, `post` can log the same step on each.
 
 For a long stretch of log, `read_logs` and `send` take `to_file`: the lines go to a file in the
 temp folder (`<temp>/blinkview/read_logs/`, deleted after a day) and the agent gets its path and

@@ -151,6 +151,7 @@ class TestMcpProtocol:
             "create_watch",
             "open_view",
             "command",
+            "post",
             "rotate_session",
         ]
 
@@ -209,6 +210,44 @@ class TestMcpToolCalls:
             agent_mcp._pick_instance(instances, None, tmp_path / "elsewhere")
 
 
+class TestPostToSeveralInstances:
+    @pytest.fixture
+    def calls(self, monkeypatch):
+        """Two instances (pids 1 and 2); pid 2 refuses. Records (pid, tool, args) of each call."""
+        calls = []
+
+        def call_instance_tool(instance, name, args):
+            calls.append((instance["pid"], name, args))
+            if instance["pid"] == 2:
+                raise AgentApiError("posting is turned off")
+            return {"device": "mcp", "rows": [f"mcp.{args['module']}"]}
+
+        monkeypatch.setattr(agent_mcp, "list_instances", lambda run_dir: [{"pid": 1}, {"pid": 2}])
+        monkeypatch.setattr(agent_mcp, "call_instance_tool", call_instance_tool)
+        return calls
+
+    def test_a_list_of_pids_posts_the_same_lines_on_each(self, calls):
+        result = agent_mcp.call_tool("post", {"module": "dut1", "text": "step 1", "instance": [1, 2, 1]})
+
+        assert calls == [
+            (1, "post", {"module": "dut1", "text": "step 1"}),
+            (2, "post", {"module": "dut1", "text": "step 1"}),
+        ]
+        assert result == {
+            "posted": {1: {"device": "mcp", "rows": ["mcp.dut1"]}},
+            "errors": {2: "posting is turned off"},
+        }
+
+    def test_an_error_only_when_no_instance_took_it(self, calls):
+        with pytest.raises(AgentApiError, match="posted to no instance.*turned off"):
+            agent_mcp.call_tool("post", {"module": "dut1", "text": "x", "instance": [2]})
+        with pytest.raises(AgentApiError, match="posted to no instance.*No running instance with pid 7"):
+            agent_mcp.call_tool("post", {"module": "dut1", "text": "x", "instance": [7]})
+        for bad in ([], ["1"], [True]):
+            with pytest.raises(AgentApiError, match="non-empty list of pids"):
+                agent_mcp.call_tool("post", {"module": "dut1", "text": "x", "instance": bad})
+
+
 def test_blink_mcp_fresh_process_speaks_only_json_on_stdout(tmp_path):
     """The real `blink mcp` command: registered as a subcommand, and nothing but protocol lines
     on stdout (an MCP client treats any other output as a broken server)."""
@@ -234,5 +273,5 @@ def test_blink_mcp_fresh_process_speaks_only_json_on_stdout(tmp_path):
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     responses = [json.loads(line) for line in result.stdout.splitlines()]
     assert [r["id"] for r in responses] == [1, 2, 3]
-    assert len(responses[1]["result"]["tools"]) == 15
+    assert len(responses[1]["result"]["tools"]) == 16
     assert json.loads(responses[2]["result"]["content"][0]["text"]) == {"instances": []}

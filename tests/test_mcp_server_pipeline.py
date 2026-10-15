@@ -450,7 +450,9 @@ def test_blinkviews_own_lines_are_hidden_unless_asked_for(registry, run_dir, dev
     hidden = _call(run_dir, "read_logs", after_seq=seq)
     shown = _call(run_dir, "read_logs", after_seq=seq, include_system=True)
 
-    assert _messages(hidden) == ["pong"]
+    # The agent's own line of the send is not a system line: only the audit line is hidden.
+    assert _lines_of(hidden) == ["mcp I tx.board: send: ping", "board I log: pong"]
+    assert "send to 'src_board'" not in hidden["text"]
     assert "send to 'src_board'" in shown["text"]
     assert "send to 'src_board'" in _call(run_dir, "read_logs", after_seq=seq, device="system")["text"]
 
@@ -1318,3 +1320,110 @@ def test_reset_connect_cycles_example_reports_each_cycle(registry, run_dir, devi
         "network connected 3",
     ]
     assert "3 of 3 cycles reached 'network connected'" in out
+
+
+# ---------------------------------------------------------------------------
+# post, and the agent's sends as its own lines
+# ---------------------------------------------------------------------------
+
+
+def _lines_of(result):
+    """Each returned line without its date and time: 'device level module: message'."""
+    return [line.split(" ", 2)[2] for line in result["text"].splitlines()]
+
+
+def test_post_logs_text_and_values_under_the_pipelines_device(registry, run_dir):
+    _wait_for_server(run_dir)
+    (instance,) = _call(run_dir, "status")["instances"]
+    assert (instance["can_post"], instance["post_device"]) == (True, "mcp")
+
+    result = _call(
+        run_dir, "post", module="DUT2.flash", text="step 3: erasing", values={"progress": 0.25, "state": "erase"}
+    )
+    assert result["device"] == "mcp"
+    assert result["rows"] == ["mcp.dut2.flash", "mcp.dut2.flash.progress", "mcp.dut2.flash.state"]
+
+    logged = _wait_for(
+        lambda: (r := _call(run_dir, "read_logs", device="mcp", after_seq=result["seq"])) and r["lines"] == 3 and r,
+        what="the posted lines",
+    )
+    assert _lines_of(logged) == [
+        "mcp I dut2.flash: step 3: erasing",
+        "mcp I dut2.flash.progress: 0.25",
+        "mcp I dut2.flash.state: erase",
+    ]
+
+    _call(run_dir, "post", module="dut2.flash", values={"progress": 1}, level="WARN")
+    latest = _wait_for(
+        lambda: (r := _call(run_dir, "telemetry_latest", device="mcp")) and "= 1" in r["text"] and r,
+        what="the second progress value",
+    )
+    assert _telemetry_lines(latest) == [
+        ("mcp", "dut2.flash", "step 3: erasing"),
+        ("mcp", "dut2.flash.progress", "1"),
+        ("mcp", "dut2.flash.state", "erase"),
+    ]
+    warned = _call(run_dir, "read_logs", device="mcp", min_level="WARN")
+    assert _lines_of(warned) == ["mcp W dut2.flash.progress: 1"]
+
+    series = _call(run_dir, "telemetry_series", device="mcp", module="dut2.flash.progress")
+    assert [line.split(" ")[-1] for line in series["text"].splitlines()] == ["0.25", "1"]
+
+    # Recorded with the session, like any device's lines.
+    assert _wait_for(_recorded_lines(registry, b"step 3: erasing"), what="the line on disk")
+
+
+def test_post_refuses_bad_requests(registry, run_dir):
+    _wait_for_server(run_dir)
+    for args, error in [
+        ({}, "'module' must be a dotted path"),
+        ({"module": "dut 2", "text": "x"}, "'module' must be a dotted path"),
+        ({"module": "dut2..flash", "text": "x"}, "'module' must be a dotted path"),
+        ({"module": "dut2"}, "pass 'text', 'values' or both"),
+        ({"module": "dut2", "text": "x", "level": "LOUD"}, "'level' must be one of"),
+        ({"module": "dut2", "text": "two\nlines"}, "must be one line"),
+        ({"module": "dut2", "text": 5}, "'text' must be a string"),
+        ({"module": "dut2", "values": [1]}, "'values' must be an object"),
+        ({"module": "dut2", "values": {"a b": 1}}, "value key 'a b'"),
+        ({"module": "dut2", "values": {"ok": True}}, "value 'ok' must be a number or a string"),
+        ({"module": "dut2", "values": {"ok": [1]}}, "value 'ok' must be a number or a string"),
+        ({"module": "dut2", "values": {f"v{i}": i for i in range(51)}}, "max 50"),
+    ]:
+        with pytest.raises(AgentApiError, match=error):
+            _call(run_dir, "post", **args)
+    # A refused call logs nothing, not even its valid part.
+    assert all(not d["modules"] for d in _call(run_dir, "list_modules")["devices"] if d["name"] == "mcp")
+
+
+def test_allow_post_off(registry, run_dir):
+    _wait_for_server(run_dir)
+    registry.config.apply_patch("/pipelines/pipe_mcp", [{"op": "add", "path": "/allow_post", "value": False}])
+    _wait_for(
+        lambda: [i for i in agent_api.list_instances(run_dir) if i["info"]["can_post"] is False],
+        what="the restarted server",
+    )
+    with pytest.raises(AgentApiError, match="logging the agent's progress is turned off"):
+        _call(run_dir, "post", module="dut2", text="x")
+
+
+def test_sends_and_commands_are_logged_before_the_reply(registry, run_dir, device):
+    seq = _call(run_dir, "status")["instances"][0]["seq"]
+    _call(run_dir, "send", text="ping")
+    assert device.recv(100) == b"ping" + NL
+    _say(device, "pong")
+
+    source = registry.sources.get("src_board")
+    source.get_commands = lambda: [("reset", "Reset MCU")]
+    source.send_command = lambda command: _say(device, "booted")
+    _call(run_dir, "command", command="reset")
+
+    result = _wait_for(
+        lambda: (r := _call(run_dir, "read_logs", after_seq=seq)) and r["lines"] == 4 and r,
+        what="the sends and the replies",
+    )
+    assert _lines_of(result) == [
+        "mcp I tx.board: send: ping",
+        "board I log: pong",
+        "mcp I tx.board: command: reset",
+        "board I log: booted",
+    ]

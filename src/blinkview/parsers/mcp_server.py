@@ -5,6 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import json
+import re
 import secrets
 import threading
 
@@ -22,8 +23,10 @@ from blinkview.core.config_schema import (
     schema_at,
 )
 from blinkview.core.configurable import configuration_property, override_property
+from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.parsers.parser import BaseParser, ParserFactory
 from blinkview.utils.generate_id import generate_id
+from blinkview.utils.log_level import LogLevel
 
 MAX_SEND_CHARS = 4096
 # get_config's answer as JSON text. Above it the agent is told to narrow the path or pass 'depth'.
@@ -43,6 +46,15 @@ _NO_FILE_EDIT_HINT = (
 
 # Key prefixes of the watch entries that need a key, as the watch window generates them.
 _WATCH_KEY_PREFIXES = {"row": "row", "button": "btn", "group_start": "grp_start", "group_end": "grp_end"}
+
+# `post`: the most `values` one call may log, and the levels it takes by name.
+MAX_POST_VALUES = 50
+_POST_LEVELS = {level.name_conf: level for level in LogLevel.LIST_CONF}
+_POST_LEVELS["WARN"] = LogLevel.WARN
+# A module path as DeviceIdentity.get_module takes it, without empty segments.
+_MODULE_PATH = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$")
+# Where the agent's sends and commands are logged on this pipeline's device: tx.<source name>.
+TX_MODULE = "tx"
 
 
 @ParserFactory.register("mcp_server")
@@ -109,10 +121,21 @@ _WATCH_KEY_PREFIXES = {"row": "row", "button": "btn", "group_start": "grp_start"
     "with an Undo button.",
 )
 @configuration_property(
+    "allow_post",
+    title="Agent may log its progress",
+    type="boolean",
+    default=True,
+    required=True,
+    ui_order=8,
+    description="Lets the agent log lines and values of its own under this pipeline's name, on modules it "
+    "names - to follow what it is doing in the log, telemetry and watch windows. Its sends and commands "
+    "are logged there either way, under 'tx'.",
+)
+@configuration_property(
     "port",
     type="integer",
     default=0,
-    ui_order=8,
+    ui_order=9,
     description="Local TCP port to listen on (127.0.0.1 only). 0 picks a free one; `blink mcp` finds it either way.",
 )
 class McpServer(BaseParser):
@@ -125,9 +148,12 @@ class McpServer(BaseParser):
 * Reads this profile's configuration (sources, pipelines, ...) as it is in effect now, and its schema.
 * Changes the configuration, when `allow_config` is on: checked against the schema, with Undo.
 * Creates, changes and opens watch lists.
+* Logs the agent's progress (`post`) and its sends and commands (under `tx`) as lines of this pipeline's
+  device, for the log, telemetry and watch windows, and the session's recording.
 * Listens on 127.0.0.1 only and requires a per-run token; everything it does is logged.
 
-It is not a parser: no data flows through it. Connect an agent with `claude mcp add blinkview -- blink mcp`."""
+It is not a parser: no data flows through it; its only lines are the agent's own.
+Connect an agent with `claude mcp add blinkview -- blink mcp`."""
 
     send_to_any: bool
     send_to: list
@@ -135,6 +161,7 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
     allow_read: bool
     allow_config: bool
     allow_watches: bool
+    allow_post: bool
     port: int
 
     def __init__(self):
@@ -165,6 +192,7 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
                     "apply_config_patch": self._tool_apply_config_patch,
                     "create_watch": self._tool_create_watch,
                     "open_view": self._tool_open_view,
+                    "post": self._tool_post,
                 },
                 port=self.port,
                 run_info={
@@ -244,6 +272,8 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
             "can_read": bool(self.allow_read),
             "can_configure": bool(self.allow_config),
             "can_edit_watches": bool(self.allow_watches) and registry.gui_config is not None,
+            "can_post": bool(self.allow_post),
+            "post_device": self.local.device_id.name,
             "seq": current_sequence(registry),
             "sources": sources,
         }
@@ -262,6 +292,7 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
         # Taken before writing: reading from here on returns the device's reply and nothing older.
         seq = current_sequence(self.shared.registry)
         self.logger.info("send to '%s': %r", source_id, payload)
+        self._log_tx(source_id, source, "send: " + text.replace("\r", "\\r").replace("\n", "\\n"))
         written = source.send_data(payload)
 
         # Readers that know report bytes written (RTT); 0 then means it never left this PC.
@@ -561,6 +592,7 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
         # Taken before the command, like send's: a reset's boot log is read from here on.
         seq = current_sequence(self.shared.registry)
         self.logger.info("command to '%s': %s", source_id, command)
+        self._log_tx(source_id, source, f"command: {command}")
         source.send_command(command)
         return {"source": source_id, "command": command, "seq": seq}
 
@@ -577,3 +609,82 @@ It is not a parser: no data flows through it. Connect an agent with `claude mcp 
         except (RuntimeError, TimeoutError) as e:
             raise AgentApiError(str(e)) from None
         return {"old_session_id": old_dir.name, "session_id": new_dir.name, "session_dir": str(new_dir)}
+
+    # --- The agent's own lines ---
+
+    def _tool_post(self, args: dict) -> dict:
+        if not self.allow_post:
+            raise AgentApiError(f"logging the agent's progress is turned off on the '{self.name}' pipeline")
+
+        module = args.get("module")
+        module = module.strip().lower() if isinstance(module, str) else None
+        if not module or not _MODULE_PATH.match(module):
+            raise AgentApiError("'module' must be a dotted path of letters, digits and '_', e.g. 'dut2.flash'")
+
+        level_name = args.get("level", "INFO")
+        level = _POST_LEVELS.get(level_name.upper()) if isinstance(level_name, str) else None
+        if level is None:
+            raise AgentApiError(f"'level' must be one of: {sorted(_POST_LEVELS)}")
+
+        rows = []
+        if args.get("text") is not None:
+            rows.append((module, self._one_line(args["text"], "'text'")))
+
+        values = args.get("values", {})
+        if not isinstance(values, dict):
+            raise AgentApiError("'values' must be an object of key: number or string")
+        if len(values) > MAX_POST_VALUES:
+            raise AgentApiError(f"'values' has {len(values)} entries (max {MAX_POST_VALUES}): post them in parts")
+        for key, value in values.items():
+            path = f"{module}.{key.strip().lower()}"
+            if not _MODULE_PATH.match(path):
+                raise AgentApiError(f"value key {key!r} must be letters, digits and '_' (dots for submodules)")
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise AgentApiError(f"value {key!r} must be a number or a string")
+            rows.append((path, self._one_line(value, repr(key)) if isinstance(value, str) else format(value, ".10g")))
+
+        if not rows:
+            raise AgentApiError("pass 'text', 'values' or both")
+
+        seq = current_sequence(self.shared.registry)
+        self._log_rows(rows, level)
+        device = self.local.device_id.name
+        return {"device": device, "rows": [f"{device}.{path}" for path, _text in rows], "seq": seq}
+
+    @staticmethod
+    def _one_line(text, what: str) -> str:
+        if not isinstance(text, str):
+            raise AgentApiError(f"{what} must be a string")
+        if len(text) > MAX_SEND_CHARS:
+            raise AgentApiError(f"{what} is longer than {MAX_SEND_CHARS} characters")
+        if "\n" in text or "\r" in text:
+            raise AgentApiError(f"{what} must be one line: post each line on its own")
+        return text
+
+    def _log_tx(self, source_id: str, source, text: str):
+        """The agent's send or command as a line at tx.<source name>, logged before it is carried
+        out so that it sorts before the device's reply."""
+        name = re.sub(r"[^a-z0-9_]", "_", str(getattr(source, "name", None) or source_id).lower())
+        try:
+            self._log_rows([(f"{TX_MODULE}.{name}", text)], LogLevel.INFO)
+        except Exception as e:  # the send itself must not fail over its log line
+            self.logger.warning("could not log the agent's line for '%s': %s", source_id, e)
+
+    def _log_rows(self, rows: list, level):
+        """[(module path, message)] as lines of this pipeline's device, all at one timestamp.
+        Runs on a request thread: the batch is this call's own."""
+        device = self.local.device_id
+        encoded = [(device.get_module(path).id, text.encode("utf-8")) for path, text in rows]
+        batch = self.shared.array_pool.create(
+            PooledLogBatch,
+            len(encoded),
+            max(sum(len(msg) for _module_id, msg in encoded), 1),
+            has_levels=True,
+            has_modules=True,
+            has_devices=True,
+        )
+        now_ns = self.shared.time_ns()
+        with batch:
+            for module_id, msg in encoded:
+                batch.insert(now_ns, now_ns, msg, level=level.value, module=module_id, device=device.id)
+            self.distribute(batch)

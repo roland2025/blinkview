@@ -55,7 +55,8 @@ INSTRUCTIONS = (
     "and the Undo. Tell the user what you wanted to change and that they can allow it on the "
     "`mcp_server` pipeline. "
     "`create_watch` puts chosen values in "
-    "a live window for the user. For a whole "
+    "a live window for the user. While you work on devices, `post` your progress (steps, results, "
+    "numbers) to BlinkView so the user can follow it there next to the devices' logs. For a whole "
     "recorded session use the shell command `blink export SESSION_ID` (see `blink export --help`)."
 )
 
@@ -422,6 +423,46 @@ TOOLS = [
         },
     },
     {
+        "name": "post",
+        "description": "Logs your progress as BlinkView lines of your own, so the user can follow what you "
+        "are doing in the log view, the telemetry table, plots and watch lists, and find it again in the "
+        "session's recording. The lines go under the device `post_device` from `status` (the mcp_server "
+        "pipeline's name), on the `module` you give. Start the module with the device or task the line is "
+        "about (`dut1.flash`, `dut2.selftest`) so it can be filtered next to that device's own log, and "
+        "number your steps in `text` (`step 3: erasing`). Each of `values` becomes its own module, "
+        "`<module>.<key>`, holding that value - numbers plot. At the start of a task on several devices, "
+        "`create_watch` with the rows `post` returns. Your `send`s and `command`s are logged there too, "
+        "under `tx.<source name>`. Returns `rows` (the 'device.module' names, as `create_watch` takes "
+        "them) and `seq`.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "module": {
+                    "type": "string",
+                    "description": "Dotted path of letters, digits and '_', e.g. 'dut2.flash'.",
+                },
+                "text": {"type": "string", "description": "One line, logged at `module`."},
+                "values": {
+                    "type": "object",
+                    "description": 'Up to 50 key: number or string, e.g. {"progress": 0.25, "state": "erasing"}.',
+                },
+                "level": {
+                    "type": "string",
+                    "enum": ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "CRITICAL"],
+                    "description": "Of every line of the call (default INFO).",
+                },
+                "instance": {
+                    "type": ["integer", "array"],
+                    "items": {"type": "integer"},
+                    "description": "pid of the BlinkView instance, from `status`; only needed when several are "
+                    "running. A list of pids logs the same lines in each - for a step that involves devices "
+                    "on several instances.",
+                },
+            },
+            "required": ["module"],
+        },
+    },
+    {
         "name": "rotate_session",
         "description": "Ends the current recording session and starts a new, empty one; sources stay "
         "connected. Use it to get a clean log for one experiment. Returns the old and new session ids. "
@@ -488,8 +529,26 @@ def call_tool(name: str, args: dict, run_dir: Optional[Path] = None, cwd: Option
         raise AgentApiError(f"Unknown tool: {name}")
 
     args = dict(args)
-    instance = _pick_instance(instances, args.pop("instance", None), cwd or Path.cwd())
+    wanted = args.pop("instance", None)
+    if name == "post" and isinstance(wanted, list):
+        return _post_to_each(instances, wanted, args, cwd or Path.cwd())
+    instance = _pick_instance(instances, wanted, cwd or Path.cwd())
     return call_instance_tool(instance, name, args)
+
+
+def _post_to_each(instances: List[dict], pids: list, args: dict, cwd: Path) -> dict:
+    """`post` with a list of instances: the same lines on each. An error only when none took them."""
+    if not pids or not all(isinstance(pid, int) and not isinstance(pid, bool) for pid in pids):
+        raise AgentApiError("'instance' must be a pid or a non-empty list of pids")
+    posted, errors = {}, {}
+    for pid in dict.fromkeys(pids):
+        try:
+            posted[pid] = call_instance_tool(_pick_instance(instances, pid, cwd), "post", dict(args))
+        except AgentApiError as e:
+            errors[pid] = str(e)
+    if not posted:
+        raise AgentApiError("posted to no instance: " + json.dumps(errors))
+    return {"posted": posted, "errors": errors}
 
 
 def call_instance_tool(instance: dict, name: str, args: dict) -> Any:
