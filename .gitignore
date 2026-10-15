@@ -214,3 +214,6 @@ logs/
 .blinkview/
 .numba_cache
 .aider*
+
+# Plans and reports live in the wiki repo (see agents.md)
+/plans/

@@ -12,7 +12,7 @@ before adding REPLAY-scrubbing support to another widget, or before touching any
 implementations above.
 
 The first three widgets share `core/playback_follow.py`'s `PlaybackFollowMachine` (see
-`plans/playback-follow-state-machine.md` for the design history) - a plain-Python state machine
+`wiki:plans/playback-follow-state-machine.md` in blinkatlas-wiki for the design history) - a plain-Python state machine
 that replaced what used to be four independently-reimplemented booleans per widget
 (`follow_playback`/`is_paused`/`_playback_anchored`/`force_live`) with one `FollowState` enum
 (`LIVE`/`FOLLOWING`/`FROZEN`) plus an explicit transition table. `TelemetryPlotter` predates this
