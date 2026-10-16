@@ -225,3 +225,70 @@ class TestFromMemmapMatchesLiveKernels:
 
         cold_segment.release()
         segment.release()
+
+
+class TestMmapClosesCleanlyAfterRelease:
+    """plans/bundle-push-fast-path.md stage 2 gave PooledLogBatch memoryviews onto some of its
+    columns. On a cold segment the columns are mmap-backed, and a live memoryview makes
+    mmap.close() raise BufferError - which _MmapFileRef.release() catches and swallows, leaving
+    the mapping (and the file behind it) alive until GC. Only the always-owned size/msg_cursor
+    counters get views eagerly; sequences/timestamps are built lazily by note_appended_rows(),
+    which a frozen cold segment never calls."""
+
+    ROWS = [
+        (100, b"hello", LogLevel.INFO.value, 1, 2, 1, 10, 20),
+        (150, b"world", LogLevel.WARN.value, 1, 2, 2, 10, 21),
+        (200, b"third", LogLevel.ERROR.value, 3, 2, 3, 11, 22),
+    ]
+
+    def test_release_closes_the_mapping_with_no_swallowed_buffer_error(self, global_pool, tmp_path):
+        segment = make_real_segment(global_pool, self.ROWS)
+        path = tmp_path / "segment_0000000001.blkseg"
+        write_cold_segment_file(path, segment.bundle)
+        segment.release()
+
+        cold = PooledLogBatch.from_memmap(path)
+
+        # Touch exactly the properties that go through the counter memoryviews.
+        assert cold.size == 3
+        assert len(cold) == 3
+        assert cold.msg_cursor == sum(len(r[1]) for r in self.ROWS)
+        assert cold.last_sequence_id == 3
+        assert cold.first_sequence_id == 1
+        assert cold.start_ts == 100
+        assert cold.end_ts == 200
+
+        # The lazy views stay unbuilt: these two columns are the mmap-backed ones.
+        assert cold._seq_mv is None
+        assert cold._ts_mv is None
+
+        mapping = cold._ts_h._file_ref._mmap
+        assert mapping is not None
+
+        cold.release()
+
+        # A mapping that really closed raises ValueError on any access; one whose close() hit
+        # BufferError and got swallowed would still be perfectly readable here.
+        with pytest.raises(ValueError):
+            mapping.read(1)
+
+        # And with nothing holding the mapping open, the file is deletable right away.
+        path.unlink()
+        assert not path.exists()
+
+    def test_counter_views_are_released_even_though_the_columns_are_mapped(self, global_pool, tmp_path):
+        segment = make_real_segment(global_pool, self.ROWS)
+        path = tmp_path / "segment_0000000002.blkseg"
+        write_cold_segment_file(path, segment.bundle)
+        segment.release()
+
+        cold = PooledLogBatch.from_memmap(path)
+        assert cold._size_mv is not None
+        assert cold._cursor_mv is not None
+
+        cold.release()
+
+        assert cold._size_mv is None
+        assert cold._cursor_mv is None
+        assert cold.size == 0
+        assert cold.msg_cursor == 0

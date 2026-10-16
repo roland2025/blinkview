@@ -56,6 +56,29 @@ class PooledLogBatch:
         "_cached_first_ts",
         "_cached_last_seq",
         "_cached_last_ts",
+        # memoryviews onto the bundle's counter/seq/ts columns. A memoryview scalar read returns
+        # a plain Python int straight from the buffer (~35 ns) where int(arr[0]) first builds a
+        # numpy scalar object and unwraps it (~99 ns) - see plans/bundle-push-fast-path.md stage
+        # 2. These are an *additional* access path, not a replacement: the ndarrays stay on the
+        # LogBundle because every kernel call site and every vectorized operation needs them (an
+        # ndarray argument is both cheaper to pass and avoids compiling a second Numba
+        # specialisation), so kernel calls must keep passing b.<column>, never these views.
+        #
+        # size/msg_cursor are built eagerly, for every batch: they are always *owned* 1-element
+        # arrays (_from_cold_handles builds them with np.array([...])), never mmap views, and
+        # there are ~100 .size/len() call sites plus per-row capacity checks in
+        # parsers/key_value.py and parsers/module_gen.py, which clears the ~450-550 ns build
+        # cost several times over.
+        #
+        # sequences/timestamps are built lazily, on the first note_appended_rows(), and lazily is
+        # load-bearing: those two columns *are* mmap-backed on cold segments, and a live
+        # memoryview makes core/cold_segment.py's mmap.close() raise BufferError (caught and
+        # swallowed there, which delays cold-segment file deletion). Cold segments are frozen and
+        # never appended to, so they never build these.
+        "_size_mv",
+        "_cursor_mv",
+        "_seq_mv",
+        "_ts_mv",
     )
 
     def __init__(
@@ -90,6 +113,11 @@ class PooledLogBatch:
         self._cached_first_ts = None
         self._cached_last_seq = SEQ_NONE
         self._cached_last_ts = None
+
+        self._size_mv = None
+        self._cursor_mv = None
+        self._seq_mv = None
+        self._ts_mv = None
 
         self._allocate(
             req_capacity,
@@ -220,6 +248,9 @@ class PooledLogBatch:
             has_ext_u64_1=has_ext_u64_1,
         )
 
+        self._size_mv = memoryview(self.bundle.size)
+        self._cursor_mv = memoryview(self.bundle.msg_cursor)
+
     @classmethod
     def from_memmap(cls, path: Any, metadata: Any = None) -> "PooledLogBatch":
         """Alternate constructor: builds a frozen, read-only PooledLogBatch backed by a
@@ -285,6 +316,12 @@ class PooledLogBatch:
         self._tid_h = handles["tids"]
         self._ext_u32_1_h = self._ext_u32_2_h = self._ext_u64_1_h = None
 
+        # Deliberately left unbuilt: sequences/timestamps here are mmap-backed, and holding a
+        # memoryview on them would make cold_segment's mmap.close() raise BufferError. A cold
+        # segment never calls note_appended_rows(), so nothing ever builds them.
+        self._seq_mv = None
+        self._ts_mv = None
+
         # Populated once, up front, straight from the header - a cold segment never changes again,
         # so unlike a hot segment there's no later insert()/note_appended_rows() call to keep this
         # in sync with; it's simply set correctly from the start.
@@ -328,11 +365,15 @@ class PooledLogBatch:
             has_ext_u64_1=False,
         )
 
+        # Safe eagerly even here: both are owned np.array([...]) above, not mmap views.
+        self._size_mv = memoryview(self.bundle.size)
+        self._cursor_mv = memoryview(self.bundle.msg_cursor)
+
         return self
 
     @property
     def size(self) -> int:
-        return int(b.size[0]) if (b := self.bundle) else 0
+        return mv[0] if (mv := self._size_mv) is not None else 0
 
     @property
     def capacity(self) -> int:
@@ -340,9 +381,9 @@ class PooledLogBatch:
 
     def clear(self, new_metadata: Any = None):
         """O(1) reset of counters and optional metadata update."""
-        if b := self.bundle:
-            b.size[0] = 0
-            b.msg_cursor[0] = 0
+        if (mv := self._size_mv) is not None:
+            mv[0] = 0
+            self._cursor_mv[0] = 0
         if new_metadata is not None:
             self.metadata = new_metadata
         self._cached_first_seq = None
@@ -352,7 +393,7 @@ class PooledLogBatch:
 
     @property
     def msg_cursor(self) -> int:
-        return int(b.msg_cursor[0]) if (b := self.bundle) else 0
+        return mv[0] if (mv := self._cursor_mv) is not None else 0
 
     def insert_any(
         self,
@@ -494,14 +535,26 @@ class PooledLogBatch:
         b = self.bundle
         if b is None:
             return
-        size = int(b.size[0])
+        seq_mv = self._seq_mv
+        if seq_mv is None:
+            # First append on this batch: build the views now, not in _allocate(). Hot segments
+            # are long-lived, so the one-off build cost amortises away over every later append,
+            # while segments that are never appended to - cold ones above all - pay nothing and
+            # keep mmap.close() on the clean path.
+            seq_mv = self._seq_mv = memoryview(b.sequences)
+            ts_mv = self._ts_mv = memoryview(b.timestamps)
+        else:
+            ts_mv = self._ts_mv
+        size = self._size_mv[0]
         last_idx = size - 1
-        self._cached_last_seq = b.sequences[last_idx]
-        self._cached_last_ts = b.timestamps[last_idx]
+        # memoryview reads give plain Python ints, so this path now agrees with
+        # _note_inserted_row on the *type* of the cached values, not just their value.
+        self._cached_last_seq = seq_mv[last_idx]
+        self._cached_last_ts = ts_mv[last_idx]
         if self._cached_first_seq is None:
             first_idx = size - new_row_count
-            self._cached_first_seq = b.sequences[first_idx]
-            self._cached_first_ts = b.timestamps[first_idx]
+            self._cached_first_seq = seq_mv[first_idx]
+            self._cached_first_ts = ts_mv[first_idx]
 
     def append(self, msg_bytes: bytes) -> bool:
         if not (b := self.bundle):
@@ -529,6 +582,18 @@ class PooledLogBatch:
             self.clear()
             self.in_use = False
             self.bundle = None
+
+            # Must happen here, in the same block that drops the bundle: the slabs below go back
+            # to the pool and get handed to an unrelated batch, and a memoryview that outlived
+            # that would write into another batch's memory with no error at all. Releasing
+            # explicitly rather than letting GC do it is also what keeps cold_segment's
+            # mmap.close() on its clean path.
+            size_mv, cursor_mv = self._size_mv, self._cursor_mv
+            seq_mv, ts_mv = self._seq_mv, self._ts_mv
+            self._size_mv = self._cursor_mv = self._seq_mv = self._ts_mv = None
+            for mv in (size_mv, cursor_mv, seq_mv, ts_mv):
+                if mv is not None:
+                    mv.release()
 
             if self._ts_h:
                 self._ts_h.release()
@@ -568,7 +633,7 @@ class PooledLogBatch:
             self._ext_u32_1_h = self._ext_u32_2_h = self._ext_u64_1_h = None
 
     def __len__(self):
-        return self.size
+        return mv[0] if (mv := self._size_mv) is not None else 0
 
     def __enter__(self):
         return self

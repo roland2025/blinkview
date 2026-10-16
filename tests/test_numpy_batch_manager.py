@@ -269,3 +269,94 @@ class TestRepr:
         batch = make_batch(pool)
         batch.release()
         assert "released" in repr(batch)
+
+
+class TestCounterViewConsistency:
+    """plans/bundle-push-fast-path.md stage 2. note_appended_rows() used to cache
+    b.sequences[i]/b.timestamps[i] - numpy scalars - into the same "plain-int cache" that
+    _note_inserted_row fills with real Python ints, so last_sequence_id's *type* depended on
+    which path had filled the batch. Reading through a memoryview returns a plain int and makes
+    the two paths agree."""
+
+    SCHEMA = dict(
+        has_levels=True,
+        has_modules=True,
+        has_devices=True,
+        has_sequences=True,
+        has_pids=True,
+        has_tids=True,
+    )
+
+    def test_insert_and_note_appended_rows_agree_on_type_and_value(self, pool):
+        from blinkview.ops.segments import nb_copy_batch_to_segment
+
+        rows = [(100, b"aaa"), (150, b"bbb"), (200, b"ccc")]
+
+        inserted = make_batch(pool, capacity=8, buffer_bytes=256, **self.SCHEMA)
+        for i, (ts, msg) in enumerate(rows):
+            assert inserted.insert(ts, ts, msg, seq=28 + i)
+
+        appended = make_batch(pool, capacity=8, buffer_bytes=256, **self.SCHEMA)
+        copied = nb_copy_batch_to_segment(appended.bundle, inserted.bundle, 0, 27)
+        assert copied == len(rows)
+        appended.note_appended_rows(copied)
+
+        assert appended.last_sequence_id == inserted.last_sequence_id == 30
+        assert appended.first_sequence_id == inserted.first_sequence_id == 28
+        assert appended.end_ts == inserted.end_ts == 200
+        assert appended.start_ts == inserted.start_ts == 100
+
+        for name in ("last_sequence_id", "first_sequence_id", "start_ts", "end_ts"):
+            assert type(getattr(appended, name)) is int, name
+            assert type(getattr(inserted, name)) is type(getattr(appended, name)), name
+
+        inserted.release()
+        appended.release()
+
+    def test_note_appended_rows_tracks_later_appends(self, pool):
+        from blinkview.ops.segments import nb_copy_batch_to_segment
+
+        src = make_batch(pool, capacity=8, buffer_bytes=256, **self.SCHEMA)
+        assert src.insert(500, 500, b"x")
+
+        segment = make_batch(pool, capacity=8, buffer_bytes=256, **self.SCHEMA)
+        for expected_seq in (1, 2, 3):
+            copied = nb_copy_batch_to_segment(segment.bundle, src.bundle, 0, expected_seq - 1)
+            assert copied == 1
+            segment.note_appended_rows(copied)
+            assert segment.last_sequence_id == expected_seq
+            assert type(segment.last_sequence_id) is int
+
+        assert segment.first_sequence_id == 1
+        assert segment.size == 3
+        src.release()
+        segment.release()
+
+    def test_size_and_msg_cursor_survive_clear_and_reinsert(self, pool):
+        batch = make_batch(pool, capacity=8, buffer_bytes=256, **self.SCHEMA)
+        assert batch.insert(100, 100, b"hello", seq=1)
+        assert batch.size == 1
+        assert batch.msg_cursor == 5
+        assert type(batch.size) is int
+        assert type(batch.msg_cursor) is int
+
+        batch.clear()
+        assert batch.size == 0
+        assert len(batch) == 0
+        assert batch.msg_cursor == 0
+        assert batch.last_sequence_id == SEQ_NONE
+
+        assert batch.insert(200, 200, b"yo", seq=2)
+        assert batch.size == 1
+        assert batch.msg_cursor == 2
+        assert batch.bundle.size[0] == 1
+        batch.release()
+
+    def test_counters_read_zero_after_release(self, pool):
+        batch = make_batch(pool, capacity=8, buffer_bytes=256, **self.SCHEMA)
+        assert batch.insert(100, 100, b"hello")
+        batch.release()
+
+        assert batch.size == 0
+        assert len(batch) == 0
+        assert batch.msg_cursor == 0
