@@ -1427,3 +1427,108 @@ def test_sends_and_commands_are_logged_before_the_reply(registry, run_dir, devic
         "mcp I tx.board: command: reset",
         "board I log: booted",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Debug access to a J-Link source's target (read_memory, probe_status)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def target_memory(registry):
+    """Gives the board source a real JLinkDebug, on a JLinkRTTReader whose JLink is a fake with RAM
+    at 0x20000000 holding 0, 1, 2, ... Returns that fake JLink."""
+    from tests.test_jlink_debug import MemoryJLink
+    from tests.test_rtt_reader import make_reader
+
+    reader = make_reader()
+    reader.jlink = MemoryJLink()
+    registry.sources.get("src_board").debug = reader.debug
+    return reader.jlink
+
+
+def test_status_lists_each_sources_debug_tools(registry, run_dir):
+    _wait_for_server(run_dir)
+    assert _call(run_dir, "status")["instances"][0]["sources"][0]["debug_tools"] == []
+
+    registry.sources.get("src_board").debug = SimpleNamespace(TOOLS=("read_memory", "probe_status"))
+    assert _call(run_dir, "status")["instances"][0]["sources"][0]["debug_tools"] == ["read_memory", "probe_status"]
+
+
+def test_read_memory_returns_bytes_and_words(registry, run_dir, target_memory):
+    _wait_for_server(run_dir)
+
+    result = _call(run_dir, "read_memory", address="0x20000004", length=8, width=32)
+
+    assert result["source"] == "src_board"
+    assert (result["address"], result["length"], result["width"]) == ("0x20000004", 8, 32)
+    assert result["hex"] == "0405060708090a0b"
+    assert result["words"] == ["0x07060504", "0x0b0a0908"]
+    assert result["duration_ms"] >= 0
+    assert isinstance(result["seq"], int)
+    assert "words" not in _call(run_dir, "read_memory", address=0x20000000, length=2)
+
+
+def test_read_memory_refusals(registry, run_dir, target_memory):
+    _wait_for_server(run_dir)
+    with pytest.raises(AgentApiError, match="'length' is required"):
+        _call(run_dir, "read_memory", address=0x20000000)
+    with pytest.raises(AgentApiError, match="'address' must be an integer or a string"):
+        _call(run_dir, "read_memory", address="ram", length=4)
+    with pytest.raises(AgentApiError, match="read_memory on 'src_board': a 32-bit read needs"):
+        _call(run_dir, "read_memory", address=0x20000002, length=4, width=32)
+    target_memory_reader = registry.sources.get("src_board").debug._reader
+    target_memory_reader.jlink = None
+    with pytest.raises(AgentApiError, match="read_memory on 'src_board': no open J-Link session"):
+        _call(run_dir, "read_memory", address=0x20000000, length=4)
+
+
+def test_debug_tools_on_a_source_without_debug_access_are_refused(registry, run_dir):
+    _wait_for_server(run_dir)
+    with pytest.raises(AgentApiError, match="source 'src_board' has no debug access"):
+        _call(run_dir, "read_memory", address=0x20000000, length=4)
+    with pytest.raises(AgentApiError, match="source 'src_board' has no debug access"):
+        _call(run_dir, "probe_status")
+    with pytest.raises(AgentApiError, match="unknown or not allowed source 'src_other'"):
+        _call(run_dir, "probe_status", source="src_other")
+
+
+def test_probe_status_reports_the_session(registry, run_dir, target_memory):
+    _wait_for_server(run_dir)
+    status = _call(run_dir, "probe_status")
+    assert (status["source"], status["target_voltage_mv"], status["core"]) == ("src_board", 3300, "Cortex-M4")
+    assert [b["name"] for b in status["rtt"]["up_buffers"]] == ["Terminal", "Data"]
+
+
+def test_debug_calls_are_logged_as_tx_lines(registry, run_dir, target_memory):
+    _wait_for_server(run_dir)
+    seq = _call(run_dir, "status")["instances"][0]["seq"]
+
+    _call(run_dir, "read_memory", address=0x20000010, length=4, width=32)
+    _call(run_dir, "probe_status")
+
+    result = _wait_for(
+        lambda: (r := _call(run_dir, "read_logs", after_seq=seq, device="mcp")) and r["lines"] == 2 and r,
+        what="the tx lines",
+    )
+    assert _lines_of(result) == ["mcp I tx.board: read_memory 0x20000010 4 w32", "mcp I tx.board: probe_status"]
+
+
+def test_client_read_memory_returns_bytes(registry, run_dir, target_memory):
+    from blinkview.client import BlinkView
+
+    _wait_for_server(run_dir)
+    bv = BlinkView.connect()
+    assert bv.read_memory(0x20000000, 4, width=16) == bytes([0, 1, 2, 3])
+    assert bv.probe_status()["speed_khz"] == 4000
+
+
+def test_every_agent_tool_has_a_server_handler_and_a_client_method():
+    from blinkview.client import BlinkView
+    from blinkview.parsers.mcp_server import McpServer
+
+    for tool in agent_mcp.TOOLS:
+        name = "info" if tool["name"] == "status" else tool["name"]
+        assert hasattr(McpServer, f"_tool_{name}"), name
+    for name in ("read_memory", "probe_status"):
+        assert hasattr(BlinkView, name), name

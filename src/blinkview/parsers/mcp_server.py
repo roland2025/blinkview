@@ -8,6 +8,7 @@ import json
 import re
 import secrets
 import threading
+import time
 
 from blinkview.core.agent_api import AgentApiError, AgentApiServer
 from blinkview.core.agent_log_read import current_sequence, list_modules, read_logs, summary
@@ -24,6 +25,7 @@ from blinkview.core.config_schema import (
 )
 from blinkview.core.configurable import configuration_property, override_property
 from blinkview.core.numpy_batch_manager import PooledLogBatch
+from blinkview.io.jlink_debug import TargetDebugError
 from blinkview.parsers.parser import BaseParser, ParserFactory
 from blinkview.utils.generate_id import generate_id
 from blinkview.utils.log_level import LogLevel
@@ -55,6 +57,25 @@ _POST_LEVELS["WARN"] = LogLevel.WARN
 _MODULE_PATH = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$")
 # Where the agent's sends and commands are logged on this pipeline's device: tx.<source name>.
 TX_MODULE = "tx"
+
+
+def _int_arg(args: dict, name: str, required: bool = False, default=None) -> int:
+    """An integer argument, given as a number or as a string such as "0x20001000"."""
+    value = args.get(name)
+    if value is None:
+        if required:
+            raise AgentApiError(f"'{name}' is required")
+        return default
+    if isinstance(value, bool):
+        raise AgentApiError(f"'{name}' must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip(), 0)
+        except ValueError:
+            pass
+    raise AgentApiError(f"'{name}' must be an integer or a string like '0x20001000', got {value!r}")
 
 
 @ParserFactory.register("mcp_server")
@@ -142,6 +163,7 @@ class McpServer(BaseParser):
     __doc__ = """Lets an AI agent (Claude, through `blink mcp`) act on this running BlinkView.
 
 * Sends text and source commands (reset, halt, ...) to any source, or only to those listed in `send_to`.
+* Reads target memory and probe status through a J-Link source's own open session.
 * Starts a new session.
 * Reads log lines, through the log viewer's own filters and formatter, and counts them per module and level.
 * Reads telemetry: the latest value per module, and a module's numeric history.
@@ -180,6 +202,8 @@ Connect an agent with `claude mcp add blinkview -- blink mcp`."""
                     "info": self._tool_info,
                     "send": self._tool_send,
                     "command": self._tool_command,
+                    "read_memory": self._tool_read_memory,
+                    "probe_status": self._tool_probe_status,
                     "rotate_session": self._tool_rotate_session,
                     "read_logs": self._tool_read_logs,
                     "summary": self._tool_summary,
@@ -260,6 +284,7 @@ Connect an agent with `claude mcp add blinkview -- blink mcp`."""
                     "enabled": bool(getattr(source, "enabled", False)),
                     "can_send": hasattr(source, "send_data"),
                     "commands": {token: label for token, label in source.get_commands()},
+                    "debug_tools": list(debug.TOOLS) if (debug := getattr(source, "debug", None)) else [],
                 }
             )
         return {
@@ -595,6 +620,51 @@ Connect an agent with `claude mcp add blinkview -- blink mcp`."""
         self._log_tx(source_id, source, f"command: {command}")
         source.send_command(command)
         return {"source": source_id, "command": command, "seq": seq}
+
+    # --- Debug access to a source's target (J-Link) ---
+
+    def _resolve_debug(self, args: dict):
+        source_id, source = self._resolve_source(args)
+        debug = getattr(source, "debug", None)
+        if debug is None:
+            raise AgentApiError(f"source '{source_id}' has no debug access to its target (only J-Link sources do)")
+        return source_id, source, debug
+
+    def _tool_read_memory(self, args: dict) -> dict:
+        source_id, source, debug = self._resolve_debug(args)
+        address = _int_arg(args, "address", required=True)
+        length = _int_arg(args, "length", required=True)
+        width = _int_arg(args, "width", default=8)
+
+        seq = current_sequence(self.shared.registry)
+        self._log_tx(source_id, source, f"read_memory 0x{address:08x} {length} w{width}")
+        started = time.perf_counter()
+        try:
+            data = debug.read_memory(address, length, width)
+        except TargetDebugError as e:
+            raise AgentApiError(f"read_memory on '{source_id}': {e}") from None
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+
+        result = {"source": source_id, "address": f"0x{address:08x}", "length": len(data), "width": width}
+        result["duration_ms"] = duration_ms
+        result["hex"] = data.hex()
+        if width > 8:
+            unit = width // 8
+            result["words"] = [
+                f"0x{int.from_bytes(data[i : i + unit], 'little'):0{unit * 2}x}" for i in range(0, len(data), unit)
+            ]
+        result["seq"] = seq
+        return result
+
+    def _tool_probe_status(self, args: dict) -> dict:
+        source_id, source, debug = self._resolve_debug(args)
+        seq = current_sequence(self.shared.registry)
+        self._log_tx(source_id, source, "probe_status")
+        try:
+            status = debug.probe_status()
+        except TargetDebugError as e:
+            raise AgentApiError(f"probe_status on '{source_id}': {e}") from None
+        return {"source": source_id, **status, "seq": seq}
 
     def _tool_rotate_session(self, args: dict) -> dict:
         if not self.allow_rotate:

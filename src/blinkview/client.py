@@ -67,6 +67,16 @@ class BlinkView:
         cursor from just before it."""
         return self.call("command", command=command, **_given(source=source))["seq"]
 
+    def read_memory(self, address: int, length: int, width: int = 8, source: Optional[str] = None) -> bytes:
+        """`length` bytes of a J-Link source's target memory from `address`, read `width` bits
+        at a time (see agent_mcp.py's read_memory). call("read_memory", ...) for the whole result."""
+        result = self.call("read_memory", address=address, length=length, width=width, **_given(source=source))
+        return bytes.fromhex(result["hex"])
+
+    def probe_status(self, source: Optional[str] = None) -> dict:
+        """Probe, target and RTT state of a J-Link source's open session."""
+        return self.call("probe_status", **_given(source=source))
+
     def send(self, text: str, source: Optional[str] = None, **args) -> dict:
         """Sends text to a source's device. With `wait_s` (and `until` or `quiet_ms`) the
         device's answer is in the result's "reply"."""

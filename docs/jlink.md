@@ -1,8 +1,8 @@
 # SEGGER J-Link and RTT
 
 BlinkView reads SEGGER RTT through a J-Link probe with a source of type `jlink_rtt`. This page
-covers what has to be installed, the source's settings, running several probes, and the
-problems seen so far.
+covers what has to be installed, the source's settings, reading the target from an AI agent,
+running several probes, and the problems seen so far.
 
 ## Install the J-Link software separately
 
@@ -39,6 +39,31 @@ probe answers again. You don't need to restart it.
 An RTT source offers these commands, which an AI agent can also send over
 [MCP](mcp.md): `reset` (reset the MCU), `halt`, `restart` (resume after a halt) and
 `rtt_restart` (restart RTT on the probe).
+
+## Reading the target from an AI agent
+
+An agent connected over [MCP](mcp.md) can look inside the target through the probe session the
+RTT source already has open. It doesn't need J-Link Commander or a second connection to the
+probe, and RTT keeps streaming while it reads.
+
+- **`read_memory`** reads up to 4 KB per call: variables, peripheral registers, the Cortex-M
+  fault registers (CFSR at `0xE000ED28`, HFSR at `0xE000ED2C`, ...). It reads 8, 16 or 32 bits
+  at a time (`width`). On Cortex-M a read doesn't halt the core. The address is a number or a
+  string such as `"0x20001000"`. To read a variable, the agent looks up its address in the
+  firmware's ELF file itself, e.g. with `arm-none-eabi-nm`.
+- **`probe_status`** shows what the session sees: target voltage, whether the target is
+  connected and halted, the core, the probe's serial number and speed, and the RTT buffers. Use
+  it to tell a firmware problem from a wiring or probe problem.
+
+Every call is logged as a `tx.<source name>` line, like the agent's commands, so the session
+recording shows what it read and when. A call is refused while the source isn't connected, and
+gives up after 2 s if the probe is busy (see [The probe stops answering](#the-probe-stops-answering)).
+The same reads are available to scripts through `blinkview.client` (`read_memory()`,
+`probe_status()`).
+
+Known limit: the J-Link library may not describe the RTT down buffers (seen with an nRF52840).
+`probe_status` then lists them as `{"empty": true}` with a `down_buffers_note`. Their names and
+sizes are in the RTT control block in target memory, which `read_memory` can read.
 
 ## Several probes
 

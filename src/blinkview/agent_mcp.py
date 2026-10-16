@@ -26,7 +26,8 @@ PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 ROTATE_TIMEOUT_SECONDS = 150
 # `summary` scans every retained row, cold storage included. HTTP timeouts of the tools that need
 # more than the default.
-_TOOL_TIMEOUT_SECONDS = {"rotate_session": ROTATE_TIMEOUT_SECONDS, "summary": 60.0}
+# `read_memory` takes the probe once per 1 KB chunk and may wait for it each time.
+_TOOL_TIMEOUT_SECONDS = {"rotate_session": ROTATE_TIMEOUT_SECONDS, "summary": 60.0, "read_memory": 20.0}
 # Same cap as core/agent_log_read.py's MAX_WAIT_SECONDS (not imported: that module loads numba).
 MAX_WAIT_SECONDS = 60
 # Extra HTTP timeout for `to_file`, which may format and write up to a million lines.
@@ -54,6 +55,10 @@ INSTRUCTIONS = (
     ".blinkview) instead: the user turned it off on purpose, and a file edit skips the validation "
     "and the Undo. Tell the user what you wanted to change and that they can allow it on the "
     "`mcp_server` pipeline. "
+    "To look inside a J-Link source's target while BlinkView has its probe open, use `read_memory` "
+    "and `probe_status` (`status` lists them per source under `debug_tools`), not J-Link Commander or "
+    "another tool of your own: they go through BlinkView's open probe session, where a second session "
+    "can disturb the RTT stream. "
     "`create_watch` puts chosen values in "
     "a live window for the user. While you work on devices, `post` your progress (steps, results, "
     "numbers) to BlinkView so the user can follow it there next to the devices' logs. For a whole "
@@ -136,7 +141,8 @@ TOOLS = [
     {
         "name": "status",
         "description": "Lists running BlinkView instances: pid, project, profile, the current session "
-        "(id, name, folder) and, per source you may send to, its id, name, type and commands.",
+        "(id, name, folder) and, per source you may send to, its id, name, type, commands and "
+        "`debug_tools` (e.g. read_memory on a J-Link source).",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -420,6 +426,47 @@ TOOLS = [
                 "instance": _INSTANCE_PROPERTY,
             },
             "required": ["command"],
+        },
+    },
+    {
+        "name": "read_memory",
+        "description": "Reads target memory through a J-Link source's own probe session - use it instead "
+        "of J-Link Commander while BlinkView has the probe open. Does not halt a Cortex-M core. "
+        "Reads variables (resolve their address with `arm-none-eabi-nm` on the ELF), "
+        "peripheral registers, the fault registers (CFSR 0xE000ED28, HFSR 0xE000ED2C, MMFAR 0xE000ED34, "
+        "BFAR 0xE000ED38). Up to 4096 bytes per call. Returns `hex` (the bytes as they lie in memory) "
+        "and, for width 16 or 32, `words` (little-endian values), and `duration_ms`. Logged as a "
+        "`tx.<source name>` line when the read starts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {
+                    "type": ["integer", "string"],
+                    "description": "Start address, e.g. 536875008 or '0x20001000'.",
+                },
+                "length": {"type": "integer", "description": "Bytes to read, 1..4096; a multiple of width/8."},
+                "width": {
+                    "type": "integer",
+                    "enum": [8, 16, 32],
+                    "description": "Access width in bits (default 8). Peripheral registers usually need 32; "
+                    "the address must then be 4-aligned.",
+                },
+                "source": _SOURCE_PROPERTY,
+                "instance": _INSTANCE_PROPERTY,
+            },
+            "required": ["address", "length"],
+        },
+    },
+    {
+        "name": "probe_status",
+        "description": "What a J-Link source's open session sees: target voltage (mV), whether the "
+        "target is connected and halted, the core, probe serial and speed, and RTT (running, overflows, "
+        "the up and down buffers). Tells a firmware problem from a wiring or probe one. A field that "
+        'could not be read holds {"error": ...}. A buffer the DLL describes as empty is {"empty": true}: '
+        "an unused slot, or one the DLL did not read (see `down_buffers_note` when present).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"source": _SOURCE_PROPERTY, "instance": _INSTANCE_PROPERTY},
         },
     },
     {

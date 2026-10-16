@@ -97,6 +97,7 @@ instead, and to ask you. This is an instruction to the agent, not a lock on the 
 | --- | --- |
 | `status` | Lists running BlinkView instances, the current session and the sources. |
 | `send`, `command` | Sends text to a source and returns the reply; runs a source's own command (e.g. RTT `reset`). |
+| `read_memory`, `probe_status` | Reads target memory and the probe's state through a J-Link source's open session (see [J-Link](jlink.md#reading-the-target-from-an-ai-agent)). |
 | `read_logs`, `summary` | Reads log lines with the log viewer's filters; counts lines per module and level. |
 | `list_modules`, `telemetry_latest`, `telemetry_series` | Modules, their latest values, a signal's history. |
 | `get_config`, `list_types`, `get_schema` | Reads the configuration and what can be configured. |
@@ -105,7 +106,7 @@ instead, and to ask you. This is an instruction to the agent, not a lock on the 
 | `post` | Logs the agent's progress as lines and values of its own, to follow in the log, telemetry and watch windows. |
 | `rotate_session` | Starts a new session. |
 
-The agent's own lines are logged under the `mcp_server` pipeline's name (`mcp` in a profile made by `blink init --agent`), on modules it picks, such as `mcp dut2.flash` or `mcp dut2.flash.progress` for a value. Its `send`s and `command`s are logged there too, under `tx.<source name>`, just before the device's reply. Add them to a watch list, or filter the log view on a device and `mcp`, to see what the agent is doing on each device. They are recorded with the session like any other line. When one agent works with several BlinkView instances, `post` can log the same step on each.
+The agent's own lines are logged under the `mcp_server` pipeline's name (`mcp` in a profile made by `blink init --agent`), on modules it picks, such as `mcp dut2.flash` or `mcp dut2.flash.progress` for a value. Its `send`s, `command`s and J-Link reads are logged there too, under `tx.<source name>`, just before the device's reply. Add them to a watch list, or filter the log view on a device and `mcp`, to see what the agent is doing on each device. They are recorded with the session like any other line. When one agent works with several BlinkView instances, `post` can log the same step on each.
 
 For a long stretch of log, `read_logs` and `send` take `to_file`: the lines go to a file in the
 temp folder (`<temp>/blinkview/read_logs/`, deleted after a day) and the agent gets its path and

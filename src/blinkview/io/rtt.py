@@ -5,6 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import ctypes
+from contextlib import contextmanager
 from threading import Lock, RLock
 from time import sleep
 from typing import TYPE_CHECKING, Optional
@@ -15,6 +16,7 @@ from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property, override_property
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
+from blinkview.io.jlink_debug import JLinkDebug, TargetDebugError
 from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 if TYPE_CHECKING:
@@ -191,6 +193,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         self.logging_processor = "binary"
         self.jlink: Optional[pylink.JLink] = None
         self._jlink_lock = RLock()
+        self.debug = JLinkDebug(self)
 
         self.logger_send = None
 
@@ -456,6 +459,25 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                     except Exception:
                         pass
                 return None
+
+    @contextmanager
+    def probe(self):
+        """The open JLink, held for the length of the block. For calls from other threads: waits
+        JLINK_LOCK_TIMEOUT_S for the probe, and raises TargetDebugError when it stays busy or no
+        session is open."""
+        if not self._jlink_lock.acquire(timeout=JLINK_LOCK_TIMEOUT_S):
+            raise TargetDebugError("the J-Link is busy: a call into its DLL has not returned")
+        try:
+            if self.jlink is None:
+                raise TargetDebugError("no open J-Link session: the source is not connected")
+            try:
+                yield self.jlink
+            except TargetDebugError:
+                raise
+            except Exception as e:
+                raise TargetDebugError(str(e) or type(e).__name__) from e
+        finally:
+            self._jlink_lock.release()
 
     def send_data(self, data: str, channel: int = 0):
         """
