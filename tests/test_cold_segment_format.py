@@ -292,3 +292,25 @@ class TestMmapClosesCleanlyAfterRelease:
         assert cold._cursor_mv is None
         assert cold.size == 0
         assert cold.msg_cursor == 0
+
+    def test_insert_into_a_cold_segment_refuses_without_building_views(self, global_pool, tmp_path):
+        """Stage 3's insert path builds memoryviews onto every column on first use - which on a
+        cold segment would be the mmap-backed ones. A cold segment's capacity is its row count,
+        so the capacity check has to refuse the insert before that build happens."""
+        segment = make_real_segment(global_pool, self.ROWS)
+        path = tmp_path / "segment_0000000003.blkseg"
+        write_cold_segment_file(path, segment.bundle)
+        segment.release()
+
+        cold = PooledLogBatch.from_memmap(path)
+        assert cold.insert(300, 300, b"late", seq=4) is False
+        assert cold.insert_any(300, 300, bytearray(b"late")) is False
+        assert cold.insert_view(300, 300, np.frombuffer(b"late", dtype=np.uint8), 4) is False
+        assert cold._insert_views is None
+        assert cold.size == 3
+        assert cold.last_sequence_id == 3
+
+        mapping = cold._ts_h._file_ref._mmap
+        cold.release()
+        with pytest.raises(ValueError):
+            mapping.read(1)

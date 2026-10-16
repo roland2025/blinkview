@@ -13,7 +13,13 @@ from blinkview.core import dtypes
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.types.empty import EMPTY_ID, EMPTY_LEVEL, EMPTY_SEQ
 from blinkview.core.types.log_batch import LogBundle
-from blinkview.ops.segments import nb_bundle_extend, nb_bundle_push, nb_bundle_push_len
+from blinkview.ops.segments import nb_bundle_extend, nb_bundle_push_len
+
+# What a memoryview store rejects where the push kernel silently converts: a float (truncated), an
+# out-of-range int such as level=300 or a negative id (wrapped), np.bool_, and a payload whose
+# buffer format isn't "B" (an int8 array, a cast("c") view). _push catches exactly these and
+# redoes the row through the kernel, so those inputs keep their old results.
+_PUSH_CONVERSION_ERRORS = (TypeError, ValueError, OverflowError)
 
 
 class PooledLogBatch:
@@ -79,6 +85,16 @@ class PooledLogBatch:
         "_cursor_mv",
         "_seq_mv",
         "_ts_mv",
+        # The insert path's write plan (plans/bundle-push-fast-path.md stage 3): one tuple of
+        # memoryviews - buffer, the four mandatory columns, then the nine optional ones with None
+        # for each disabled column - so insert() reads one attribute and unpacks it instead of
+        # loading fourteen. Built on the first insert that gets past the capacity check, never in
+        # _allocate(): hot and cold segments are PooledLogBatch instances too, filled by kernels
+        # and never through insert(), so they would pay the ~5 us build and 28 GC-tracked objects
+        # for nothing - and on a cold segment the views would sit on mmap-backed columns, where a
+        # live view makes mmap.close() raise BufferError. A cold segment's capacity is its row
+        # count, so an insert into one returns False before getting this far.
+        "_insert_views",
     )
 
     def __init__(
@@ -118,6 +134,7 @@ class PooledLogBatch:
         self._cursor_mv = None
         self._seq_mv = None
         self._ts_mv = None
+        self._insert_views = None
 
         self._allocate(
             req_capacity,
@@ -321,6 +338,7 @@ class PooledLogBatch:
         # segment never calls note_appended_rows(), so nothing ever builds them.
         self._seq_mv = None
         self._ts_mv = None
+        self._insert_views = None
 
         # Populated once, up front, straight from the header - a cold segment never changes again,
         # so unlike a hot segment there's no later insert()/note_appended_rows() call to keep this
@@ -412,19 +430,29 @@ class PooledLogBatch:
     ) -> bool:
         """
         Inserts data from any buffer-compatible object (bytes, bytearray, memoryview, ndarray).
-        Uses np.frombuffer to create a zero-copy view for the Numba kernel.
+        The message is the object's raw bytes, whatever its item format - an int16 array of n
+        items is 2n bytes, as with np.frombuffer(msg_data, uint8).
         """
-        if not (b := self.bundle):
-            return False
-
-        data_view = np.frombuffer(msg_data, dtype=dtypes.BYTE)
-
-        success = nb_bundle_push(
-            b, ts_ns, rx_ts_ns, data_view, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1, pid, tid
+        if type(msg_data) is not bytes:
+            mv = memoryview(msg_data)
+            if mv.format != "B" or mv.ndim != 1:
+                mv = mv.cast("B")
+            msg_data = mv
+        return self._push(
+            ts_ns,
+            rx_ts_ns,
+            msg_data,
+            len(msg_data),
+            level,
+            module,
+            device,
+            seq,
+            ext_u32_1,
+            ext_u32_2,
+            ext_u64_1,
+            pid,
+            tid,
         )
-        if success:
-            self._note_inserted_row(ts_ns, seq)
-        return success
 
     def insert_view(
         self,
@@ -443,14 +471,10 @@ class PooledLogBatch:
         tid: int = 0,
     ) -> bool:
         """
-        Directly passes a pre-allocated zero-copy NumPy view to the Numba kernel.
-        Achieves absolute minimum Python overhead.
+        Inserts the first msg_length bytes of a reusable read buffer - the stream readers'
+        recv_into()/read target - without slicing or copying it on the caller's side.
         """
-        if not (b := self.bundle):
-            return False
-
-        success = nb_bundle_push_len(
-            b,
+        return self._push(
             ts_ns,
             rx_ts_ns,
             data_view,
@@ -465,9 +489,6 @@ class PooledLogBatch:
             pid,
             tid,
         )
-        if success:
-            self._note_inserted_row(ts_ns, seq)
-        return success
 
     def insert(
         self,
@@ -485,32 +506,146 @@ class PooledLogBatch:
         tid: int = 0,
     ) -> bool:
         """
-        Inserts a new log record into the bundle via optimized Numba kernel.
+        Inserts one log record. Returns False, writing nothing, when the batch is full (rows or
+        message buffer) or released.
         """
-        if not (b := self.bundle):
+        return self._push(
+            ts_ns,
+            rx_ts_ns,
+            msg_bytes,
+            len(msg_bytes),
+            level,
+            module,
+            device,
+            seq,
+            ext_u32_1,
+            ext_u32_2,
+            ext_u64_1,
+            pid,
+            tid,
+        )
+
+    def _push(
+        self,
+        ts_ns,
+        rx_ts_ns,
+        src,
+        msg_len,
+        level,
+        module,
+        device,
+        seq,
+        ext_u32_1,
+        ext_u32_2,
+        ext_u64_1,
+        pid,
+        tid,
+    ) -> bool:
+        """The row write behind insert()/insert_any()/insert_view(): nb_bundle_push_len's body in
+        plain Python over memoryviews. Crossing into the kernel for one row cost ~3.8 us, nearly
+        all of it unboxing the LogBundle; the same stores from Python cost ~0.5 us (see
+        plans/bundle-push-fast-path.md stage 3). Batch writers should still use a kernel that
+        loops over many rows - this is for callers that really have one row at a time.
+
+        Every enabled column is written even when the value is 0: pool slabs are not zeroed on
+        acquire, so a skipped store would leave an earlier batch's value in the row. Nothing is
+        visible until the final size bump, so a store that raises leaves the batch as it was."""
+        if (views := self._insert_views) is None:
+            if not (b := self.bundle) or self._size_mv[0] >= b.capacity:
+                return False
+            views = self._insert_views = self._build_insert_views(b)
+        capacity, buf, ts, rx_ts, offsets, lengths, levels, modules, devices, seqs, pids, tids, u32_1, u32_2, u64_1 = (
+            views
+        )
+
+        size_mv = self._size_mv
+        idx = size_mv[0]
+        if idx >= capacity:
+            return False
+        cursor_mv = self._cursor_mv
+        cursor = cursor_mv[0]
+        end = cursor + msg_len
+        if end > len(buf):
             return False
 
-        # print(
-        #     f"PooledLogBatch insert -> "
-        #     f"self: {type(self).__name__}, "
-        #     f"ts_ns: {type(ts_ns).__name__}, "
-        #     f"rx_ts_ns: {type(rx_ts_ns).__name__}, "
-        #     f"msg_bytes: {type(msg_bytes).__name__}, "
-        #     f"level: {type(level).__name__}, "
-        #     f"module: {type(module).__name__}, "
-        #     f"device: {type(device).__name__}, "
-        #     f"seq: {type(seq).__name__}, "
-        #     f"ext_u32_1: {type(ext_u32_1).__name__}, "
-        #     f"ext_u32_2: {type(ext_u32_2).__name__}, "
-        #     f"ext_u64_1: {type(ext_u64_1).__name__}, "
-        # )
+        try:
+            ts[idx] = ts_ns
+            rx_ts[idx] = rx_ts_ns
+            offsets[idx] = cursor
+            lengths[idx] = msg_len
+            if levels is not None:
+                levels[idx] = level
+            if modules is not None:
+                modules[idx] = module
+            if devices is not None:
+                devices[idx] = device
+            if seqs is not None:
+                seqs[idx] = seq
+            if pids is not None:
+                pids[idx] = pid
+            if tids is not None:
+                tids[idx] = tid
+            if u32_1 is not None:
+                u32_1[idx] = ext_u32_1
+            if u32_2 is not None:
+                u32_2[idx] = ext_u32_2
+            if u64_1 is not None:
+                u64_1[idx] = ext_u64_1
+            if msg_len:
+                buf[cursor:end] = src if len(src) == msg_len else src[:msg_len]
+        except _PUSH_CONVERSION_ERRORS:
+            # The kernel rewrites the whole row, so stores that landed before the error don't
+            # matter; it commits size/msg_cursor itself.
+            if not nb_bundle_push_len(
+                self.bundle,
+                ts_ns,
+                rx_ts_ns,
+                src,
+                msg_len,
+                level,
+                module,
+                device,
+                seq,
+                ext_u32_1,
+                ext_u32_2,
+                ext_u64_1,
+                pid,
+                tid,
+            ):
+                return False
+        else:
+            cursor_mv[0] = end
+            size_mv[0] = idx + 1
 
-        success = nb_bundle_push(
-            b, ts_ns, rx_ts_ns, msg_bytes, level, module, device, seq, ext_u32_1, ext_u32_2, ext_u64_1, pid, tid
+        if self._cached_first_seq is None:
+            self._cached_first_seq = seq
+            self._cached_first_ts = ts_ns
+        self._cached_last_seq = seq
+        self._cached_last_ts = ts_ns
+        return True
+
+    @staticmethod
+    def _build_insert_views(b: LogBundle) -> tuple:
+        """The write plan _push unpacks: capacity, then buffer and the mandatory columns, then a
+        view for each enabled optional column and None for each disabled one. A disabled column
+        points at a shared EMPTY_* placeholder, which must never be written."""
+        return (
+            b.capacity,
+            memoryview(b.buffer),
+            memoryview(b.timestamps),
+            memoryview(b.rx_timestamps),
+            memoryview(b.offsets),
+            memoryview(b.lengths),
+            memoryview(b.levels) if b.has_levels else None,
+            memoryview(b.modules) if b.has_modules else None,
+            memoryview(b.devices) if b.has_devices else None,
+            memoryview(b.sequences) if b.has_sequences else None,
+            memoryview(b.pids) if b.has_pids else None,
+            memoryview(b.tids) if b.has_tids else None,
+            memoryview(b.ext_u32_1) if b.has_ext_u32_1 else None,
+            memoryview(b.ext_u32_2) if b.has_ext_u32_2 else None,
+            memoryview(b.ext_u64_1) if b.has_ext_u64_1 else None,
         )
-        if success:
-            self._note_inserted_row(ts_ns, seq)
-        return success
 
     def _note_inserted_row(self, ts_ns: int, seq) -> None:
         """Updates the plain-int first/last seq+ts cache after a single successful insert -
@@ -590,8 +725,10 @@ class PooledLogBatch:
             # mmap.close() on its clean path.
             size_mv, cursor_mv = self._size_mv, self._cursor_mv
             seq_mv, ts_mv = self._seq_mv, self._ts_mv
+            insert_views = self._insert_views or ()
             self._size_mv = self._cursor_mv = self._seq_mv = self._ts_mv = None
-            for mv in (size_mv, cursor_mv, seq_mv, ts_mv):
+            self._insert_views = None
+            for mv in (size_mv, cursor_mv, seq_mv, ts_mv, *insert_views[1:]):
                 if mv is not None:
                     mv.release()
 

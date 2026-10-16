@@ -86,9 +86,8 @@ class BinaryFileReader(BaseReader):
                 # np.memmap refuses to map an empty file
                 logger.warning("Binary file is empty: %s", path)
                 return
-            # Plain read-only ndarray view over the mapping: slices are zero-copy. Push them via
-            # insert_view() - its read-only-array nb_bundle_push_len variant is already warmed
-            # (binary_parser); insert() would compile a new read-only-array nb_bundle_push.
+            # Plain read-only ndarray view over the mapping: slices are zero-copy, and insert_view()
+            # copies straight out of them.
             data_map = np.memmap(path, dtype=dtypes.BYTE, mode="r").view(np.ndarray)
         except Exception as e:
             logger.error("Failed to memory-map binary file %s: %s", path, e)
