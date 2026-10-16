@@ -320,22 +320,24 @@ When writing or reviewing an `@app_njit` function:
 
 **The axis that actually matters: which side of the Python↔Numba boundary the call happens on.**
 A repo-wide audit (grep every `@app_njit` function for default-valued parameters, then check each
-call site) found exactly 3 surviving live-default functions: `nb_table_get_max_string_len`
-(`ops/formatting.py`, `fallback_default=3`) and `nb_bundle_push`/`nb_bundle_push_len`
-(`ops/segments.py`, `pid=0, tid=0`). All three are safe to leave as-is, but for two *different*
-reasons worth distinguishing:
+call site) found exactly 2 surviving live-default functions: `nb_table_get_max_string_len`
+(`ops/formatting.py`, `fallback_default=3`) and `nb_bundle_push_len` (`ops/segments.py`,
+`pid=0, tid=0`). (`nb_bundle_push` used to be a third; it was deleted along with `nb_can_push`,
+its last caller, in `plans/bundle-push-fast-path.md` stage 4.) Both are safe to leave as-is, but
+for two *different* reasons worth distinguishing:
 - `nb_table_get_max_string_len` has one call site, and it passes the value explicitly anyway - no
   omission actually occurs.
-- `nb_bundle_push`'s `pid`/`tid` omission at `io/can_bus.py`'s `nb_can_push` call site is safe
-  **not** because it's "only one call site with this particular omission pattern", but because
-  `nb_can_push` is *itself* `@app_njit`-decorated - the call into `nb_bundle_push` is
+- `nb_bundle_push_len`'s `pid`/`tid` omission at `ops/kv_extraction.py`'s call sites is safe
+  **not** because they share one omission pattern, but because those callers are *themselves*
+  `@app_njit`-decorated - the call into `nb_bundle_push_len` is
   **Numba-to-Numba**, resolved entirely at compile time (the compiler already knows both
   functions' full signatures and bakes the omitted values in as compile-time constants). The
   `Omitted(value=...)` typing/dispatch cost documented above is specifically a **Python-call-site**
   phenomenon - it's the cost of Python's calling convention resolving which specialization to
   invoke and marshaling arguments across the language boundary before compiled code ever runs.
   Two `@app_njit` functions calling each other never pay it, no matter how many such internal call
-  sites exist or how their omission patterns differ from each other.
+  sites exist or how their omission patterns differ from each other. Its one Python-side caller,
+  `PooledLogBatch._push`'s conversion-error fallback, passes all fourteen arguments.
 - Practical audit rule: when you find a default-valued `@app_njit` parameter, check whether its
   *caller* is plain Python or itself `@app_njit`. Only Python-side callers need the "pass
   everything explicitly" discipline above; njit-to-njit callers omitting a default are free.

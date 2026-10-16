@@ -7,15 +7,10 @@
 from time import sleep
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
-
-from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property
 from blinkview.core.limits import BATCH_MAXLEN
 from blinkview.core.numpy_batch_manager import PooledLogBatch
-from blinkview.core.types.empty import EMPTY_BYTES
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
-from blinkview.ops.segments import nb_can_push
 from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 if TYPE_CHECKING:
@@ -47,41 +42,26 @@ class CanLogBatch(PooledLogBatch):
 
     def insert_can(self, msg: "Message", offset_ns: int) -> bool:
         """
-        High-performance insertion of a python-can Message object.
-        Handles zero-copy buffer views, flag packing, and clock sync.
+        Inserts one python-can Message: the arbitration id goes to ext_u32_1, the packed flags to
+        ext_u32_2, and msg.timestamp (seconds on the interface's clock) is projected to epoch ns
+        with offset_ns. Plain Python, not a kernel: python-can's recv() hands over one frame at a
+        time, and a <=64-byte row costs far less to write than a kernel call costs to make (see
+        plans/bundle-push-fast-path.md stage 4).
         """
-        if not (b := self.bundle):
-            return False
-
-        # 1. Zero-copy view of data (Fixes the Element Size ValueError)
-        # Using np.uint8 explicitly
-        d_view = np.frombuffer(msg.data, dtype=dtypes.BYTE) if msg.data else EMPTY_BYTES
-
-        # 2. Extract hardware attributes safely
-        # We use getattr for FD flags to support non-FD drivers/interfaces
-        success = nb_can_push(
-            b,
-            msg.timestamp,
-            offset_ns,
-            msg.arbitration_id,
-            d_view,
-            msg.is_extended_id,
-            msg.is_remote_frame,
-            msg.is_error_frame,
-            msg.is_fd,
-            msg.is_rx,
-            msg.bitrate_switch,
-            msg.error_state_indicator,
+        ts_ns = offset_ns + int(msg.timestamp * 1_000_000_000)
+        # Stored layout - nothing decodes it yet, but append new flags rather than reorder.
+        flags = (
+            (0x01 if msg.is_extended_id else 0)  # Extended vs Standard id
+            | (0x02 if msg.is_remote_frame else 0)  # Remote Frame
+            | (0x04 if msg.is_error_frame else 0)  # Error Frame
+            | (0x08 if msg.is_fd else 0)  # CAN FD Frame
+            | (0x10 if msg.is_rx else 0)  # Rx vs Tx
+            | (0x20 if msg.bitrate_switch else 0)  # Bit Rate Switch
+            | (0x40 if msg.error_state_indicator else 0)  # Error State Indicator
         )
-        if success:
-            # nb_can_push writes straight into the bundle (bypassing insert()/insert_any()), so
-            # the first/last seq+ts cache those maintain incrementally never sees this row -
-            # update it here too, so self.start_ts (relied on by can_bus.py's flush-timing logic)
-            # doesn't get stuck at its "empty" sentinel forever. seq is always 0 for raw CAN
-            # ingress (see nb_can_push); ts_ns mirrors its own projection formula exactly, so no
-            # extra array read-back is needed.
-            self._note_inserted_row(offset_ns + int(msg.timestamp * 1_000_000_000), 0)
-        return success
+        data = msg.data
+        # level, module, device, seq are 0 for raw CAN ingress
+        return self._push(ts_ns, ts_ns, data, len(data), 0, 0, 0, 0, msg.arbitration_id, flags, 0, 0, 0)
 
 
 @DeviceFactory.register("can")

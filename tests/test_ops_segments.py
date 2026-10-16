@@ -16,8 +16,7 @@ from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS, build_kv_condition_arra
 from blinkview.ops.segments import (
     LEVEL_SLOTS,
     nb_bundle_extend,
-    nb_bundle_push,
-    nb_can_push,
+    nb_bundle_push_len,
     nb_copy_batch_to_segment,
     nb_count_rows_by_module_level,
     nb_filter_segment,
@@ -1162,8 +1161,15 @@ def test_find_next_module_index_not_found_returns_false():
 
 
 # ---------------------------------------------------------------------------
-# nb_bundle_push / nb_bundle_push_len / nb_can_push / nb_bundle_extend
+# nb_bundle_push_len / nb_bundle_extend
 # ---------------------------------------------------------------------------
+
+
+def _push_row(bundle, ts_ns, rx_ts_ns, msg, *args, **kwargs):
+    """nb_bundle_push_len with the length taken from msg - what the deleted nb_bundle_push wrapper
+    did. Its only non-test caller was nb_can_push, gone with plans/bundle-push-fast-path.md
+    stage 4."""
+    return nb_bundle_push_len(bundle, ts_ns, rx_ts_ns, msg, len(msg), *args, **kwargs)
 
 
 def _pool_batch(capacity=4, buffer_bytes=64, **flags):
@@ -1209,7 +1215,7 @@ def test_bundle_push_writes_row_and_advances_cursors():
     batch = _pool_batch(has_levels=True, has_modules=True, has_devices=True, has_sequences=True)
     msg = np.frombuffer(b"hello", dtype=dtypes.BYTE)
 
-    ok = nb_bundle_push(
+    ok = _push_row(
         batch.bundle, 100, 100, msg, level=2, module=3, device=1, seq=7, ext_u32_1=0, ext_u32_2=0, ext_u64_1=0
     )
 
@@ -1231,8 +1237,8 @@ def test_bundle_push_fails_when_capacity_exhausted():
     bundle = _raw_push_bundle(capacity=1, buffer_bytes=64)
     msg = np.frombuffer(b"a", dtype=dtypes.BYTE)
 
-    first = nb_bundle_push(bundle, 1, 1, msg, 0, 0, 0, 0, 0, 0, 0)
-    second = nb_bundle_push(bundle, 2, 2, msg, 0, 0, 0, 0, 0, 0, 0)
+    first = _push_row(bundle, 1, 1, msg, 0, 0, 0, 0, 0, 0, 0)
+    second = _push_row(bundle, 2, 2, msg, 0, 0, 0, 0, 0, 0, 0)
 
     assert first
     assert not second  # capacity is 1, second row must be rejected
@@ -1242,7 +1248,7 @@ def test_bundle_push_fails_when_buffer_would_overflow():
     bundle = _raw_push_bundle(capacity=4, buffer_bytes=3)
     msg = np.frombuffer(b"toolong", dtype=dtypes.BYTE)
 
-    ok = nb_bundle_push(bundle, 1, 1, msg, 0, 0, 0, 0, 0, 0, 0)
+    ok = _push_row(bundle, 1, 1, msg, 0, 0, 0, 0, 0, 0, 0)
 
     assert not ok
     assert bundle.size[0] == 0  # rejected before any metadata was written
@@ -1252,7 +1258,7 @@ def test_bundle_push_writes_pids_and_tids_when_present():
     batch = _pool_batch(has_pids=True, has_tids=True)
     msg = np.frombuffer(b"x", dtype=dtypes.BYTE)
 
-    nb_bundle_push(batch.bundle, 1, 1, msg, 0, 0, 0, 0, 0, 0, 0, pid=42, tid=7)
+    _push_row(batch.bundle, 1, 1, msg, 0, 0, 0, 0, 0, 0, 0, pid=42, tid=7)
 
     assert int(batch.bundle.pids[0]) == 42
     assert int(batch.bundle.tids[0]) == 7
@@ -1260,39 +1266,10 @@ def test_bundle_push_writes_pids_and_tids_when_present():
     batch.release()
 
 
-def test_can_push_projects_timestamp_and_packs_flags():
-    batch = _pool_batch(has_ext_u32_1=True, has_ext_u32_2=True)
-    data = np.frombuffer(b"\x01\x02\x03", dtype=dtypes.BYTE)
-
-    ok = nb_can_push(
-        batch.bundle,
-        raw_timestamp=0.5,
-        offset_ns=1_000_000_000,
-        arb_id=0x123,
-        data=data,
-        is_ext=True,
-        is_rem=False,
-        is_err=False,
-        is_fd=True,
-        is_rx=True,
-        brs=False,
-        esi=False,
-    )
-
-    assert ok
-    # ts_ns = offset_ns + int(0.5 * 1e9) = 1_500_000_000
-    assert batch.bundle.timestamps[0] == 1_500_000_000
-    assert int(batch.bundle.ext_u32_1[0]) == 0x123
-    # is_ext (bit0) | is_fd (bit3) | is_rx (bit4) = 0x01 | 0x08 | 0x10 = 0x19
-    assert int(batch.bundle.ext_u32_2[0]) == 0x19
-
-    batch.release()
-
-
 def test_bundle_extend_appends_to_last_message():
     batch = _pool_batch()
     first = np.frombuffer(b"hello", dtype=dtypes.BYTE)
-    nb_bundle_push(batch.bundle, 1, 1, first, 0, 0, 0, 0, 0, 0, 0)
+    _push_row(batch.bundle, 1, 1, first, 0, 0, 0, 0, 0, 0, 0)
 
     more = np.frombuffer(b" world", dtype=dtypes.BYTE)
     ok = nb_bundle_extend(batch.bundle, more)
@@ -1320,7 +1297,7 @@ def test_bundle_extend_on_empty_bundle_returns_false():
 def test_bundle_extend_fails_when_buffer_would_overflow():
     bundle = _raw_push_bundle(capacity=4, buffer_bytes=6)
     first = np.frombuffer(b"abc", dtype=dtypes.BYTE)
-    nb_bundle_push(bundle, 1, 1, first, 0, 0, 0, 0, 0, 0, 0)
+    _push_row(bundle, 1, 1, first, 0, 0, 0, 0, 0, 0, 0)
 
     too_much = np.frombuffer(b"toolong", dtype=dtypes.BYTE)
     ok = nb_bundle_extend(bundle, too_much)
@@ -1337,7 +1314,7 @@ def test_bundle_push_copies_large_payloads_byte_for_byte():
         batch = _pool_batch(capacity=2, buffer_bytes=payload_len * 2, has_levels=True)
         msg = np.frombuffer(payload, dtype=dtypes.BYTE)
 
-        ok = nb_bundle_push(
+        ok = _push_row(
             batch.bundle, 100, 100, msg, level=2, module=0, device=0, seq=0, ext_u32_1=0, ext_u32_2=0, ext_u64_1=0
         )
 
@@ -1358,7 +1335,7 @@ def test_bundle_push_back_to_back_large_payloads_stay_separate():
     batch = _pool_batch(capacity=4, buffer_bytes=len(first) + len(second), has_levels=True)
 
     for payload in (first, second):
-        assert nb_bundle_push(
+        assert _push_row(
             batch.bundle,
             100,
             100,

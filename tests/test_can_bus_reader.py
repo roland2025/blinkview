@@ -68,9 +68,9 @@ class TestDefaults:
 
 
 class TestCanLogBatchStartTsTracksRealInserts:
-    """Regression test for a real bug: CanLogBatch.insert_can() pushes rows via a custom Numba
-    kernel (nb_can_push) rather than PooledLogBatch.insert()/insert_any()/insert_view() - the
-    only three methods PooledLogBatch's first/last seq+ts cache (added for
+    """Regression test for a real bug: CanLogBatch.insert_can() used to push rows via its own
+    Numba kernel (nb_can_push) rather than PooledLogBatch.insert()/insert_any()/insert_view() -
+    the only three methods PooledLogBatch's first/last seq+ts cache (added for
     plans/fetch-telemetry-window-cold-segment-perf.md) was originally wired into. Without this
     fix, batch.start_ts stayed stuck at its "empty" sentinel (max int64) forever after a real
     insert_can() call, which silently broke can_bus.py's time-based flush check
@@ -91,6 +91,94 @@ class TestCanLogBatchStartTsTracksRealInserts:
         assert batch.start_ts == 1_000_000_000
 
         batch.release()
+
+
+FLAG_ATTRS = (
+    ("is_extended_id", 0x01),
+    ("is_remote_frame", 0x02),
+    ("is_error_frame", 0x04),
+    ("is_fd", 0x08),
+    ("is_rx", 0x10),
+    ("bitrate_switch", 0x20),
+    ("error_state_indicator", 0x40),
+)
+
+
+def _row(batch, idx):
+    b = batch.bundle
+    off, n = int(b.offsets[idx]), int(b.lengths[idx])
+    return (
+        int(b.timestamps[idx]),
+        int(b.rx_timestamps[idx]),
+        int(b.ext_u32_1[idx]),
+        int(b.ext_u32_2[idx]),
+        bytes(b.buffer[off : off + n]),
+    )
+
+
+class TestInsertCan:
+    """plans/bundle-push-fast-path.md stage 4: insert_can() packs the flags and projects the
+    timestamp in Python and writes through PooledLogBatch._push, instead of calling nb_can_push.
+    Before deleting the kernel, the Python arithmetic was checked against it on 40,009 timestamps
+    (random, negative, ns rounding edges) and all 128 flag combinations with no mismatch; the
+    literal values below are what both produce."""
+
+    @pytest.fixture
+    def batch(self):
+        batch = NumpyArrayPool().create(CanLogBatch, req_capacity=256, buffer_bytes=8192)
+        yield batch
+        batch.release()
+
+    def test_every_flag_combination_packs_to_its_bits(self, batch):
+        for combo in range(128):
+            kwargs = {attr: bool(combo & bit) for attr, bit in FLAG_ATTRS}
+            msg = can.Message(arbitration_id=0x100, data=b"", timestamp=0.0, **kwargs)
+            # python-can forces is_fd when brs/esi is set; pack what the Message actually holds.
+            expected = sum(bit for attr, bit in FLAG_ATTRS if getattr(msg, attr))
+            assert batch.insert_can(msg, offset_ns=0)
+            assert _row(batch, combo)[3] == expected, kwargs
+
+    @pytest.mark.parametrize(
+        "raw_ts, projected_ns",
+        [
+            (0.5, 500_000_000),
+            (-0.25, -250_000_000),
+            (1e-9, 1),
+            (0.999999999, 999_999_999),
+            (1.0000000005, 1_000_000_000),
+            (1760000000.123456, 1_760_000_000_123_456_000),
+        ],
+    )
+    def test_timestamp_projection_truncates_like_the_old_kernel(self, batch, raw_ts, projected_ns):
+        msg = can.Message(arbitration_id=0x1, data=b"\x01", timestamp=raw_ts)
+        assert batch.insert_can(msg, offset_ns=1_000)
+        ts, rx_ts, *_ = _row(batch, 0)
+        assert ts == rx_ts == 1_000 + projected_ns
+        assert batch.start_ts == batch.end_ts == ts
+
+    def test_writes_id_and_payload_including_empty_and_fd_frames(self, batch):
+        frames = [
+            can.Message(arbitration_id=0x1ABCDEF, data=b"\x01\x02\x03", is_extended_id=True),
+            can.Message(arbitration_id=0x7FF, is_remote_frame=True, dlc=4, is_extended_id=False),
+            can.Message(arbitration_id=0x123, data=bytes(range(64)), is_fd=True, is_extended_id=False),
+        ]
+        for msg in frames:
+            assert batch.insert_can(msg, offset_ns=0)
+
+        assert [_row(batch, i)[2] for i in range(3)] == [0x1ABCDEF, 0x7FF, 0x123]
+        assert [_row(batch, i)[4] for i in range(3)] == [b"\x01\x02\x03", b"", bytes(range(64))]
+        assert batch.msg_cursor == 3 + 64
+
+    def test_refuses_when_full_or_released(self):
+        batch = NumpyArrayPool().create(CanLogBatch, req_capacity=1, buffer_bytes=64)
+        msg = can.Message(arbitration_id=0x1, data=b"\x01")
+        for _ in range(batch.capacity):
+            assert batch.insert_can(msg, offset_ns=0)
+        assert batch.insert_can(msg, offset_ns=0) is False
+        assert batch.size == batch.capacity
+
+        batch.release()
+        assert batch.insert_can(msg, offset_ns=0) is False
 
 
 class TestRealLoopbackIngestion:
