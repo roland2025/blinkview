@@ -65,3 +65,12 @@ These are not kept in this repository. They live in the separate `blinkatlas-wik
 checkout: `plans/`, `reports/`, `findings/`, `benchmarks/`, `patterns/`, `decisions/`).
 - Write new plans in the wiki clone, not here; `plans/` is gitignored.
 - Code comments citing `plans/<name>.md` refer to `wiki:plans/<name>.md` (a few moved to `wiki:reports/`).
+
+## Check blinkatlas before changing code
+The wiki is indexed by the `blinkatlas` MCP server (see the `blinkatlas` skill).
+- Before changing code in `src/`, for a new feature as much as an optimization or a fix, run
+  `findings_about` and `plans_touching` on the files or symbols you will change. Follow the plans
+  they list; read findings before relying on code behaviour they describe.
+- Record what you measured or learned on hardware or by benchmark with `record_finding` /
+  `record_benchmark`, not only in chat or a plan's open issues. Anchor it on committed, indexed code
+  (see the skill for unpushed or uncommitted work).
