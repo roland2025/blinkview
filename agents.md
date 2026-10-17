@@ -61,7 +61,7 @@ BlinkView is a high-performance telemetry, log viewer, and visualization tool fo
 - Use descriptive variable names, especially when dealing with complex array indexing in the `ops/` directory.
 
 ## Plans, reports and findings
-These are not kept in this repository. They live in the separate `blinkatlas-wiki` repo (a sibling
+These are not kept in this repository. They live in the separate `blinkview-wiki` repo (a sibling
 checkout: `plans/`, `reports/`, `findings/`, `benchmarks/`, `patterns/`, `decisions/`).
 - Write new plans in the wiki clone, not here; `plans/` is gitignored.
 - Code comments citing `plans/<name>.md` refer to `wiki:plans/<name>.md` (a few moved to `wiki:reports/`).
