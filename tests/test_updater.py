@@ -606,6 +606,37 @@ class TestGitUpdaterRealRepo:
         ]
         assert settings.values["update.pending_version"] == "v0.18.0"
 
+    def test_fetch_takes_a_tag_that_moved_on_the_remote(self, repo, tmp_path):
+        # A history rewrite moves existing tags; a plain `git fetch --tags` refuses those
+        # ("would clobber existing tag") and exits 1, failing every update check.
+        def git(path, *args):
+            return subprocess.run(
+                ["git", "-C", str(path), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        checkout = tmp_path / "checkout"
+        git(tmp_path, "clone", "-q", str(repo), str(checkout))
+        (checkout / "src" / "blinkview").mkdir(parents=True)
+        (checkout / "src" / "blinkview" / "__main__.py").write_text("")
+        (checkout / "pyproject.toml").write_text("")
+
+        git(repo, "commit", "-q", "--allow-empty", "-m", "rewritten")
+        git(repo, "tag", "-f", "v0.18.0")
+        git(repo, "tag", "v0.20.0")
+        moved = git(repo, "rev-parse", "v0.18.0^{commit}")
+        assert git(checkout, "rev-parse", "v0.18.0^{commit}") != moved
+
+        settings = FakeSettings({"update.path": str(checkout)})
+        u = GitUpdater(settings, InstallInfo(Installer.UV_TOOL, checkout, True, ("all",)))
+
+        assert u.fetch(force=True) is True
+        assert git(checkout, "rev-parse", "v0.18.0^{commit}") == moved
+        assert u.get_versions()[0] == "v0.20.0"
+        assert settings.values["update.latest_version"] == "0.20.0"
+
 
 class TestUpdateNotice:
     @pytest.fixture

@@ -467,8 +467,13 @@ class GitUpdater(Updater):
         # Execute Network Call
         try:
             print("[Updater] Contacting remote for updates...")
+            # --force: a tag moved on the remote (history rewrite, retag) replaces the local one;
+            # without it git refuses ("would clobber existing tag") and the whole fetch fails.
             subprocess.run(
-                ["git", "-C", str(self.repo_path), "fetch", "--tags"], check=True, capture_output=True, text=True
+                ["git", "-C", str(self.repo_path), "fetch", "--tags", "--force"],
+                check=True,
+                capture_output=True,
+                text=True,
             )
         except subprocess.CalledProcessError as e:
             raise UpdateError(f"Fetch failed: {e.stderr or e.stdout or str(e)}")
