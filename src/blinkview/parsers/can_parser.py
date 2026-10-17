@@ -40,7 +40,8 @@ class DBCMsgInfo:
     default=False,
     required=True,
     ui_order=10,
-    description="If true, raises an error for unknown CAN IDs. Overrides ignore_unknown.",
+    description="If true, logs each unknown CAN ID as an ERROR row instead of an INFO UNMAPPED row. "
+    "Overrides ignore_unknown.",
 )
 @configuration_property(
     "ignore_unknown",
@@ -81,7 +82,8 @@ class CantoolsParser(BaseParser):
                 self.db = None
 
         # --- Pre-bake Logic ---
-        self._msg_info_map.clear()
+        # Build a new map and swap it in, so a running run() never sees a half-filled one
+        msg_info_map = {}
 
         if self.db:
             get_device_module = self.local.device_id.get_module
@@ -90,11 +92,9 @@ class CantoolsParser(BaseParser):
                 # Pre-calculate the module IDs exclusively for this message's signals
                 local_signal_map = {signal.name: get_device_module(signal.name).id for signal in msg.signals}
 
-                self._msg_info_map[msg.frame_id] = DBCMsgInfo(
-                    name=msg.name, decode=msg.decode, signal_map=local_signal_map
-                )
+                msg_info_map[msg.frame_id] = DBCMsgInfo(name=msg.name, decode=msg.decode, signal_map=local_signal_map)
 
-                print(f"{msg.name}: {local_signal_map}")
+        self._msg_info_map = msg_info_map
 
         return changed
 
@@ -103,8 +103,10 @@ class CantoolsParser(BaseParser):
             self.logger.info("Starting Cantools parser thread")
             get = self.input_queue.get
 
-            # Using 50ms as a safe default delay if not specifically overridden
-            max_timeout = getattr(self, "delay", 50) / 1000.0
+            # A row waits at most `delay` before its batch is distributed
+            max_timeout = self.delay / 1000.0
+            max_timeout_ns = int(max_timeout * 1e9)
+            time_ns = self.shared.time_ns
             stop_is_set = self._stop_event.is_set
 
             device: "DeviceIdentity" = self.local.device_id
@@ -115,9 +117,8 @@ class CantoolsParser(BaseParser):
 
             module_unknown_id_int = get_device_module("unknown").id
 
-            info_map_get = self._msg_info_map.get
-            strict = getattr(self, "strict", False)
-            ignore_unknown = getattr(self, "ignore_unknown", False)
+            # CAN IDs whose decode failure was already logged, so a DBC/bus mismatch logs once per ID
+            decode_failure_logged = set()
 
             log_level_error_int = LogLevel.ERROR.value
             log_level_info_int = LogLevel.INFO.value
@@ -140,18 +141,38 @@ class CantoolsParser(BaseParser):
                 )
 
             batch_out = None
+            batch_out_time = 0  # When the first row went into batch_out, 0 while it is empty
 
             def flush():
-                nonlocal batch_out
+                nonlocal batch_out, batch_out_time
                 if batch_out is not None and batch_out.size > 0:
                     with batch_out:
                         tuner_out.update(batch_out.msg_cursor, batch_out.size, target_window_sec=max_timeout)
                         self.distribute(batch_out)
                 batch_out = None
+                batch_out_time = 0
+
+            def insert_row(ts, out_bytes, level, mod_id):
+                nonlocal batch_out, batch_out_time
+                if not batch_out.insert(ts, ts, out_bytes, level, mod_id, device_id_int):
+                    flush()
+                    batch_out = batch_acquire()
+                    if not batch_out.insert(ts, ts, out_bytes, level, mod_id, device_id_int):
+                        self.logger.warn("Dropped a %d-byte row that does not fit an empty batch", len(out_bytes))
+                        return
+                if not batch_out_time:
+                    batch_out_time = time_ns()  # Start the clock
 
             while not stop_is_set():
                 try:
-                    batch_in = get(timeout=max_timeout)
+                    if batch_out_time:
+                        # Wait only for what is left of the pending batch's delay window
+                        timeout = max(0.0, max_timeout - (time_ns() - batch_out_time) / 1e9)
+                    else:
+                        # Nothing pending; get() wakes when data arrives or the parser is stopped
+                        timeout = 120
+
+                    batch_in = get(timeout=timeout)
 
                     if not batch_in:
                         flush()
@@ -160,9 +181,10 @@ class CantoolsParser(BaseParser):
                     with batch_in:
                         speed_in.batch(batch_in)
 
-                        # print(f"[cantools] batch_in={batch_in}")
-                        # for ts, msg, _, _, _, _, addr, flags, _ in batch_in:
-                        #     print(f"  ts={ts} addr={addr:04X} flags={flags:02X} data='{msg.tobytes().hex()}'")
+                        # Re-read per batch so a live reconfigure takes effect
+                        info_map_get = self._msg_info_map.get
+                        strict = self.strict
+                        ignore_unknown = self.ignore_unknown
 
                         # Estimate burst size (assume decoded string takes ~80-120 bytes max)
                         estimated_out_bytes = batch_in.size * 128
@@ -198,59 +220,31 @@ class CantoolsParser(BaseParser):
                                 if msg_info is not None:
                                     try:
                                         decoded = msg_info.decode(data)
-                                        local_sig_map = msg_info.signal_map
-
-                                        for k, v in decoded.items():
-                                            mod_id = local_sig_map[k]
-                                            out_bytes = str(v).encode()
-
-                                            if not batch_out.insert(
-                                                ts, ts, out_bytes, log_level_info_int, mod_id, device_id_int
-                                            ):
-                                                flush()
-                                                batch_out = batch_acquire()
-                                                batch_out.insert(
-                                                    ts, ts, out_bytes, log_level_info_int, mod_id, device_id_int
-                                                )
-
                                     except Exception as e:
-                                        out_bytes = f"[{can_id:04X}] {msg_info.name} | {data.hex()} | Decoding error: {e}".encode()
-
-                                        if not batch_out.insert(
-                                            ts, ts, out_bytes, log_level_error_int, module_unknown_id_int, device_id_int
-                                        ):
-                                            flush()
-                                            batch_out = batch_acquire()
-                                            batch_out.insert(
-                                                ts,
-                                                ts,
-                                                out_bytes,
-                                                log_level_error_int,
-                                                module_unknown_id_int,
-                                                device_id_int,
+                                        err = f"[{can_id:04X}] {msg_info.name} | {data.hex()} | Decoding error: {e}"
+                                        insert_row(ts, err.encode(), log_level_error_int, module_unknown_id_int)
+                                        if can_id not in decode_failure_logged:
+                                            decode_failure_logged.add(can_id)
+                                            self.logger.error(
+                                                "Decoding failed for CAN ID %04X (%s), not logging it again",
+                                                can_id,
+                                                msg_info.name,
+                                                exc=e,
                                             )
-                                        self.logger.exception("Failure", exc=e)
+                                        continue
+
+                                    local_sig_map = msg_info.signal_map
+                                    for k, v in decoded.items():
+                                        insert_row(ts, str(v).encode(), log_level_info_int, local_sig_map[k])
 
                                 else:
                                     # --- Unmapped ID Handling ---
                                     if strict:
-                                        raise ValueError(f"Unknown CAN ID: {can_id}")
-
-                                    if not ignore_unknown:
+                                        out_bytes = f"[{can_id:04X}] UNKNOWN CAN ID | {data.hex()}".encode()
+                                        insert_row(ts, out_bytes, log_level_error_int, module_unknown_id_int)
+                                    elif not ignore_unknown:
                                         out_bytes = f"[{can_id:04X}] UNMAPPED | {data.hex()}".encode()
-                                        if not batch_out.insert(
-                                            ts, ts, out_bytes, log_level_info_int, module_unknown_id_int, device_id_int
-                                        ):
-                                            flush()
-                                            batch_out = batch_acquire()
-                                            batch_out.insert(
-                                                ts,
-                                                ts,
-                                                out_bytes,
-                                                log_level_info_int,
-                                                module_unknown_id_int,
-                                                device_id_int,
-                                            )
+                                        insert_row(ts, out_bytes, log_level_info_int, module_unknown_id_int)
                         finally:
                             timestamps.release()
                             offsets.release()
@@ -258,10 +252,11 @@ class CantoolsParser(BaseParser):
                             buf.release()
                             can_ids.release()
 
-                    # --- Check for Flush Thresholds ---
+                    # --- Check for Flush Thresholds: full, or its oldest row has waited `delay` ---
                     if batch_out and (
                         batch_out.size >= batch_out.capacity
                         or batch_out.msg_cursor >= (batch_out.buffer_capacity() * 0.9)
+                        or (batch_out_time and time_ns() - batch_out_time >= max_timeout_ns)
                     ):
                         flush()
                 except Exception as e:
