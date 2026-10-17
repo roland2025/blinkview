@@ -167,6 +167,8 @@ def _list_jlink_serials() -> list[str]:
     description="The physical size of the RTT Up-Buffer in the target's RAM. "
     "Used to precisely flush stale data on startup without discarding live telemetry.",
 )
+@override_property("stall_warn_s", default=30)
+@override_property("stall_reconnect_s", default=60)
 class JLinkRTTReader(BaseReader):
     __doc__ = """The primary data ingestion source for Segger J-Link RTT (Real-Time Transfer).
 
@@ -176,6 +178,12 @@ class JLinkRTTReader(BaseReader):
 * Efficiently batches high-frequency incoming byte streams
 
 Leverages the `pylink-square` library under the hood. Batches are accumulated based on the configured delay to minimize downstream processing overhead without dropping high-throughput streams."""
+
+    supports_reconnect = True
+    stall_hint = (
+        "Check the J-Link USB hubs and controller: when every board goes quiet at once, power-cycling "
+        "the hubs has fixed it."
+    )
 
     type: str
     target_device: str
@@ -282,6 +290,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                         _dll_rtterminal_read = _dll.JLINK_RTTERMINAL_Read
                         _dll_is_open = _dll.JLINKARM_IsOpen
                         _dll_is_connected = _dll.JLINKARM_EMU_IsConnected
+                        self._mark_ready()
 
                 # Acquire batch using current Tuner projections
                 if batch is None:
@@ -421,7 +430,9 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
                 self.logger_link.info("Connecting to J-Link: %s", self.serial_number)
                 jl = _reader_jlink(self.serial_number)
-                jl.exec_command("SuppressGUI = 1")  # bare "SuppressGUI" makes the DLL print an "Info: No parameter" line per open
+                jl.exec_command(
+                    "SuppressGUI = 1"
+                )  # bare "SuppressGUI" makes the DLL print an "Info: No parameter" line per open
 
                 if self.serial_number:
                     jl.open(serial_no=int(self.serial_number))
@@ -462,6 +473,51 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                     except Exception:
                         pass
                 return None
+
+    @property
+    def is_connected(self) -> bool:
+        return self.jlink is not None
+
+    def reconnect(self) -> bool:
+        """Closes the probe; the reader loop sees self.jlink is None and opens it again. A full
+        reconnect, not rtt_stop() + rtt_start() on the open session: that left a stalled RTT (reads
+        returning 0 bytes) stalled, while closing the probe and opening it again - what disabling and
+        enabling the source does - brought data back. Used by the rtt_restart command and the stall
+        watchdog; False when the probe stays busy."""
+        if not self._jlink_lock.acquire(timeout=JLINK_LOCK_TIMEOUT_S):
+            self.logger_link.warn("Reconnect dropped: the J-Link is busy (a DLL call has not returned).")
+            return False
+        try:
+            self.cleanup_jlink()
+            return True
+        finally:
+            self._jlink_lock.release()
+
+    def describe_stall(self) -> Optional[str]:
+        """The DLL's RTT status and whether the probe can reach the target, for the stall warning."""
+        if not self._jlink_lock.acquire(timeout=JLINK_LOCK_TIMEOUT_S):
+            return "J-Link busy (a DLL call has not returned)"
+        try:
+            jl = self.jlink
+            if jl is None:
+                return "no open J-Link session"
+            parts = []
+            try:
+                st = jl.rtt_get_status()
+                parts.append(
+                    f"RTT running={st.IsRunning} up_buffers={st.NumUpBuffers} "
+                    f"bytes_transferred={st.NumBytesTransferred} bytes_read={st.NumBytesRead} "
+                    f"host_overflows={st.HostOverflowCount}"
+                )
+            except Exception as e:
+                parts.append(f"RTT status failed: {e}")
+            try:
+                parts.append("target halted" if jl.halted() else "target running")
+            except Exception as e:
+                parts.append(f"target not reachable: {e}")
+            return "; ".join(parts)
+        finally:
+            self._jlink_lock.release()
 
     @contextmanager
     def probe(self):
@@ -528,12 +584,8 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
             match command:
                 case "rtt_restart":
-                    # A full reconnect, not rtt_stop() + rtt_start() on the open session: that left a
-                    # stalled RTT (reads returning 0 bytes) stalled, while closing the probe and opening
-                    # it again - what disabling and enabling the source does - brought data back.
-                    # The reader loop sees self.jlink is None and reopens it.
                     self.logger.info("RTT restart: reconnecting the J-Link.")
-                    self.cleanup_jlink()
+                    self.reconnect()
 
                 case "reset":
                     self.logger.info("Initiating hardware reset on target MCU: %s", self.target_device)

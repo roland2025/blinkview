@@ -30,11 +30,26 @@ connect to the probe. If that works, BlinkView can use the probe too.
 | `channel` | `0` | RTT up-channel to read. 0 is the standard terminal channel. |
 | `target_rtt_buffer_size` | `8192` | Size of the RTT up-buffer in the firmware (`BUFFER_SIZE_UP`). When it connects, BlinkView uses it to drop the stale data still in the buffer, without discarding live data. |
 | `delay` | `100` | Longest time (ms) incoming bytes are held before they're passed on. |
+| `stall_warn_s` | `30` | Log a warning when no data has arrived for this many seconds. `0` turns it off. |
+| `stall_reconnect_s` | `60` | Reconnect the probe when no data has arrived for this many seconds. `0` turns it off. |
 
 The serial number list in the settings editor shows the probes attached right now.
 
 When the probe drops off or the connection is lost, BlinkView retries once a second until the
 probe answers again. You don't need to restart it.
+
+RTT can also stall without any error: the probe still reports open and connected, but every read
+returns nothing. When no data has arrived for `stall_warn_s`, BlinkView logs "No data for N s"
+on the source's `link` logger, with the RTT status the J-Link DLL reports. After
+`stall_reconnect_s` it closes the probe and connects again, the same as the `rtt_restart`
+command. While the source stays silent it retries at doubling intervals, up to every 10 minutes.
+After 3 attempts it also says to check the USB hubs: when every board goes quiet at once,
+power-cycling them is what has fixed it. When data comes back, it logs "Data resumed after N s".
+The time while the probe is not connected at all doesn't count. Set both to `0` for firmware
+that is silent for long stretches on purpose.
+
+Other source types have the same two settings, off by default. They only warn: reconnecting
+works only for RTT so far.
 
 An RTT source offers these commands, which an AI agent can also send over
 [MCP](mcp.md): `reset` (reset the MCU), `halt`, `restart` (resume after a halt) and

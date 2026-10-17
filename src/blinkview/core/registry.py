@@ -240,6 +240,7 @@ class Registry:
         self.log_device_id = self.system_device.id
 
         self.sources = None
+        self.stall_watchdog = None
 
         # ==========================================
         # LAYER 4: Hardware Pipelines
@@ -636,6 +637,10 @@ class Registry:
         they directly know (one file just finished) via their own `on_progress(label)`
         callbacks - this method is what turns those into a single running count across both."""
         if self._is_running:
+            if self.stall_watchdog is not None:
+                self.stall_watchdog.stop()
+                self.stall_watchdog = None
+
             if self.sources is not None:
                 self.sources.stop()
 
@@ -957,6 +962,14 @@ class Registry:
 
         tasks.run_periodic(1.0 / 60, self.module_value_tracker.update_and_print)
         tasks.run_periodic(0.1, self._tick_replay_snapshot)
+
+        if self.sources is not None and not self.replay_mode and self.stall_watchdog is None:
+            from blinkview.core.source_stall_watchdog import SourceStallWatchdog
+
+            self.stall_watchdog = SourceStallWatchdog(
+                lambda: self.sources.sources.values() if self.sources is not None else (), tasks, logger=self.logger
+            )
+            self.stall_watchdog.start()
 
         self._is_running = True
         self.logger.warn("BlinkView is now live.")

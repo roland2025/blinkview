@@ -390,6 +390,13 @@ class TestSendCommand:
         assert jl.closed is True
         assert reader.jlink is None
 
+    def test_rtt_restart_dropped_when_the_probe_stays_busy(self, probe_held_by_another_thread):
+        reader = probe_held_by_another_thread
+
+        reader.send_command("rtt_restart")
+
+        assert reader.jlink.closed is False
+
     def test_reset_calls_jlink_reset_with_halt_false(self):
         reader = make_reader()
         jl = FakeJLink()
@@ -496,3 +503,126 @@ class TestGetConfigSchema:
         schema = JLinkRTTReader.get_config_schema()  # must not raise
 
         assert "serial_number" in schema["properties"]
+
+
+class TestStallHooks:
+    def test_reconnect_closes_the_probe(self):
+        reader = make_reader()
+        jl = FakeJLink()
+        reader.jlink = jl
+
+        assert reader.reconnect() is True
+
+        assert jl.closed is True
+        assert reader.jlink is None
+
+    def test_reconnect_gives_up_when_the_probe_stays_busy(self, probe_held_by_another_thread):
+        reader = probe_held_by_another_thread
+
+        assert reader.reconnect() is False
+
+        assert reader.jlink.closed is False
+
+    def test_describe_stall_reports_rtt_status_and_target_state(self):
+        reader = make_reader()
+
+        class StatusJLink(FakeJLink):
+            def rtt_get_status(self):
+                return SimpleNamespace(
+                    IsRunning=1, NumUpBuffers=3, NumBytesTransferred=10, NumBytesRead=10, HostOverflowCount=0
+                )
+
+            def halted(self):
+                return False
+
+        reader.jlink = StatusJLink()
+
+        assert reader.describe_stall() == (
+            "RTT running=1 up_buffers=3 bytes_transferred=10 bytes_read=10 host_overflows=0; target running"
+        )
+
+    def test_describe_stall_reports_failures_as_text(self):
+        reader = make_reader()
+
+        class BrokenJLink(FakeJLink):
+            def rtt_get_status(self):
+                raise pylink.errors.JLinkRTTException(-1)
+
+            def halted(self):
+                raise pylink.errors.JLinkException("Could not find core")
+
+        reader.jlink = BrokenJLink()
+
+        text = reader.describe_stall()
+
+        assert text.startswith("RTT status failed:")
+        assert "; target not reachable: Could not find core" in text
+
+    def test_describe_stall_without_a_session(self):
+        reader = make_reader()
+        reader.jlink = None
+        assert reader.describe_stall() == "no open J-Link session"
+
+    def test_describe_stall_reports_a_busy_probe(self, probe_held_by_another_thread):
+        assert probe_held_by_another_thread.describe_stall() == "J-Link busy (a DLL call has not returned)"
+
+    def test_stall_defaults(self):
+        reader = make_reader()
+        assert (reader.stall_warn_s, reader.stall_reconnect_s) == (30, 60)
+
+    def test_connected_only_with_an_open_session(self):
+        reader = make_reader()
+        reader.jlink = None
+        assert reader.is_connected is False
+        reader.jlink = FakeJLink()
+        assert reader.is_connected is True
+
+
+class TestReconnectWithTheReaderLoop:
+    def test_the_loop_opens_the_probe_again_after_reconnect(self):
+        """The real run() loop, with a DLL whose reads return 0 bytes (a stalled RTT): reconnect()
+        from another thread closes the probe, and the loop opens a new session."""
+        reader = make_reader()
+
+        class FakeBatch:
+            start_ts = 0
+
+            def __len__(self):
+                return 0
+
+            def release(self):
+                pass
+
+        reader.shared = SimpleNamespace(time_ns=lambda: 0, array_pool=SimpleNamespace(create=lambda *args: FakeBatch()))
+
+        opened = []
+        opened_once, opened_twice = threading.Event(), threading.Event()
+
+        def fake_open():
+            jl = FakeJLink()
+            jl._dll = SimpleNamespace(
+                JLINK_RTTERMINAL_Read=lambda channel, buf, size: 0,
+                JLINKARM_IsOpen=lambda: 1,
+                JLINKARM_EMU_IsConnected=lambda: 1,
+            )
+            opened.append(jl)
+            (opened_once if len(opened) == 1 else opened_twice).set()
+            return jl
+
+        reader.open = fake_open
+        thread = threading.Thread(target=reader.run, daemon=True)
+        thread.start()
+        try:
+            assert opened_once.wait(2.0)
+            ready_after_first_open = reader._ready_ns
+
+            assert reader.reconnect() is True
+
+            assert opened_twice.wait(2.0)
+            assert opened[0].closed is True
+            assert reader.jlink is opened[1]
+            assert reader._ready_ns > ready_after_first_open
+        finally:
+            reader._stop_event.set()
+            thread.join(2.0)
+        assert not thread.is_alive()
