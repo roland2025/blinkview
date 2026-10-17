@@ -289,6 +289,9 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
                 try:
                     with jlink_lock:
+                        if self.jlink is None:
+                            continue  # closed by another thread (rtt_restart) while we waited for the lock
+
                         # --- FAST HARDWARE CHECK ---
                         # Calling the C-pointers directly.
                         # If they return 0, they are falsy, which triggers the exception.
@@ -525,9 +528,12 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
             match command:
                 case "rtt_restart":
-                    self.jlink.rtt_stop()
-                    self.jlink.rtt_start()
-                    self.logger.info("RTT System restarted manually.")
+                    # A full reconnect, not rtt_stop() + rtt_start() on the open session: that left a
+                    # stalled RTT (reads returning 0 bytes) stalled, while closing the probe and opening
+                    # it again - what disabling and enabling the source does - brought data back.
+                    # The reader loop sees self.jlink is None and reopens it.
+                    self.logger.info("RTT restart: reconnecting the J-Link.")
+                    self.cleanup_jlink()
 
                 case "reset":
                     self.logger.info("Initiating hardware reset on target MCU: %s", self.target_device)

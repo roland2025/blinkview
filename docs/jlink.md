@@ -38,7 +38,8 @@ probe answers again. You don't need to restart it.
 
 An RTT source offers these commands, which an AI agent can also send over
 [MCP](mcp.md): `reset` (reset the MCU), `halt`, `restart` (resume after a halt) and
-`rtt_restart` (restart RTT on the probe).
+`rtt_restart` (close the probe and connect again, which restarts RTT without resetting the
+target).
 
 ## Reading the target from an AI agent
 

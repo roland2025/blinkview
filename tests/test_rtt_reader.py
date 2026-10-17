@@ -379,7 +379,7 @@ class TestSendCommand:
         reader.jlink = None
         reader.send_command("halt")  # must not raise
 
-    def test_rtt_restart_stops_and_restarts_rtt(self):
+    def test_rtt_restart_closes_the_probe_so_the_reader_reconnects(self):
         reader = make_reader()
         jl = FakeJLink()
         reader.jlink = jl
@@ -387,7 +387,8 @@ class TestSendCommand:
         reader.send_command("rtt_restart")
 
         assert jl.rtt_stopped is True
-        assert jl.rtt_started is True
+        assert jl.closed is True
+        assert reader.jlink is None
 
     def test_reset_calls_jlink_reset_with_halt_false(self):
         reader = make_reader()
