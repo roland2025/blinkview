@@ -59,6 +59,14 @@ from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
     description="Prevents the device from resetting when the port opens by pulling DTR and RTS low. Essential for ESP32 and Arduino boards.",
 )
 @configuration_property(
+    "serial_exclusive",
+    type="boolean",
+    default=True,
+    description="Open the port so no other program can open it at the same time. On Windows a COM port is always "
+    "exclusive; on Linux/macOS this stops a flasher (or a second terminal) from silently sharing the port with "
+    "blink, which garbles both. Turn off only to share a port on purpose.",
+)
+@configuration_property(
     "flash_handshake",
     type="boolean",
     default=False,
@@ -88,6 +96,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
     delay: int
     # log_rx_tx: bool
     suppress_auto_reset: bool
+
+    serial_exclusive: bool
 
     flash_handshake: bool
     flash_handshake_id: str
@@ -305,7 +315,16 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             from serial import serial_for_url
 
             # Use PySerial's URL handler (handles socket://, rfc2217://, hwgrep://, etc.)
-            ser = serial_for_url(self.url, baudrate=self.baudrate, timeout=self.delay / 1000.0, inter_byte_timeout=0.01)
+            ser = serial_for_url(
+                self.url,
+                baudrate=self.baudrate,
+                timeout=self.delay / 1000.0,
+                inter_byte_timeout=0.01,
+                # pyserial's own lock (flock on POSIX) only keeps out tools that also take it.
+                exclusive=True if self.serial_exclusive else None,
+            )
+            if self.serial_exclusive:
+                self._lock_tty_exclusive(ser)
 
             with self._serial_lock:
                 self.serial = ser
@@ -327,10 +346,29 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
             self.logger_link.info("Connected")
             self.logger_state_open.info("1")
+            self._mark_ready()
 
             return ser
         except Exception as e:
             self.logger_link.error("Failed to open serial port.", exc=e)
+
+    def _lock_tty_exclusive(self, ser):
+        """TIOCEXCL on a real tty (Linux/macOS): the kernel then refuses every other non-root open
+        with EBUSY, also from tools that don't take pyserial's advisory flock - a flasher run
+        that opens the port anyway fails cleanly with "port busy" instead of sharing it. Windows
+        COM ports are exclusive already."""
+        fd = getattr(ser, "fd", None)
+        if fd is None or "://" in self.url:
+            return
+        try:
+            import fcntl
+            import termios
+
+            fcntl.ioctl(fd, termios.TIOCEXCL)
+        except (ImportError, AttributeError):
+            pass
+        except OSError as e:
+            self.logger_link.warn("Could not lock the port for exclusive use: %s", e)
 
     def send_data(self, data: str):
         with self._serial_lock:
@@ -372,13 +410,15 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 self.logger.error("Failed to perform hardware reset", exc=e)
                 self.serial_broken = True
 
-    def is_connected(self):
+    @property
+    def is_connected(self) -> bool:
         with self._serial_lock:
             try:
                 return self.serial is not None and self.serial.is_open
             except Exception as e:
                 self.logger.error("Failed to check serial connection", exc=e)
                 self.serial_broken = True
+                return False
 
     def _check_flash_handshake(self):
         import os

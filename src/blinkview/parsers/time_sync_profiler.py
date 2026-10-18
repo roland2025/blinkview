@@ -128,24 +128,24 @@ class TimeSyncProfiler(BaseParser):
             # 1. Evaluate Server Connection
             server_connected = True
             if hasattr(pipeline_server, "is_connected"):
-                server_connected = pipeline_server.is_connected()
+                server_connected = _connected(pipeline_server)
             else:
                 # Fall back to checking the target's underlying source subscription
                 resolved_server = get_pipeline_source(pipeline_server)
                 if resolved_server and hasattr(resolved_server, "is_connected"):
-                    server_connected = resolved_server.is_connected()
+                    server_connected = _connected(resolved_server)
 
             # 2. Evaluate Sources Connections
             sources_connected = True
             for src in pipeline_sources:
                 src_connected = True
                 if hasattr(src, "is_connected"):
-                    src_connected = src.is_connected()
+                    src_connected = _connected(src)
                 else:
                     # Try to extract the true underlying subscriber from the pipeline
                     resolved_src = get_pipeline_source(src)
                     if resolved_src and hasattr(resolved_src, "is_connected"):
-                        src_connected = resolved_src.is_connected()
+                        src_connected = _connected(resolved_src)
 
                 if not src_connected:
                     sources_connected = False
@@ -381,3 +381,9 @@ class TimeSyncProfiler(BaseParser):
                 flush()
             else:
                 batch_out.release()
+
+
+def _connected(obj) -> bool:
+    """`is_connected` is a property on some readers (UART, RTT) and a method on others (ADB)."""
+    value = obj.is_connected
+    return value() if callable(value) else bool(value)

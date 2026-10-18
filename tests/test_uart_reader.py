@@ -5,6 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import socket
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -77,6 +78,7 @@ class TestDefaults:
         assert reader.baudrate == 115200
         assert reader.delay == 100
         assert reader.suppress_auto_reset is False
+        assert reader.serial_exclusive is True
         assert reader.flash_handshake is False
         assert reader.flash_handshake_id == "uart"
 
@@ -145,20 +147,66 @@ class TestResetDevice:
 
 
 class TestIsConnected:
+    """A property, like BaseReader's: the stall watchdog reads `source.is_connected` without
+    calling it, and a bound method there was always truthy."""
+
     def test_true_when_serial_is_open(self):
         reader = make_reader()
         reader.serial = FakeSerial(is_open=True)
-        assert reader.is_connected() is True
+        assert reader.is_connected is True
 
     def test_false_when_serial_is_none(self):
         reader = make_reader()
         reader.serial = None
-        assert reader.is_connected() is False
+        assert reader.is_connected is False
 
     def test_false_when_serial_is_closed(self):
         reader = make_reader()
         reader.serial = FakeSerial(is_open=False)
-        assert reader.is_connected() is False
+        assert reader.is_connected is False
+
+
+class FakeTtySerial:
+    def __init__(self, fd=7):
+        self.fd = fd
+
+
+class TestLockTtyExclusive:
+    def test_sets_tiocexcl_on_a_real_tty(self, monkeypatch):
+        calls = []
+        monkeypatch.setitem(sys.modules, "fcntl", SimpleNamespace(ioctl=lambda fd, op: calls.append((fd, op))))
+        monkeypatch.setitem(sys.modules, "termios", SimpleNamespace(TIOCEXCL=0x540C))
+        reader = make_reader(url="/dev/ttyUSB0")
+
+        reader._lock_tty_exclusive(FakeTtySerial(fd=7))
+
+        assert calls == [(7, 0x540C)]
+
+    def test_skips_url_handlers(self, monkeypatch):
+        calls = []
+        monkeypatch.setitem(sys.modules, "fcntl", SimpleNamespace(ioctl=lambda fd, op: calls.append((fd, op))))
+        monkeypatch.setitem(sys.modules, "termios", SimpleNamespace(TIOCEXCL=0x540C))
+        reader = make_reader(url="rfc2217://host:2217")
+
+        reader._lock_tty_exclusive(FakeTtySerial())
+
+        assert calls == []
+
+    def test_an_ioctl_error_only_warns(self, monkeypatch):
+        def refuse(fd, op):
+            raise OSError("not a tty")
+
+        monkeypatch.setitem(sys.modules, "fcntl", SimpleNamespace(ioctl=refuse))
+        monkeypatch.setitem(sys.modules, "termios", SimpleNamespace(TIOCEXCL=0x540C))
+        reader = make_reader(url="/dev/ttyUSB0")
+
+        reader._lock_tty_exclusive(FakeTtySerial())  # must not raise
+
+    def test_noop_without_fcntl(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "fcntl", None)  # import fails, as on Windows
+        reader = make_reader(url="COM5")
+
+        reader._lock_tty_exclusive(FakeTtySerial())  # must not raise
 
 
 class TestApplyConfigFlashHandshakeTeardown:
@@ -428,9 +476,9 @@ class TestRunRealSocketIngestion:
                 # has gotten past that flush yet - a race that reliably loses under a slower
                 # reader thread (e.g. under coverage.py's line-tracing overhead).
                 deadline = time.time() + 5.0
-                while time.time() < deadline and not reader.is_connected():
+                while time.time() < deadline and not reader.is_connected:
                     time.sleep(0.01)
-                assert reader.is_connected(), "reader never finished opening the connection"
+                assert reader.is_connected, "reader never finished opening the connection"
 
                 conn.sendall(expected)
 
