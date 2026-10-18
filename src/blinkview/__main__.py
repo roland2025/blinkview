@@ -225,6 +225,17 @@ def _main():
     setup_recover_parser(recover_parser)
     recover_parser.set_defaults(func=run_recover)
 
+    borrow_parser = subparsers.add_parser(
+        "borrow", prog="blink borrow", help="Borrow a source's port from a running blink (e.g. to flash through it)"
+    )
+    return_parser = subparsers.add_parser("return", prog="blink return", help="Return a port taken with blink borrow")
+    from blinkview.utils.borrow_cli import run_borrow, run_return, setup_borrow_parser, setup_return_parser
+
+    setup_borrow_parser(borrow_parser)
+    borrow_parser.set_defaults(func=run_borrow)
+    setup_return_parser(return_parser)
+    return_parser.set_defaults(func=run_return)
+
     mcp_parser = subparsers.add_parser(
         "mcp", prog="blink mcp", help="MCP server (stdio) for AI agents to act on a running BlinkView"
     )
@@ -263,7 +274,8 @@ def _main():
 
     args = parser.parse_args()
 
-    if args.command not in ("config", "mcp"):
+    # borrow/return run inside build scripts before and after every flash: no notice in their output.
+    if args.command not in ("config", "mcp", "borrow", "return"):
         from blinkview.utils.updater import get_update_notice
 
         # stderr: a notice, not command output - `blink replay --list > file` (or an export to

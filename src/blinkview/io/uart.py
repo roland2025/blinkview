@@ -67,16 +67,33 @@ from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
     "blink, which garbles both. Turn off only to share a port on purpose.",
 )
 @configuration_property(
-    "flash_handshake",
+    "allow_borrow",
     type="boolean",
     default=False,
-    description="When enabled, monitors the working directory for a flash lock file, closing the serial port to allow external flashing.",
+    description="Lend the port to an external tool on request: `blink borrow COM5 -- pio run -t upload` closes the "
+    "port while the command runs and reopens it afterwards. For flashing through the same port the logs come from "
+    "(ESP32, Arduino).",
 )
 @configuration_property(
-    "flash_handshake_id",
+    "borrow_name",
     type="string",
-    default="uart",
-    description="The identifier string used for the handshake files (e.g., if set to 'esp32', files will be '.bv_source_esp32.lock').",
+    default="",
+    description="The name a tool borrows this port by. Empty: the port's own name (COM5, ttyUSB0). A path is used as "
+    "the borrow file itself.",
+)
+@configuration_property(
+    "borrow_timeout_s",
+    type="integer",
+    default=120,
+    minimum=0,
+    description="Take the port back when a borrow has not been returned after this many seconds. 0: never.",
+)
+@configuration_property(
+    "reset_after_return",
+    type="boolean",
+    default=False,
+    description="Reset the device (DTR/RTS) right after the port comes back from a borrow, so its boot log is "
+    "captured. Pair it with esptool's `--after no_reset` on the flashing side.",
 )
 class UARTReader(BaseReader):
     __doc__ = """The primary data ingestion source for serial and UART communication.
@@ -98,9 +115,12 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
     suppress_auto_reset: bool
 
     serial_exclusive: bool
+    allow_borrow: bool
+    borrow_name: str
+    borrow_timeout_s: int
+    reset_after_return: bool
 
-    flash_handshake: bool
-    flash_handshake_id: str
+    supports_pause = True
 
     def __init__(self):
         super().__init__()
@@ -114,9 +134,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
         self.serial_broken = False
 
-        self._handshake_task_id = None
-        self._flash_active = False
-        self._flash_lock_ts = 0
+        # Set by the reader thread once it has closed the port for request_pause().
+        self._paused = False
 
         self.logger_send = None
 
@@ -153,20 +172,6 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
         self.logger_send = self.logger_send or self.logger.child("send")
 
-        # 2. If the feature was turned off but the periodic task is active, kill it
-        if not self.flash_handshake and self._handshake_task_id is not None:
-            try:
-                self.logger.info("Flash handshake disabled via config. Stopping periodic task.")
-                # Assuming your framework's task manager supports cancel/stop/remove
-                self.shared.tasks.stop_periodic(self._handshake_task_id)
-            except Exception as e:
-                self.logger.error("Failed to cleanly stop flash handshake task: %s", e)
-            finally:
-                self._handshake_task_id = None
-
-        # 3. Always clear lingering handshake artifacts to guarantee a pristine slate
-        self._clear_handshake_files()
-
         return changed
 
     def run(self):
@@ -174,8 +179,6 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         stop_is_set = self._stop_event.is_set
         time_ns = self.shared.time_ns
         logger = self.logger
-
-        use_flash_handshake = self.flash_handshake
 
         # Tuner configuration
         delay_s = self.delay / 1000.0
@@ -212,17 +215,42 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                                 self.logger_link.warn("Broken, port closed.")
                                 self.logger_state_open.warning("0")
 
-                if use_flash_handshake and self._flash_active:
-                    with self._serial_lock:
-                        if ser is not None:
+                # Paused (the port is lent to an external tool, io/source_borrow.py): keep it
+                # closed until request_resume().
+                if self._pause_requested:
+                    if ser is not None:
+                        # Hand over what was read so far, it is not part of what the tool sends.
+                        if batch is not None:
+                            if len(batch) > 0:
+                                with batch:
+                                    self.distribute(batch)
+                            else:
+                                batch.release()
+                            batch = None
+                        with self._serial_lock:
                             try:
                                 ser.close()
                             finally:
                                 ser = None
                                 self.serial = None
                                 self.logger_state_open.info("0")
-                        sleep(0.1)
+                    if not self._paused:
+                        self._paused = True
+                        self.logger_link.info("Port closed, lent out.")
+                        self.logger_state_lent.info("1")
+                    sleep(0.05)
+                    continue
+
+                if self._paused:
+                    self._paused = False
+                    self.logger_state_lent.info("0")
+                    ser = self.open()
+                    if ser is None:
+                        sleep(1.0)
                         continue
+                    _read = ser.read
+                    if self.reset_after_return:
+                        self.reset_device()
 
                 if ser is None:
                     ser = self.open()
@@ -299,9 +327,6 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         try:
             from blinkview.parsers.binary_parser import BinaryParser
 
-            if self.flash_handshake and self._handshake_task_id is None:
-                self._handshake_task_id = self.shared.tasks.run_periodic(0.3, self._check_flash_handshake)
-
             time_ns = self.shared.time_ns
 
             # sync_state = self._init_sync_engine(anchor_is_boot=True)
@@ -355,7 +380,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
     def _lock_tty_exclusive(self, ser):
         """TIOCEXCL on a real tty (Linux/macOS): the kernel then refuses every other non-root open
         with EBUSY, also from tools that don't take pyserial's advisory flock - a flasher run
-        that opens the port anyway fails cleanly with "port busy" instead of sharing it. Windows
+        without `blink borrow` fails cleanly with "port busy" instead of sharing the port. Windows
         COM ports are exclusive already."""
         fd = getattr(ser, "fd", None)
         if fd is None or "://" in self.url:
@@ -412,6 +437,8 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
     @property
     def is_connected(self) -> bool:
+        if self._paused:
+            return False
         with self._serial_lock:
             try:
                 return self.serial is not None and self.serial.is_open
@@ -420,73 +447,14 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 self.serial_broken = True
                 return False
 
-    def _check_flash_handshake(self):
-        import os
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
 
-        ident = self.flash_handshake_id or "uart"
-        lock_file = f".bv_source_{ident}.lock"
-        closed_file = f".bv_source_{ident}.closed"
+    def default_borrow_name(self) -> str:
+        from blinkview.borrow import name_from_port
 
-        lock_exists = os.path.exists(lock_file)
-        current_time_ns = self.shared.time_ns()
-
-        # 1. Timeout Check
-        if self._flash_active and lock_exists:
-            if (current_time_ns - self._flash_lock_ts) > 60_000_000_000:
-                self.logger.warning("Flash handshake timed out after 60s! Forcing environment reset.")
-                self._clear_handshake_files()
-                return  # Exit early since files are gone and state is reset
-
-        # 2. Existing lock detection block
-        if lock_exists and not self._flash_active:
-            self.logger.warning("Flash lock '%s' detected! Requesting serial loop release...", lock_file)
-
-            self._flash_active = True
-            self._flash_lock_ts = current_time_ns
-
-            while True:
-                with self._serial_lock:
-                    if self.serial is None:
-                        break
-                sleep(0.02)
-
-            try:
-                with open(closed_file, "w") as f:
-                    f.write("closed")
-            except Exception as e:
-                self.logger.error("Failed to create handshake file %s: %s", closed_file, e)
-
-        # 3. Existing natural cleanup block (when external tool finishes cleanly)
-        elif not lock_exists and self._flash_active:
-            self.logger.info("Flash lock removed. Restoring serial connection availability.")
-            self._flash_active = False
-
-            if os.path.exists(closed_file):
-                try:
-                    os.remove(closed_file)
-                except Exception:
-                    pass
-
-    def _clear_handshake_files(self):
-        """Removes local handshake lock/closed files and resets internal flash state flags."""
-        import os
-
-        if not self.flash_handshake:
-            return
-
-        ident = self.flash_handshake_id or "uart"
-        lock_file = f".bv_source_{ident}.lock"
-        closed_file = f".bv_source_{ident}.closed"
-
-        for file_path in (lock_file, closed_file):
-            if os.path.exists(file_path):
-                try:
-                    self.logger.info("Removing handshake file: %s", file_path)
-                    os.remove(file_path)
-                except Exception as e:
-                    self.logger.error("Failed to remove handshake file '%s': %s", file_path, e)
-
-        self._flash_active = False
+        return name_from_port(self.url)
 
     def get_commands(self) -> list[tuple[str, str]]:
         """Exposes UART runtime capabilities to GUI/CLI layers."""

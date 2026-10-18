@@ -55,7 +55,7 @@ class HotTierMemoryGovernor:
     (`update_max_pieces`) to match - grows it while memory is abundant, shrinks it (evicting
     oldest segments to cold storage) the moment free memory gets tight. Just a policy object
     scheduled on the registry's existing `TaskManager` (`shared.tasks.run_periodic`/
-    `stop_periodic` - see io/adb_reader.py, io/uart.py, io/source_handshake.py for the same
+    `stop_periodic` - see io/adb_reader.py, io/source_borrow.py for the same
     pattern) rather than spinning up its own OS thread - this is exactly the "periodic small task"
     case that infrastructure already exists for."""
 

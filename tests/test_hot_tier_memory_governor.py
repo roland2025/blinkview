@@ -259,8 +259,8 @@ class FakeTasks:
 
 
 class TestHotTierMemoryGovernorScheduling:
-    """The governor rides the shared TaskManager's scheduler (see io/adb_reader.py, io/uart.py,
-    io/source_handshake.py for the same run_periodic/stop_periodic pattern) instead of owning a
+    """The governor rides the shared TaskManager's scheduler (see io/adb_reader.py,
+    io/source_borrow.py for the same run_periodic/stop_periodic pattern) instead of owning a
     dedicated OS thread."""
 
     def make_governor(self, tasks, **overrides):

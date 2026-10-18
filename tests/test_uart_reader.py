@@ -79,8 +79,10 @@ class TestDefaults:
         assert reader.delay == 100
         assert reader.suppress_auto_reset is False
         assert reader.serial_exclusive is True
-        assert reader.flash_handshake is False
-        assert reader.flash_handshake_id == "uart"
+        assert reader.allow_borrow is False
+        assert reader.borrow_name == ""
+        assert reader.borrow_timeout_s == 120
+        assert reader.reset_after_return is False
 
     def test_apply_config_wires_up_logger_send(self):
         reader = make_reader()
@@ -165,6 +167,21 @@ class TestIsConnected:
         reader.serial = FakeSerial(is_open=False)
         assert reader.is_connected is False
 
+    def test_false_while_paused(self):
+        reader = make_reader()
+        reader.serial = FakeSerial(is_open=True)
+        reader._paused = True
+        assert reader.is_connected is False
+
+
+class TestDefaultBorrowName:
+    @pytest.mark.parametrize(
+        "url, name",
+        [("COM5", "COM5"), ("/dev/ttyUSB0", "ttyUSB0"), ("socket://127.0.0.1:1234", "socket_127.0.0.1_1234")],
+    )
+    def test_is_the_ports_own_name(self, url, name):
+        assert make_reader(url=url).default_borrow_name() == name
+
 
 class FakeTtySerial:
     def __init__(self, fd=7):
@@ -207,85 +224,6 @@ class TestLockTtyExclusive:
         reader = make_reader(url="COM5")
 
         reader._lock_tty_exclusive(FakeTtySerial())  # must not raise
-
-
-class TestApplyConfigFlashHandshakeTeardown:
-    def test_stops_periodic_task_when_flash_handshake_is_disabled(self):
-        reader = make_reader(flash_handshake=True)
-        reader._handshake_task_id = "abc123"
-
-        reader.apply_config({"flash_handshake": False})
-
-        assert reader.shared.tasks.stopped == ["abc123"]
-        assert reader._handshake_task_id is None
-
-    def test_leaves_task_alone_when_flash_handshake_stays_enabled(self):
-        reader = make_reader(flash_handshake=True)
-        reader._handshake_task_id = "abc123"
-
-        reader.apply_config({"flash_handshake": True})
-
-        assert reader.shared.tasks.stopped == []
-        assert reader._handshake_task_id == "abc123"
-
-
-class TestClearHandshakeFiles:
-    def test_removes_lock_and_closed_files_when_enabled(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        reader = make_reader(flash_handshake=True, flash_handshake_id="esp32")
-        (tmp_path / ".bv_source_esp32.lock").write_text("x")
-        (tmp_path / ".bv_source_esp32.closed").write_text("x")
-
-        reader._clear_handshake_files()
-
-        assert not (tmp_path / ".bv_source_esp32.lock").exists()
-        assert not (tmp_path / ".bv_source_esp32.closed").exists()
-        assert reader._flash_active is False
-
-    def test_noop_when_flash_handshake_disabled(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        reader = make_reader(flash_handshake=False)
-        (tmp_path / ".bv_source_uart.lock").write_text("x")
-
-        reader._clear_handshake_files()
-
-        assert (tmp_path / ".bv_source_uart.lock").exists()  # left untouched
-
-
-class TestCheckFlashHandshake:
-    def test_lock_file_activates_handshake_and_writes_closed_marker(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        reader = make_reader(flash_handshake=True, flash_handshake_id="esp32")
-        reader.serial = None  # already closed, so the wait-for-close loop exits immediately
-        (tmp_path / ".bv_source_esp32.lock").write_text("x")
-
-        reader._check_flash_handshake()
-
-        assert reader._flash_active is True
-        assert (tmp_path / ".bv_source_esp32.closed").exists()
-
-    def test_lock_removed_clears_active_flag_and_closed_marker(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        reader = make_reader(flash_handshake=True, flash_handshake_id="esp32")
-        reader._flash_active = True
-        (tmp_path / ".bv_source_esp32.closed").write_text("x")
-
-        reader._check_flash_handshake()
-
-        assert reader._flash_active is False
-        assert not (tmp_path / ".bv_source_esp32.closed").exists()
-
-    def test_stale_lock_past_60s_forces_a_clear_and_returns_early(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        reader = make_reader(now_ns=100_000_000_000, flash_handshake=True, flash_handshake_id="esp32")
-        reader._flash_active = True
-        reader._flash_lock_ts = 0  # 100s ago per shared.time_ns(), past the 60s timeout
-        (tmp_path / ".bv_source_esp32.lock").write_text("x")
-
-        reader._check_flash_handshake()
-
-        assert not (tmp_path / ".bv_source_esp32.lock").exists()
-        assert reader._flash_active is False
 
 
 class TestCommands:

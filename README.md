@@ -163,7 +163,7 @@ To store logs somewhere else, set a log directory with `blink config --global lo
 ## Features
 
 * **Multi-Source Ingestion:** Supported source types include:
-  * Serial / UART
+  * Serial / UART (flash an ESP32 through the same port while logging; see [Flashing through the logging port](docs/serial-flashing.md))
   * CAN-bus (with DBC decoding; see [CAN bus](docs/can.md))
   * SEGGER RTT (J-Link; see [SEGGER J-Link and RTT](docs/jlink.md))
   * TCP/UDP sockets

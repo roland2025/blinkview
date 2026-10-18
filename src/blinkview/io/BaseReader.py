@@ -55,6 +55,10 @@ class BaseReader(BaseDaemon):
     supports_reconnect = False
     # Added to the watchdog's warning once reconnecting has not brought data back.
     stall_hint: Optional[str] = None
+    # A reader that can give its connection up on request and take it back - the pause interface
+    # below. Such a reader can lend its port to an external tool (io/source_borrow.py) when it
+    # declares the `allow_borrow` / `borrow_name` / `borrow_timeout_s` config options.
+    supports_pause = False
 
     stall_warn_s: int
     stall_reconnect_s: int
@@ -68,9 +72,15 @@ class BaseReader(BaseDaemon):
         self._started_ns = 0
         self._ready_ns = 0
 
+        # Pause interface: request_pause() sets this, the reader thread closes its connection and
+        # reports it through is_paused.
+        self._pause_requested = False
+        self._borrow_watcher = None
+
         self.targets = [SysCat.PARSER]
         self.logger_state: Optional[BaseLogger] = None
         self.logger_state_open: BaseLogger = None
+        self.logger_state_lent: Optional[BaseLogger] = None
         self.logger_link: BaseLogger = None
         # self.logger_state_connected: Optional[BaseLogger] = (
         #     None  # will track connected state... data has moved in last x seconds
@@ -86,7 +96,65 @@ class BaseReader(BaseDaemon):
 
     def start(self):
         self._started_ns = self._ready_ns = monotonic_ns()
+        self._pause_requested = False
         super().start()
+        if self.is_running:
+            self._start_borrow_watcher()
+
+    def stop(self, timeout=5.0):
+        self._stop_borrow_watcher()
+        super().stop(timeout)
+
+    # --- Pause interface (supports_pause) ---
+
+    def request_pause(self, reason: str) -> None:
+        """Asks the reader thread to close its connection and keep it closed until
+        request_resume(). Returns at once; is_paused turns True once the connection is closed."""
+        if self.logger_link:
+            self.logger_link.info("Pausing: %s", reason)
+        self._pause_requested = True
+
+    def request_resume(self) -> None:
+        """Lets the reader thread open its connection again."""
+        self._pause_requested = False
+
+    @property
+    def is_paused(self) -> bool:
+        """True while the connection is closed because of request_pause(). Readers that support
+        pausing override this."""
+        return False
+
+    def default_borrow_name(self) -> str:
+        """The borrow name used when `borrow_name` is empty - for a serial port, the port's own name."""
+        return ""
+
+    def _start_borrow_watcher(self):
+        if not self.supports_pause or not getattr(self, "allow_borrow", False) or self._borrow_watcher is not None:
+            return
+        from blinkview import borrow
+        from blinkview.io.source_borrow import SourceBorrowWatcher
+
+        name = getattr(self, "borrow_name", "") or self.default_borrow_name()
+        try:
+            paths = borrow.resolve(name)
+        except ValueError as e:
+            self.logger_link.error("Can't lend the port: no usable borrow name (set borrow_name)", exc=e)
+            return
+
+        self._borrow_watcher = SourceBorrowWatcher(
+            self,
+            paths,
+            timeout_s=getattr(self, "borrow_timeout_s", 0) or 0,
+            logger=self.logger_link,
+            tasks=self.shared.tasks,
+        )
+        self._borrow_watcher.start()
+
+    def _stop_borrow_watcher(self):
+        watcher, self._borrow_watcher = self._borrow_watcher, None
+        if watcher is not None:
+            watcher.stop()
+        self._pause_requested = False
 
     @property
     def is_connected(self) -> bool:
@@ -119,6 +187,10 @@ class BaseReader(BaseDaemon):
         self.logger_state = self.logger_state or self.logger.child("state")
         self.logger_state_open = self.logger_state_open or self.logger_state.child("open", essential=True)
         self.logger_link = self.logger_link or self.logger.child("link", essential=True)
+        if self.supports_pause:
+            # 1 while the port is lent to an external tool - tells "lent" apart from "broken"
+            # where state.open alone reads 0 for both.
+            self.logger_state_lent = self.logger_state_lent or self.logger_state.child("lent")
         # self.logger_state_connected = self.logger_state_connected or self.logger_state.child("connected")
 
         return changed
