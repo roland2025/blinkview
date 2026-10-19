@@ -110,6 +110,25 @@ class TestRestoreWindowGeometrySafe:
         frame = window.frameGeometry()
         assert [frame.x(), frame.y()] == [200, 150]
 
+    def test_minimized_window_is_unminimized(self, qapp, qtbot):
+        """Applying a View layout to a window the user minimized must bring it back -
+        restoreGeometry() alone leaves the minimized bit set."""
+        from qtpy.QtCore import Qt
+
+        source = QWidget()
+        qtbot.addWidget(source)
+        source.setGeometry(75, 85, 250, 175)
+        saved = get_window_geometry_data(source)
+
+        window = QWidget()
+        qtbot.addWidget(window)
+        window.show()
+        window.setWindowState(Qt.WindowState.WindowMinimized)
+
+        restore_window_geometry_safe(window, saved)
+
+        assert not window.windowState() & Qt.WindowState.WindowMinimized
+
     def test_off_screen_window_with_reattach_hook_schedules_a_reattach(self, qapp, qtbot, monkeypatch):
         window = QWidget()
         qtbot.addWidget(window)

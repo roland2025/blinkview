@@ -6,7 +6,7 @@
 
 from base64 import b64decode, b64encode
 
-from qtpy.QtCore import QByteArray, QTimer
+from qtpy.QtCore import QByteArray, Qt, QTimer
 from qtpy.QtGui import QGuiApplication
 
 
@@ -53,6 +53,12 @@ def restore_window_geometry_safe(window, geo_dict: dict):
     from qtpy.QtCore import QRect
 
     window._last_saved_geo = geo_dict
+
+    # restoreGeometry() only clears the maximized/fullscreen bits, and raise_()/activateWindow()
+    # don't un-minimize on Windows - so a minimized window would get its geometry but stay in
+    # the taskbar.
+    if window.windowState() & Qt.WindowState.WindowMinimized:
+        window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
 
     # Restore Native Geometry (This handles Maximize/Minimize/Fullscreen states)
     geometry_b64 = geo_dict.get("geometry")
