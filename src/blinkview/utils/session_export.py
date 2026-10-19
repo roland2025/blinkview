@@ -16,6 +16,7 @@ stored (invalid UTF-8 included)."""
 import errno
 import json
 import os
+import re
 import sys
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
 from collections import Counter
@@ -63,6 +64,10 @@ class ExportFilter:
     drop_tags: tuple[bytes, ...] = ()  # b"<device> <module prefix>" prefixes; b"<device> " drops a device
     since: Optional[bytes] = None  # inclusive, in the line's own 27-byte UTC timestamp format
     until: Optional[bytes] = None  # exclusive
+    devices: frozenset[bytes] = frozenset()  # keep only these devices; empty keeps all
+    modules: tuple[bytes, ...] = ()  # keep only these module prefixes; empty keeps all
+    match: tuple[re.Pattern, ...] = ()  # keep only lines one of these finds; empty keeps all
+    exclude: tuple[re.Pattern, ...] = ()  # drop lines any of these finds
 
 
 class FilterError(ValueError):
@@ -75,27 +80,62 @@ def make_filter(
     drop_device: Sequence[str] = (),
     since: Optional[str] = None,
     until: Optional[str] = None,
+    device: Sequence[str] = (),
+    module: Sequence[str] = (),
+    match: Sequence[str] = (),
+    exclude: Sequence[str] = (),
 ) -> ExportFilter:
     """`drop` entries are a module prefix (`app.bms`, any device) or `"DEVICE module-prefix"`
-    (`"iot battery."`, one device) - logprep.py's rule. Raises FilterError on a value that would
-    silently do the wrong thing, like an empty prefix (which would drop every line)."""
+    (`"iot battery."`, one device) - logprep.py's rule. `match`/`exclude` are regular expressions,
+    compiled here so a bad one is a command-line error, not a failure on some line. Raises
+    FilterError on a value that would silently do the wrong thing, like an empty prefix (which
+    would drop every line)."""
     drop_modules, drop_tags = [], []
     for entry in drop:
         words = entry.split(" ")
         if not entry or "" in words or len(words) > 2:
             raise FilterError(f'--drop {entry!r}: expected "MODULE-PREFIX" or "DEVICE MODULE-PREFIX"')
         (drop_modules if len(words) == 1 else drop_tags).append(entry.encode())
-    for device in drop_device:
-        if not device or " " in device:
-            raise FilterError(f"--drop-device {device!r}: expected a single device name")
-        drop_tags.append(device.encode() + b" ")
+    for name in drop_device:
+        if not name or " " in name:
+            raise FilterError(f"--drop-device {name!r}: expected a single device name")
+        drop_tags.append(name.encode() + b" ")
+    for name in device:
+        if not name or " " in name:
+            raise FilterError(f"--device {name!r}: expected a single device name")
+    for prefix in module:
+        if not prefix or " " in prefix:
+            raise FilterError(f"--module {prefix!r}: expected a module prefix without spaces")
 
     since_ts = _parse_bound("--since", since)
     until_ts = _parse_bound("--until", until)
     if since_ts is not None and until_ts is not None and since_ts >= until_ts:
         raise FilterError(f"--since {since} is not before --until {until}")
 
-    return ExportFilter(include_stats, tuple(drop_modules), tuple(drop_tags), since_ts, until_ts)
+    return ExportFilter(
+        include_stats,
+        tuple(drop_modules),
+        tuple(drop_tags),
+        since_ts,
+        until_ts,
+        devices=frozenset(name.encode() for name in device),
+        modules=tuple(prefix.encode() for prefix in module),
+        match=_compile_all("-e/--match", match),
+        exclude=_compile_all("--exclude", exclude),
+    )
+
+
+def _compile_all(flag: str, patterns: Sequence[str]) -> tuple[re.Pattern, ...]:
+    # As bytes: lines are never decoded. An empty pattern would match every line.
+    compiled = []
+    for pattern in patterns:
+        if not pattern:
+            raise FilterError(f"{flag} '': an empty pattern matches every line")
+        try:
+            compiled.append(re.compile(pattern.encode("utf-8", errors="surrogateescape")))
+        except re.error as e:
+            raise FilterError(f"{flag} {pattern!r}: not a valid regular expression ({e})")
+    return tuple(compiled)
 
 
 def _parse_bound(flag: str, text: Optional[str]) -> Optional[bytes]:
@@ -126,8 +166,9 @@ def keep_line(line: bytes, options: ExportFilter) -> bool:
     """Whether a unified log line (no b"\\n") goes to the export.
 
     Line grammar: `<timestamp> <level> <device> <module>: <message>`. A line with fewer than
-    four fields isn't a log line, but it's still data - kept, never filtered by stats or drops.
-    Time bounds only apply to lines that start with a timestamp."""
+    four fields isn't a log line, but it's still data - never filtered by stats, drops, devices
+    or modules. Time bounds only apply to lines that start with a timestamp. `match`/`exclude`
+    search the whole line, log line or not: they are about text, like grep."""
     if options.since is not None or options.until is not None:
         ts = line_timestamp(line)
         if ts is not None:
@@ -138,9 +179,14 @@ def keep_line(line: bytes, options: ExportFilter) -> bool:
 
     fields = line.split(b" ", 4)
     if len(fields) < 4:
-        return True
+        return _keep_text(line, options)
     device = fields[2]
     module = fields[3].removesuffix(b":")
+
+    if options.devices and device not in options.devices:
+        return False
+    if options.modules and not module.startswith(options.modules):
+        return False
 
     # The last segment, so `source.nrf_rtt.stats` and `parser.nrf.stats_in` match while
     # `foo.stats_extra` or `statsd` don't. Only on `system`: a firmware module may well be
@@ -154,6 +200,15 @@ def keep_line(line: bytes, options: ExportFilter) -> bool:
     if options.drop_tags and (device + b" " + module).startswith(options.drop_tags):
         return False
 
+    return _keep_text(line, options)
+
+
+def _keep_text(line: bytes, options: ExportFilter) -> bool:
+    # Last: a regex is the most expensive check.
+    if options.exclude and any(pattern.search(line) for pattern in options.exclude):
+        return False
+    if options.match and not any(pattern.search(line) for pattern in options.match):
+        return False
     return True
 
 
@@ -330,21 +385,42 @@ FILTERING
   J-Link/RTT connection loss, `Target system has no power`. `system gui.lag`
   is GUI performance noise.
 
+{FILTER_RULES}
+{PRESETS}"""
+
+# The filter flags' rules and presets, shared with `blink tail --help` (utils/session_tail.py).
+FILTER_RULES = """\
+  --device and --module keep only the devices / module prefixes given (each
+  repeatable; a line must pass both when both are given). --drop and
+  --drop-device then drop from what is left.
+
+  -e/--match REGEX keeps only lines that one of the -e patterns finds;
+  --exclude REGEX drops lines that any --exclude pattern finds. Both are
+  Python regular expressions searched in the whole line as shown above
+  (time, level, device, module and message), case-sensitive unless the
+  pattern starts with (?i). A line without the log-line shape is never
+  dropped by the device, module, drop or stats rules, but -e/--exclude do
+  apply to it: with -e you get only lines that match, as with grep.
+"""
+PRESETS_HELP = """\
 PRESETS
-  Named --drop/--drop-device sets in <profile>.export_presets.json next to
-  the profile JSON - the one the session was recorded with, else the active
-  profile's:
+  Named filter sets in <profile>.export_presets.json next to the profile
+  JSON - the one the session was recorded with, else the active profile's.
+  Keys: drop, drop_device, device, module, match, exclude (lists, as the
+  flags of the same name) and description. Flags add to a preset's lists:
 
     {"quiet": {"description": "...", "drop": ["app.heartbeat"],
-               "drop_device": ["can0"]}}
+               "drop_device": ["can0"], "exclude": ["heartbeat ok"]}}
 """
+EXPORT_DESCRIPTION = EXPORT_DESCRIPTION.format(FILTER_RULES=FILTER_RULES, PRESETS=PRESETS_HELP)
 
 EXPORT_EPILOG = """\
 typical use:
   blink replay --list                                   which sessions exist
   blink export --last --summary -o OUT                  what's in the newest one
-  blink export --last --preset quiet -o OUT             with a preset's drops
+  blink export --last --preset quiet -o OUT             with a preset's filters
   blink export 20261002_162827 --since 2026-10-02T16:30 --until 2026-10-02T16:45
+  blink export --last --device board -e "(?i)fault|panic" --exclude heartbeat
   blink export --last | grep -E "^[^ ]+ [EFC] "         errors and worse only
 """
 
@@ -354,7 +430,9 @@ SUMMARY_TOP_TAGS = 40
 # <profile>.export_presets.json next to the profile JSON - FileManager.get_profile_path()'s naming,
 # like <profile>.view_presets.json.
 PRESETS_FILE_SUFFIX = ".export_presets.json"
-_PRESET_KEYS = {"description", "drop", "drop_device"}
+# A preset's list-valued keys: each is a make_filter() argument and a flag of the same name.
+_PRESET_LISTS = ("drop", "drop_device", "device", "module", "match", "exclude")
+_PRESET_KEYS = {"description", *_PRESET_LISTS}
 
 
 def setup_export_parser(parser: ArgumentParser) -> None:
@@ -367,7 +445,22 @@ def setup_export_parser(parser: ArgumentParser) -> None:
         "-o", "--outdir", default=None, help="write OUTDIR/<session id>.log per session (needed for several)"
     )
     parser.add_argument("-l", "--logdir", default=None, help="log folder to look names up in (default: the project's)")
-    parser.add_argument("--include-stats", action="store_true", help="keep BlinkView's own stats/tuner lines")
+    add_filter_arguments(parser)
+    parser.add_argument(
+        "--since", default=None, metavar="TIME", help="keep lines at/after TIME: ISO 8601, local unless Z or +hh:mm"
+    )
+    parser.add_argument("--until", default=None, metavar="TIME", help="keep lines before TIME (as --since)")
+    parser.add_argument(
+        "--summary", action="store_true", help="per session on stderr: counts, time span, parts, dev mode, top 40 tags"
+    )
+
+
+def add_filter_arguments(parser: ArgumentParser) -> None:
+    """The line filter flags `blink export` and `blink tail` share; filter_from_args() reads them."""
+    parser.add_argument("--device", action="append", default=[], metavar="DEV", help="keep only device DEV; repeatable")
+    parser.add_argument(
+        "--module", action="append", default=[], metavar="PREFIX", help="keep only modules starting PREFIX; repeatable"
+    )
     parser.add_argument(
         "--drop",
         action="append",
@@ -377,15 +470,18 @@ def setup_export_parser(parser: ArgumentParser) -> None:
     )
     parser.add_argument("--drop-device", action="append", default=[], metavar="DEV", help="drop device DEV; repeatable")
     parser.add_argument(
-        "--since", default=None, metavar="TIME", help="keep lines at/after TIME: ISO 8601, local unless Z or +hh:mm"
+        "-e",
+        "--match",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        help="keep only lines REGEX finds; repeatable, any one may match",
     )
-    parser.add_argument("--until", default=None, metavar="TIME", help="keep lines before TIME (as --since)")
     parser.add_argument(
-        "--summary", action="store_true", help="per session on stderr: counts, time span, parts, dev mode, top 40 tags"
+        "--exclude", action="append", default=[], metavar="REGEX", help="drop lines REGEX finds; repeatable"
     )
-    parser.add_argument(
-        "--preset", default=None, metavar="NAME", help="apply preset NAME; --drop/--drop-device add to it"
-    )
+    parser.add_argument("--include-stats", action="store_true", help="keep BlinkView's own stats/tuner lines")
+    parser.add_argument("--preset", default=None, metavar="NAME", help="apply preset NAME; the filter flags add to it")
 
 
 @dataclass
@@ -415,15 +511,25 @@ class ExportError(Exception):
 class Preset:
     name: str
     file: Path
-    drop: list[str]
-    drop_device: list[str]
+    lists: dict[str, list[str]]  # every _PRESET_LISTS key -> its values
+
+
+def filter_from_args(args, preset: Optional[Preset] = None) -> ExportFilter:
+    """The ExportFilter that add_filter_arguments()' flags ask for (and --since/--until, where
+    the command has them), with `preset`'s lists first. Raises FilterError."""
+    lists = {key: list(getattr(args, key)) for key in _PRESET_LISTS}
+    if preset is not None:
+        lists = {key: preset.lists[key] + values for key, values in lists.items()}
+    return make_filter(
+        args.include_stats, since=getattr(args, "since", None), until=getattr(args, "until", None), **lists
+    )
 
 
 def run_export(args) -> None:
     try:
         try:
             # Checked before anything is resolved or read: a typo shouldn't cost a whole read.
-            make_filter(args.include_stats, args.drop, args.drop_device, args.since, args.until)
+            filter_from_args(args)
         except FilterError as e:
             raise ExportError(str(e))
         sources = _resolve_sources(args)
@@ -439,13 +545,11 @@ def run_export(args) -> None:
 
 
 def _filter_for(source: ExportSource, args) -> ExportFilter:
-    drop, drop_device = list(args.drop), list(args.drop_device)
+    preset = None
     if args.preset is not None:
         preset = load_preset(args.preset, preset_files_for(source.folder))
         print(f"{source.name}: preset {preset.name!r} from {preset.file}", file=sys.stderr)
-        drop = preset.drop + drop
-        drop_device = preset.drop_device + drop_device
-    return make_filter(args.include_stats, drop, drop_device, args.since, args.until)
+    return filter_from_args(args, preset)
 
 
 def preset_files_for(session_folder: Path) -> list[Path]:
@@ -492,16 +596,16 @@ def load_preset(name: str, candidates: Sequence[Path]) -> Preset:
     if unknown:
         raise ExportError(f"{file}: preset {name!r} has unknown keys {unknown} (allowed: {sorted(_PRESET_KEYS)})")
     lists = {}
-    for key in ("drop", "drop_device"):
+    for key in _PRESET_LISTS:
         values = preset.get(key, [])
         if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
             raise ExportError(f"{file}: preset {name!r}: {key} must be a list of strings")
         lists[key] = values
     try:
-        make_filter(drop=lists["drop"], drop_device=lists["drop_device"])
+        make_filter(**lists)
     except FilterError as e:
         raise ExportError(f"{file}: preset {name!r}: {e}")
-    return Preset(name, file, lists["drop"], lists["drop_device"])
+    return Preset(name, file, lists)
 
 
 def _resolve_sources(args) -> list[ExportSource]:

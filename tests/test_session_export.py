@@ -426,6 +426,89 @@ class TestDrops:
             make_filter(drop_device=[bad])
 
 
+class TestKeepFilters:
+    def test_device_keeps_only_the_devices_given(self):
+        options = make_filter(device=["nrf", "system"])
+        assert keep_line(_log("nrf", "app"), options)
+        assert keep_line(_log("system", "source.x"), options)
+        assert not keep_line(_log("iot", "app"), options)
+        assert not keep_line(_log("nrf2", "app"), options)  # a whole name, not a prefix
+
+    def test_module_keeps_only_module_prefixes_on_any_device(self):
+        options = make_filter(module=["app.bms", "net."])
+        assert keep_line(_log("nrf", "app.bms.cell"), options)
+        assert keep_line(_log("iot", "net.mqtt"), options)
+        assert not keep_line(_log("nrf", "app.main"), options)
+        assert not keep_line(_log("nrf", "net"), options)  # "net" doesn't start with "net."
+
+    def test_device_and_module_must_both_pass_and_drops_still_apply(self):
+        options = make_filter(device=["nrf"], module=["app"], drop=["app.heartbeat"])
+        assert keep_line(_log("nrf", "app.main"), options)
+        assert not keep_line(_log("iot", "app.main"), options)
+        assert not keep_line(_log("nrf", "net"), options)
+        assert not keep_line(_log("nrf", "app.heartbeat"), options)
+
+    def test_device_does_not_override_the_stats_rule(self):
+        options = make_filter(device=["system"])
+        assert not keep_line(_log("system", "central.stats"), options)
+        assert keep_line(_log("system", "central.stats"), make_filter(include_stats=True, device=["system"]))
+
+    def test_device_and_module_never_drop_lines_that_are_not_log_lines(self):
+        assert keep_line(b"  continued", make_filter(device=["nrf"], module=["app"]))
+
+    @pytest.mark.parametrize("flag, bad", [("device", ""), ("device", "a b"), ("module", ""), ("module", "a b")])
+    def test_malformed_names_are_rejected(self, flag, bad):
+        with pytest.raises(FilterError, match=f"--{flag}"):
+            make_filter(**{flag: [bad]})
+
+
+class TestRegexFilters:
+    def test_match_keeps_lines_any_pattern_finds(self):
+        options = make_filter(match=["fault", r"reset \d+"])
+        assert keep_line(_log("nrf", "app", "bus fault at 0x20"), options)
+        assert keep_line(_log("nrf", "app", "reset 3"), options)
+        assert not keep_line(_log("nrf", "app", "reset x"), options)
+
+    def test_match_searches_the_whole_line(self):
+        """Time, level, device and module too - the same text grep would see."""
+        assert keep_line(_log("nrf", "app.bms", "x"), make_filter(match=[r" I nrf app\.bms: "]))
+        assert keep_line(_log("nrf", "app"), make_filter(match=["^2026-10-01T12"]))
+
+    def test_exclude_drops_and_wins_over_match(self):
+        options = make_filter(match=["fault"], exclude=["expected", "ignore me"])
+        assert keep_line(_log("nrf", "app", "fault"), options)
+        assert not keep_line(_log("nrf", "app", "expected fault"), options)
+        assert not keep_line(_log("nrf", "app", "ignore me"), make_filter(exclude=["ignore me"]))
+
+    def test_case_sensitive_unless_the_pattern_says_otherwise(self):
+        assert not keep_line(_log("nrf", "app", "FAULT"), make_filter(match=["fault"]))
+        assert keep_line(_log("nrf", "app", "FAULT"), make_filter(match=["(?i)fault"]))
+
+    def test_applies_to_lines_that_are_not_log_lines(self):
+        """Unlike the device/module/drop rules: with -e only matching lines come out, as with grep."""
+        assert not keep_line(b"  continued", make_filter(match=["fault"]))
+        assert keep_line(b"  continued fault", make_filter(match=["fault"]))
+        assert not keep_line(b"  noise", make_filter(exclude=["noise"]))
+
+    def test_matches_bytes_without_decoding(self):
+        line = _log("nrf", "app", "temp") + b" \xff\xfe"
+        assert keep_line(line, make_filter(match=["temp"]))
+        assert not keep_line(line, make_filter(exclude=["temp"]))
+        assert keep_line(line, make_filter(match=["\udcff"]))  # a raw byte, written as `blink` decodes argv
+
+    @pytest.mark.parametrize("flag, key", [("-e/--match", "match"), ("--exclude", "exclude")])
+    @pytest.mark.parametrize("bad", ["(", "[a-", "*x"])
+    def test_a_bad_regex_is_rejected_when_the_filter_is_made(self, flag, key, bad):
+        with pytest.raises(FilterError, match=re.escape(f"{flag} {bad!r}: not a valid regular expression")):
+            make_filter(**{key: [bad]})
+
+    @pytest.mark.parametrize("key", ["match", "exclude"])
+    def test_an_empty_pattern_is_rejected(self, key):
+        """It would match every line: -e '' keeps everything, --exclude '' drops everything."""
+        with pytest.raises(FilterError, match="empty pattern"):
+            make_filter(**{key: [""]})
+
+
 def _at(ts: str, device: str = "nrf") -> bytes:
     return f"{ts} I {device} app: x".encode()
 
@@ -663,6 +746,29 @@ class TestFilterFlags:
 
         assert capsysbinary.readouterr().out == lines[1] + b"\n" + lines[2] + b"\n"
 
+    def test_device_module_match_and_exclude(self, tmp_path, capsysbinary):
+        lines = [
+            _log("nrf", "app.bms", "cell fault"),
+            _log("nrf", "app.bms", "cell ok"),
+            _log("nrf", "app.bms", "fault expected"),
+            _log("nrf", "net.mqtt", "fault"),
+            _log("iot", "app.bms", "cell fault"),
+            _log("can0", "frame", "FAULT"),
+        ]
+        folder = _session(tmp_path, "s", lines)
+
+        _run(
+            [str(folder), "--device", "nrf", "--device", "can0", "--module", "app.", "--module", "frame"]
+            + ["-e", "fault", "--match", "(?i)^.* can0 ", "--exclude", "expected"]
+        )
+
+        assert capsysbinary.readouterr().out.splitlines() == [lines[0], lines[5]]
+
+    def test_a_bad_regex_is_a_command_line_error_before_anything_is_read(self, tmp_path, capsysbinary):
+        with pytest.raises(SystemExit, match=r"blink export: -e/--match '\(': not a valid regular expression"):
+            _run([str(tmp_path / "no such session"), "-e", "("])
+        assert capsysbinary.readouterr().out == b""
+
 
 PRESET_LINES = [
     _log("nrf", "app.bms"),
@@ -715,6 +821,17 @@ class TestPresets:
         _run([str(folder), "--preset", "analysis", "--drop", "gui.lag", "--drop-device", "can0"])
 
         assert capsysbinary.readouterr().out.splitlines() == [_log("nrf", "app.main")]
+
+    def test_preset_with_keep_filters_and_flags_adding_to_them(self, tmp_path, capsysbinary):
+        presets = {"watch": {"device": ["nrf"], "module": ["app."], "match": ["bms"], "exclude": ["main"]}}
+        folder = _session_recorded_with(tmp_path, "s", _profile(tmp_path / "default", presets))
+
+        _run([str(folder), "--preset", "watch"])
+        assert capsysbinary.readouterr().out.splitlines() == [_log("nrf", "app.bms")]
+
+        # A flag widens the preset's keep lists: one more device, one more pattern.
+        _run([str(folder), "--preset", "watch", "--device", "iot", "--module", "battery", "-e", "level"])
+        assert capsysbinary.readouterr().out.splitlines() == [_log("nrf", "app.bms"), _log("iot", "battery.level")]
 
     def test_falls_back_to_the_active_profile(self, tmp_path, capsysbinary, no_active_profile):
         """Recorded profile gone (or recorded elsewhere): the active profile's presets apply."""
@@ -784,6 +901,9 @@ class TestPresets:
             ({"analysis": {"drop": "app.bms"}}, "drop must be a list of strings"),
             ({"analysis": {"drop_device": [1]}}, "drop_device must be a list of strings"),
             ({"analysis": {"drop": [""]}}, r"preset 'analysis': --drop ''"),
+            ({"analysis": {"match": "fault"}}, "match must be a list of strings"),
+            ({"analysis": {"exclude": ["("]}}, r"preset 'analysis': --exclude '\(': not a valid regular"),
+            ({"analysis": {"device": ["a b"]}}, r"preset 'analysis': --device 'a b'"),
         ],
     )
     def test_broken_presets_file_is_an_error_naming_it(self, tmp_path, presets, message):
