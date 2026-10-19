@@ -105,6 +105,30 @@ def cold_log_pool(global_pool, tmp_path):
     pool.release_all()
 
 
+class TestFirstRetainedSequence:
+    """What read_logs compares a cursor with to report rows lost to eviction (`lost_rows`)."""
+
+    def test_empty_pool_is_one_past_latest(self, cold_log_pool):
+        assert cold_log_pool.first_retained_sequence() == 1
+
+    def test_follows_cold_tier_eviction(self, cold_log_pool, global_pool):
+        push_rows(cold_log_pool, global_pool, 3, ts_start=100)
+        assert wait_for(lambda: snapshot_seqs(cold_log_pool) == [1, 2, 3])
+        assert cold_log_pool.first_retained_sequence() == 1  # seq 1 is in the cold tier
+
+        push_rows(cold_log_pool, global_pool, 5, ts_start=200)
+        assert wait_for(lambda: snapshot_seqs(cold_log_pool) == [5, 6, 7, 8])
+        assert cold_log_pool.first_retained_sequence() == 5
+
+    def test_after_rotate_session_nothing_is_held_until_new_rows(self, cold_log_pool, global_pool, tmp_path):
+        push_rows(cold_log_pool, global_pool, 3, ts_start=100)
+        cold_log_pool.rotate_session(tmp_path / "next" / "cold")
+        assert cold_log_pool.first_retained_sequence() == 4  # numbering continues; 1-3 left with the old session
+
+        push_rows(cold_log_pool, global_pool, 1, ts_start=200)
+        assert cold_log_pool.first_retained_sequence() == 4
+
+
 class TestHotToColdEviction:
     def test_evicted_hot_segments_land_in_cold_tier(self, cold_log_pool, global_pool):
         push_rows(cold_log_pool, global_pool, 4, ts_start=100)

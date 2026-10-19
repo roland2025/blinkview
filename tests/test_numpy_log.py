@@ -126,6 +126,7 @@ class TestSegmentRotationAndEviction:
             current_total, _, seq = log_pool.get_counts()
             assert current_total == 6
             assert seq == 10
+            assert log_pool.first_retained_sequence() == 5  # rows 1-4 were dropped (no cold tier)
         finally:
             log_pool.release_all()
 

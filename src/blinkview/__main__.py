@@ -217,6 +217,14 @@ def _main():
     setup_export_parser(export_parser)
     export_parser.set_defaults(func=run_export)
 
+    tail_parser = subparsers.add_parser(
+        "tail", prog="blink tail", help="Follow a running BlinkView's log, filtered (for scripts and AI tools)"
+    )
+    from blinkview.utils.session_tail import run_tail, setup_tail_parser
+
+    setup_tail_parser(tail_parser)
+    tail_parser.set_defaults(func=run_tail)
+
     recover_parser = subparsers.add_parser(
         "recover", prog="blink recover", help="Finalize sessions whose recording was killed"
     )
@@ -274,8 +282,9 @@ def _main():
 
     args = parser.parse_args()
 
-    # borrow/return run inside build scripts before and after every flash: no notice in their output.
-    if args.command not in ("config", "mcp", "borrow", "return"):
+    # borrow/return run inside build scripts before and after every flash, and tail's stderr is
+    # watched by scripts and agents: no notice in their output.
+    if args.command not in ("config", "mcp", "borrow", "return", "tail"):
         from blinkview.utils.updater import get_update_notice
 
         # stderr: a notice, not command output - `blink replay --list > file` (or an export to

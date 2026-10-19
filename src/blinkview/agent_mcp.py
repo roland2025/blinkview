@@ -38,6 +38,8 @@ INSTRUCTIONS = (
     "instances, the current session and the sources you may send to. To run a device command and see "
     "its reply, call `send` with `wait_s` (and `quiet_ms` or `until`). `read_logs` reads the live log "
     "with a sequence cursor: pass the `next_seq` of one call as `after_seq` of the next. "
+    "To watch for a device event over more than a minute, run the shell command `blink tail` "
+    "(see `blink tail --help`) in a background shell instead of polling `read_logs`. "
     "`summary` counts lines per module and level - start there to find where the errors are. "
     "`telemetry_latest` gives the current value of every module, `telemetry_series` a module's numeric "
     "history. `get_config` shows how the profile's sources and pipelines are set up. To change it "
@@ -170,10 +172,11 @@ TOOLS = [
         "description": "Reads log lines from the running session, formatted like BlinkView's log window. "
         "Without `after_seq`: the newest `last_n` matching lines. With `after_seq`: the lines after that "
         "cursor, oldest first. The result's `next_seq` is the cursor for the next call; `truncated` means "
-        "more lines are waiting behind it. With `wait_s` it waits for new lines (from now on, unless "
-        "`after_seq` is given). With `around`: the lines just before and after a point in time - what "
-        "happened around an error. Device and module names for the filters come from `list_modules`. "
-        "To go through more than a few hundred lines, pass `to_file` and search the file.",
+        "more lines are waiting behind it; `lost_rows` that many lines after the cursor were dropped from "
+        "memory (or went to the previous session) before they were read. With `wait_s` it waits for new "
+        "lines (from now on, unless `after_seq` is given). With `around`: the lines just before and after a "
+        "point in time - what happened around an error. Device and module names for the filters come from "
+        "`list_modules`. To go through more than a few hundred lines, pass `to_file` and search the file.",
         "inputSchema": {
             "type": "object",
             "properties": {

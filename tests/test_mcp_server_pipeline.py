@@ -404,6 +404,51 @@ def test_to_file_deletes_its_old_files_and_refuses_a_non_boolean(registry, run_d
         _call(run_dir, "read_logs", to_file="yes")
 
 
+def test_export_format_returns_to_files_lines_in_the_reply(registry, run_dir, device, to_file_dir, monkeypatch):
+    """For scripts (`blink tail`): the session log's own lines without a temporary file."""
+    monkeypatch.setattr(agent_log_read, "HARD_MAX_LINES", 3)
+    seq = _call(run_dir, "status")["instances"][0]["seq"]
+    _say(device, *[f"exported {i}" for i in range(6)])
+    device.sendall(b"bad byte \xff" + NL)  # invalid UTF-8 comes back byte for byte
+    _wait_for(lambda: _call(run_dir, "read_logs", device="board", contains="bad byte")["lines"], what="the rows")
+
+    result = _call(run_dir, "read_logs", after_seq=seq, device="board", export_format=True, show_ts=False)
+    filed = _call(run_dir, "read_logs", after_seq=seq, device="board", to_file=True)
+
+    assert "file" not in result
+    assert result["lines"] == 7 and result["truncated"] is False  # past HARD_MAX_LINES: export_format pages bigger
+    assert result["text"].encode("utf-8", "surrogateescape") == Path(filed["file"]).read_bytes()
+    assert result["text"].encode("utf-8", "surrogateescape").endswith(b": bad byte \xff\n")
+    assert all(line_timestamp(line) for line in result["text"].encode("utf-8", "surrogateescape").splitlines())
+    assert list(to_file_dir.iterdir()) == [Path(filed["file"])]  # export_format wrote no file of its own
+
+    capped = _call(run_dir, "read_logs", after_seq=seq, device="board", export_format=True, max_lines=4)
+    assert capped["lines"] == 4 and capped["truncated"] is True
+    with pytest.raises(AgentApiError, match="'export_format' must be true or false"):
+        _call(run_dir, "read_logs", export_format=1)
+
+
+def test_a_cursor_behind_what_central_storage_holds_reports_lost_rows(registry, run_dir, device):
+    """A rotation hands everything in memory to the old session: a reader that hadn't caught up
+    is told how many rows it can no longer get, instead of silently starting after them."""
+    seq = _call(run_dir, "status")["instances"][0]["seq"]
+    _say(device, "unread 1", "unread 2")
+    _wait_for(lambda: _call(run_dir, "read_logs", device="board", contains="unread 2")["lines"], what="the rows")
+    before = _call(run_dir, "read_logs", after_seq=seq, device="board")
+    assert "lost_rows" not in before
+
+    _call(run_dir, "rotate_session")
+    _say(device, "after rotation")
+    _wait_for(lambda: _call(run_dir, "read_logs", device="board", contains="after rotation")["lines"], what="the row")
+
+    result = _call(run_dir, "read_logs", after_seq=seq, include_system=True)
+    held = registry.central.log_pool.first_retained_sequence()
+    assert result["lost_rows"] == held - seq - 1 >= 2
+    assert "unread" not in result["text"]
+    caught_up = _call(run_dir, "read_logs", after_seq=result["next_seq"])
+    assert "lost_rows" not in caught_up
+
+
 def test_send_with_to_file_puts_the_reply_in_a_file(registry, run_dir, device, to_file_dir):
     import threading
 

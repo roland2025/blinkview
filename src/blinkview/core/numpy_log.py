@@ -225,6 +225,18 @@ class CircularLogPool:
     def latest_sequence(self):
         return self.sequence
 
+    def first_retained_sequence(self) -> int:
+        """The sequence of the oldest row still held (cold or hot) - or latest_sequence() + 1
+        when nothing is (just after a session rotation): a reader whose cursor is below this
+        minus one has lost rows to eviction. Read under the lock from the segments' cached first
+        sequence, so no segment is retained."""
+        with self._lock:
+            for segment in chain(self.cold_segments, self.segments):
+                first = segment.first_sequence_id
+                if first != SEQ_NONE:
+                    return int(first)
+            return int(self.sequence) + 1
+
     @property
     def cold_storage_active(self) -> bool:
         """True while a cold-storage archiver is attached (cold storage enabled with a dir)."""

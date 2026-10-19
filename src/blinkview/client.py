@@ -50,6 +50,14 @@ class BlinkView:
     def pid(self) -> Optional[int]:
         return self._instance.get("pid")
 
+    @property
+    def project(self) -> Optional[str]:
+        return self._instance.get("project")
+
+    @property
+    def profile(self) -> Optional[str]:
+        return self._instance.get("profile")
+
     def call(self, tool: str, **args) -> Any:
         """Any tool by name, for the ones without a method here."""
         return call_instance_tool(self._instance, tool, args)
@@ -83,6 +91,8 @@ class BlinkView:
         return self.call("send", text=text, **_given(source=source), **args)
 
     def read_logs(self, **args) -> dict:
+        """agent_mcp.py's read_logs. Also takes `export_format=True`: the text is then `blink
+        export`'s lines (UTC, invalid UTF-8 as surrogate escapes), up to 50000 per call."""
         return self.call("read_logs", **args)
 
     def wait_for(

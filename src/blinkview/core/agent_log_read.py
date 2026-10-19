@@ -45,6 +45,7 @@ HARD_MAX_LINES = 2000
 # With `to_file` the lines go to a file instead of the reply, so the cap only bounds the file.
 FILE_MAX_LINES = 1_000_000
 # ... and they are fetched this many at a time, so no more than a page of text is held in memory.
+# Also `export_format`'s cap: a reply for a script (`blink tail`), which pages with the cursor.
 FILE_PAGE_LINES = 50_000
 # to_file's files are deleted once they are this old, whenever another one is written.
 FILE_KEEP_SECONDS = 24 * 3600
@@ -321,11 +322,13 @@ def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: Fa
     scanner = _make_scanner(registry, args)
     log_pool = registry.central.log_pool
     # to_file: the session log's own lines (what `blink export` prints) written to a file, and
-    # only its path returned.
+    # only its path returned. export_format: those lines in the reply's text - for scripts
+    # (`blink tail`); left out of the MCP schema, an agent reads them with to_file.
     to_file = _flag(args, "to_file")
-    fetcher_type = LogRowTextFetcher if to_file else LogTextFetcher
+    export_format = _flag(args, "export_format")
+    fetcher_type = LogRowTextFetcher if to_file or export_format else LogTextFetcher
     fetcher = fetcher_type(scanner, registry.system_ctx.array_pool, tables_provider=id_registry.bundle)
-    hard_max_lines = FILE_MAX_LINES if to_file else HARD_MAX_LINES
+    hard_max_lines = FILE_MAX_LINES if to_file else FILE_PAGE_LINES if export_format else HARD_MAX_LINES
 
     # --- Formatting: the log viewer's formatter ---
     format_cfg = _format_config(args)
@@ -402,6 +405,13 @@ def read_logs(registry, args: dict, stop_is_set: Callable[[], bool] = lambda: Fa
         # but restart with the process).
         cursor = int(SEQ_NONE)
         result["cursor_reset"] = True
+    elif after_seq is not None:
+        # Rows after the cursor already evicted from central storage (or handed to the old
+        # session by a rotation) can't be returned: the reply starts after them. Say how many
+        # rows (of any device, before the filters) that skips, instead of skipping silently.
+        lost = log_pool.first_retained_sequence() - cursor - 1
+        if lost > 0:
+            result["lost_rows"] = lost
 
     def step(cursor: int, cap: int) -> _Step:
         """Matching rows newer than `cursor`, oldest first, at most `cap`."""
