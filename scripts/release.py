@@ -35,6 +35,13 @@ def main():
 
     increment = sys.argv[1]
 
+    # Push whatever branch we're on, not a hard-coded one. Checked before the bump so a
+    # detached HEAD fails without leaving a modified __init__.py behind.
+    branch = run("git rev-parse --abbrev-ref HEAD", capture=True).stdout.strip()
+    if not branch or branch == "HEAD":
+        print("Not on a branch (detached HEAD); check out the branch to release from.")
+        return
+
     # hatch's segment for "drop the .devN / rcN suffix" is 'release' (0.18.1.dev0 -> 0.18.1);
     # 'standard' is the name of its version scheme, not a segment, and fails.
     if increment in ["final", "standard"]:
@@ -58,8 +65,8 @@ def main():
         run(["git", "add", "src/blinkview/__init__.py"])
         run(["git", "commit", "-m", f'"Release: v{ver}"'])
         run(["git", "tag", "-a", f"v{ver}", "-m", f'"Release: v{ver}"'])
-        run(["git", "push", "origin", "main"])
-        run(["git", "push", "origin", "--tags"])
+        run(["git", "push", "origin", branch])
+        run(["git", "push", "origin", f"v{ver}"])
         print(f"\nSuccessfully released v{ver}")
     except subprocess.CalledProcessError as e:
         print(f"\nGit command failed: {e}")
