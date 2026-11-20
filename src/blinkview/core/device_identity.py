@@ -60,6 +60,15 @@ class ModuleIdentity:
         """Delegates to the registry for the heavy lifting."""
         return self.device.id_registry.get_descendant_modules(self.id)
 
+    def is_within(self, ancestor: "ModuleIdentity") -> bool:
+        """True if `ancestor` is this module itself or anywhere on its parent chain."""
+        curr = self
+        while curr is not None:
+            if curr == ancestor:
+                return True
+            curr = curr.parent
+        return False
+
     def name_with_device(self) -> str:
         return f"{self.device.name}.{self.name}"
 

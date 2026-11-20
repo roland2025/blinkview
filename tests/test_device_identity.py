@@ -153,6 +153,19 @@ class TestModuleIdentityHelpers:
         descendants = wifi.get_all_descendants()
         assert set(descendants) == {tx, rx}
 
+    def test_is_within_walks_the_parent_chain(self, registry):
+        device = registry.get_device("esp32")
+        wifi = device.get_module("wifi")
+        tx = device.get_module("wifi.tx")
+        ble = device.get_module("ble")
+
+        assert tx.is_within(tx)  # a module is within itself
+        assert tx.is_within(wifi)
+        assert tx.is_within(device.root)
+        assert not wifi.is_within(tx)  # not downward
+        assert not tx.is_within(ble)  # not across siblings
+        assert not tx.is_within(registry.get_device("nrf").get_module("wifi"))  # not across devices
+
     def test_set_essential_updates_module_and_registry(self, registry):
         device = registry.get_device("esp32")
         module = device.get_module("wifi")

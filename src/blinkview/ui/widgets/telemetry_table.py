@@ -257,28 +257,10 @@ class TelemetryTableModel(QAbstractTableModel):
             if module.device != self.allowed_module.device:
                 return False
 
-            if self.allowed_module_children:
-                curr = module
-                found = False
-                while curr is not None:
-                    if curr == self.allowed_module:
-                        found = True
-                        break
-                    curr = curr.parent
-                if not found:
-                    return False
-            else:
-                parent = self.allowed_module.parent
-                if parent is not None:
-                    curr = module
-                    found = False
-                    while curr is not None:
-                        if curr == parent:
-                            found = True
-                            break
-                        curr = curr.parent
-                    if not found:
-                        return False
+            # "With children" scopes to allowed_module's subtree; without, to its parent's subtree.
+            scope = self.allowed_module if self.allowed_module_children else self.allowed_module.parent
+            if scope is not None and not module.is_within(scope):
+                return False
 
         # Text Search Filters
         if self._positive_groups or self._global_negatives:
@@ -429,63 +411,7 @@ class TelemetryTableModel(QAbstractTableModel):
         """Applies filters to the id tracking array and executes sorting."""
         self.beginResetModel()
 
-        filtered_ids = []
-        for mod_id, module in enumerate(self.modules):
-            # Essential Filter
-            if module.device is self.system_device:
-                if not self.show_non_essential and not module.is_essential:
-                    continue
-
-            if self.allowed_device is not None and module.device != self.allowed_device:
-                continue
-
-            if self.allowed_module is not None:
-                if module.device != self.allowed_module.device:
-                    continue
-
-                if self.allowed_module_children:
-                    curr = module
-                    found = False
-                    while curr is not None:
-                        if curr == self.allowed_module:
-                            found = True
-                            break
-                        curr = curr.parent
-                    if not found:
-                        continue
-                else:
-                    parent = self.allowed_module.parent
-                    if parent is not None:
-                        curr = module
-                        found = False
-                        while curr is not None:
-                            if curr == parent:
-                                found = True
-                                break
-                            curr = curr.parent
-                        if not found:
-                            continue
-
-            if self._positive_groups or self._global_negatives:
-                row_content = f"{module.name} {module.device.name}".lower()
-
-                if self._global_negatives and any(neg in row_content for neg in self._global_negatives):
-                    continue
-
-                if self._positive_groups:
-                    passed_pos = False
-                    for group in self._positive_groups:
-                        if all(term in row_content for term in group if term):
-                            passed_pos = True
-                            break
-                    if not passed_pos:
-                        continue
-
-            # Read from memoryview instead of numpy array
-            if self.hide_empty and self.seqs_mv[mod_id] == 0:
-                continue
-
-            filtered_ids.append(mod_id)
+        filtered_ids = [mod_id for mod_id in range(len(self.modules)) if self._passes_filters(mod_id)]
 
         reverse = self.sort_order == Qt.DescendingOrder
         if self.sort_column == TelemetryCol.DEVICE:
