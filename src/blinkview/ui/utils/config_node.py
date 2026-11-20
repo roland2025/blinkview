@@ -10,6 +10,8 @@ from typing import Any
 
 from qtpy.QtCore import QObject, Signal
 
+from blinkview.utils.dev_mode import dev_print
+
 
 class ConfigNode(QObject):
     signal_received = Signal(object, object)
@@ -141,7 +143,7 @@ class ConfigNode(QObject):
 
         # If overlapping, our local state is stale. Re-fetch!
         if is_child_updated or is_parent_updated:
-            print(f"[ConfigNode] Overlapping change detected at '{path}'. Re-fetching '{self.active_path}'...")
+            dev_print(f"[ConfigNode] Overlapping change detected at '{path}'. Re-fetching '{self.active_path}'...")
             self.fetch()
 
     def _prune_schema_depth(self, schema_node: dict, current_depth: int, max_depth: int) -> dict:

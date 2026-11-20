@@ -20,6 +20,7 @@ from blinkview.core.settings_manager import SettingsManager
 from blinkview.core.system_context import SystemContext
 from blinkview.storage.file_logger import FileLogger
 from blinkview.utils.atomic_json_dump import atomic_json_dump
+from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.global_settings import get_blink_home
 from blinkview.utils.project_settings import get_project_root, get_workspace_dir
 from blinkview.utils.session_lister import HEARTBEAT_INTERVAL_S
@@ -607,7 +608,7 @@ class FileManager:
                 for request in requests:
                     request.resume.set()
 
-        print(f"[FileManager] Rotated session: {old_dir.name} -> {new_dir.name}")
+        dev_print(f"[FileManager] Rotated session: {old_dir.name} -> {new_dir.name}")
         return old_dir, new_dir
 
     @staticmethod

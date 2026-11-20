@@ -311,7 +311,7 @@ class TelemetryPlotter(QWidget):
         self._last_update_ns = 0
 
     def restore(self, state: dict):
-        print(f"[TelemetryPlotter] restoring state '{state}'")
+        dev_print(f"[TelemetryPlotter] restoring state '{state}'")
         self.tab_name = state.get("tab_name", self.tab_name)
         self.is_split = state.get("is_split", self.is_split)
         self.view_duration_text = state.get("view_duration", self.view_duration_text)

@@ -36,6 +36,7 @@ from blinkview.ui.utils.window_title import titled
 from blinkview.ui.widget_registry import register_widget_factory
 from blinkview.ui.widgets.config_widget_factory import WidgetFactory
 from blinkview.ui.widgets.message_box import MessageBox
+from blinkview.utils.dev_mode import dev_print
 
 # Global setting: help texts written out under each field (True), or behind an info button.
 SHOW_HELP_SETTING = "config.show_help"
@@ -228,7 +229,7 @@ class DynamicConfigWidget(QWidget):
         """Called automatically when the widget is instructed to close."""
         if not self._closed:
             self._closed = True
-            print(f"[Widget] Closing. Deregistering node for {self.node.active_path}")
+            dev_print(f"[Widget] Closing. Deregistering node for {self.node.active_path}")
 
             # Clean up the backend connection
             self.node.signal_received.disconnect(self.update_config_schema)
@@ -277,7 +278,7 @@ class DynamicConfigWidget(QWidget):
             self.applying_config = False
             return  # Safety catch: Nothing actually changed
 
-        print(f"[DynamicConfigWidget] Generating JSON Patch:\n{patch}")
+        dev_print(f"[DynamicConfigWidget] Generating JSON Patch:\n{patch}")
 
         # Send the patch and the new full state
         self.node.send(patch=patch)
@@ -1302,7 +1303,7 @@ class DynamicConfigWidget(QWidget):
         if target_path is None:
             return
 
-        print(f"[DynamicConfigWidget] _on_factory_type_changed target_path={target_path}")
+        dev_print(f"[DynamicConfigWidget] _on_factory_type_changed target_path={target_path}")
 
         current_state = self.get_config()
 

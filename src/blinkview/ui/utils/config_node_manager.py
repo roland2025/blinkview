@@ -86,7 +86,7 @@ class ConfigNodeManager(QObject):
     @Slot(object)
     def deregister_node(self, node: ConfigNode):
         """Removes a node when its UI component closes."""
-        print(f"[ConfigManager] Deregistering node for {node.active_path}")
+        dev_print(f"[ConfigManager] Deregistering node for {node.active_path}")
         if node in self.nodes:
             self.nodes.remove(node)
 
@@ -103,10 +103,10 @@ class ConfigNodeManager(QObject):
                 print(f"[ConfigManager] Broadcasting '{path}' failed: {e}")
 
     def show(self, path: str, child_name=None, drop_keys: list = None, editable: bool = True):
-        print(
+        dev_print(
             f"[ConfigManager] Request to show config for '{path}' with name='{child_name}', drop_keys={drop_keys}, editable={editable}"
         )
-        print(f"context: {self.gui_context}, create_widget: {self.gui_context.create_widget}")
+        dev_print(f"context: {self.gui_context}, create_widget: {self.gui_context.create_widget}")
         self.gui_context.create_widget(
             WidgetName.DYNAMIC_CONFIG,
             f"Settings: {child_name or path}",
@@ -125,7 +125,7 @@ class ConfigNodeManager(QObject):
 
     def broadcast_deletion(self, deleted_path: str):
         """Notifies all nodes on this path (or its children) that the config was deleted."""
-        print(f"[ConfigManager] Broadcasting deletion for '{deleted_path}'")
+        dev_print(f"[ConfigManager] Broadcasting deletion for '{deleted_path}'")
 
         # Ensure trailing slash to prevent substring false-positives (e.g., "/dev/A" vs "/dev/ABC")
         deleted_slashed = deleted_path if deleted_path.endswith("/") else deleted_path + "/"
@@ -137,5 +137,5 @@ class ConfigNodeManager(QObject):
             is_child = node.active_path.startswith(deleted_slashed)
 
             if is_exact_match or is_child:
-                print(f"[ConfigManager] Triggering deletion lifecycle for node '{node.active_path}'")
+                dev_print(f"[ConfigManager] Triggering deletion lifecycle for node '{node.active_path}'")
                 node.handle_deletion()

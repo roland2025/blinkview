@@ -1040,7 +1040,7 @@ class Registry:
                 for item_id, item in self.pipelines.pipelines.items():
                     values.append((item_id, item.name))
 
-        print(f"[Registry] get_reference_values '{name}': {values}")
+        dev_print(f"[Registry] get_reference_values '{name}': {values}")
         return values
 
     def get_source(self, source_id: str):

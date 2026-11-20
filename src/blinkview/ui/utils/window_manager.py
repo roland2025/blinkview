@@ -9,6 +9,8 @@ from base64 import b64decode, b64encode
 from qtpy.QtCore import QByteArray, Qt, QTimer
 from qtpy.QtGui import QGuiApplication
 
+from blinkview.utils.dev_mode import dev_print
+
 
 def get_window_geometry_data(window, threshold=15) -> dict:
     """Extracts geometry, applying a deadzone to prevent OS-level pixel creep."""
@@ -134,7 +136,7 @@ class WindowManager:
         """
         self._windows[window] = content_widget
 
-        print(
+        dev_print(
             f"[WindowManager] Registered {content_widget.__class__.__name__} "
             f"in {hex(id(window))}. Total: {len(self._windows)}"
         )

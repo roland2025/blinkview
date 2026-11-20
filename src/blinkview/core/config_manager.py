@@ -166,7 +166,7 @@ class ConfigManager:
 
     def apply_patch(self, path: str, patch: list):
         """Applies patch and notifies affected subscribers."""
-        print(f"[ConfigManager] Patching {path} with '{patch}'")
+        dev_print(f"[ConfigManager] Patching {path} with '{patch}'")
         if not patch:
             return
 
