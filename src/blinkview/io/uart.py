@@ -288,8 +288,15 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                                     self.distribute(batch)
                                     tuner.update(batch.msg_cursor, batch.size, delay_s)
 
+                                # A read can be bigger than the tuner's estimate (it starts at
+                                # 4 KB and learns from what it delivers): size the new batch for
+                                # it, or the insert below fails and the read is lost.
+                                tuner.ensure_burst_capacity(len(rest))
                                 batch = batch_acquire()
-                                batch.insert(now, now, rest)
+                                if not batch.insert(now, now, rest):
+                                    self.logger_link.error(
+                                        "Dropped a %d-byte read: it does not fit a new batch", len(rest)
+                                    )
 
                     if batch is not None and batch.start_ts > 0 and (now - batch.start_ts) >= delay_ns:
                         with batch:
@@ -338,6 +345,12 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
             self.logger_link.info("Opening '%s' at %s baud", self.url, self.baudrate)
 
             from serial import serial_for_url
+
+            from blinkview.io import urlhandler
+
+            # socket:// through our handler (a byte-counting in_waiting, see
+            # io/urlhandler/protocol_socket.py); every other scheme stays pyserial's.
+            urlhandler.install()
 
             # Use PySerial's URL handler (handles socket://, rfc2217://, hwgrep://, etc.)
             ser = serial_for_url(

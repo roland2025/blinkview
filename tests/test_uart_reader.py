@@ -429,3 +429,186 @@ class TestRunRealSocketIngestion:
             assert subscriber.joined() == expected
         finally:
             server.close()
+
+
+def _wait_until(pred, timeout=5.0, tick=0.005):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(tick)
+    return pred()
+
+
+class TestSocketUrlHandler:
+    """io/urlhandler: socket:// through BlinkView's handler, whose in_waiting counts queued bytes
+    instead of pyserial's select()-based 0/1 (https://github.com/pyserial/pyserial/issues/759)."""
+
+    def test_install_puts_the_package_first_once(self):
+        import serial
+
+        from blinkview.io import urlhandler
+
+        urlhandler.install()
+        urlhandler.install()
+        assert serial.protocol_handler_packages[0] == urlhandler.PACKAGE
+        assert serial.protocol_handler_packages.count(urlhandler.PACKAGE) == 1
+        assert "serial.urlhandler" in serial.protocol_handler_packages
+
+    def test_socket_url_resolves_to_our_class_and_other_schemes_stay_pyserials(self):
+        import serial
+
+        from blinkview.io import urlhandler
+        from blinkview.io.urlhandler import protocol_socket
+
+        urlhandler.install()
+        ser = serial.serial_for_url("socket://127.0.0.1:1", do_not_open=True)
+        assert type(ser) is protocol_socket.Serial
+        loop = serial.serial_for_url("loop://", do_not_open=True)
+        assert type(loop).__module__ == "serial.urlhandler.protocol_loop"
+
+    def test_in_waiting_counts_the_queued_bytes(self):
+        import serial
+
+        from blinkview.io import urlhandler
+
+        urlhandler.install()
+        server = LoopbackTCPServer()
+        try:
+            ser = serial.serial_for_url(f"socket://127.0.0.1:{server.port}", timeout=0.5)
+            try:
+                conn = server.wait_for_client()
+                assert ser.in_waiting == 0
+                conn.sendall(b"x" * 10_000)
+                assert _wait_until(lambda: ser.in_waiting == 10_000), ser.in_waiting
+                assert ser.read(4_000) == b"x" * 4_000
+                assert ser.in_waiting == 6_000
+            finally:
+                ser.close()
+        finally:
+            server.close()
+
+    def test_pyserials_own_handler_still_reports_0_or_1(self):
+        """Why the handler exists. If this starts failing, pyserial has fixed #759 and
+        io/urlhandler/protocol_socket.py can go."""
+        from serial.urlhandler.protocol_socket import Serial as UpstreamSerial
+
+        server = LoopbackTCPServer()
+        try:
+            ser = UpstreamSerial(f"socket://127.0.0.1:{server.port}", timeout=0.5)
+            try:
+                conn = server.wait_for_client()
+                conn.sendall(b"x" * 10_000)
+                time.sleep(0.2)
+                assert ser.in_waiting == 1
+            finally:
+                ser.close()
+        finally:
+            server.close()
+
+    def test_uart_open_uses_the_handler_in_a_fresh_process(self):
+        """The handler is found through a mutable global list, so an import-order mistake could
+        silently leave pyserial's in place; only a fresh interpreter shows that."""
+        import subprocess
+
+        server = LoopbackTCPServer()
+        try:
+            code = (
+                "from types import SimpleNamespace\n"
+                "from blinkview.core.logger import PrintLogger\n"
+                "from blinkview.io.uart import UARTReader\n"
+                "r = UARTReader(); r.logger = PrintLogger('t')\n"
+                "r.shared = SimpleNamespace(tasks=None, time_ns=lambda: 0)\n"
+                f"r.apply_config({{'url': 'socket://127.0.0.1:{server.port}', 'serial_exclusive': False}})\n"
+                "ser = r.open()\n"
+                "print('CLASS', type(ser).__module__)\n"
+                "ser.close()\n"
+            )
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+            assert "CLASS blinkview.io.urlhandler.protocol_socket" in out.stdout, out.stdout + out.stderr
+        finally:
+            server.close()
+
+
+class BurstSerial:
+    """A port that hands over `bursts` reads of `size` bytes: read(1) gives the lead byte and
+    in_waiting the rest, as a real COM port does once its driver queue holds a whole burst."""
+
+    def __init__(self, reader, size, bursts=1):
+        self.reader = reader
+        self.size = size
+        self.left = bursts
+        self.is_open = True
+        self.rest = bytes(range(256)) * ((size - 1) // 256 + 1)
+        self.rest = self.rest[: size - 1]
+
+    @property
+    def in_waiting(self):
+        return self.size - 1
+
+    def read(self, n):
+        if n == 1:
+            if self.left == 0:
+                self.reader._stop_event.set()
+                return b""
+            self.left -= 1
+            return b"\xaa"
+        return self.rest
+
+    def close(self):
+        self.is_open = False
+
+
+class TestBurstLargerThanTheTunersBuffer:
+    """A read bigger than the tuner's estimate (4096 bytes on a fresh reader) used to be dropped
+    by the unchecked retry insert in run(); every byte now has to arrive."""
+
+    @pytest.mark.parametrize("size,bursts", [(4096, 1), (8192, 1), (65536, 1), (1 << 20, 1), (65536, 3)])
+    def test_every_byte_of_the_burst_is_delivered(self, size, bursts):
+        reader = make_reader(url="COM_FAKE", delay=20)
+        reader.shared = SimpleNamespace(
+            array_pool=NumpyArrayPool(max_bytes=64 * 1024 * 1024), time_ns=time.time_ns, tasks=FakeTasks()
+        )
+        port = BurstSerial(reader, size, bursts)
+        reader.open = lambda: port
+        subscriber = RecordingSubscriber()
+        reader.subscribe(subscriber)
+
+        reader.run()
+
+        expected = (b"\xaa" + port.rest) * bursts
+        assert len(subscriber.joined()) == len(expected)
+        assert subscriber.joined() == expected
+
+
+class TestRunRealSocketLargeTransfer:
+    """4 MB over a real socket:// connection: everything arrives, in reads far bigger than the
+    2 bytes per pass pyserial's own in_waiting allowed."""
+
+    def test_four_megabytes_arrive_complete_in_large_reads(self):
+        server = LoopbackTCPServer()
+        try:
+            reader = make_reader(url=f"socket://127.0.0.1:{server.port}", delay=20)
+            reader.enabled = True
+            reader.shared = SimpleNamespace(
+                array_pool=NumpyArrayPool(max_bytes=64 * 1024 * 1024), time_ns=time.time_ns, tasks=FakeTasks()
+            )
+            subscriber = RecordingSubscriber()
+            reader.subscribe(subscriber)
+            payload = (b"0123456789abcdef" * 4)[:63] + b"\n"
+            expected = payload * ((4 << 20) // len(payload))
+
+            reader.start()
+            try:
+                conn = server.wait_for_client()
+                assert _wait_until(lambda: reader.is_connected), "reader never finished opening"
+                conn.sendall(expected)
+                assert _wait_until(lambda: len(subscriber.joined()) >= len(expected), timeout=30)
+            finally:
+                reader.stop()
+
+            assert subscriber.joined() == expected
+            rows = len(subscriber.messages)
+            assert len(expected) / rows > 1000, f"{rows} rows for {len(expected)} bytes"
+        finally:
+            server.close()
