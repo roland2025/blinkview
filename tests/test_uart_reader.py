@@ -581,6 +581,88 @@ class TestBurstLargerThanTheTunersBuffer:
         assert subscriber.joined() == expected
 
 
+class GoneAfterOneLineSerial:
+    """A port that delivers one line, then goes away: the next read(1) raises (fail_with) or times
+    out (returns b"") until the test marks the port broken. The reader's open() hands it out once
+    and then fails, as for a device that does not come back."""
+
+    def __init__(self, reader, line: bytes, fail_with: Exception = None):
+        self.reader = reader
+        self.line = line
+        self.fail_with = fail_with
+        self.is_open = True
+        self.line_read = threading.Event()
+
+    @property
+    def in_waiting(self):
+        return 0 if self.line_read.is_set() else len(self.line) - 1
+
+    def read(self, n):
+        if not self.line_read.is_set():
+            if n == 1:
+                return self.line[:1]
+            self.line_read.set()
+            return self.line[1:]
+        if self.fail_with is not None:
+            raise self.fail_with
+        time.sleep(0.01)  # a read timeout with nothing received
+        return b""
+
+    def close(self):
+        self.is_open = False
+
+
+def start_reader_on(port_factory) -> tuple[UARTReader, RecordingSubscriber, "GoneAfterOneLineSerial"]:
+    """A live reader whose timed flush cannot fire during the test (delay 60 s), so anything
+    the subscriber sees was handed on by a flush on the disconnect path."""
+    reader = make_reader(url="COM_FAKE", delay=60_000)
+    reader.enabled = True
+    reader.shared = SimpleNamespace(array_pool=NumpyArrayPool(), time_ns=time.time_ns, tasks=FakeTasks())
+    port = port_factory(reader)
+    opens = iter([port])
+
+    def fake_open():
+        ser = next(opens, None)
+        if ser is not None:
+            reader.serial = ser
+        return ser
+
+    reader.open = fake_open
+    subscriber = RecordingSubscriber()
+    reader.subscribe(subscriber)
+    reader.start()
+    return reader, subscriber, port
+
+
+class TestRunFlushesOnDisconnect:
+    """The lines read just before the port goes away are handed on while the reader is still
+    running and the port stays gone, not held until it reopens or stop()."""
+
+    def test_read_error_hands_on_the_last_lines(self):
+        expected = b"last line before the device reset\n"
+        reader, subscriber, _port = start_reader_on(
+            lambda r: GoneAfterOneLineSerial(r, expected, fail_with=OSError("device gone"))
+        )
+        try:
+            assert _wait_until(lambda: subscriber.joined() == expected, timeout=3.0)
+            assert reader._thread.is_alive()
+        finally:
+            reader.stop()
+
+    def test_broken_port_hands_on_the_last_lines(self):
+        expected = b"last line before send_data failed\n"
+        reader, subscriber, port = start_reader_on(lambda r: GoneAfterOneLineSerial(r, expected))
+        try:
+            assert port.line_read.wait(3.0)
+            # What send_data(), reset_device() or is_connected do on another thread when the port fails.
+            reader.serial_broken = True
+
+            assert _wait_until(lambda: subscriber.joined() == expected, timeout=3.0)
+            assert reader._thread.is_alive()
+        finally:
+            reader.stop()
+
+
 class TestRunRealSocketLargeTransfer:
     """4 MB over a real socket:// connection: everything arrives, in reads far bigger than the
     2 bytes per pass pyserial's own in_waiting allowed."""

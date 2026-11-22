@@ -188,7 +188,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         try:
             # msg_size_bytes=20 keeps the ~50 rows/KB density
             feeder = BatchFeeder(self, msg_size_bytes=20)
-            push, append, maybe_flush = feeder.push, feeder.append, feeder.maybe_flush
+            push, append, maybe_flush, flush = feeder.push, feeder.append, feeder.maybe_flush, feeder.flush
 
             while not stop_is_set():
                 # Serial Lifecycle Management
@@ -235,6 +235,10 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                         self.reset_device()
 
                 if ser is None:
+                    # Hand on what the port delivered before it was marked broken (send_data(),
+                    # reset_device() or is_connected failing on another thread): while it stays
+                    # gone nothing else would.
+                    flush()
                     ser = self.open()
                     if ser is None:
                         sleep(1.0)
@@ -269,6 +273,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                     ser = None
                     self.serial = None
                     self.logger_state_open.warning("0")
+                    flush()
                     sleep(1.0)
 
         except Exception as e:
