@@ -17,6 +17,7 @@ from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.parsers.frame_decoders import FrameDecoderFactory
 from blinkview.parsers.frame_parsers import FrameParserFactory, FrameSectionParserFactory
 from blinkview.parsers.frame_pipeline_parser import FramePipelineParser, RsyslogFileFormatParser
+from blinkview.parsers.state import MAX_FRAMES_PER_CALL
 from blinkview.utils.log_level import LogLevel
 
 
@@ -314,3 +315,53 @@ class TestRsyslogFileFormatParser:
         _msg1, _level1, module1 = rows[1]
         assert module0 == device.get_module("sshd").id
         assert module1 == device.get_module("kernel").id
+
+
+class TestOutputBatchFill:
+    def test_output_batch_keeps_filling_after_the_frame_trackers_run_out(self, id_registry, monkeypatch):
+        """The decoder reports "full" after MAX_FRAMES_PER_CALL frames even when the output batch
+        has room; the parser used to hand that batch on, so every batch ended at ~8 K rows whatever
+        its capacity (measured: ~7 K rows in 16 MB batches, which made the reorder queue's byte
+        bound trip at a third of its row bound). With room for 65536 rows, 20000 lines must come
+        out as one batch, not 8192 + 8192 + 3616."""
+        import blinkview.parsers.frame_pipeline_parser as fpp
+
+        class RoomyTuner(fpp.ThroughputAutoTuner):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.estimated_capacity = 65536
+                self.estimated_buffer_bytes = 1024 * 1024
+
+        monkeypatch.setattr(fpp, "ThroughputAutoTuner", RoomyTuner)
+
+        parser = make_parser(id_registry, delay=200, frame_decoder=SYNCED_LINE_DECODER)
+        parser.enabled = True
+
+        out_batches = queue.Queue()
+
+        class BatchSizes:
+            def put(self, batch):
+                out_batches.put(batch.size)
+
+        parser.subscribe(BatchSizes())
+
+        line_count = 20_000
+        assert line_count > 2 * MAX_FRAMES_PER_CALL
+        batch = parser.shared.array_pool.create(PooledLogBatch, line_count, line_count * 20)
+        for i in range(line_count):
+            batch.insert(1000, 1000, b"line %08d\n" % i)
+        parser.put(batch)
+
+        sizes = []
+        parser.start()
+        try:
+            deadline = time.time() + 10.0
+            while sum(sizes) < line_count and time.time() < deadline:
+                try:
+                    sizes.append(out_batches.get(timeout=0.5))
+                except queue.Empty:
+                    pass
+        finally:
+            parser.stop()
+
+        assert sizes == [line_count]

@@ -166,8 +166,8 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
             frame_state = FrameState(pool, codec.frame_length_maximum, start_synced=not codec.frame_resync_on_start)
             f_state = frame_state.bundle
-            # One decoder call reserves at most this many output rows (the frame trackers' length),
-            # so a burst never needs a batch with more rows than that.
+            # One decoder call reserves at most this many output rows (the frame trackers' length);
+            # a call that stops at exactly this many has run out of trackers, not of batch room.
             max_frames_per_call = f_state.fstatus.shape[0]
 
             o_config = OutputConfig(compact_buffer=getattr(self, "compact_buffer", True))
@@ -243,7 +243,8 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
                     # The loop below spreads an input batch over as many output batches as it takes,
                     # so the output is splittable and stays under the tuner's cap. Rows: a rough
-                    # frame count at the tuner's msg_size_bytes, up to what one call can fill.
+                    # frame count at the tuner's msg_size_bytes, kept to one decoder call's worth as
+                    # a cautious start; update() learns the real row rate within a second.
                     batch_size_bytes = batch_in.msg_cursor
                     tuner_out.ensure_burst_capacity(
                         batch_size_bytes,
@@ -299,7 +300,12 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
                         self.logger_post.debug("%.6f", (end_time - start_time) / 1_000_000)
 
-                        if out_is_full:
+                        # out_is_full also means "this call's frame trackers ran out", reported
+                        # after exactly max_frames_per_call frames while the batch may still have
+                        # room: then call again into the same batch instead of handing on a mostly
+                        # empty one. Fewer frames means the batch's rows or buffer are full. The
+                        # check at the top of the loop catches a batch that filled at the same time.
+                        if out_is_full and n < max_frames_per_call:
                             flush()
 
                 # 4. Final age check: Did the batch expire while we were processing the dribble?
