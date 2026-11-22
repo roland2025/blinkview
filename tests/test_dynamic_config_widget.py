@@ -369,8 +369,8 @@ class TestDynamicDict:
         assert widget.get_config()["extra"] == {"x": 1}
 
     def test_add_new_key_rebuilds_and_includes_it(self, widget, qtbot):
-        """Uses a schema with an explicit "default" on additionalProperties - see
-        test_add_new_key_without_a_default_crashes below for what happens without one."""
+        """Uses a schema with an explicit "default" on additionalProperties; the tests below
+        cover a value schema without one."""
         from qtpy.QtWidgets import QLineEdit, QPushButton
 
         schema = deepcopy(SCHEMA)
@@ -388,20 +388,64 @@ class TestDynamicDict:
 
         assert "newkey" in widget.get_config()["extra"]
 
-    def test_add_new_key_without_a_default_would_crash_the_rebuild(self, qapp):
-        """Real bug: _build_dynamic_dict's on_add() computes
-        `new_item = schema_template.get("default", {})` regardless of the additionalProperties
-        schema's actual type - for "extra" ({"type": "integer"}, no explicit default in SCHEMA),
-        that produces a bare `{}`, and the very next rebuild calls exactly
-        WidgetFactory.build_widget({"type": "integer"}, {}, ...) for it, which crashes in
-        build_integer_widget's int({}) cast. Reproduced directly here (not by clicking the real
-        "Add" button) because exceptions raised inside a Qt slot are caught by pytest-qt's
-        exception-capture machinery asynchronously rather than propagating to the click() call,
-        which would make this awkward to pin down with a plain pytest.raises block."""
-        from blinkview.ui.widgets.config_widget_factory import WidgetFactory
+    @staticmethod
+    def _click_add(widget, qtbot, new_key):
+        """Clicks the real "Add" button. An exception raised inside the Qt slot doesn't reach
+        click(); qtbot.capture_exceptions() collects it instead."""
+        from qtpy.QtWidgets import QLineEdit, QPushButton
 
-        with pytest.raises(TypeError):
-            WidgetFactory.build_widget({"type": "integer"}, {})
+        group_box = widget._widget_registry["extra"]["container"]
+        line_edit = next(w for w in group_box.findChildren(QLineEdit) if w.placeholderText() == "Enter new item name...")
+        button = next(b for b in group_box.findChildren(QPushButton) if b.text() == "Add")
+        line_edit.setText(new_key)
+        with qtbot.capture_exceptions() as exceptions:
+            button.click()
+        return exceptions
+
+    def test_add_new_key_to_an_integer_dict_without_a_default_seeds_zero(self, widget, qtbot):
+        """on_add() used to seed `{}` whatever the value type, so for "extra"
+        ({"type": "integer"}, no default) the rebuild crashed in build_integer_widget's
+        int({})."""
+        _load(widget)
+
+        exceptions = self._click_add(widget, qtbot, "newkey")
+
+        assert exceptions == []
+        assert widget.get_config()["extra"] == {"x": 1, "newkey": 0}
+
+    @pytest.mark.parametrize(
+        "value_schema, expected",
+        [
+            ({"type": "number"}, 0.0),
+            ({"type": "boolean"}, False),
+            ({"type": "string"}, ""),
+            ({"type": "integer", "minimum": 5, "maximum": 10}, 5),
+            ({"type": "string", "enum": ["low", "high"]}, "low"),
+            ({"type": "integer", "default": 7}, 7),
+        ],
+    )
+    def test_add_new_key_seeds_a_value_matching_the_value_schema(self, widget, qtbot, value_schema, expected):
+        schema = deepcopy(SCHEMA)
+        schema["properties"]["extra"]["additionalProperties"] = value_schema
+
+        _load(widget, schema=schema, config={**CONFIG, "extra": {}})
+        exceptions = self._click_add(widget, qtbot, "newkey")
+
+        assert exceptions == []
+        assert widget.get_config()["extra"] == {"newkey": expected}
+
+    def test_add_new_key_to_an_object_dict_seeds_an_object(self, widget, qtbot):
+        schema = deepcopy(SCHEMA)
+        schema["properties"]["extra"]["additionalProperties"] = {
+            "type": "object",
+            "properties": {"enabled": {"type": "boolean", "default": True}},
+        }
+
+        _load(widget, schema=schema, config={**CONFIG, "extra": {}})
+        exceptions = self._click_add(widget, qtbot, "newkey")
+
+        assert exceptions == []
+        assert isinstance(widget.get_config()["extra"]["newkey"], dict)
 
     def test_remove_key_via_button(self, widget):
         from qtpy.QtWidgets import QPushButton

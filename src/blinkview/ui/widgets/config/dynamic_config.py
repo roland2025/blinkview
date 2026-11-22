@@ -58,6 +58,27 @@ def reflow(description: str) -> str:
     return "\n".join(lines)
 
 
+# Empty value per JSON-schema type, for a new entry whose schema has no default.
+_TYPE_SEEDS = {"string": "", "integer": 0, "number": 0.0, "boolean": False, "array": [], "object": {}}
+
+
+def _seed_value(schema: dict):
+    """A starting value for a new dynamic-dict entry that the widget built for `schema` accepts:
+    its default, else its first enum choice, else the type's empty value raised to `minimum`.
+    A schema without a type is treated as an object."""
+    if "default" in schema:
+        return deepcopy(schema["default"])
+    if schema.get("enum"):
+        return deepcopy(schema["enum"][0])
+    schema_type = schema.get("type", "object")
+    if isinstance(schema_type, list):  # e.g. ["integer", "null"]
+        schema_type = next((t for t in schema_type if t != "null"), "object")
+    value = deepcopy(_TYPE_SEEDS.get(schema_type, {}))
+    if schema_type in ("integer", "number") and "minimum" in schema:
+        value = max(value, schema["minimum"])
+    return value
+
+
 @register_widget_factory(WidgetName.DYNAMIC_CONFIG)
 class DynamicConfigWidget(QWidget):
     signal_unregister = Signal(object)
@@ -680,7 +701,7 @@ class DynamicConfigWidget(QWidget):
                     return
 
             if new_key not in target:
-                target[new_key] = deepcopy(schema_template.get("default", {}))
+                target[new_key] = _seed_value(schema_template)
                 self.schema = deepcopy(self.original_schema)
                 self._clear_layout(self.form_layout)
                 self._widget_registry.clear()
