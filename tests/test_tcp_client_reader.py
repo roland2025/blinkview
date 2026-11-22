@@ -194,6 +194,29 @@ def start_running_reader(port: int, parser: QueueParser) -> TCPClientReader:
     return reader
 
 
+class TestRunStopsDuringReconnectWait:
+    def test_stop_interrupts_the_reconnect_wait(self):
+        # A freed loopback port: every connect is refused, so run() sits in the reconnect wait.
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        reader = make_reader(host="127.0.0.1", port=port, delay=50, reconnect_interval=30)
+        reader.enabled = True
+        reader.shared = SimpleNamespace(array_pool=NumpyArrayPool(), time_ns=time.time_ns)
+        reader.start()
+        thread = reader._thread
+        time.sleep(0.5)
+
+        t0 = time.perf_counter()
+        reader.stop(timeout=5.0)
+        elapsed = time.perf_counter() - t0
+
+        assert not thread.is_alive()
+        assert elapsed < 1.5
+
+
 class TestRunFlushesOnDisconnect:
     """The lines received just before the peer goes away are handed on while the reader is still
     running and the peer stays down, not held until a reconnect or stop()."""

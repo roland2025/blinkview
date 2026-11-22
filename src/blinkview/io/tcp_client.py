@@ -5,7 +5,6 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import socket
-from time import sleep
 
 import numpy as np
 
@@ -108,6 +107,7 @@ class TCPClientReader(BaseReader):
 
     def run(self):
         stop_is_set = self._stop_event.is_set
+        stop_wait = self._stop_event.wait
         time_ns = self.shared.time_ns
         logger = self.logger
 
@@ -131,8 +131,9 @@ class TCPClientReader(BaseReader):
                     # failure on another thread): while the peer stays down nothing else would.
                     flush()
                     if self.open() is None:
-                        # Wait for the user-configured interval before retrying connection
-                        sleep(float(self.reconnect_interval))
+                        # Wait for the user-configured interval before retrying connection; stop()
+                        # ends the wait (its join gives up after 5 s, the default interval)
+                        stop_wait(float(self.reconnect_interval))
                         continue
 
                     recv_into = self.client_sock.recv_into
@@ -158,7 +159,7 @@ class TCPClientReader(BaseReader):
                     self.logger_link.error("Stream receive error occurred on client connection", exc=e)
                     self._close_client()
                     flush()
-                    sleep(0.5)
+                    stop_wait(0.5)
                     continue
 
                 # Flush evaluation window (`now` is from the read, or from the timeout above)
