@@ -5,6 +5,7 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import os
+from decimal import Decimal
 from pathlib import Path
 
 from qtpy.QtCore import QRegularExpression, Qt
@@ -24,6 +25,12 @@ from qtpy.QtWidgets import (
 )
 
 from blinkview.ui.utils.window_title import titled
+
+
+def _decimal_places(number) -> int:
+    """Digits after the decimal point in a schema's multipleOf: 0.5 -> 1, 0.01 -> 2, 2 -> 0."""
+    exponent = Decimal(str(number)).normalize().as_tuple().exponent
+    return max(0, -exponent) if isinstance(exponent, int) else 0
 
 
 def get_portable_path(absolute_path: str, max_up_levels: int = 2) -> str:
@@ -215,7 +222,16 @@ class WidgetFactory:
     @staticmethod
     def build_number_widget(schema: dict, value) -> QWidget:
         widget = QDoubleSpinBox()
-        widget.setDecimals(schema.get("multipleOf", 3))
+        # Decimals first: setDecimals rounds the range and the value already set.
+        multiple_of = schema.get("multipleOf")
+        if multiple_of:
+            widget.setDecimals(_decimal_places(multiple_of))
+            widget.setSingleStep(float(multiple_of))
+        else:
+            widget.setDecimals(3)
+        # Without an explicit range QDoubleSpinBox clamps to 0..99.99. Same wide default as the
+        # integer widget (a float-max range would blow up the spin box's size hint).
+        widget.setRange(float(schema.get("minimum", -2147483648)), float(schema.get("maximum", 2147483647)))
         widget.setValue(float(value if value is not None else schema.get("default", 0.0)))
         return widget
 

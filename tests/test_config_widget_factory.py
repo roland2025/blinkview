@@ -283,10 +283,40 @@ class TestScalarWidgets:
         widget = WidgetFactory.build_integer_widget({"default": 7}, None)
         assert widget.value() == 7
 
-    def test_number_uses_multiple_of_as_decimals(self, qapp):
-        widget = WidgetFactory.build_number_widget({"multipleOf": 2}, 1.5)
-        assert widget.decimals() == 2
-        assert widget.value() == 1.5
+    @pytest.mark.parametrize(
+        "multiple_of, decimals",
+        [(0.5, 1), (0.01, 2), (0.25, 2), (1e-05, 5), (2, 0), (1, 0)],
+    )
+    def test_number_decimals_and_step_come_from_multiple_of(self, qapp, multiple_of, decimals):
+        widget = WidgetFactory.build_number_widget({"multipleOf": multiple_of}, None)
+        assert widget.decimals() == decimals
+        assert widget.singleStep() == pytest.approx(multiple_of)
+
+    def test_number_without_multiple_of_keeps_three_decimals(self, qapp):
+        widget = WidgetFactory.build_number_widget({}, 1.234)
+        assert widget.decimals() == 3
+        assert widget.value() == pytest.approx(1.234)
+
+    def test_number_uses_schema_range(self, qapp):
+        widget = WidgetFactory.build_number_widget({"minimum": 0.5, "maximum": 1000}, 150.0)
+        assert widget.minimum() == 0.5
+        assert widget.maximum() == 1000
+        assert widget.value() == 150.0
+
+    @pytest.mark.parametrize("value", [120.0, 5000.25, 1e6])
+    def test_number_above_100_is_not_clamped(self, qapp, value):
+        widget = WidgetFactory.build_number_widget({}, value)
+        assert widget.value() == pytest.approx(value)
+        assert WidgetFactory.extract_value(widget) == pytest.approx(value)
+
+    @pytest.mark.parametrize("value", [-1.0, -0.5, -250.75])
+    def test_number_below_0_is_not_clamped(self, qapp, value):
+        widget = WidgetFactory.build_number_widget({}, value)
+        assert widget.value() == pytest.approx(value)
+
+    def test_number_none_uses_default_above_100(self, qapp):
+        widget = WidgetFactory.build_number_widget({"default": 120.0}, None)
+        assert widget.value() == 120.0
 
 
 # ---------------------------------------------------------------------------
