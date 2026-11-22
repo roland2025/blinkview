@@ -17,8 +17,6 @@ def setup_config_parser(parser):
     parser.add_argument("key", nargs="?", help="The setting key (e.g., 'logs', 'name')")
     parser.add_argument("value", nargs="?", help="The value to set (leave empty to GET)")
 
-    parser.add_argument("--check-updates", action="store_true", help="Force a check for new versions now")
-
 
 def handle_config(args):
     """Handles Git-style config get/set/list/unset logic."""

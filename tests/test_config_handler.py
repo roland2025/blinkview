@@ -12,6 +12,8 @@ blinkview.utils.project_settings.ProjectSettings is picked up at call time."""
 import argparse
 from types import SimpleNamespace
 
+import pytest
+
 import blinkview.utils.global_settings as global_settings_module
 import blinkview.utils.project_settings as project_settings_module
 from blinkview.utils.config_handler import handle_config, setup_config_parser
@@ -97,13 +99,18 @@ class TestSetupConfigParser:
         assert args.key is None
         assert args.value is None
 
-    def test_unset_and_keys_and_check_updates_flags(self):
-        args = self._build_parser().parse_args(["--unset", "--keys", "--check-updates", "log_dir"])
+    def test_unset_and_keys_flags(self):
+        args = self._build_parser().parse_args(["--unset", "--keys", "log_dir"])
 
         assert args.unset is True
         assert args.keys is True
-        assert args.check_updates is True
         assert args.key == "log_dir"
+
+    def test_check_updates_flag_is_gone(self, capsys):
+        """It was parsed but never acted on; `blink update fetch` is the update check."""
+        with pytest.raises(SystemExit):
+            self._build_parser().parse_args(["--check-updates"])
+        assert "--check-updates" in capsys.readouterr().err
 
 
 class TestGlobalScope:
