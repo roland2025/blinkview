@@ -101,6 +101,12 @@ class Benchmark(BaseReader):
                 c_offs[i] = current_offset
                 current_offset += c_lens[i]
             c_items = len(c_lens)
+            # Bytes of the first k cache entries, so a tick's size is two lookups, not a Python loop
+            # over its chunks (that loop held the GIL for ~1 M iterations/s across 4 sources).
+            c_cum = [0]
+            for n in c_lens:
+                c_cum.append(c_cum[-1] + int(n))
+            c_total = c_cum[-1]
 
             # --- [START] NUMBA WARMUP ---
             if self.numba_needs_compile:
@@ -194,7 +200,8 @@ class Benchmark(BaseReader):
                 msgs_per_tick = int(current_msg_per_sec / TICKS_PER_SEC)
                 if in_flight < effective_max_backlog:
                     chunks = max(1, msgs_per_tick // rows_per_bytes)
-                    estimated_bytes = sum(c_lens[i % c_items] for i in range(chunks))
+                    full, rest = divmod(chunks, c_items)
+                    estimated_bytes = full * c_total + c_cum[rest]  # sum of c_lens[i % c_items], i < chunks
 
                     batch = pool_create(PooledLogBatch, chunks, estimated_bytes)
                     written_bytes = nb_blast_benchmark_cache(
