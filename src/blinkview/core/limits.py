@@ -13,6 +13,11 @@ BATCH_QUEUE_MAX_BYTES = 1024 * 1024 * 1024  # ~64 full 16 MB batches
 # The reorderer's input queue takes every source at once: ~1.5 s at 12 M msg/s of 64-byte lines
 # (dense batches measured at ~110 bytes/row allocated).
 REORDER_QUEUE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+# Rows the reorderer merges in one pass. A backlog is merged in slices of this size, so its output
+# batches stay pool-sized and the merge's working set stays in cache: unbounded passes took 4-20 M
+# rows and 0.4-1.6 GB batches under a backlog. Measured with a 2 M-row backlog, 2^17 was as fast
+# as or faster than 2^18 and 2^19 for 12- and 64-byte lines (64 B: 40 vs 24 M rows/s unbounded).
+REORDER_MAX_ROWS_PER_PASS = 1 << 17
 CENTRAL_STORAGE_MAXLEN = 1_000_000
 BATCH_MAXLEN = 2000
 

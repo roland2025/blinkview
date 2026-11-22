@@ -13,10 +13,16 @@ from numba.typed import List as NumbaList
 from blinkview.core import dtypes
 from blinkview.core.base_reorder import BaseReorder, ReorderFactory
 from blinkview.core.batch_queue import BatchQueue
-from blinkview.core.limits import REORDER_QUEUE_MAX_BYTES
+from blinkview.core.limits import REORDER_MAX_ROWS_PER_PASS, REORDER_QUEUE_MAX_BYTES
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.warmup_registry import register_warmup
-from blinkview.ops.reorder import MergeChunk, nb_find_split_idx, nb_hybrid_merge_and_copy, nb_sum_lengths
+from blinkview.ops.reorder import (
+    MergeChunk,
+    nb_find_split_idx,
+    nb_hybrid_merge_and_copy,
+    nb_merge_cut_rows,
+    nb_sum_lengths,
+)
 from blinkview.utils.dev_mode import dev_print
 from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
@@ -86,6 +92,8 @@ class Reorder(BaseReorder):
 
         # Hoist the NumbaList outside the loop to prevent GC churn
         ready_chunks = NumbaList()
+        max_pass_rows = REORDER_MAX_ROWS_PER_PASS
+        more_ready = False
 
         try:
             while not stop_is_set():
@@ -118,8 +126,11 @@ class Reorder(BaseReorder):
                 if dynamic_timeout_sec < 0.02:
                     dynamic_timeout_sec = 0.02
 
-                # 1. Drain input queue (Blocking precisely until the next item is due)
-                first_batch = get(timeout=dynamic_timeout_sec)
+                # 1. Drain input queue (Blocking precisely until the next item is due). After a
+                # capped pass, ready rows are still waiting: merge those first and take nothing
+                # new, so the held batches stay bounded by what the input queue held, and the
+                # queue's own bound keeps pushing back on the pipelines.
+                first_batch = None if more_ready else get(timeout=dynamic_timeout_sec)
 
                 batches_to_ingest = []
                 if first_batch is not None:
@@ -144,33 +155,61 @@ class Reorder(BaseReorder):
                 total_ready_rows = 0
                 total_ready_bytes = 0
                 batches_to_release = []
+                # Per ready chunk, in ready_chunks order: its queued batch and its end.
+                ready_qbs = []
+                ready_ends = []
+                more_ready = False
 
                 try:
-                    for dev_id, queue in list(device_queues.items()):
-                        while queue:
-                            qb = queue[0]
+                    # Every row at or before safe_ts, walking each device queue from its head and
+                    # stopping at the first batch that is not ready to its end. A queue is walked
+                    # only until it gives more than max_pass_rows: the cut below keeps at most that
+                    # many rows, so (for a queue in time order) it falls before that queue's last
+                    # collected row and nothing further down could be kept.
+                    for queue in device_queues.values():
+                        while queue and int(queue[0].cursor[0]) >= queue[0].batch.size:
+                            batches_to_release.append(queue.popleft().batch)
+                        queue_rows = 0
+                        for qb in queue:
                             batch = qb.batch
+                            size = batch.size
                             cursor = int(qb.cursor[0])
-
-                            if cursor >= batch.size:
-                                batches_to_release.append(queue.popleft().batch)
-                                continue
                             batch_bundle = batch.bundle
-                            idx = int(nb_find_split_idx(batch_bundle.timestamps, cursor, batch.size, safe_ts))
-
+                            idx = int(nb_find_split_idx(batch_bundle.timestamps, cursor, size, safe_ts))
                             if idx > 0:
-                                s = cursor
-                                e = cursor + idx
-
-                                ready_chunks.append(MergeChunk(batch_bundle, s, e))
+                                ready_chunks.append(MergeChunk(batch_bundle, cursor, cursor + idx))
+                                ready_qbs.append(qb)
+                                ready_ends.append(cursor + idx)
                                 total_ready_rows += idx
-                                total_ready_bytes += int(nb_sum_lengths(batch_bundle.lengths, s, e))
-
-                                qb.cursor[0] = e
-                                if qb.cursor[0] == batch.size:
-                                    batches_to_release.append(queue.popleft().batch)
-                            else:
+                                queue_rows += idx
+                            if cursor + idx < size or queue_rows > max_pass_rows:
                                 break
+
+                    # A backlog is merged a slice at a time: one cut timestamp across all sources
+                    # keeps each pass's output in time order with the next, and bounds the output
+                    # batch and the merge's working set. Every chunk is trimmed to the cut on its
+                    # own, so a later batch of a device can be partly merged before its head batch
+                    # when the device's clock went backwards; the cut always keeps the earliest
+                    # rows, so each pass makes progress.
+                    if total_ready_rows > max_pass_rows:
+                        more_ready = True
+                        cut_ends = np.empty(len(ready_qbs), dtype=np.int64)
+                        total_ready_rows = int(nb_merge_cut_rows(ready_chunks, max_pass_rows, cut_ends))
+                        for i, qb in enumerate(ready_qbs):
+                            e = int(cut_ends[i])
+                            if e < ready_ends[i]:
+                                ready_ends[i] = e
+                                ready_chunks[i] = MergeChunk(qb.batch.bundle, int(qb.cursor[0]), e)
+
+                    for i, qb in enumerate(ready_qbs):
+                        start = int(qb.cursor[0])
+                        e = ready_ends[i]
+                        if e > start:
+                            total_ready_bytes += int(nb_sum_lengths(qb.batch.bundle.lengths, start, e))
+                            qb.cursor[0] = e
+                    for queue in device_queues.values():
+                        while queue and int(queue[0].cursor[0]) >= queue[0].batch.size:
+                            batches_to_release.append(queue.popleft().batch)
 
                     # 3. K-Way Merge & Flush
                     if total_ready_rows > 0:
@@ -194,24 +233,24 @@ class Reorder(BaseReorder):
                             )
 
                         h_ts = None
-                        h_b_idx = None
-                        h_r_idx = None
-                        h_sort = None
+                        h_len = None
+                        h_row = None
+                        h_off = None
 
                         try:
-                            # Reinstating the O(N) scratchpads to bypass Numba unboxing overhead
+                            # Flat per-row scratch for the merge kernel, one slot per ready row.
                             h_ts = pool.acquire(total_ready_rows, dtype=dtypes.TS_TYPE)
-                            h_b_idx = pool.acquire(total_ready_rows, dtype=np.uint32)
-                            h_r_idx = pool.acquire(total_ready_rows, dtype=np.uint32)
-                            h_sort = pool.acquire(total_ready_rows, dtype=np.uint32)
-
-                            ts_scr = h_ts.array[:total_ready_rows]
-                            b_idx_scr = h_b_idx.array[:total_ready_rows]
-                            r_idx_scr = h_r_idx.array[:total_ready_rows]
-                            sort_order = h_sort.array[:total_ready_rows]
+                            h_len = pool.acquire(total_ready_rows, dtype=np.uint32)
+                            h_row = pool.acquire(total_ready_rows, dtype=np.uint32)
+                            h_off = pool.acquire(total_ready_rows, dtype=np.uint32)
 
                             nb_hybrid_merge_and_copy(
-                                ready_chunks, ts_scr, b_idx_scr, r_idx_scr, sort_order, batch_out.bundle
+                                ready_chunks,
+                                h_ts.array[:total_ready_rows],
+                                h_len.array[:total_ready_rows],
+                                h_row.array[:total_ready_rows],
+                                h_off.array[:total_ready_rows],
+                                batch_out.bundle,
                             )
 
                             flush()
@@ -219,12 +258,12 @@ class Reorder(BaseReorder):
                         finally:
                             if h_ts is not None:
                                 h_ts.release()
-                            if h_b_idx is not None:
-                                h_b_idx.release()
-                            if h_r_idx is not None:
-                                h_r_idx.release()
-                            if h_sort is not None:
-                                h_sort.release()
+                            if h_len is not None:
+                                h_len.release()
+                            if h_row is not None:
+                                h_row.release()
+                            if h_off is not None:
+                                h_off.release()
 
                 except Exception as e:
                     self.logger.exception("Error during reorder merge", exc=e)
@@ -290,15 +329,21 @@ class Reorder(BaseReorder):
 
             # Create small dummy scratchpads for the hybrid kernel warmup
             w_ts_scr = np.zeros(1, dtype=dtypes.TS_TYPE)
-            w_b_idx_scr = np.zeros(1, dtype=np.uint32)
-            w_r_idx_scr = np.zeros(1, dtype=np.uint32)
-            w_sort_scr = np.zeros(1, dtype=np.uint32)
+            w_len_scr = np.zeros(1, dtype=np.uint32)
+            w_row_scr = np.zeros(1, dtype=np.uint32)
+            w_off_scr = np.zeros(1, dtype=np.uint32)
 
             # --- Explicitly warm up the helper functions ---
             nb_find_split_idx(dummy_in_b.timestamps, 0, dummy_in.size, time_ns())
             nb_sum_lengths(dummy_in_b.lengths, 0, 1)
+            nb_merge_cut_rows(warmup_chunks, 1, np.zeros(1, dtype=np.int64))
 
             # Warm up the Hybrid Merge & Copy kernel
-            nb_hybrid_merge_and_copy(warmup_chunks, w_ts_scr, w_b_idx_scr, w_r_idx_scr, w_sort_scr, dummy_out.bundle)
+            nb_hybrid_merge_and_copy(warmup_chunks, w_ts_scr, w_len_scr, w_row_scr, w_off_scr, dummy_out.bundle)
+
+            # The typed list's own methods compile on first use too (~0.5 s for setitem): run()
+            # trims chunks in place under a backlog and clears the list every pass.
+            warmup_chunks[0] = MergeChunk(dummy_in_b, 0, 1)
+            warmup_chunks.clear()
 
         dev_print("[Warmup] Reorder ... done")
