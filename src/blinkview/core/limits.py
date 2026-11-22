@@ -8,6 +8,14 @@ BATCH_QUEUE_MAXLEN = 1_000_000
 CENTRAL_STORAGE_MAXLEN = 1_000_000
 BATCH_MAXLEN = 2000
 
+# ThroughputAutoTuner's ceiling on the batches it sizes (rate x window x safety has no bound of its
+# own: a fast loopback source asked for 64-256 MB batches). 16 MB covers ~107 MB/s at the readers'
+# 100 ms delay; past that a full batch is handed on early, which is cheap. Both are powers of two,
+# so the pool's power-of-two slabs never round past them, and they stay well under the pool's
+# 64 MB max_bytes so these batches are reused instead of reallocated.
+TUNER_MAX_BUFFER_BYTES = 16 * 1024 * 1024
+TUNER_MAX_CAPACITY = 1 << 18
+
 CENTRAL_STORAGE_MAX_PIECES = 2
 CENTRAL_STORAGE_BUFFER_SIZE_MB = 128
 

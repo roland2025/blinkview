@@ -101,8 +101,9 @@ class BatchFeeder:
         batch, self.batch = self.batch, None
         self._hand_on(batch)
         # A chunk can be bigger than the tuner's estimate (it starts at default_buffer_bytes and
-        # learns from what it delivers): size the new batch for it, or the retry fails. The check
-        # is ensure_burst_capacity's own, done here so a batch that is simply full skips the call.
+        # learns from what it delivers): size the new batch for it, or the retry fails. A chunk is
+        # one row, ensure_burst_capacity's default. It never asks for more than safety_factor x the
+        # chunk, so when that already fits, a batch that is simply full skips the call.
         tuner = self._tuner
         if int(burst_bytes * tuner.safety_factor) > tuner.estimated_buffer_bytes:
             tuner.ensure_burst_capacity(burst_bytes)

@@ -183,6 +183,24 @@ class TestAppend:
         assert tuner_calls == [("update", 1, 1)]
         assert reader.logger_link.errors == []
 
+    def test_a_chunk_bigger_than_the_tuner_cap_still_fits_and_rows_stay_put(self, tuner_calls):
+        """The cap bounds what the tuner grows to, not a single chunk: the retry must still fit it.
+        A chunk is one row, so it must not grow the row estimate either."""
+        reader = FakeReader()
+        feeder = BatchFeeder(reader, msg_size_bytes=16, default_buffer_bytes=256)
+        feeder._tuner.max_buffer_bytes = 64 * 1024
+        rows_before = feeder._tuner.estimated_capacity
+        big = b"b" * 200_000
+        feeder.push(1, b"f")
+        feeder.push(2, big)
+
+        assert feeder._tuner.estimated_buffer_bytes == len(big)
+        assert feeder._tuner.estimated_capacity == rows_before
+        feeder.close()
+
+        assert reader.batches == [[b"f"], [big]]
+        assert reader.logger_link.errors == []
+
 
 class TestFlush:
     def test_flush_distributes_and_starts_a_new_batch(self, tuner_calls):

@@ -6,6 +6,8 @@
 
 import time
 
+from blinkview.core.limits import TUNER_MAX_BUFFER_BYTES, TUNER_MAX_CAPACITY
+
 
 class Speedometer:
     """
@@ -88,6 +90,10 @@ class ThroughputAutoTuner:
     """
     Uses a Speedometer to project required buffer sizes in bytes.
     Logs specifically when it recalculates resource projections.
+
+    Its estimates never exceed max_buffer_bytes / max_capacity, with one exception: a single burst
+    passed to ensure_burst_capacity() bigger than max_buffer_bytes gets a buffer that just fits it,
+    since the caller has to put it somewhere. The next update() brings the estimate back under.
     """
 
     __slots__ = (
@@ -99,6 +105,8 @@ class ThroughputAutoTuner:
         "estimated_buffer_bytes",
         "estimated_capacity",
         "default_capacity",
+        "max_buffer_bytes",
+        "max_capacity",
     )
 
     def __init__(
@@ -108,15 +116,21 @@ class ThroughputAutoTuner:
         msg_size_bytes: int = 32,
         safety_factor: float = 1.5,
         logger=None,
+        max_buffer_bytes: int = TUNER_MAX_BUFFER_BYTES,
+        max_capacity: int = TUNER_MAX_CAPACITY,
     ):
         self.speedo = speedometer
         self.default_buffer_bytes = default_buffer_bytes
         self.msg_size_bytes = msg_size_bytes
         self.safety_factor = safety_factor
         self.logger = logger
+        # A caller's default above the cap is kept as asked: the cap bounds what the tuner grows
+        # to, not the floor a caller picked.
+        self.max_buffer_bytes = max(max_buffer_bytes, default_buffer_bytes)
 
         # Capacity is derived from bytes
         self.default_capacity = int(default_buffer_bytes / msg_size_bytes)
+        self.max_capacity = max(max_capacity, self.default_capacity)
 
         self.estimated_buffer_bytes = self.default_buffer_bytes
         self.estimated_capacity = self.default_capacity
@@ -125,11 +139,15 @@ class ThroughputAutoTuner:
         # Speedometer logs its own stats internally
         speedo = self.speedo
         if speedo.update(bytes_in, msgs_in):
-            bytes_needed = speedo.bytes_per_sec * target_window_sec * self.safety_factor
-            msgs_needed = speedo.msgs_per_sec * target_window_sec * self.safety_factor
+            bytes_needed = int(speedo.bytes_per_sec * target_window_sec * self.safety_factor)
+            msgs_needed = int(speedo.msgs_per_sec * target_window_sec * self.safety_factor)
 
-            estimated_buffer_bytes = self.estimated_buffer_bytes = max(self.default_buffer_bytes, int(bytes_needed))
-            estimated_capacity = self.estimated_capacity = max(self.default_capacity, int(msgs_needed))
+            estimated_buffer_bytes = self.estimated_buffer_bytes = min(
+                self.max_buffer_bytes, max(self.default_buffer_bytes, bytes_needed)
+            )
+            estimated_capacity = self.estimated_capacity = min(
+                self.max_capacity, max(self.default_capacity, msgs_needed)
+            )
 
             if logger := self.logger:
                 # Log state specifically; we can format to KB here for readability
@@ -138,16 +156,30 @@ class ThroughputAutoTuner:
             return True
         return False
 
-    def ensure_burst_capacity(self, current_batch_bytes: int):
-        required_bytes = int(current_batch_bytes * self.safety_factor)
+    def ensure_burst_capacity(self, burst_bytes: int, burst_rows: int = 1, splittable: bool = False):
+        """Grows the estimates so a batch fits a burst of `burst_bytes` in `burst_rows` rows.
+
+        The buffer gets the safety factor on top, up to max_buffer_bytes; past that only the burst
+        itself is guaranteed to fit, unless `splittable` says the caller spreads a burst over as
+        many batches as it takes (a parser's output), in which case the cap holds. It never asks
+        for more than burst_bytes * safety_factor, so a caller may skip the call when that already
+        fits. Rows grow only to `burst_rows`: a burst's byte size says nothing about how many rows
+        it is, and deriving rows from bytes is what once made a parser's output batches ~500x too
+        large."""
+        max_buffer_bytes = self.max_buffer_bytes
+        if splittable and burst_bytes > max_buffer_bytes:
+            burst_bytes = max_buffer_bytes
+        required_bytes = max(burst_bytes, min(max_buffer_bytes, int(burst_bytes * self.safety_factor)))
 
         if required_bytes > self.estimated_buffer_bytes:
             self.estimated_buffer_bytes = required_bytes
-            self.estimated_capacity = int(self.estimated_buffer_bytes / self.msg_size_bytes)
 
             if self.logger:
-                kb = self.estimated_buffer_bytes / 1024
+                kb = required_bytes / 1024
                 self.logger.warning("Burst detected! Force-resized buffer projection to %.1f KB", kb)
+
+        if burst_rows > self.estimated_capacity:
+            self.estimated_capacity = min(self.max_capacity, burst_rows)
 
     def __str__(self) -> str:
         kb = self.estimated_buffer_bytes / 1024

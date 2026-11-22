@@ -166,6 +166,9 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
             frame_state = FrameState(pool, codec.frame_length_maximum, start_synced=not codec.frame_resync_on_start)
             f_state = frame_state.bundle
+            # One decoder call reserves at most this many output rows (the frame trackers' length),
+            # so a burst never needs a batch with more rows than that.
+            max_frames_per_call = f_state.fstatus.shape[0]
 
             o_config = OutputConfig(compact_buffer=getattr(self, "compact_buffer", True))
 
@@ -238,8 +241,15 @@ Each stage is configurable via the factory system, allowing users to mix and mat
                 with batch_in:
                     # log_batch(self, batch_in, "IN")
 
+                    # The loop below spreads an input batch over as many output batches as it takes,
+                    # so the output is splittable and stays under the tuner's cap. Rows: a rough
+                    # frame count at the tuner's msg_size_bytes, up to what one call can fill.
                     batch_size_bytes = batch_in.msg_cursor
-                    tuner_out.ensure_burst_capacity(batch_size_bytes)
+                    tuner_out.ensure_burst_capacity(
+                        batch_size_bytes,
+                        burst_rows=min(max_frames_per_call, batch_size_bytes // tuner_out.msg_size_bytes),
+                        splittable=True,
+                    )
 
                     if batch_out and batch_out.buffer_capacity() < tuner_out.estimated_buffer_bytes:
                         flush()

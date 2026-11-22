@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.factory_registry import FactoryRegistry
 from blinkview.core.id_registry import IDRegistry
+from blinkview.core.limits import TUNER_MAX_BUFFER_BYTES, TUNER_MAX_CAPACITY
 from blinkview.core.logger import PrintLogger
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.parsers.frame_decoders import FrameDecoderFactory
@@ -238,6 +239,46 @@ class TestRunRealIngestion:
 
         assert [msg for msg, *_r in first_rows] == [b"first batch line"]
         assert [msg for msg, *_r in second_rows] == [b"second batch line"]
+
+    def test_a_big_input_batch_does_not_make_oversized_output_batches(self, id_registry):
+        """The finding's case: a 128 MB input batch made ~292 MB output batches (rows derived from
+        bytes, buffer at 1.5x the input), of which ~0.2% was used. A 20 MB input batch, above the
+        tuner's cap, must come out in batches within the cap, with no line lost."""
+        parser = make_parser(id_registry, delay=20, frame_decoder=SYNCED_LINE_DECODER)
+        parser.enabled = True
+
+        out_batches = queue.Queue()
+
+        class BatchShapes:
+            def put(self, batch):
+                out_batches.put((batch.size, batch.capacity, batch.buffer_capacity()))
+
+        parser.subscribe(BatchShapes())
+
+        line = b"x" * 999 + b"\n"
+        line_count = (20 * 1024 * 1024) // len(line)
+        batch = parser.shared.array_pool.create(PooledLogBatch, line_count, line_count * len(line))
+        for _ in range(line_count):
+            batch.insert(1000, 1000, line)
+        parser.put(batch)
+
+        shapes = []
+        parser.start()
+        try:
+            deadline = time.time() + 30.0
+            while sum(size for size, *_r in shapes) < line_count and time.time() < deadline:
+                try:
+                    shapes.append(out_batches.get(timeout=0.5))
+                except queue.Empty:
+                    pass
+        finally:
+            parser.stop()
+
+        # Before the fix: a 32 MB buffer slab (1.5x the input, rounded up) and ~1 M rows.
+        assert sum(size for size, *_r in shapes) == line_count
+        for _size, row_capacity, buffer_capacity in shapes:
+            assert buffer_capacity <= TUNER_MAX_BUFFER_BYTES
+            assert row_capacity <= TUNER_MAX_CAPACITY
 
 
 class TestRsyslogFileFormatParser:

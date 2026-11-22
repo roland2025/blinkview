@@ -186,9 +186,11 @@ class CantoolsParser(BaseParser):
                         strict = self.strict
                         ignore_unknown = self.ignore_unknown
 
-                        # Estimate burst size (assume decoded string takes ~80-120 bytes max)
+                        # Estimate burst size (assume decoded string takes ~80-120 bytes max), at
+                        # least one row per frame. insert_row hands a full batch on and starts the
+                        # next, so the output is splittable and stays under the tuner's cap.
                         estimated_out_bytes = batch_in.size * 128
-                        tuner_out.ensure_burst_capacity(estimated_out_bytes)
+                        tuner_out.ensure_burst_capacity(estimated_out_bytes, burst_rows=batch_in.size, splittable=True)
 
                         if batch_out and batch_out.buffer_capacity() < tuner_out.estimated_buffer_bytes:
                             flush()
