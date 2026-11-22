@@ -1157,7 +1157,10 @@ class Registry:
                         pop_rate = (curr["popped"] - prev["popped"]) / dt
                         is_dropping = curr["dropped"] > prev["dropped"]
 
+                # Whichever bound the queue is closer to: it drops on rows or on bytes
                 fill_pct = (curr["total"] / curr["maxlen"]) * 100 if curr["maxlen"] > 0 else 0
+                if (max_bytes := curr.get("max_bytes", 0)) > 0:
+                    fill_pct = max(fill_pct, curr["bytes"] / max_bytes * 100)
 
                 # Determine State
                 if is_dropping:

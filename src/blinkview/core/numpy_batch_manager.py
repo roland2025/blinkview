@@ -783,6 +783,31 @@ class PooledLogBatch:
             b = self.bundle
             return len(b.buffer) if b is not None and b.buffer is not None else 0
 
+    def allocated_bytes(self) -> int:
+        """Bytes held by this batch's arrays, whole slabs, used or not: what it costs in memory
+        (commit), as opposed to msg_cursor, which counts only the buffer bytes in use. 0 once
+        released."""
+        total = 0
+        for h in (
+            self._ts_h,
+            self._rx_ts_h,
+            self._off_h,
+            self._len_h,
+            self._buf_h,
+            self._lvl_h,
+            self._mod_h,
+            self._dev_h,
+            self._seq_h,
+            self._pid_h,
+            self._tid_h,
+            self._ext_u32_1_h,
+            self._ext_u32_2_h,
+            self._ext_u64_1_h,
+        ):
+            if h is not None and (a := h.array) is not None:
+                total += a.nbytes
+        return total
+
     def __repr__(self):
         with self._lock:
             b = self.bundle

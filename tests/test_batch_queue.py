@@ -251,3 +251,104 @@ class TestStats:
         from blinkview.core.limits import BATCH_QUEUE_MAXLEN
 
         assert BatchQueue().maxlen == BATCH_QUEUE_MAXLEN
+
+
+class SizedFakeBatch(FakeBatch):
+    """A FakeBatch that reports the memory it holds, as PooledLogBatch.allocated_bytes does."""
+
+    def __init__(self, size, nbytes):
+        super().__init__(size)
+        self.nbytes = nbytes
+
+    def allocated_bytes(self):
+        return self.nbytes
+
+
+class TestByteBound:
+    def test_evicts_oldest_once_remaining_bytes_still_meet_max_bytes(self):
+        """The finding's case: few rows, huge batches. The row bound alone never trips."""
+        q = BatchQueue(maxlen=1_000_000, max_bytes=100)
+        b1, b2, b3 = SizedFakeBatch(1, 60), SizedFakeBatch(1, 60), SizedFakeBatch(1, 60)
+        q.put(b1)
+        q.put(b2)  # 120 bytes, but dropping b1 would leave 60 < 100: kept
+        assert list(q) == [b1, b2]
+
+        q.put(b3)  # 180 bytes; dropping b1 leaves 120 >= 100: b1 goes
+
+        assert list(q) == [b2, b3]
+        assert q.dropped == 1
+        assert b1.released == 1
+        assert q.get_stats()["bytes"] == 120
+
+    def test_never_evicts_the_newest_batch_however_big(self):
+        q = BatchQueue(maxlen=1_000_000, max_bytes=100)
+        b1, huge = SizedFakeBatch(1, 10), SizedFakeBatch(1, 10_000)
+        q.put(b1)
+        q.put(huge)
+
+        assert list(q) == [huge]
+        assert q.get_stats()["bytes"] == 10_000
+
+    def test_get_get_nowait_and_clear_give_the_bytes_back(self):
+        q = BatchQueue(maxlen=1_000_000, max_bytes=1_000)
+        for _ in range(3):
+            q.put(SizedFakeBatch(1, 100))
+
+        q.get(timeout=0)
+        assert q.get_stats()["bytes"] == 200
+        q.get_nowait()
+        assert q.get_stats()["bytes"] == 100
+        q.clear()
+        assert q.get_stats()["bytes"] == 0
+
+    def test_a_batch_without_allocated_bytes_counts_as_zero(self):
+        q = BatchQueue(maxlen=1_000_000, max_bytes=1)
+        b1, b2 = FakeBatch(1), FakeBatch(1)
+        q.put(b1)
+        q.put(b2)
+
+        assert list(q) == [b1, b2]
+        assert q.get_stats()["bytes"] == 0
+
+    def test_real_batches_count_their_whole_slabs(self):
+        """A nearly empty PooledLogBatch costs its full allocation, not the bytes it uses."""
+        from blinkview.core.array_pool import NumpyArrayPool
+        from blinkview.core.numpy_batch_manager import PooledLogBatch
+
+        pool = NumpyArrayPool(max_bytes=64 * 1024 * 1024)
+        batch = pool.create(PooledLogBatch, 1024, 1024 * 1024, has_levels=True)
+        batch.insert(1, 1, b"one row")
+        slabs = (
+            batch._ts_h.array.nbytes
+            + batch._rx_ts_h.array.nbytes
+            + batch._off_h.array.nbytes
+            + batch._len_h.array.nbytes
+            + batch._buf_h.array.nbytes
+            + batch._lvl_h.array.nbytes
+        )
+        assert batch.allocated_bytes() == slabs >= 1024 * 1024
+
+        q = BatchQueue(maxlen=1_000_000, max_bytes=slabs + 1)
+        second = pool.create(PooledLogBatch, 1024, 1024 * 1024, has_levels=True)
+        second.insert(1, 1, b"another row")
+        q.put(batch)
+        q.put(second)  # 2x slabs; dropping the first leaves slabs < max_bytes: kept
+        assert q.get_stats()["bytes"] == 2 * slabs and q.dropped == 0
+
+        third = pool.create(PooledLogBatch, 1024, 1024 * 1024, has_levels=True)
+        third.insert(1, 1, b"third row")
+        q.put(third)  # dropping the first leaves 2x slabs >= max_bytes: dropped
+
+        assert list(q) == [second, third]
+        assert batch._ref_count == 1  # the queue gave its reference back; the test holds the other
+        q.clear()
+        for b in (batch, second, third):
+            b.release()
+        assert batch.allocated_bytes() == 0
+
+
+class TestByteBoundDefaults:
+    def test_default_max_bytes_matches_limits_constant(self):
+        from blinkview.core.limits import BATCH_QUEUE_MAX_BYTES
+
+        assert BatchQueue().max_bytes == BATCH_QUEUE_MAX_BYTES

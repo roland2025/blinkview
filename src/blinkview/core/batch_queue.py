@@ -8,14 +8,27 @@ from collections import deque
 from threading import Condition, Lock
 from time import time
 
-from blinkview.core.limits import BATCH_QUEUE_MAXLEN
+from blinkview.core.limits import BATCH_QUEUE_MAX_BYTES, BATCH_QUEUE_MAXLEN
+
+
+def _batch_bytes(batch) -> int:
+    """The memory a queued batch holds (PooledLogBatch.allocated_bytes); 0 for a batch type that
+    does not say. A queued batch is retained, so its arrays and this value do not change while
+    it is in the queue."""
+    return f() if (f := getattr(batch, "allocated_bytes", None)) is not None else 0
 
 
 class BatchQueue:
-    def __init__(self, maxlen=BATCH_QUEUE_MAXLEN):
+    """Bounded by rows (maxlen) and by the memory its batches hold (max_bytes, allocated rather
+    than used: a nearly empty batch costs its full size). Past either bound, put() drops the
+    oldest batches, but never the newest one."""
+
+    def __init__(self, maxlen=BATCH_QUEUE_MAXLEN, max_bytes=BATCH_QUEUE_MAX_BYTES):
         self.maxlen = maxlen
+        self.max_bytes = max_bytes
         self._deque = deque()  # Stores the batches (lists of objects)
         self._total_objects = 0  # Tracks the actual number of individual objects
+        self._total_bytes = 0  # Sum of _batch_bytes over the queued batches
 
         # Statistics members
         self.pushed = 0  # Total individual objects added over time
@@ -39,6 +52,7 @@ class BatchQueue:
         if (retain := _getattr(batch, "retain", None)) is not None:
             retain()
 
+        batch_bytes = _batch_bytes(batch)
         dropped_batches = None
 
         with self._not_empty:
@@ -46,14 +60,20 @@ class BatchQueue:
             dq.append(batch)
 
             self._total_objects += batch_size
+            self._total_bytes += batch_bytes
             self.pushed += batch_size
 
             while _len(dq) > 1:
                 # Reusing _len here saves a global lookup on every iteration
-                oldest_batch_size = _len(dq[0])
-                if (self._total_objects - oldest_batch_size) >= self.maxlen:
+                oldest = dq[0]
+                oldest_batch_size = _len(oldest)
+                oldest_batch_bytes = _batch_bytes(oldest)
+                if (self._total_objects - oldest_batch_size) >= self.maxlen or (
+                    self._total_bytes - oldest_batch_bytes
+                ) >= self.max_bytes:
                     oldest_batch = dq.popleft()
                     self._total_objects -= oldest_batch_size
+                    self._total_bytes -= oldest_batch_bytes
                     self.dropped += oldest_batch_size
 
                     if (_ := _getattr(oldest_batch, "release", None)) is not None:
@@ -92,6 +112,7 @@ class BatchQueue:
 
             batch_len = len(batch)
             self._total_objects -= batch_len
+            self._total_bytes -= _batch_bytes(batch)
             self.popped += batch_len
             return batch
 
@@ -103,6 +124,7 @@ class BatchQueue:
 
                 batch_len = len(batch)
                 self._total_objects -= batch_len
+                self._total_bytes -= _batch_bytes(batch)
                 self.popped += batch_len
 
                 return batch
@@ -115,6 +137,8 @@ class BatchQueue:
             return {
                 "total": self._total_objects,
                 "maxlen": self.maxlen,
+                "bytes": self._total_bytes,
+                "max_bytes": self.max_bytes,
                 "pushed": self.pushed,
                 "popped": self.popped,
                 "dropped": self.dropped,
@@ -132,6 +156,7 @@ class BatchQueue:
                     release()
 
             self._total_objects = 0
+            self._total_bytes = 0
             self._shutdown = False  # Reset so it's ready for a fresh start
 
     def __getitem__(self, index):

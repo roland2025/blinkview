@@ -5,6 +5,9 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 BATCH_QUEUE_MAXLEN = 1_000_000
+# Also bounds a BatchQueue by the memory its batches hold (allocated, not used): a row bound alone
+# let ~120 nearly empty 292 MB batches (~35 GB) queue up under 1 M rows. ~64 full 16 MB batches.
+BATCH_QUEUE_MAX_BYTES = 1024 * 1024 * 1024
 CENTRAL_STORAGE_MAXLEN = 1_000_000
 BATCH_MAXLEN = 2000
 
