@@ -166,6 +166,50 @@ class TestRunRealSocketIngestion:
         finally:
             reader.stop()
 
+    def test_receive_error_hands_on_the_last_datagram(self):
+        """The datagram received just before a receive error is handed on while the reader is
+        still running and the socket cannot be bound again, not held until it rebinds or stop().
+        delay is 60 s, so the timed flush cannot be what sends it."""
+        expected = b"last datagram before the receive error\n"
+
+        class GoneAfterOneDatagramSocket:
+            """Delivers one datagram, then fails, as recvfrom does on Windows (WinError 10054)
+            once a send_data() reply hit a peer that is gone."""
+
+            def __init__(self):
+                self.recvs = 0
+
+            def recvfrom_into(self, buf):
+                self.recvs += 1
+                if self.recvs == 1:
+                    buf[: len(expected)] = expected
+                    return len(expected), ("127.0.0.1", 40000)
+                raise ConnectionResetError("peer gone")
+
+            def close(self):
+                pass
+
+        reader = make_reader(host="127.0.0.1", port=0, delay=60_000)
+        reader.enabled = True
+        reader.shared = SimpleNamespace(array_pool=NumpyArrayPool(), time_ns=time.time_ns)
+        sockets = iter([GoneAfterOneDatagramSocket()])
+
+        def fake_open():
+            reader.sock = next(sockets, None)
+            return reader.sock
+
+        reader.open = fake_open
+        parser = QueueParser()
+        reader.subscribe(parser)
+
+        reader.start()
+        thread = reader._thread
+        try:
+            assert drain_until(parser.queue, expected, timeout=3.0) == expected
+            assert thread.is_alive()
+        finally:
+            reader.stop()
+
     def test_run_records_target_address_from_the_sender(self):
         """UDPReader.send_data() replies to whichever peer most recently sent a datagram -
         confirms run() actually records that address."""

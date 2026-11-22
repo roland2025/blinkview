@@ -115,6 +115,7 @@ class UDPReader(BaseReader):
             feeder = BatchFeeder(self, msg_size_bytes=1024, default_buffer_bytes=self.buffer_size)
             push_view = feeder.push_view
             maybe_flush = feeder.maybe_flush
+            flush = feeder.flush
 
             while not stop_is_set():
                 # Socket Lifecycle Management
@@ -153,6 +154,9 @@ class UDPReader(BaseReader):
                         self.sock = None
 
                         self.logger_state_open.error("0")
+                    # Hand on what was received before the error: rebinding waits 1 s, and can
+                    # keep failing.
+                    flush()
                     sleep(1.0)
                     continue
 
