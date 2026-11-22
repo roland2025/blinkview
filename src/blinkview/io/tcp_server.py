@@ -5,7 +5,6 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import socket
-from time import sleep
 
 import numpy as np
 
@@ -102,6 +101,7 @@ class TCPReader(BaseReader):
 
     def run(self):
         stop_is_set = self._stop_event.is_set
+        stop_wait = self._stop_event.wait  # the retry waits below end at stop()
         time_ns = self.shared.time_ns
         logger = self.logger
 
@@ -123,7 +123,7 @@ class TCPReader(BaseReader):
                 # Master Server Socket Lifecycle Management
                 if self.server_sock is None:
                     if self.open() is None:
-                        sleep(1.0)
+                        stop_wait(1.0)
                         continue
 
                 # Connection Management Loop
@@ -155,7 +155,7 @@ class TCPReader(BaseReader):
                     except Exception as e:
                         self.logger_link.error("Error accepting incoming client connection", exc=e)
                         waiting_logged = False
-                        sleep(1.0)
+                        stop_wait(1.0)
                         continue
 
                 # Active Stream Data Read
@@ -177,7 +177,7 @@ class TCPReader(BaseReader):
                     self.logger_link.error("Stream receive error occurred", exc=e)
                     self._close_client()
                     flush()
-                    sleep(0.5)
+                    stop_wait(0.5)
                     continue
 
                 # Flush evaluation window (`now` is from the read, or from the timeout above)

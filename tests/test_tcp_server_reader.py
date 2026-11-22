@@ -223,6 +223,24 @@ def start_running_reader(parser: QueueParser) -> tuple[TCPReader, int]:
     return reader, reader.server_sock.getsockname()[1]
 
 
+class TestRunStopsDuringRetryWait:
+    def test_stop_interrupts_the_wait_after_a_failed_bind(self):
+        reader = make_reader(host="127.0.0.1", port=0)
+        reader.enabled = True
+        reader.shared = SimpleNamespace(array_pool=NumpyArrayPool(), time_ns=time.time_ns)
+        reader.open = lambda: None  # the bind keeps failing: run() waits 1 s between tries
+        reader.start()
+        thread = reader._thread
+        time.sleep(0.3)
+
+        t0 = time.perf_counter()
+        reader.stop()
+        elapsed = time.perf_counter() - t0
+
+        assert not thread.is_alive()
+        assert elapsed < 0.5
+
+
 class TestRunFlushesOnDisconnect:
     """The lines a client sent just before it went away are handed on while the reader is still
     running and no new client connects, not held until the next client or stop()."""

@@ -663,6 +663,24 @@ class TestRunFlushesOnDisconnect:
             reader.stop()
 
 
+class TestRunStopsDuringRetryWait:
+    def test_stop_interrupts_the_wait_after_a_failed_open(self):
+        reader = make_reader(url="COM_FAKE")
+        reader.enabled = True
+        reader.shared = SimpleNamespace(array_pool=NumpyArrayPool(), time_ns=time.time_ns, tasks=FakeTasks())
+        reader.open = lambda: None  # the port stays gone: run() waits 1 s between tries
+        reader.start()
+        thread = reader._thread
+        time.sleep(0.3)
+
+        t0 = time.perf_counter()
+        reader.stop()
+        elapsed = time.perf_counter() - t0
+
+        assert not thread.is_alive()
+        assert elapsed < 0.5
+
+
 class TestRunRealSocketLargeTransfer:
     """4 MB over a real socket:// connection: everything arrives, in reads far bigger than the
     2 bytes per pass pyserial's own in_waiting allowed."""

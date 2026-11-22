@@ -4,7 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from time import sleep
 from typing import TYPE_CHECKING, Any
 
 from blinkview.core.configurable import configuration_property
@@ -133,6 +132,7 @@ class CANReader(BaseReader):
 
         # Localize method lookups for the tight loop
         stop_is_set = self._stop_event.is_set
+        stop_wait = self._stop_event.wait  # the retry waits below end at stop()
         time_ns = self.shared.time_ns
         logger = self.logger
 
@@ -157,7 +157,7 @@ class CANReader(BaseReader):
                         logger.info("CAN bus connected successfully.")
                     except Exception as e:
                         logger.error("Failed to open CAN bus '%s'.", self.channel, exc=e)
-                        sleep(1.0)
+                        stop_wait(1.0)
                         continue
 
                     _recv = bus.recv  # Localize for performance
@@ -202,7 +202,7 @@ class CANReader(BaseReader):
                     if bus:
                         bus.shutdown()
                     bus = None
-                    sleep(1.0)
+                    stop_wait(1.0)
 
                 except Exception as e:
                     logger.exception("Unexpected error in CAN read loop.", exc=e)
@@ -210,7 +210,7 @@ class CANReader(BaseReader):
                     if bus:
                         bus.shutdown()
                     bus = None
-                    sleep(1.0)
+                    stop_wait(1.0)
 
         except Exception as e:
             logger.exception("Fatal error in CAN Reader loop", exc=e)

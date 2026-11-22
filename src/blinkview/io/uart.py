@@ -176,6 +176,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
     def run(self):
         # Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
+        stop_wait = self._stop_event.wait  # the retry waits below end at stop()
         time_ns = self.shared.time_ns
         logger = self.logger
 
@@ -228,7 +229,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                     self.logger_state_lent.info("0")
                     ser = self.open()
                     if ser is None:
-                        sleep(1.0)
+                        stop_wait(1.0)
                         continue
                     _read = ser.read
                     if self.reset_after_return:
@@ -241,7 +242,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                     flush()
                     ser = self.open()
                     if ser is None:
-                        sleep(1.0)
+                        stop_wait(1.0)
                         continue
                     _read = ser.read
 
@@ -274,7 +275,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                     self.serial = None
                     self.logger_state_open.warning("0")
                     flush()
-                    sleep(1.0)
+                    stop_wait(1.0)
 
         except Exception as e:
             logger.exception("Fatal error in Serial Reader loop", exc=e)

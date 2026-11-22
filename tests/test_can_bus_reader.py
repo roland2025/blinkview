@@ -275,6 +275,27 @@ class TestRealLoopbackIngestion:
         assert received_ids == {0x100, 0x101, 0x102, 0x103, 0x104}
 
 
+class TestRunStopsDuringRetryWait:
+    def test_stop_interrupts_the_wait_after_a_failed_open(self, monkeypatch):
+        def no_adapter(**kwargs):
+            raise can.CanError("no adapter")
+
+        monkeypatch.setattr(can, "Bus", no_adapter)  # run() waits 1 s between tries
+        reader = make_reader(interface="virtual", channel="unused")
+        reader.enabled = True
+        reader.shared = SimpleNamespace(array_pool=NumpyArrayPool(), time_ns=time.time_ns)
+        reader.start()
+        thread = reader._thread
+        time.sleep(0.3)
+
+        t0 = time.perf_counter()
+        reader.stop()
+        elapsed = time.perf_counter() - t0
+
+        assert not thread.is_alive()
+        assert elapsed < 0.5
+
+
 class TestRunFlushesOnBusError:
     """The frames received just before the bus fails are handed on while the reader is still
     running and the adapter does not come back, not held until the bus reopens or stop(). delay

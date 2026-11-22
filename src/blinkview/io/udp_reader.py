@@ -5,7 +5,6 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import socket
-from time import sleep
 
 import numpy as np
 
@@ -99,6 +98,7 @@ class UDPReader(BaseReader):
     def run(self):
         # Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
+        stop_wait = self._stop_event.wait  # the retry waits below end at stop()
         time_ns = self.shared.time_ns
         logger = self.logger
 
@@ -122,7 +122,7 @@ class UDPReader(BaseReader):
                 if sock is None:
                     sock = self.open()
                     if sock is None:
-                        sleep(1.0)
+                        stop_wait(1.0)
                         continue
 
                     recvfrom_into = sock.recvfrom_into
@@ -157,7 +157,7 @@ class UDPReader(BaseReader):
                     # Hand on what was received before the error: rebinding waits 1 s, and can
                     # keep failing.
                     flush()
-                    sleep(1.0)
+                    stop_wait(1.0)
                     continue
 
                 # Flush the batch if the delay window has elapsed (`now` is from the read, or

@@ -210,6 +210,22 @@ class TestRunRealSocketIngestion:
         finally:
             reader.stop()
 
+    def test_stop_interrupts_the_wait_after_a_failed_bind(self):
+        reader = make_reader(host="127.0.0.1", port=0)
+        reader.enabled = True
+        reader.shared = SimpleNamespace(array_pool=NumpyArrayPool(), time_ns=time.time_ns)
+        reader.open = lambda: None  # the bind keeps failing: run() waits 1 s between tries
+        reader.start()
+        thread = reader._thread
+        time.sleep(0.3)
+
+        t0 = time.perf_counter()
+        reader.stop()
+        elapsed = time.perf_counter() - t0
+
+        assert not thread.is_alive()
+        assert elapsed < 0.5
+
     def test_run_records_target_address_from_the_sender(self):
         """UDPReader.send_data() replies to whichever peer most recently sent a datagram -
         confirms run() actually records that address."""
