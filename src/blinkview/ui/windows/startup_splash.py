@@ -44,7 +44,7 @@ class StartupSplash(QFrame):
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setFixedHeight(8)
 
-        # Under the bar: "42% - BinaryParser", and on the right the seconds a compile has taken.
+        # Under the bar: "42% - FramePipelineParser", and on the right the seconds a compile has taken.
         self.step_label = QLabel()
         self.elapsed_label = QLabel()
         footer = QHBoxLayout()

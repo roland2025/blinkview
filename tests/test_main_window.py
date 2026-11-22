@@ -557,7 +557,7 @@ class TestBackgroundWarmup:
             state.cancel = cancel
             state.thread = threading.current_thread()
             state.started.set()
-            on_progress(0.25, "BinaryParser")
+            on_progress(0.25, "FramePipelineParser")
             while not state.release.wait(0.01):
                 if cancel.is_set():
                     raise WarmupCancelled()
@@ -594,7 +594,7 @@ class TestBackgroundWarmup:
         qtbot.waitUntil(lambda: splash.progress_bar.value() == 250, timeout=5000)
         assert splash.progress_area.isVisibleTo(splash)
         assert splash.status_label.text() == "Compiling kernels. Needed once after an install or update."
-        assert splash.step_label.text() == "25% - BinaryParser"
+        assert splash.step_label.text() == "25% - FramePipelineParser"
         assert splash.elapsed_label.text().endswith(" s")
 
         controlled_warmup.release.set()
@@ -611,7 +611,7 @@ class TestBackgroundWarmup:
         monkeypatch.setattr(main_window_module, "COMPILING_AFTER_S", 3600.0)
         main_window._start_warmup()
 
-        qtbot.waitUntil(lambda: splash.step_label.text() == "25% - BinaryParser", timeout=5000)
+        qtbot.waitUntil(lambda: splash.step_label.text() == "25% - FramePipelineParser", timeout=5000)
         assert splash.status_label.text() == "Loading kernels..."
         assert splash.elapsed_label.text() == ""
         controlled_warmup.release.set()

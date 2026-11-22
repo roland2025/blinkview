@@ -23,9 +23,9 @@ from blinkview.core.frame_warmup_registry import (
     frame_warmup_weight,
 )
 from blinkview.core.warmup import NumbaWarmupHelper
-from blinkview.parsers.binary_parser import BinaryParser
 from blinkview.parsers.frame_decoders import FrameDecoderFactory
 from blinkview.parsers.frame_parsers import FrameParserFactory, FrameSectionParserFactory
+from blinkview.parsers.frame_pipeline_parser import FramePipelineParser
 
 
 def test_decorators_register_the_config_and_return_the_class_unchanged():
@@ -62,12 +62,12 @@ def test_warmup_weight_is_kept_out_of_the_config():
         FRAME_WARMUP_WEIGHTS.pop((KIND_DECODER, "heavy_dec"), None)
 
 
-def test_binary_parser_warmup_reports_weighted_substeps(monkeypatch):
-    monkeypatch.setattr(BinaryParser, "_warmup_config", staticmethod(lambda helper, decoder, parser: None))
+def test_frame_pipeline_parser_warmup_reports_weighted_substeps(monkeypatch):
+    monkeypatch.setattr(FramePipelineParser, "_warmup_config", staticmethod(lambda helper, decoder, parser: None))
     reported = []
     helper = SimpleNamespace(report_substep=lambda done, total: reported.append(done / total))
 
-    BinaryParser.warmup(helper)
+    FramePipelineParser.warmup(helper)
 
     weights = [frame_warmup_weight(KIND_DECODER, e["type"]) for e in FRAME_DECODER_WARMUPS]
     weights += [frame_warmup_weight(KIND_SECTION, e["type"]) for e in FRAME_SECTION_WARMUPS]
@@ -102,19 +102,19 @@ def _helper():
     return NumbaWarmupHelper(shared)
 
 
-def test_binary_parser_warmup_runs_every_registered_decoder_and_section(monkeypatch):
+def test_frame_pipeline_parser_warmup_runs_every_registered_decoder_and_section(monkeypatch):
     built = []
-    original = BinaryParser._warmup_config
+    original = FramePipelineParser._warmup_config
 
     def spy(helper, decoder_config, parser_config):
         built.append((decoder_config["type"], [step["type"] for step in parser_config["steps"]]))
         return original(helper, decoder_config, parser_config)
 
-    monkeypatch.setattr(BinaryParser, "_warmup_config", staticmethod(spy))
+    monkeypatch.setattr(FramePipelineParser, "_warmup_config", staticmethod(spy))
 
     helper = _helper()
     try:
-        BinaryParser.warmup(helper)
+        FramePipelineParser.warmup(helper)
     finally:
         helper.log_pool.release_all()
 

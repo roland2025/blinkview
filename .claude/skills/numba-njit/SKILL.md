@@ -183,8 +183,8 @@ def warmup(helper: "NumbaWarmupHelper"):
 Examples: `CircularLogPool.warmup` (`numpy_log.py`), `IdHistory.warmup` (`core/id_history.py`),
 `IndexedStringTable.warmup` (`core/id_registry/tables.py`), `TimeSyncEngine.warmup`
 (`time_sync_engine.py`), `TelemetryPlotter.warmup` (`plotter.py`), `LogViewerWidget.warmup`
-(`log_viewer.py`), `LogTableModel.warmup` (`log_table_viewer.py`), `BinaryParser.warmup`/
-`_warmup_config` (`binary_parser.py`), `TempLogFilter.warmup` (`module_filter_table.py`),
+(`log_viewer.py`), `LogTableModel.warmup` (`log_table_viewer.py`), `FramePipelineParser.warmup`/
+`_warmup_config` (`frame_pipeline_parser.py`), `TempLogFilter.warmup` (`module_filter_table.py`),
 `Reorder.warmup` (`reorderer.py`), `LatestModuleValueTracker.warmup` (`module_snapshot.py`).
 
 The `helper: "NumbaWarmupHelper"` type hint is always a bare forward-ref string and
@@ -252,7 +252,7 @@ setup verbatim into the new `warmup(helper)` staticmethod, swapping `self.shared
   `NumbaTypeError: Cannot modify readonly array of type: readonly array(uint8, 1d, C)` at typing
   time, not at the write itself. Wrap the source in `bytearray(...)` first:
   `np.frombuffer(bytearray(text), dtype=BYTE)`.
-- To drive the frame-parser pipeline directly in a test, mirror `BinaryParser.run()`: call the
+- To drive the frame-parser pipeline directly in a test, mirror `FramePipelineParser.run()`: call the
   decoder kernel (`codec.kernel(f_state, in_b, p_config, o_config, out_b)` -> `(out_full, n)`),
   then `section.kernel(out_b, f_state, n)` for each step, then `nb_finish_frames(...)`, where
   `p_config` is the `ParserConfig` returned by `GenericFrameParser.bundle()` (see
@@ -381,7 +381,7 @@ was decorated `@app_njit(inline="always")`. Forcing this onto a *dispatcher* (as
 single small helper) means every call site must inline the entire branch tree - Numba has to
 compile all ~12 leaf functions together, once, at first use, **regardless of how many of those
 branches the specific call actually exercises**. This was root-caused by profiling
-`BinaryParser.warmup()` (`parsers/binary_parser.py`) with `BLINKVIEW_NO_CACHE=1` (forces a true
+`FramePipelineParser.warmup()` (`parsers/frame_pipeline_parser.py`) with `BLINKVIEW_NO_CACHE=1` (forces a true
 cold compile, bypassing the on-disk cache `cache=True` normally reuses - see §14): its first
 `_warmup_config()` call, with **zero** pipeline steps, still cost ~25s; the next four calls (1, 2,
 3, 4 steps) cost ~0.5s then ~0.001s each - all the cost was the dispatcher's one-time compile, not
@@ -390,7 +390,7 @@ the pipeline's actual length.
 Fix applied: dropped `inline="always"` from `nb_process_bundle` and the equivalent
 `nb_dispatch_frame_decoder` (`ops/frame_dispatch.py`) - both are dispatch-level functions, not
 per-row hot-loop bodies, so a real (non-inlined) function call there costs little at runtime.
-Measured result: `BinaryParser.warmup()`'s cold-compile time dropped ~21% (25.65s -> ~20.1s), full
+Measured result: `FramePipelineParser.warmup()`'s cold-compile time dropped ~21% (25.65s -> ~20.1s), full
 test suite unaffected.
 
 **Explicitly tested and reverted**: also tried removing `inline="always"` from the 12 individual
@@ -427,7 +427,7 @@ for priority, callback in sorted(_WARMUP_CALLBACKS, key=lambda item: item[0], re
     print(callback.__qualname__, time.perf_counter() - t0)
 ```
 
-This is what found `BinaryParser.warmup()` was ~80-84% of total cold-compile time (and, drilling
+This is what found `FramePipelineParser.warmup()` was ~80-84% of total cold-compile time (and, drilling
 further, that a *single* call inside it - not pipeline length - was the entire cost; see §13).
 Don't stop at "which callback is slow" - if one dominates, re-run its own internal steps
 individually the same way to find the actual long pole, rather than assuming the whole callback

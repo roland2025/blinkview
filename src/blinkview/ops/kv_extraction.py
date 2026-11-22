@@ -8,7 +8,7 @@
 core/types/kv_extraction.py's module docstring and plans/kv-extractor-numba-backend.md.
 
 The whole-batch entry point, nb_process_kv_batch, mirrors ops/decode_loop.py's
-nb_decode_loop / parsers/binary_parser.py's run() loop: one call processes as much of an
+nb_decode_loop / parsers/frame_pipeline_parser.py's run() loop: one call processes as much of an
 input PooledLogBatch as fits into the current output batch, and reports whether it stopped early
 because the output filled up (so the caller can flush, acquire a fresh output batch, and resume
 the *same* input batch exactly where it left off) - never partially re-emitting a row across that

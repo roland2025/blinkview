@@ -72,5 +72,5 @@ class KvExtractState(NamedTuple):
     # 1-element int64 array: resume cursor into the current input batch. Lets
     # nb_process_kv_batch be called repeatedly against the same input batch (once per output
     # batch it fills), the same resumable-chunk contract the frame decoder kernels use -
-    # see ops/decode_loop.py / parsers/binary_parser.py's run() loop.
+    # see ops/decode_loop.py / parsers/frame_pipeline_parser.py's run() loop.
     in_idx: np.ndarray

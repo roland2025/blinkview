@@ -4,10 +4,10 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-"""Registry of the frame decoders and frame parser sections that BinaryParser's warmup has to compile.
+"""Registry of the frame decoders and frame parser sections that FramePipelineParser's warmup has to compile.
 
 Every decoder and every pipeline section owns its own kernel (decoder.kernel / section.kernel), compiled the first
-time it is called. Each concrete class registers a config that builds it; BinaryParser.warmup() then drives one
+time it is called. Each concrete class registers a config that builds it; FramePipelineParser.warmup() then drives one
 dummy batch through every registered decoder, and through every registered section behind a default decoder, so
 all kernels are compiled in one go at startup instead of on the first real batch.
 
@@ -25,7 +25,7 @@ FRAME_DECODER_WARMUPS: List[Dict] = []
 FRAME_SECTION_WARMUPS: List[Dict] = []
 
 # Relative cold-cache cost of each entry, keyed by (kind, type name) - only used to weight
-# BinaryParser.warmup()'s sub-step progress, like warmup_registry's _WARMUP_WEIGHTS one level up.
+# FramePipelineParser.warmup()'s sub-step progress, like warmup_registry's _WARMUP_WEIGHTS one level up.
 # Roughly seconds on a dev machine. Most sections compile one kernel in 1-2 s and keep the default;
 # an entry that reuses an already compiled kernel costs next to nothing.
 FRAME_WARMUP_WEIGHTS: Dict[Tuple[str, str], float] = {}

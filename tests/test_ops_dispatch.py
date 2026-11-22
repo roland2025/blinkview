@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-"""The stage-major pipeline as BinaryParser.run() drives it: a frame decoder kernel (ops/decode_loop.py), one
+"""The stage-major pipeline as FramePipelineParser.run() drives it: a frame decoder kernel (ops/decode_loop.py), one
 stage kernel per pipeline step, then nb_finish_frames (ops/dispatch.py)."""
 
 import numpy as np
@@ -41,7 +41,7 @@ def _line_decoder_config(**overrides):
 
 
 def _run_pipeline(frame_config, f_state, in_b, p_config, o_cfg, out_b, steps=()):
-    """One pass of BinaryParser.run()'s inner loop: decode, run every step's stage kernel, finish.
+    """One pass of FramePipelineParser.run()'s inner loop: decode, run every step's stage kernel, finish.
     Returns out_full."""
     decode = nb_decode_frames_passthrough if frame_config.decode_id == 0 else nb_decode_frames_newline
     out_full, n = decode(frame_config, f_state, in_b, p_config, o_cfg, out_b)
@@ -106,7 +106,7 @@ class TestStartupResync:
     """A fresh FrameState either resyncs (default, start_synced=False: everything up to the first
     delimiter is discarded, since a UART-like stream may have been joined mid-frame) or assumes the
     stream starts on a frame boundary (start_synced=True: the first frame is emitted too). Driven by
-    the frame decoder's `frame_resync_on_start` setting via BinaryParser.run()."""
+    the frame decoder's `frame_resync_on_start` setting via FramePipelineParser.run()."""
 
     def test_resync_discards_everything_before_the_first_delimiter(self):
         pool = NumpyArrayPool()
@@ -238,7 +238,7 @@ def _parser_config(report_error=True, squash=False):
 
 
 class _Rig:
-    """Drives the pipeline like BinaryParser.run(): feeds `lines` to a FrameState that starts synced (no resync
+    """Drives the pipeline like FramePipelineParser.run(): feeds `lines` to a FrameState that starts synced (no resync
     discard), and keeps running it with a fresh output batch while the decoder reports out_full."""
 
     def __init__(self, *, steps=(), report_error=True, squash=False, compact=True, frame_config=None, has_pids=False):

@@ -16,7 +16,7 @@ from blinkview.core.time_sync_engine import TimeSyncEngine
 from blinkview.core.types.parsing import SyncState
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
 from blinkview.io.batch_feeder import BatchFeeder
-from blinkview.parsers.binary_parser import BinaryParser
+from blinkview.parsers.frame_pipeline_parser import FramePipelineParser
 from blinkview.utils.adb import detect_adb_path
 
 

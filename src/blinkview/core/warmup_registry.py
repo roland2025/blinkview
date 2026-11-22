@@ -18,7 +18,7 @@ _WARMUP_CALLBACKS: List[Tuple[int, Callable[["NumbaWarmupHelper"], None]]] = []
 DEFAULT_PRIORITY = 0
 
 # Relative cost of each callback on a cold cache - only used to turn "callback i of N" into a
-# progress fraction that moves at roughly constant speed (BinaryParser's warmup alone is about half
+# progress fraction that moves at roughly constant speed (FramePipelineParser's warmup alone is about half
 # of the total). Roughly seconds on a dev machine; most callbacks take ~1 s and keep the default.
 _WARMUP_WEIGHTS: Dict[Callable[["NumbaWarmupHelper"], None], float] = {}
 

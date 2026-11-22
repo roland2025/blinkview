@@ -553,7 +553,7 @@ class TestRun:
 
 def test_round_trip_interleaved_devices(id_registry):
     """Confirms per-row device/module resolution works for a log with multiple
-    interleaved devices - the exact case BinaryParser (bound to one device per
+    interleaved devices - the exact case FramePipelineParser (bound to one device per
     instance) cannot handle."""
     dev_a = id_registry.get_device("device_a")
     dev_b = id_registry.get_device("device_b")

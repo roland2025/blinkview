@@ -13,7 +13,7 @@ sections, with **no direct object reference between them**:
   (`core/sources.py`) from the `"sources"` config section. Reads raw bytes off the wire/device and
   pushes them into the pipeline via `push_log`/queues. Its `self.local` (a `SimpleNamespace`) only
   gets `get_logger`, `push_log`, `logging_id` — **no `device_id`**.
-- **A pipeline** (a `BaseParser` subclass, e.g. `BinaryParser`) — built by `PipelineManager`
+- **A pipeline** (a `BaseParser` subclass, e.g. `FramePipelineParser`) — built by `PipelineManager`
   (`core/pipeline_manager.py`) from the `"pipelines"` config section. Decodes/parses the raw bytes
   a source produced into structured `LogBundle` rows. Its `self.local.device_id` **is** a real
   `DeviceIdentity`, resolved via `self.shared.id_registry.get_device(name)` where `name` comes

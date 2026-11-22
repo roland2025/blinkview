@@ -20,9 +20,9 @@ from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.output import OutputConfig
 from blinkview.ops.dispatch import nb_finish_frames
 from blinkview.parsers import adb_decoder  # noqa: F401  (registers the adb_long_frame steps)
-from blinkview.parsers.binary_parser import BinaryParser
 from blinkview.parsers.frame_decoders import FrameDecoderFactory
 from blinkview.parsers.frame_parsers import FrameParserFactory, FrameSectionParserFactory
+from blinkview.parsers.frame_pipeline_parser import FramePipelineParser
 from blinkview.parsers.state import FrameState
 from blinkview.utils import level_map  # noqa: F401  (registers the log_level_* steps)
 
@@ -45,7 +45,7 @@ def _rows(decoder, steps, data, pid_tid=False):
     shared = _shared(id_registry)
     pool = shared.array_pool
 
-    parser = BinaryParser()
+    parser = FramePipelineParser()
     parser.logger = PrintLogger("test.stage_kernels")
     parser.shared = shared
     parser.local = SimpleNamespace(device_id=id_registry.get_device("stage_kernels"))

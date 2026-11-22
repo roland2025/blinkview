@@ -100,7 +100,7 @@ class BaseParser(BaseDaemon):
                 if self.sync_state is None:
                     self.sync_state: SyncState = create_default_sync(self.shared.time_ns())
 
-                    # print(f"BinaryParser initial sync state: {self.sync_state}")
+                    # print(f"FramePipelineParser initial sync state: {self.sync_state}")
                 sync_ctx = SimpleNamespace(
                     get_logger=self.logger.child_creator("time"),
                     parser=self,

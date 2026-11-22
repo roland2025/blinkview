@@ -142,7 +142,7 @@ class TestSendData:
 
 
 class QueueParser:
-    """Minimal stand-in for a real downstream parser (e.g. BinaryParser) - the object
+    """Minimal stand-in for a real downstream parser (e.g. FramePipelineParser) - the object
     BaseDaemon.distribute() calls .put(batch) on. Pushes each row's raw bytes onto a
     queue.Queue so the test can observe distribute() calls made by a live reader thread."""
 

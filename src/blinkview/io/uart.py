@@ -294,13 +294,13 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
 
     def open(self):
         try:
-            from blinkview.parsers.binary_parser import BinaryParser
+            from blinkview.parsers.frame_pipeline_parser import FramePipelineParser
 
             time_ns = self.shared.time_ns
 
             # sync_state = self._init_sync_engine(anchor_is_boot=True)
 
-            target_parser = next((s for s in self.subscribers if isinstance(s, BinaryParser)), None)
+            target_parser = next((s for s in self.subscribers if isinstance(s, FramePipelineParser)), None)
 
             BUF_SIZE = 64 * 1024  # 64KB buffer for incoming serial data
 

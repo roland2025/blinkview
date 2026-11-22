@@ -68,7 +68,7 @@ WARMUP_DECODER_DEFAULTS = {
     required=True,
 )
 @ParserFactory.register("default")
-class BinaryParser(BaseParser):
+class FramePipelineParser(BaseParser):
     __doc__ = """The default pipeline, designed for maximum flexibility and configurability.
 
 * Supports optional splitting of raw byte streams
@@ -106,7 +106,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         if self.sync_state is None:
             self.sync_state: SyncState = create_default_sync(self.shared.time_ns())
 
-            dev_print(f"BinaryParser initial sync state: {self.sync_state}")
+            dev_print(f"FramePipelineParser initial sync state: {self.sync_state}")
 
         factory_build = self.shared.factories.build
 
@@ -437,7 +437,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         Each registered decoder (core/frame_warmup_registry.py) runs with an empty pipeline, which also compiles the
         shared finish kernel and the batch processors. Each registered section then runs behind the default line
         decoder. Sections are independent kernels, so there is no per-pipeline-length compilation to cover."""
-        dev_print("[Warmup] BinaryParser frame decoders and sections ...")
+        dev_print("[Warmup] FramePipelineParser frame decoders and sections ...")
 
         no_steps = {"type": "default", "parser_errors_hidden": False, "steps": [], "filter_squash_spaces": False}
 
@@ -455,14 +455,14 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
         for (decoder_config, parser_config), weight in zip(configs, weights):
             helper.report_substep(done_weight, total_weight)
-            BinaryParser._warmup_config(helper, decoder_config, parser_config)
+            FramePipelineParser._warmup_config(helper, decoder_config, parser_config)
             done_weight += weight
 
-        dev_print("[Warmup] BinaryParser frame decoders and sections ... done")
+        dev_print("[Warmup] FramePipelineParser frame decoders and sections ... done")
 
 
 @ParserFactory.register("serial_default")
-class SerialParserThread(BinaryParser):
+class SerialParserThread(FramePipelineParser):
     __doc__ = "Splitting enabled by default for serial logs, with the split character set to newline (ASCII 10). This is a common configuration for serial log streams, where each log entry is typically separated by a newline character. Users can still customize the split character or disable splitting entirely if their log format differs."
 
 
@@ -579,7 +579,7 @@ class EspIdfV1Parser(SerialParserThread):
         ],
     },
 )
-class RsyslogFileFormatParser(BinaryParser):
+class RsyslogFileFormatParser(FramePipelineParser):
     __doc__ = """rsyslog's default "RSYSLOG_FileFormat" template: an RFC3339 timestamp, the
 hostname, and a "tag[pid]: " syslog TAG field, e.g. "2026-09-20T10:23:01.456789+00:00 myhost
 sshd[1234]: connection closed". For the older low-precision default (RFC3164 "Mon DD HH:MM:SS"

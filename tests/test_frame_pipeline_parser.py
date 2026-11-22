@@ -13,9 +13,9 @@ from blinkview.core.factory_registry import FactoryRegistry
 from blinkview.core.id_registry import IDRegistry
 from blinkview.core.logger import PrintLogger
 from blinkview.core.numpy_batch_manager import PooledLogBatch
-from blinkview.parsers.binary_parser import BinaryParser, RsyslogFileFormatParser
 from blinkview.parsers.frame_decoders import FrameDecoderFactory
 from blinkview.parsers.frame_parsers import FrameParserFactory, FrameSectionParserFactory
+from blinkview.parsers.frame_pipeline_parser import FramePipelineParser, RsyslogFileFormatParser
 from blinkview.utils.log_level import LogLevel
 
 
@@ -32,9 +32,9 @@ def make_shared(id_registry):
     )
 
 
-def make_parser(id_registry, device_name="binary_parser_test", **config_overrides):
-    parser = BinaryParser()
-    parser.logger = PrintLogger("test.binary_parser")
+def make_parser(id_registry, device_name="frame_pipeline_parser_test", **config_overrides):
+    parser = FramePipelineParser()
+    parser.logger = PrintLogger("test.frame_pipeline_parser")
     parser.shared = make_shared(id_registry)
     parser.local = SimpleNamespace(device_id=id_registry.get_device(device_name))
     config = {
@@ -157,7 +157,7 @@ class TestNameChanged:
 
 
 class TestRunRealIngestion:
-    """Runs BinaryParser.run() for real: real line_decoder framing (nb_decode_loop), real (empty) parser
+    """Runs FramePipelineParser.run() for real: real line_decoder framing (nb_decode_loop), real (empty) parser
     pipeline, real nb_finish_frames. Apart from the test of the default, the decoder runs with
     frame_resync_on_start=False so the first frame is delivered too."""
 

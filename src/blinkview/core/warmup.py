@@ -22,7 +22,7 @@ class WarmupCancelled(Exception):
 
 
 def warmup_label(callback: Callable) -> str:
-    """'BinaryParser.warmup' -> 'BinaryParser', the same name the callbacks' own log lines use."""
+    """'FramePipelineParser.warmup' -> 'FramePipelineParser', the same name the callbacks' own log lines use."""
     qualname = getattr(callback, "__qualname__", repr(callback))
     owner, _, name = qualname.rpartition(".")
     if owner and name == "warmup":
@@ -119,7 +119,7 @@ class NumbaWarmupHelper:
         )
 
     def report_substep(self, done: float, total: float):
-        """For callbacks with a long loop of independent compiles (e.g. BinaryParser's 30 decoder
+        """For callbacks with a long loop of independent compiles (e.g. FramePipelineParser's 30 decoder
         and section configs): call before each item so progress moves within the callback and a
         cancel takes effect between items instead of only after the whole callback. `done`/`total`
         are item counts, or summed weights when the items' costs differ a lot. A no-op when the

@@ -31,7 +31,7 @@ class FakeHelper:
 
     def run_all(self, on_progress=None, cancel=None):
         if on_progress is not None:
-            on_progress(0.5, "BinaryParser")
+            on_progress(0.5, "FramePipelineParser")
         if self.raises is not None:
             raise self.raises
 
@@ -44,7 +44,7 @@ class TestCompileKernels:
         error = blink_setup.compile_kernels(helper, on_progress=lambda f, label: seen.append((f, label)))
 
         assert error is None
-        assert seen == [(0.5, "BinaryParser")]
+        assert seen == [(0.5, "FramePipelineParser")]
         assert helper.shutdowns == [True]
 
     def test_cancelled_is_reported(self):
@@ -80,12 +80,12 @@ class TestHeadlessFallback:
     def test_printed_progress_is_one_line_per_kernel_group(self, capsys):
         on_progress = blink_setup._print_progress()
 
-        on_progress(0.0, "BinaryParser")
-        on_progress(0.2, "BinaryParser")  # a sub-step of the same group
+        on_progress(0.0, "FramePipelineParser")
+        on_progress(0.2, "FramePipelineParser")  # a sub-step of the same group
         on_progress(0.5, "TelemetryPlotter")
         on_progress(1.0, "")
 
-        assert capsys.readouterr().out.splitlines() == ["[  0%] BinaryParser", "[ 50%] TelemetryPlotter"]
+        assert capsys.readouterr().out.splitlines() == ["[  0%] FramePipelineParser", "[ 50%] TelemetryPlotter"]
 
 
 class TestSetupWindow:
@@ -104,7 +104,7 @@ class TestSetupWindow:
             compile_state.thread = threading.current_thread()
             compile_state.cancel = cancel
             compile_state.started.set()
-            on_progress(0.25, "BinaryParser")
+            on_progress(0.25, "FramePipelineParser")
             while not compile_state.release.wait(0.01):
                 if cancel.is_set():
                     return "cancelled"
@@ -124,7 +124,7 @@ class TestSetupWindow:
 
         assert compile_state.thread is not threading.main_thread()
         qtbot.waitUntil(lambda: window.progress_bar.value() == PROGRESS_STEPS // 4, timeout=5000)
-        assert window.status_label.text() == "25% - BinaryParser"
+        assert window.status_label.text() == "25% - FramePipelineParser"
         assert window.exit_code is None
 
     def test_closes_itself_with_exit_code_0_when_done(self, window, qtbot, compile_state):
