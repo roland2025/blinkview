@@ -395,7 +395,9 @@ class TestDynamicDict:
         from qtpy.QtWidgets import QLineEdit, QPushButton
 
         group_box = widget._widget_registry["extra"]["container"]
-        line_edit = next(w for w in group_box.findChildren(QLineEdit) if w.placeholderText() == "Enter new item name...")
+        line_edit = next(
+            w for w in group_box.findChildren(QLineEdit) if w.placeholderText() == "Enter new item name..."
+        )
         button = next(b for b in group_box.findChildren(QPushButton) if b.text() == "Add")
         line_edit.setText(new_key)
         with qtbot.capture_exceptions() as exceptions:
@@ -830,6 +832,27 @@ class TestHelpToggle:
         assert len(shown) == 1
         assert "Level" in shown[0][0]
         assert shown[0][1] == "How loud <it> is."
+
+    def test_group_and_root_buttons_preview_the_text_fields_stay_icons(self, qapp, qtbot, gui_context):
+        w = self.make(qtbot, gui_context, FakeSettings({module.SHOW_HELP_SETTING: False}))
+        texts = sorted(button.text() for button in self.parts(w)[1] if button.text())
+
+        # The root and the 'nested' group show their line; the three fields only an icon.
+        assert texts == sorted([" ".join(HELP_SCHEMA["description"].split()), "A nested part."])
+        assert sum(1 for button in self.parts(w)[1] if not button.text()) == 3
+
+    def test_preview_elides_when_narrow_and_grows_back(self, qapp, qtbot):
+        line = "A long description that cannot possibly fit into a narrow button at all."
+        button = module._HelpPreviewButton(line)
+        qtbot.addWidget(button)
+        button.show()
+
+        button.resize(button.minimumSizeHint().width() + 60, button.sizeHint().height())
+        assert button.text().endswith("…") and len(button.text()) < len(line)
+        assert button.minimumSizeHint().width() < button.sizeHint().width()
+
+        button.resize(button.sizeHint())
+        assert button.text() == line
 
     def test_reflow_joins_wrapped_lines_but_keeps_examples_and_lists(self):
         wrapped = (

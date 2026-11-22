@@ -8,7 +8,7 @@ import re
 from copy import deepcopy
 from html import escape
 
-from qtpy.QtCore import Qt, QTimer, Signal
+from qtpy.QtCore import QSize, Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -78,6 +78,40 @@ def _button_style(bg: str, hover: str) -> str:
             background-color: {hover};
         }}
     """
+
+
+class _HelpPreviewButton(QToolButton):
+    """Info icon followed by the description squeezed onto one line, elided to the width it gets.
+
+    The size hint is the whole line, so the button grows back when there is room again, and the
+    minimum is the bare icon, so a long description never widens the form."""
+
+    _PAD = 12  # icon-to-text spacing plus the frame on both sides
+
+    def __init__(self, description: str):
+        super().__init__()
+        self._line = " ".join(description.split())
+        self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.setStyleSheet("QToolButton { color: #888; font-style: italic; }")
+        # Maximum: never wider than the whole line, so a short one isn't centred in spare space.
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+
+    def _text_room(self, width: int) -> int:
+        return width - self.iconSize().width() - self._PAD
+
+    def sizeHint(self) -> QSize:
+        self.ensurePolished()
+        # +4: integer text advances round, and a hint of exactly the advance can still elide.
+        width = self.iconSize().width() + self._PAD + 4 + self.fontMetrics().horizontalAdvance(self._line)
+        return QSize(width, super().sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(self.iconSize().width() + self._PAD, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        room = max(0, self._text_room(event.size().width()))
+        self.setText(self.fontMetrics().elidedText(self._line, Qt.ElideRight, room))
 
 
 _TYPE_SEEDS = {"string": "", "integer": 0, "number": 0.0, "boolean": False, "array": [], "object": {}}
@@ -315,9 +349,12 @@ class DynamicConfigWidget(QWidget):
         self.btn_apply.setEnabled(False)
         self.btn_revert.setEnabled(False)
 
-    def _make_help(self, title: str, description: str, style: str) -> tuple[QLabel, QToolButton]:
+    def _make_help(self, title: str, description: str, style: str, preview: bool = False) -> tuple[QLabel, QToolButton]:
         """A description twice: written out as a label, and as an info button showing it on hover
-        and on click. Only one of the two is visible, see `show_help`."""
+        and on click. Only one of the two is visible, see `show_help`.
+
+        `preview`: the button carries the description's opening as one elided line, for a button
+        that sits on a line of its own (root, group box) and would look lost as a bare icon."""
         description = reflow(description)
         label = QLabel(description)
         label.setObjectName("HelpText")
@@ -329,7 +366,7 @@ class DynamicConfigWidget(QWidget):
         if not self.show_help:
             label.hide()
 
-        button = QToolButton()
+        button = _HelpPreviewButton(description) if preview else QToolButton()
         button.setObjectName("HelpButton")
         button.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxInformation))
         button.setAutoRaise(True)
@@ -367,6 +404,7 @@ class DynamicConfigWidget(QWidget):
                     schema_node.get("title", "Description"),
                     description,
                     "color: #aaa; font-size: 12px; font-style: italic; margin-bottom: 12px;",
+                    preview=True,
                 )
 
                 # addRow with one widget spans the entire top of the form
@@ -874,7 +912,10 @@ class DynamicConfigWidget(QWidget):
 
         if description:
             desc_label, help_button = self._make_help(
-                title, description, "color: #888; font-size: 11px; font-style: italic; margin-bottom: 6px;"
+                title,
+                description,
+                "color: #888; font-size: 11px; font-style: italic; margin-bottom: 6px;",
+                preview=True,
             )
             group_main_layout.addWidget(desc_label)
             group_main_layout.addWidget(help_button, 0, Qt.AlignLeft)
