@@ -4,10 +4,15 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-BATCH_QUEUE_MAXLEN = 1_000_000
-# Also bounds a BatchQueue by the memory its batches hold (allocated, not used): a row bound alone
-# let ~120 nearly empty 292 MB batches (~35 GB) queue up under 1 M rows. ~64 full 16 MB batches.
-BATCH_QUEUE_MAX_BYTES = 1024 * 1024 * 1024
+# A BatchQueue is bounded by rows and by the memory its batches hold (allocated, not used). The
+# byte bound is what keeps memory in check: a row bound alone let ~120 nearly empty 292 MB batches
+# (~35 GB) queue up under 1 M rows. So the row bound is set for throughput, not memory: 16 M rows is
+# ~1.3 s at 12 M msg/s (1 M rows was less than the reorderer's 100 ms delay window at that rate).
+BATCH_QUEUE_MAXLEN = 16_000_000
+BATCH_QUEUE_MAX_BYTES = 1024 * 1024 * 1024  # ~64 full 16 MB batches
+# The reorderer's input queue takes every source at once: ~1.5 s at 12 M msg/s of 64-byte lines
+# (dense batches measured at ~110 bytes/row allocated).
+REORDER_QUEUE_MAX_BYTES = 2 * 1024 * 1024 * 1024
 CENTRAL_STORAGE_MAXLEN = 1_000_000
 BATCH_MAXLEN = 2000
 

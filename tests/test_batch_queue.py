@@ -352,3 +352,12 @@ class TestByteBoundDefaults:
         from blinkview.core.limits import BATCH_QUEUE_MAX_BYTES
 
         assert BatchQueue().max_bytes == BATCH_QUEUE_MAX_BYTES
+
+    def test_reorder_input_queue_gets_its_own_byte_bound(self):
+        """The reorderer takes every source at once, so its queue holds more than the default."""
+        from blinkview.core.limits import BATCH_QUEUE_MAXLEN, REORDER_QUEUE_MAX_BYTES
+        from blinkview.core.reorderer import Reorder
+
+        q = Reorder().input_queue
+        assert q.max_bytes == REORDER_QUEUE_MAX_BYTES
+        assert q.maxlen == BATCH_QUEUE_MAXLEN

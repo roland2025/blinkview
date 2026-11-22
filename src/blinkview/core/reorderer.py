@@ -13,6 +13,7 @@ from numba.typed import List as NumbaList
 from blinkview.core import dtypes
 from blinkview.core.base_reorder import BaseReorder, ReorderFactory
 from blinkview.core.batch_queue import BatchQueue
+from blinkview.core.limits import REORDER_QUEUE_MAX_BYTES
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.warmup_registry import register_warmup
 from blinkview.ops.reorder import MergeChunk, nb_find_split_idx, nb_hybrid_merge_and_copy, nb_sum_lengths
@@ -39,7 +40,7 @@ class Reorder(BaseReorder):
 
     def __init__(self):
         super().__init__()
-        self.input_queue = BatchQueue()
+        self.input_queue = BatchQueue(max_bytes=REORDER_QUEUE_MAX_BYTES)
         self.put = self.input_queue.put
 
     def run(self):
