@@ -147,7 +147,7 @@ class CANReader(BaseReader):
             # Estimating an average CAN message payload of 8 bytes; CanLogBatch carries the CAN
             # address in ext_u32_1 and the flags in ext_u32_2
             feeder = BatchFeeder(self, msg_size_bytes=8, batch_cls=CanLogBatch)
-            maybe_flush = feeder.maybe_flush
+            maybe_flush, flush = feeder.maybe_flush, feeder.flush
             delay_ns = feeder.delay_ns
 
             while not stop_is_set():
@@ -189,13 +189,16 @@ class CANReader(BaseReader):
                         # Clean, high-level insertion; a full batch is handed on first (a frame
                         # is at most 64 bytes, so it always fits a new batch)
                         if not feeder.batch.insert_can(msg, _ts_offset_ns):
-                            feeder.flush().insert_can(msg, _ts_offset_ns)
+                            flush().insert_can(msg, _ts_offset_ns)
 
                     # Time-based flush check
                     maybe_flush(now)
 
                 except CanError as e:
                     logger.exception("CAN Bus Error detected.", exc=e)
+                    # Hand on what the bus delivered first (here and below): reopening can keep
+                    # failing while the adapter is gone.
+                    flush()
                     if bus:
                         bus.shutdown()
                     bus = None
@@ -203,6 +206,7 @@ class CANReader(BaseReader):
 
                 except Exception as e:
                     logger.exception("Unexpected error in CAN read loop.", exc=e)
+                    flush()
                     if bus:
                         bus.shutdown()
                     bus = None

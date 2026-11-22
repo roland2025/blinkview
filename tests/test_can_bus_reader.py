@@ -273,3 +273,57 @@ class TestRealLoopbackIngestion:
             reader.stop()
 
         assert received_ids == {0x100, 0x101, 0x102, 0x103, 0x104}
+
+
+class TestRunFlushesOnBusError:
+    """The frames received just before the bus fails are handed on while the reader is still
+    running and the adapter does not come back, not held until the bus reopens or stop(). delay
+    is 60 s, so the timed flush cannot be what sends them."""
+
+    @pytest.mark.parametrize("error", [can.CanError("adapter gone"), OSError("adapter gone")])
+    def test_bus_error_hands_on_the_last_frames(self, monkeypatch, error):
+        class GoneAfterOneFrameBus:
+            """Delivers one frame, then fails; can.Bus() then fails too, as for an unplugged adapter."""
+
+            def __init__(self):
+                self.recvs = 0
+
+            def recv(self, timeout=None):
+                self.recvs += 1
+                if self.recvs == 1:
+                    # Stamped on the uptime clock, as an adapter does: a 0.0 timestamp would
+                    # project minutes into the past and fire the timed flush at once.
+                    return can.Message(arbitration_id=0x321, data=[7, 7], timestamp=time.monotonic())
+                raise error
+
+            def shutdown(self):
+                pass
+
+        buses = iter([GoneAfterOneFrameBus()])
+
+        def fake_bus(**kwargs):
+            bus = next(buses, None)
+            if bus is None:
+                raise can.CanError("no adapter")
+            return bus
+
+        monkeypatch.setattr(can, "Bus", fake_bus)
+
+        reader = make_reader(interface="virtual", channel="unused", delay=60_000)
+        reader.enabled = True
+        reader.shared = SimpleNamespace(array_pool=NumpyArrayPool(), time_ns=time.time_ns)
+        subscriber = QueueParser()
+        reader.subscribe(subscriber)
+
+        reader.start()
+        thread = reader._thread
+        try:
+            received = _drain_one(subscriber.queue, timeout=3.0)
+            assert thread.is_alive()
+        finally:
+            reader.stop()
+
+        assert received is not None
+        data, arb_id, _flags = received
+        assert data == bytes([7, 7])
+        assert arb_id == 0x321
