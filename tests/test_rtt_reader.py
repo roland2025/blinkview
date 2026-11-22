@@ -4,12 +4,16 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import ctypes
+import queue
 import threading
+import time
 from types import SimpleNamespace
 
 import pylink
 import pytest
 
+from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.logger import PrintLogger
 from blinkview.io import rtt
 from blinkview.io.rtt import JLinkRTTReader
@@ -626,3 +630,52 @@ class TestReconnectWithTheReaderLoop:
             reader._stop_event.set()
             thread.join(2.0)
         assert not thread.is_alive()
+
+
+class TestRunIngestsData:
+    def test_bytes_read_from_the_probe_are_distributed_by_the_timed_flush(self):
+        """The real run() loop with a DLL that returns two chunks and then 0 bytes: both chunks
+        reach the subscriber while the reader is still running, so it was the timed flush, not
+        the final flush in stop's finally block, that sent them."""
+        reader = make_reader(delay=20)
+        reader.shared = SimpleNamespace(time_ns=time.time_ns, array_pool=NumpyArrayPool())
+
+        received = queue.Queue()
+
+        class Subscriber:
+            def put(self, batch):
+                for _ts, msg, *_rest in batch:
+                    received.put(bytes(msg))
+
+        reader.subscribe(Subscriber())
+
+        payloads = [b"first chunk\n", b"second chunk\n"]
+
+        def fake_read(channel, buf, size):
+            if not payloads:
+                return 0
+            data = payloads.pop(0)
+            ctypes.memmove(buf, data, len(data))
+            return len(data)
+
+        def fake_open():
+            jl = FakeJLink()
+            jl._dll = SimpleNamespace(
+                JLINK_RTTERMINAL_Read=fake_read,
+                JLINKARM_IsOpen=lambda: 1,
+                JLINKARM_EMU_IsConnected=lambda: 1,
+            )
+            return jl
+
+        reader.open = fake_open
+        thread = threading.Thread(target=reader.run, daemon=True)
+        thread.start()
+        try:
+            got = [received.get(timeout=2.0), received.get(timeout=2.0)]
+            assert got == [b"first chunk\n", b"second chunk\n"]
+            assert thread.is_alive()
+        finally:
+            reader._stop_event.set()
+            thread.join(2.0)
+        assert not thread.is_alive()
+        assert received.empty()

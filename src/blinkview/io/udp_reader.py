@@ -11,9 +11,8 @@ import numpy as np
 
 from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property, override_property
-from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
-from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
+from blinkview.io.batch_feeder import BatchFeeder
 
 
 @DeviceFactory.register("udp")
@@ -98,45 +97,27 @@ class UDPReader(BaseReader):
             return None
 
     def run(self):
-        # 1. Setup and Localize Lookups
+        # Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
         time_ns = self.shared.time_ns
         logger = self.logger
 
-        # Tuner configuration
-        delay_s = self.delay / 1000.0
-        delay_ns = int(self.delay * 1_000_000)
-
-        buffer_size = self.buffer_size
-
         self.logger_state_open.info("0")
-
-        # 2. Stats and Auto-Tuning Setup
-        # Using a slightly larger baseline message size for UDP vs Serial
-        stats = Speedometer(logger=self.logger.stats_child("stats"))
-        tuner = ThroughputAutoTuner(
-            speedometer=stats,
-            default_buffer_bytes=self.buffer_size,
-            msg_size_bytes=1024,
-            logger=self.logger.stats_child("tuner"),
-        )
-
-        pool_create = self.shared.array_pool.create
-
-        def batch_acquire() -> PooledLogBatch:
-            # Dynamically pull configuration from the tuner's latest projections
-            return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
-
-        batch = None
 
         recv_buffer = bytearray(self.buffer_size)
         data_view = np.frombuffer(recv_buffer, dtype=dtypes.BYTE)
 
         sock = None
+        feeder = None
 
         try:
+            # A larger baseline message size for UDP than for serial
+            feeder = BatchFeeder(self, msg_size_bytes=1024, default_buffer_bytes=self.buffer_size)
+            push_view = feeder.push_view
+            maybe_flush = feeder.maybe_flush
+
             while not stop_is_set():
-                # 3. Socket Lifecycle Management
+                # Socket Lifecycle Management
                 if sock is None:
                     sock = self.open()
                     if sock is None:
@@ -145,12 +126,8 @@ class UDPReader(BaseReader):
 
                     recvfrom_into = sock.recvfrom_into
 
-                # 4. Acquire batch using current Tuner projections
-                if batch is None:
-                    batch = batch_acquire()
-
                 try:
-                    # 5. Wait for incoming datagrams
+                    # Wait for incoming datagrams
                     # This will block until data arrives OR the socket timeout (self.delay) is reached
                     bytes_read, addr = recvfrom_into(recv_buffer)
                     now = time_ns()
@@ -162,19 +139,12 @@ class UDPReader(BaseReader):
                     if bytes_read:
                         # print(f"[UDPReader] data={data} add={addr}")
                         self.target_address = addr
-                        # 6. Insert or Append data
-
-                        if not batch.insert_view(now, now, data_view, bytes_read):
-                            with batch:
-                                self.distribute(batch)
-                                tuner.update(batch.msg_cursor + bytes_read, batch.size, delay_s)
-                            batch = batch_acquire()
-                            batch.insert_view(now, now, data_view, bytes_read)
+                        push_view(now, data_view, bytes_read)
 
                 except socket.timeout:
                     # This is an expected condition. The timeout ensures we don't hang infinitely
                     # and gives us a chance to flush the current batch if it's sitting idle.
-                    pass
+                    now = time_ns()
                 except Exception as e:
                     self.logger_link.error("Receive error", exc=e)
                     sock = None
@@ -186,24 +156,16 @@ class UDPReader(BaseReader):
                     sleep(1.0)
                     continue
 
-                # 7. Flush the batch if the delay window has elapsed
-                now = time_ns()
-                if batch is not None and batch.start_ts > 0 and (now - batch.start_ts) >= delay_ns:
-                    with batch:
-                        self.distribute(batch)
-                        tuner.update(batch.msg_cursor, batch.size, delay_s)
-                    batch = None
+                # Flush the batch if the delay window has elapsed (`now` is from the read, or
+                # from the timeout above)
+                maybe_flush(now)
 
         except Exception as e:
             logger.exception("Fatal error in UDP Reader loop", exc=e)
         finally:
-            # 8. Final Cleanup
-            if batch is not None:
-                if len(batch) > 0:
-                    with batch:
-                        self.distribute(batch)
-                else:
-                    batch.release()
+            # Final Cleanup
+            if feeder is not None:
+                feeder.close()
 
             if self.sock is not None:
                 try:

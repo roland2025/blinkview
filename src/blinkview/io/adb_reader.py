@@ -12,13 +12,12 @@ from threading import Lock
 from time import perf_counter, sleep
 
 from blinkview.core.configurable import configuration_property, override_property
-from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.time_sync_engine import TimeSyncEngine
 from blinkview.core.types.parsing import SyncState
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
+from blinkview.io.batch_feeder import BatchFeeder
 from blinkview.parsers.binary_parser import BinaryParser
 from blinkview.utils.adb import detect_adb_path
-from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 
 @DeviceFactory.register("adb")
@@ -99,7 +98,7 @@ ensuring high throughput without pipeline stalls."""
         self._pid_poll_task_id = None
 
     def run(self):
-        # 1. Setup and Localize Lookups
+        # Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
         time_ns = self.shared.time_ns
         logger = self.logger
@@ -109,27 +108,15 @@ ensuring high throughput without pipeline stalls."""
         max_backoff_ns = 5_000_000_000  # Cap at Xs
         next_reconnect_ns = 0
 
-        # Tuner configuration
-        delay_s = self.delay / 1000.0
-        delay_ns = int(self.delay * 1_000_000)
-
-        # 2. Stats and Auto-Tuning Setup
-        stats = Speedometer(logger=self.logger.stats_child("stats"))
-        tuner = ThroughputAutoTuner(
-            speedometer=stats, default_buffer_bytes=65536, msg_size_bytes=64, logger=self.logger.stats_child("tuner")
-        )
-
-        pool_create = self.shared.array_pool.create
-
-        def batch_acquire():
-            # Dynamically pull configuration from the tuner's latest projections
-            return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
-
-        batch: PooledLogBatch = None
+        feeder = None
 
         try:
+            feeder = BatchFeeder(self, msg_size_bytes=64, default_buffer_bytes=65536)
+            push = feeder.push
+            maybe_flush = feeder.maybe_flush
+
             while not stop_is_set():
-                # 3. Subprocess Lifecycle Management
+                # Subprocess Lifecycle Management
                 if self._process is None:
                     now = time_ns()
 
@@ -165,12 +152,8 @@ ensuring high throughput without pipeline stalls."""
                     fd = self._process.stdout.fileno()
                     os_read = os.read
 
-                # 4. Acquire batch using current Tuner projections
-                if batch is None:
-                    batch = batch_acquire()
-
                 try:
-                    # 5. Read incoming chunk
+                    # Read incoming chunk
                     # 65536 is a standard healthy OS buffer size
                     # chunk = _read1(65536)
                     chunk = os_read(fd, 65536)
@@ -178,28 +161,11 @@ ensuring high throughput without pipeline stalls."""
                     if chunk:
                         now = time_ns()
 
-                        # 2. Attempt high-resolution insertion
-                        # This returns False if we hit array capacity OR buffer capacity
-                        if not batch.insert(now, now, chunk):
-                            # 3. Batch is full: Flush and Acquire new
-                            with batch:
-                                self.distribute(batch)
-                                tuner.update(batch.msg_cursor, batch.size, delay_s)
+                        # One row per chunk, each with its own timestamp
+                        push(now, chunk)
 
-                            batch = batch_acquire()
-
-                            # Re-attempt the insert into the fresh batch
-                            # (Assuming chunk < total batch capacity)
-                            batch.insert(now, now, chunk)
-
-                        # 4. Batching Window Check
-                        # Now every chunk has a unique timestamp in the bundle,
-                        # but we still flush based on the first arrival in this batch.
-                        if (now - batch.start_ts) >= delay_ns:
-                            with batch:
-                                self.distribute(batch)
-                                tuner.update(batch.msg_cursor, batch.size, delay_s)
-                            batch = None
+                        # Batching Window Check: flushes on the first arrival in this batch.
+                        maybe_flush(now)
 
                         # if len(chunk) < 2048:
                         # sleep(0.016)
@@ -218,13 +184,9 @@ ensuring high throughput without pipeline stalls."""
         except Exception as e:
             logger.exception("Fatal error in ADB Reader loop", exc=e)
         finally:
-            # 7. Final Cleanup
-            if batch is not None:
-                if len(batch) > 0:
-                    with batch:
-                        self.distribute(batch)
-                else:
-                    batch.release()
+            # Final Cleanup
+            if feeder is not None:
+                feeder.close()
 
             self._cleanup_process()
 

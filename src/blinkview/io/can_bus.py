@@ -11,7 +11,7 @@ from blinkview.core.configurable import configuration_property
 from blinkview.core.limits import BATCH_MAXLEN
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
-from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
+from blinkview.io.batch_feeder import BatchFeeder
 
 if TYPE_CHECKING:
     from can import Bus, CanError, Message
@@ -136,28 +136,20 @@ class CANReader(BaseReader):
         time_ns = self.shared.time_ns
         logger = self.logger
 
-        delay_s = self.delay / 1000.0
-        delay_ns = int(self.delay * 1_000_000)
-
         logger.info("Starting CAN Reader Thread (%s:%s @ %sbps)", self.interface, self.channel, self.bitrate)
 
         _ts_offset_ns = None
 
-        # Tuner setup: Estimating an average CAN message payload of 8 bytes
-        stats = Speedometer(logger=self.logger.stats_child("stats"))
-        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=8, logger=self.logger.stats_child("tuner"))
-
-        pool_create = self.shared.array_pool.create
-
-        def batch_acquire():
-            # Dynamically pull configuration from the tuner's latest projections
-            # Request ext_u32_1 for CAN Address and ext_u32_2 for CAN Flags
-            return pool_create(CanLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
-
-        batch: CanLogBatch = None
         bus = None
+        feeder = None
 
         try:
+            # Estimating an average CAN message payload of 8 bytes; CanLogBatch carries the CAN
+            # address in ext_u32_1 and the flags in ext_u32_2
+            feeder = BatchFeeder(self, msg_size_bytes=8, batch_cls=CanLogBatch)
+            maybe_flush = feeder.maybe_flush
+            delay_ns = feeder.delay_ns
+
             while not stop_is_set():
                 if bus is None:
                     try:
@@ -170,20 +162,14 @@ class CANReader(BaseReader):
 
                     _recv = bus.recv  # Localize for performance
 
-                if batch is None:
-                    batch = batch_acquire()
-
                 try:
                     now = time_ns()
 
-                    # Dynamic Timeout Calculation
-                    if batch.size > 0:
-                        # How much time until we MUST flush?
-                        remaining_ns = (batch.start_ts + delay_ns) - now
-                        timeout_s = max(0.0, min(0.2, remaining_ns / 1_000_000_000.0))
-                    else:
-                        # No batch pending, just wake up periodically to check stop flag
-                        timeout_s = 0.2
+                    # Dynamic Timeout Calculation: how much time until we MUST flush? An empty
+                    # batch's start_ts is max int64, so with nothing pending this waits the full
+                    # 0.2 s, just to check the stop flag.
+                    remaining_ns = (feeder.batch.start_ts + delay_ns) - now
+                    timeout_s = max(0.0, min(0.2, remaining_ns / 1_000_000_000.0))
 
                     msg = _recv(timeout=timeout_s)
 
@@ -191,7 +177,7 @@ class CANReader(BaseReader):
                     now = time_ns()
 
                     if msg:
-                        # 1. One-time Clock Sync Logic
+                        # One-time Clock Sync Logic
                         if _ts_offset_ns is None:
                             import time
 
@@ -200,20 +186,13 @@ class CANReader(BaseReader):
                             else:  # Epoch
                                 _ts_offset_ns = 0
 
-                        # 2. Clean, high-level insertion
-                        if not batch.insert_can(msg, _ts_offset_ns):
-                            with batch:
-                                self.distribute(batch)
-                                tuner.update(batch.msg_cursor, batch.size, delay_s)
-                            batch = batch_acquire()
-                            batch.insert_can(msg, _ts_offset_ns)
+                        # Clean, high-level insertion; a full batch is handed on first (a frame
+                        # is at most 64 bytes, so it always fits a new batch)
+                        if not feeder.batch.insert_can(msg, _ts_offset_ns):
+                            feeder.flush().insert_can(msg, _ts_offset_ns)
 
                     # Time-based flush check
-                    if batch.size > 0 and (now - batch.start_ts >= delay_ns):
-                        with batch:
-                            self.distribute(batch)
-                            tuner.update(batch.msg_cursor, batch.size, delay_s)
-                        batch = None
+                    maybe_flush(now)
 
                 except CanError as e:
                     logger.exception("CAN Bus Error detected.", exc=e)
@@ -233,12 +212,8 @@ class CANReader(BaseReader):
             logger.exception("Fatal error in CAN Reader loop", exc=e)
         finally:
             # Final Cleanup
-            if batch is not None:
-                if len(batch) > 0:
-                    with batch:
-                        self.distribute(batch)
-                else:
-                    batch.release()
+            if feeder is not None:
+                feeder.close()
 
             if bus:
                 bus.shutdown()

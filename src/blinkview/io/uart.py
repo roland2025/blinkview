@@ -8,9 +8,8 @@ from threading import Lock
 from time import sleep
 
 from blinkview.core.configurable import configuration_property, override_property
-from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
-from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
+from blinkview.io.batch_feeder import BatchFeeder
 
 
 @DeviceFactory.register("serial")
@@ -175,35 +174,24 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         return changed
 
     def run(self):
-        # 1. Setup and Localize Lookups
+        # Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
         time_ns = self.shared.time_ns
         logger = self.logger
 
-        # Tuner configuration
-        delay_s = self.delay / 1000.0
-        delay_ns = int(self.delay * 1_000_000)
-
         self.logger_state_open.info("0")
 
-        # 2. Stats and Auto-Tuning Setup
-        # We set msg_size_bytes to 20 to maintain your ~50 chunks/KB density preference
-        stats = Speedometer(logger=self.logger.stats_child("stats"))
-        tuner = ThroughputAutoTuner(speedometer=stats, msg_size_bytes=20, logger=self.logger.stats_child("tuner"))
-
-        pool_create = self.shared.array_pool.create
-
-        def batch_acquire():
-            # Dynamically pull configuration from the tuner's latest projections
-            return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
-
-        batch: PooledLogBatch = None
         ser = None
         self.serial = None
+        feeder = None
 
         try:
+            # msg_size_bytes=20 keeps the ~50 rows/KB density
+            feeder = BatchFeeder(self, msg_size_bytes=20)
+            push, append, maybe_flush = feeder.push, feeder.append, feeder.maybe_flush
+
             while not stop_is_set():
-                # 3. Serial Lifecycle Management
+                # Serial Lifecycle Management
                 if self.serial_broken:
                     with self._serial_lock:
                         if self.serial is not None:
@@ -220,13 +208,7 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 if self._pause_requested:
                     if ser is not None:
                         # Hand over what was read so far, it is not part of what the tool sends.
-                        if batch is not None:
-                            if len(batch) > 0:
-                                with batch:
-                                    self.distribute(batch)
-                            else:
-                                batch.release()
-                            batch = None
+                        feeder.flush()
                         with self._serial_lock:
                             try:
                                 ser.close()
@@ -259,50 +241,28 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                         continue
                     _read = ser.read
 
-                # 4. Acquire batch using current Tuner projections
-                if batch is None:
-                    batch = batch_acquire()
-
                 try:
-                    # 5. Read Lead Byte (Establish Arrival Timestamp)
+                    # Read Lead Byte (Establish Arrival Timestamp)
                     first_byte = _read(1)
                     now = time_ns()
                     if first_byte:
                         # Start record
-                        if not batch.insert(now, now, first_byte):
-                            with batch:
-                                self.distribute(batch)
-                                # Update tuner with the results of the finished batch
-                                tuner.update(batch.msg_cursor, batch.size, delay_s)
+                        push(now, first_byte)
 
-                            batch = batch_acquire()
-                            batch.insert(now, now, first_byte)
+                        # Drain remaining burst and Append (a burst too big for the batch goes
+                        # into a new one sized for it)
+                        waiting = ser.in_waiting
+                        if waiting:
+                            # Already buffered: returns at once
+                            append(now, _read(waiting))
+                        else:
+                            # Nothing buffered yet: waits for up to 1024 bytes, which can take up
+                            # to the port's read timeout (delay), so the flush check needs a fresh
+                            # clock. The rows keep the first byte's timestamp.
+                            append(now, _read(1024))
+                            now = time_ns()
 
-                        # 6. Drain remaining burst and Append
-                        waiting = ser.in_waiting or 1024
-                        if waiting > 0:
-                            rest = _read(waiting)
-                            # print(f"{self.__class__.__name__}: read {time()} ... {first_byte + rest}")
-                            if not batch.append(rest):
-                                with batch:
-                                    self.distribute(batch)
-                                    tuner.update(batch.msg_cursor, batch.size, delay_s)
-
-                                # A read can be bigger than the tuner's estimate (it starts at
-                                # 4 KB and learns from what it delivers): size the new batch for
-                                # it, or the insert below fails and the read is lost.
-                                tuner.ensure_burst_capacity(len(rest))
-                                batch = batch_acquire()
-                                if not batch.insert(now, now, rest):
-                                    self.logger_link.error(
-                                        "Dropped a %d-byte read: it does not fit a new batch", len(rest)
-                                    )
-
-                    if batch is not None and batch.start_ts > 0 and (now - batch.start_ts) >= delay_ns:
-                        with batch:
-                            self.distribute(batch)
-                            tuner.update(batch.msg_cursor, batch.size, delay_s)
-                        batch = None
+                    maybe_flush(now)
 
                 except Exception as e:
                     self.logger_link.error("Closed, read error", exc=e)
@@ -314,13 +274,9 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
         except Exception as e:
             logger.exception("Fatal error in Serial Reader loop", exc=e)
         finally:
-            # 8. Final Cleanup
-            if batch is not None:
-                if len(batch) > 0:
-                    with batch:
-                        self.distribute(batch)
-                else:
-                    batch.release()
+            # Final Cleanup
+            if feeder is not None:
+                feeder.close()
             with self._serial_lock:
                 if self.serial is not None:
                     try:

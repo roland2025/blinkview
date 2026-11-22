@@ -11,9 +11,8 @@ import numpy as np
 
 from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property, override_property
-from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
-from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
+from blinkview.io.batch_feeder import BatchFeeder
 
 
 @DeviceFactory.register("tcp_client")
@@ -112,31 +111,20 @@ class TCPClientReader(BaseReader):
         time_ns = self.shared.time_ns
         logger = self.logger
 
-        delay_s = self.delay / 1000.0
-        delay_ns = int(self.delay * 1_000_000)
-
         self.logger_state_open.info("0")
-
-        stats = Speedometer(logger=self.logger.stats_child("stats"))
-        tuner = ThroughputAutoTuner(
-            speedometer=stats,
-            default_buffer_bytes=self.buffer_size,
-            msg_size_bytes=1024,
-            logger=self.logger.stats_child("tuner"),
-        )
-        pool_create = self.shared.array_pool.create
-
-        def batch_acquire() -> PooledLogBatch:
-            return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
-
-        batch = None
 
         recv_buffer = bytearray(self.buffer_size)
         data_view = np.frombuffer(recv_buffer, dtype=dtypes.BYTE)
 
+        feeder = None
+
         try:
+            feeder = BatchFeeder(self, msg_size_bytes=1024, default_buffer_bytes=self.buffer_size)
+            push_view = feeder.push_view
+            maybe_flush = feeder.maybe_flush
+
             while not stop_is_set():
-                # 1. Active Client Socket Lifecycle Management
+                # Active Client Socket Lifecycle Management
                 if self.client_sock is None:
                     if self.open() is None:
                         # Wait for the user-configured interval before retrying connection
@@ -145,10 +133,7 @@ class TCPClientReader(BaseReader):
 
                     recv_into = self.client_sock.recv_into
 
-                if batch is None:
-                    batch = batch_acquire()
-
-                # 2. Active Stream Data Read
+                # Active Stream Data Read
                 try:
                     bytes_read = recv_into(recv_buffer)
                     now = time_ns()
@@ -159,41 +144,27 @@ class TCPClientReader(BaseReader):
                         self._close_client()
                         continue
 
-                    # 3. Insert or Append stream chunk into high-throughput layer
-                    if not batch.insert_view(now, now, data_view, bytes_read):
-                        with batch:
-                            self.distribute(batch)
-                            tuner.update(batch.msg_cursor + bytes_read, batch.size, delay_s)
-                        batch = batch_acquire()
-                        batch.insert_view(now, now, data_view, bytes_read)
+                    # Insert the stream chunk into the current batch
+                    push_view(now, data_view, bytes_read)
 
                 except socket.timeout:
                     # Expected. Allows timed evaluation of batch flushing windows
-                    pass
+                    now = time_ns()
                 except Exception as e:
                     self.logger_link.error("Stream receive error occurred on client connection", exc=e)
                     self._close_client()
                     sleep(0.5)
                     continue
 
-                # 4. Flush evaluation window
-                now = time_ns()
-                if batch is not None and batch.start_ts > 0 and (now - batch.start_ts) >= delay_ns:
-                    with batch:
-                        tuner.update(batch.msg_cursor, batch.size, delay_s)
-                        self.distribute(batch)
-                    batch = None
+                # Flush evaluation window (`now` is from the read, or from the timeout above)
+                maybe_flush(now)
 
         except Exception as e:
             logger.exception("Fatal error in TCP Client Reader execution loop", exc=e)
         finally:
-            # 5. Final Cleanup
-            if batch is not None:
-                if len(batch) > 0:
-                    with batch:
-                        self.distribute(batch)
-                else:
-                    batch.release()
+            # Final Cleanup
+            if feeder is not None:
+                feeder.close()
             self._close_client()
 
     def _close_client(self):

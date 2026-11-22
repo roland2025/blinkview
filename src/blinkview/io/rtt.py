@@ -14,10 +14,9 @@ import numpy as np
 
 from blinkview.core import dtypes
 from blinkview.core.configurable import configuration_property, override_property
-from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
+from blinkview.io.batch_feeder import BatchFeeder
 from blinkview.io.jlink_debug import JLinkDebug, TargetDebugError
-from blinkview.utils.throughput import Speedometer, ThroughputAutoTuner
 
 if TYPE_CHECKING:
     import pylink
@@ -238,16 +237,13 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         return schema
 
     def run(self):
-        # 1. Setup and Localize Lookups
+        # Setup and Localize Lookups
         stop_is_set = self._stop_event.is_set
         stop_wait = self._stop_event.wait
         time_ns = self.shared.time_ns
         logger = self.logger
         jlink_lock = self._jlink_lock
 
-        # Tuner configuration
-        delay_s = self.delay / 1000.0
-        delay_ns = int(self.delay * 1_000_000)
         channel = self.channel
 
         read_size = 64 * 1024
@@ -257,24 +253,13 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         c_buf = (ctypes.c_ubyte * read_size)()
         np_buf = np.frombuffer(c_buf, dtype=dtypes.BYTE)
 
-        # 2. Stats and Auto-Tuning Setup
-        stats = Speedometer(logger=self.logger.stats_child("stats"))
-        tuner = ThroughputAutoTuner(
-            speedometer=stats,
-            default_buffer_bytes=read_size,
-            msg_size_bytes=20,
-            logger=self.logger.stats_child("tuner"),
-        )
-
-        pool_create = self.shared.array_pool.create
-
-        def batch_acquire():
-            # Dynamically pull configuration from the tuner's latest projections
-            return pool_create(PooledLogBatch, tuner.estimated_capacity, tuner.estimated_buffer_bytes)
-
-        batch: PooledLogBatch = None
+        feeder = None
 
         try:
+            feeder = BatchFeeder(self, msg_size_bytes=20, default_buffer_bytes=read_size)
+            push_view = feeder.push_view
+            maybe_flush = feeder.maybe_flush
+
             while not stop_is_set():
                 # self.open() handles its own internal locking safely
                 if self.jlink is None:
@@ -291,10 +276,6 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                         _dll_is_open = _dll.JLINKARM_IsOpen
                         _dll_is_connected = _dll.JLINKARM_EMU_IsConnected
                         self._mark_ready()
-
-                # Acquire batch using current Tuner projections
-                if batch is None:
-                    batch = batch_acquire()
 
                 try:
                     with jlink_lock:
@@ -315,13 +296,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
                         self.logger_link.warn("RTT read blocked for %.1f s.", read_ns / 1e9)
 
                     if bytes_read > 0:
-                        # 5. Insert Chunk
-                        if not batch.insert_view(now, now, np_buf, bytes_read):
-                            with batch:
-                                self.distribute(batch)
-                                tuner.update(batch.msg_cursor + bytes_read, batch.size, delay_s)
-                            batch = batch_acquire()
-                            batch.insert_view(now, now, np_buf, bytes_read)
+                        push_view(now, np_buf, bytes_read)
 
                     elif bytes_read == 0:
                         # No data? Sleep 1ms to yield the CPU
@@ -333,12 +308,8 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
                         raise Exception(f"RTT Read failed with error code: {bytes_read}")
 
-                    # 6. Maintenance: Check for time-based flush
-                    if batch is not None and batch.start_ts > 0 and (now - batch.start_ts) >= delay_ns:
-                        with batch:
-                            self.distribute(batch)
-                            tuner.update(batch.msg_cursor, batch.size, delay_s)
-                        batch = None
+                    # now + read_ns: the time after the read, which can block (SLOW_READ_NS)
+                    maybe_flush(now + read_ns)
 
                 except Exception as e:
                     self.logger_link.error("Problem.", exc=e)
@@ -348,13 +319,8 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
         except Exception as e:
             logger.exception("Fatal error in J-Link RTT Reader loop", exc=e)
         finally:
-            # 7. Final Cleanup
-            if batch is not None:
-                if len(batch) > 0:
-                    with batch:
-                        self.distribute(batch)
-                else:
-                    batch.release()
+            if feeder is not None:
+                feeder.close()
 
             self.cleanup_jlink()
 
