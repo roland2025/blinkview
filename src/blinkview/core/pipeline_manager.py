@@ -156,7 +156,11 @@ class PipelineManager:
         if not item.enabled:
             return
 
+        registry = self.shared.registry
         dev_print(f"Applying targets for pipeline '{item_id}'")
+        # An id that doesn't resolve (a typo, or a source deleted while this pipeline still
+        # names it) is skipped, as the update path does; raising here would leave the pipeline
+        # without its other links and, on a runtime add, without its central/reorder link.
         if hasattr(item, "sources_"):
             dev_print(f"Pipeline '{item_id}' has sources: {item.sources_}")
             # check if its a list or a single string
@@ -165,15 +169,22 @@ class PipelineManager:
             for source in sources:
                 dev_print(f"Source '{item_id}' has source: {source}")
                 self.logger.debug("Source '%s' has source: %s", item_id, source)
-                self.shared.registry.get_reference_target(source).subscribe(item)
+                upstream = registry.get_reference_target(source)
+                if upstream is None:
+                    self.logger.warn("Pipeline '%s': unknown source '%s', not linked", item_id, source)
+                    continue
+                upstream.subscribe(item)
 
         if hasattr(item, "targets_"):
             self.logger.warn("Applying targets for source '%s': %s", item_id, item.targets_)
             targets = [item.targets_] if isinstance(item.targets_, str) else item.targets_
 
             for target in targets:
-                target_ref = self.shared.registry.get_reference_target(target)
+                target_ref = registry.get_reference_target(target)
                 self.logger.debug("Source '%s' has target: %s", item_id, target)
+                if target_ref is None:
+                    self.logger.warn("Pipeline '%s': unknown target '%s', not linked", item_id, target)
+                    continue
                 item.subscribe(target_ref)
 
     def subscribe(self, name_debug, ref, pipeline=None):

@@ -6,6 +6,9 @@
 
 from types import SimpleNamespace
 
+import pytest
+
+from blinkview.core.constants import SysCat
 from blinkview.core.logger import PrintLogger
 from blinkview.core.pipeline_manager import PipelineManager
 
@@ -356,6 +359,82 @@ class TestApplyTarget:
 
         assert pipeline in source_ref.subscribed
         assert target_ref in pipeline.subscribed
+
+
+class RecordingLogger:
+    def __init__(self):
+        self.warnings = []
+        self.errors = []
+
+    def warn(self, fmt, *args):
+        self.warnings.append(fmt % args if args else fmt)
+
+    def exception(self, fmt, *args, exc=None):
+        self.errors.append((fmt % args if args else fmt, exc))
+
+    error = exception
+
+    def debug(self, *a, **k):
+        pass
+
+    info = debug
+
+
+class InfraLinkedPipeline(FakePipeline):
+    """Declares the infra targets a real parser does (parsers/parser.py), so
+    PipelineManager.subscribe links it to reorder/central."""
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.targets = [SysCat.REORDER, SysCat.STORAGE]
+
+
+class TestApplyTargetUnknownReference:
+    """get_reference_target returns None for an id that doesn't resolve (a typo, or a source
+    deleted while a pipeline still names it). apply_target skips that link with a warning, as
+    the update path does, instead of raising or subscribing None."""
+
+    def test_unknown_source_id_is_skipped_and_the_other_links_still_made(self):
+        manager, registry, factories = make_manager()
+        manager.logger = RecordingLogger()
+        source_ref = FakeTarget("source")
+        target_ref = FakeTarget("target")
+        registry._targets["src1"] = source_ref
+        registry._targets["tgt1"] = target_ref
+        pipeline = FakePipeline({"enabled": True, "sources_": ["missing", "src1"], "targets_": ["tgt1"]})
+
+        manager.apply_target("dev1", pipeline)
+
+        assert pipeline in source_ref.subscribed
+        assert pipeline.subscribed == [target_ref]
+        assert any("missing" in w for w in manager.logger.warnings)
+
+    def test_unknown_target_id_is_not_subscribed(self):
+        manager, registry, factories = make_manager()
+        manager.logger = RecordingLogger()
+        target_ref = FakeTarget("target")
+        registry._targets["tgt1"] = target_ref
+        pipeline = FakePipeline({"enabled": True, "targets_": ["nope", "tgt1"]})
+
+        manager.apply_target("dev1", pipeline)
+
+        assert pipeline.subscribed == [target_ref]
+        assert any("nope" in w for w in manager.logger.warnings)
+
+    @pytest.mark.parametrize("links", [{"sources_": ["missing"]}, {"targets_": ["missing"]}])
+    def test_pipeline_added_at_runtime_with_unknown_id_is_still_linked_to_central(self, links):
+        manager, registry, factories = make_manager()
+        manager.logger = RecordingLogger()
+        manager.apply_config({})  # first call just clears needs_delayed_init
+        config = {"name": "dev1", "enabled": True, **links}
+        factories.next_pipeline = InfraLinkedPipeline(config)
+
+        manager.apply_config({"dev1": config})
+
+        pipeline = manager.pipelines["dev1"]
+        assert manager.logger.errors == []
+        assert pipeline.subscribed == [registry.central]
+        assert pipeline.started is True
 
 
 class TestGetSchemaAndGet:

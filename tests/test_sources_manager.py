@@ -21,9 +21,10 @@ class FakeLogger:
     def __init__(self):
         self.errors = []
         self.infos = []
+        self.warnings = []
 
-    def warn(self, *a, **k):
-        pass
+    def warn(self, msg, *args):
+        self.warnings.append(msg % args if args else msg)
 
     def debug(self, *a, **k):
         pass
@@ -334,6 +335,55 @@ def test_apply_target_subscribes_source_and_target_links():
 
     assert upstream.subscribed_items == [item]
     assert item.subscribed == [downstream]
+
+
+def test_apply_target_skips_an_unknown_source_id_and_still_wires_the_rest():
+    """get_reference_target returns None for an id that doesn't resolve; the unknown link is
+    skipped with a warning (as the reconcile path does) instead of raising out of apply_target
+    before the targets_ are wired."""
+    registry = FakeRegistry()
+    upstream = FakeTarget()
+    downstream = FakeTarget()
+    registry.targets["up"] = upstream
+    registry.targets["down"] = downstream
+    item = FakeItem(sources_=["missing", "up"], targets_=["down"])
+    mgr, _, _ = make_manager(registry=registry)
+
+    mgr.apply_target("src1", item)
+
+    assert upstream.subscribed_items == [item]
+    assert item.subscribed == [downstream]
+    assert any("missing" in w for w in mgr.logger.warnings)
+
+
+def test_apply_target_does_not_subscribe_an_unknown_target_id():
+    """item.subscribe(None) didn't raise; it left None among the subscribers, which fails later
+    when the source hands a batch on."""
+    registry = FakeRegistry()
+    downstream = FakeTarget()
+    registry.targets["down"] = downstream
+    item = FakeItem(targets_=["nope", "down"])
+    mgr, _, _ = make_manager(registry=registry)
+
+    mgr.apply_target("src1", item)
+
+    assert item.subscribed == [downstream]
+    assert any("nope" in w for w in mgr.logger.warnings)
+
+
+@pytest.mark.parametrize("links", [{"sources_": ["missing"]}, {"targets_": ["missing"]}])
+def test_source_added_at_runtime_with_unknown_id_is_still_registered_and_started(links):
+    registry = FakeRegistry()
+    item = FakeItem(**links)
+    mgr, _, _ = make_manager(registry=registry, factories=FakeFactories(item_factory=lambda cfg: item))
+    mgr.needs_delayed_init = False
+
+    mgr.apply_config({"src1": {"type": "udp"}})
+
+    assert mgr.logger.errors == []
+    assert mgr.sources["src1"] is item
+    assert None not in item.subscribed
+    assert item.start_calls == 1
 
 
 def test_apply_targets_only_wires_enabled_sources():

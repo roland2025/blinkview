@@ -147,22 +147,32 @@ class SourcesManager:
                 self.apply_target(item_id, item)
 
     def apply_target(self, item_id, item):
+        registry = self.shared.registry
         dev_print(f"Applying targets for source '{item_id}'")
+        # An id that doesn't resolve is skipped, as the reconcile path does: raising here would
+        # drop the rest of this source's links, and subscribing None fails on the next batch.
         if hasattr(item, "sources_"):
             # check if its a list or a single string
             self.logger.warn("Source '%s' has sources: %s", item_id, item.sources_)
             sources = [item.sources_] if isinstance(item.sources_, str) else item.sources_
             for source in sources:
                 self.logger.debug("Source '%s' has source: %s", item_id, source)
-                self.shared.registry.get_reference_target(source).subscribe(item)
+                upstream = registry.get_reference_target(source)
+                if upstream is None:
+                    self.logger.warn("Source '%s': unknown source '%s', not linked", item_id, source)
+                    continue
+                upstream.subscribe(item)
 
         if hasattr(item, "targets_"):
             self.logger.warn("Applying targets for source '%s': %s", item_id, item.targets_)
             targets = [item.targets_] if isinstance(item.targets_, str) else item.targets_
 
             for target in targets:
-                target_ref = self.shared.registry.get_reference_target(target)
+                target_ref = registry.get_reference_target(target)
                 self.logger.debug("Source '%s' has target: %s", item_id, target)
+                if target_ref is None:
+                    self.logger.warn("Source '%s': unknown target '%s', not linked", item_id, target)
+                    continue
                 item.subscribe(target_ref)
 
     def get_schema(self, name: str):

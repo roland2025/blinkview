@@ -43,7 +43,7 @@ def _binary_source(path, name, enabled=True):
     }
 
 
-def _write_profile(tmp_path, sources, pipelines):
+def _write_profile(tmp_path, sources, pipelines, reorder_enabled=True):
     (tmp_path / "test_config.json").write_text(
         json.dumps(
             {
@@ -51,7 +51,7 @@ def _write_profile(tmp_path, sources, pipelines):
                 "sources": sources,
                 "pipelines": pipelines,
                 "plugins": {},
-                "reorder": {"enabled": True, "type": "default"},
+                "reorder": {"enabled": reorder_enabled, "type": "default"},
                 "central": {"enabled": True, "type": "default"},
             }
         )
@@ -141,6 +141,59 @@ class TestProfileMissingManagerKeys:
                 ],
             )
 
+            _poll_for_message(reg.central.log_pool, reg.id_registry.get_device("p").id, b"from new source")
+        finally:
+            reg.stop()
+
+
+class TestPipelineAddedWithUnknownReference:
+    """A pipeline added at runtime whose sources_/targets_ names an id that doesn't resolve
+    (typo, or a source deleted while the pipeline still names it): apply_target raised on the
+    None lookup, apply_config swallowed it before the pipeline was linked to central storage,
+    and the pipeline was started anyway with nowhere to send its rows."""
+
+    def test_unknown_source_id_still_links_the_pipeline_to_central(self, tmp_path):
+        _write_profile(tmp_path, sources={}, pipelines={}, reorder_enabled=False)
+        reg = make_real_registry(tmp_path, "unknown_source", start=True)
+        try:
+            reg.config.apply_patch(
+                "/pipelines",
+                [
+                    {
+                        "op": "add",
+                        "path": "/pipe_1",
+                        "value": {"enabled": True, "type": "default", "name": "p", "sources_": ["missing"]},
+                    }
+                ],
+            )
+
+            pipe = reg.pipelines.get("pipe_1")
+            assert pipe is not None
+            assert reg.central in pipe.subscribers
+            assert None not in pipe.subscribers
+            assert pipe.is_running
+        finally:
+            reg.stop()
+
+    def test_unknown_source_id_does_not_stop_the_other_sources_from_streaming(self, tmp_path, data_files):
+        _old, new = data_files
+        _write_profile(tmp_path, sources={"src_1": _binary_source(new, "bin")}, pipelines={})
+        reg = make_real_registry(tmp_path, "unknown_and_known_source", start=True)
+        try:
+            reg.config.apply_patch(
+                "/pipelines",
+                [
+                    {
+                        "op": "add",
+                        "path": "/pipe_1",
+                        "value": {"enabled": True, "type": "default", "name": "p", "sources_": ["missing", "src_1"]},
+                    }
+                ],
+            )
+
+            pipe = reg.pipelines.get("pipe_1")
+            assert pipe in reg.sources.get("src_1").subscribers
+            assert reg.reorder in pipe.subscribers
             _poll_for_message(reg.central.log_pool, reg.id_registry.get_device("p").id, b"from new source")
         finally:
             reg.stop()
