@@ -248,17 +248,18 @@ class CircularLogPool:
         immediately, if resumed_from_existing_cold_storage, or once UnifiedLogReplay finishes
         streaming it in) - anything appended after that is this process's own live activity
         (e.g. SystemLogger messages) layered on top of the loaded replay, which shouldn't get
-        mixed into that replay's own cold storage."""
+        mixed into that replay's own cold storage. frozen_since_sequence_id holds the last
+        sequence assigned before the freeze, so that row itself still archives."""
         with self._lock:
             self.frozen_since_sequence_id = int(self.sequence)
 
     def _should_archive_to_cold(self, segment: PooledLogBatch) -> bool:
         """False once frozen_since_sequence_id is set and this segment's rows were all appended
-        at or after that point - see freeze_cold_storage_from_now."""
+        after that point - see freeze_cold_storage_from_now."""
         if self.frozen_since_sequence_id is None:
             return True
         first_seq = segment.first_sequence_id
-        return first_seq == SEQ_NONE or int(first_seq) < self.frozen_since_sequence_id
+        return first_seq == SEQ_NONE or int(first_seq) <= self.frozen_since_sequence_id
 
     def _handle_archived(self, cold_segment: PooledLogBatch):
         """Called from the archiver's background thread once a segment has been written to disk

@@ -61,6 +61,11 @@ def push_rows(pool, global_pool, count, ts_start, module=0, device=0):
         time.sleep(0.01)
 
 
+def cold_first_seqs(pool):
+    with pool._lock:
+        return sorted(int(seg.first_sequence_id) for seg in pool.cold_segments)
+
+
 def _permissive_sidebar():
     return False, np.zeros(0, dtype=np.uint8)
 
@@ -277,11 +282,12 @@ class TestFrozenColdStorage:
         # Push enough post-freeze rows to force real hot-tier eviction (max_pieces=2).
         push_rows(cold_log_pool, global_pool, 6, ts_start=200)
 
-        # Give the archiver a moment to have processed anything it was going to - then confirm
-        # none of the cold segments contain a row at/after the freeze point.
+        # frozen_at is the last row appended before the freeze: that row must still reach cold
+        # storage, and nothing after it may.
+        assert wait_for(lambda: frozen_at in cold_first_seqs(cold_log_pool))
+        # Give the archiver a moment to have processed anything else it was going to.
         time.sleep(0.2)
-        for seg in cold_log_pool.cold_segments:
-            assert int(seg.first_sequence_id) < frozen_at
+        assert cold_first_seqs(cold_log_pool) == list(range(1, frozen_at + 1))
 
     def test_release_all_drops_frozen_hot_segments_instead_of_persisting_them(self, global_pool, tmp_path):
         pool = CircularLogPool(
@@ -307,9 +313,9 @@ class TestFrozenColdStorage:
 
         blkseg_files = list(tmp_path.glob("segment_*.blkseg"))
         last_seqs = sorted(read_cold_segment_header(p).last_seq for p in blkseg_files)
-        # The 2 post-freeze rows must not have been flushed to disk alongside the pre-freeze ones.
-        assert all(seq < frozen_at for seq in last_seqs)
-        assert len(last_seqs) < 4
+        # Every pre-freeze row (frozen_at is the last of them) is on disk; the 2 post-freeze rows
+        # must not have been flushed alongside them.
+        assert last_seqs == list(range(1, frozen_at + 1))
 
 
 class TestPersistColdStorageOnClose:
