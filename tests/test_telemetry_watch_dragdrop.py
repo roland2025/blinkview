@@ -173,15 +173,22 @@ class TestHandleInternalMoveSingleRow:
 
         assert watch.entries == [row_b, row_a]
 
-    def test_dropping_in_place_is_a_noop(self, watch):
+    @pytest.mark.parametrize("action", ["above", "below"])
+    @pytest.mark.parametrize("index", [0, 1])
+    def test_dropping_onto_itself_is_a_noop(self, watch, action, index):
+        """_calculate_drop_state returns (i, "below") for the lower half of the dragged row's own
+        rect, so releasing the drag there must not move it either."""
         row_a = RowEntry(label="A", modules=[watch.module])
         row_b = RowEntry(label="B", modules=[watch.module])
         watch.entries = [row_a, row_b]
         watch.rebuild_ui()
+        saves = []
+        watch.save_config = lambda *a, **k: saves.append(1)
 
-        watch._handle_internal_move(old_index=0, target_index=0, action="above")
+        watch._handle_internal_move(old_index=index, target_index=index, action=action)
 
         assert watch.entries == [row_a, row_b]
+        assert saves == []
 
 
 class TestHandleInternalMoveSectionBlock:
@@ -200,8 +207,57 @@ class TestHandleInternalMoveSectionBlock:
 
         assert watch.entries == [section2, child2, section1, child1]
 
+    @pytest.mark.parametrize("action", ["above", "below"])
+    @pytest.mark.parametrize("target_index", [0, 1, 2])
+    def test_dropping_a_section_inside_its_own_block_is_a_noop(self, watch, action, target_index):
+        """Targets 0-2 are Sec1 and its own children; dropping there used to move Sec1's block,
+        e.g. "below" its own header pushed it past Sec2's whole block."""
+        section1 = SectionEntry(label="Sec1")
+        child1a = RowEntry(label="Child1a", modules=[watch.module])
+        child1b = RowEntry(label="Child1b", modules=[watch.module])
+        section2 = SectionEntry(label="Sec2")
+        child2 = RowEntry(label="Child2", modules=[watch.module])
+        entries = [section1, child1a, child1b, section2, child2]
+        watch.entries = list(entries)
+        watch.rebuild_ui()
+        saves = []
+        watch.save_config = lambda *a, **k: saves.append(1)
+
+        watch._handle_internal_move(old_index=0, target_index=target_index, action=action)
+
+        assert watch.entries == entries
+        assert saves == []
+
+    def test_dropping_a_later_section_inside_its_own_block_is_a_noop(self, watch):
+        section1 = SectionEntry(label="Sec1")
+        child1 = RowEntry(label="Child1", modules=[watch.module])
+        section2 = SectionEntry(label="Sec2")
+        child2 = RowEntry(label="Child2", modules=[watch.module])
+        entries = [section1, child1, section2, child2]
+        watch.entries = list(entries)
+        watch.rebuild_ui()
+
+        watch._handle_internal_move(old_index=2, target_index=2, action="below")
+
+        assert watch.entries == entries
+
 
 class TestHandleInternalMoveGroupBlock:
+    @pytest.mark.parametrize("action", ["above", "below"])
+    @pytest.mark.parametrize("target_index", [0, 1, 2])
+    def test_dropping_a_group_inside_its_own_block_is_a_noop(self, watch, action, target_index):
+        group_start = GroupStartEntry(label="Group")
+        btn = ButtonEntry(label="Btn")
+        group_end = GroupEndEntry()
+        trailer = RowEntry(label="Trailer", modules=[watch.module])
+        entries = [group_start, btn, group_end, trailer]
+        watch.entries = list(entries)
+        watch.rebuild_ui()
+
+        watch._handle_internal_move(old_index=0, target_index=target_index, action=action)
+
+        assert watch.entries == entries
+
     def test_moves_a_whole_button_group_with_its_members(self, watch):
         group_start = GroupStartEntry(label="Group")
         btn = ButtonEntry(label="Btn")

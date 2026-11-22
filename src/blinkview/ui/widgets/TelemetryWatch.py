@@ -831,7 +831,9 @@ class TelemetryWatch(QWidget):
             self.drop_indicator.setGeometry(rect.x(), rect.bottom() - 2, rect.width(), 4)
 
     def _handle_internal_move(self, old_index, target_index, action):
-        if old_index == target_index and action == "above":
+        # A drop onto the dragged entry itself is a no-op for either half of its rect
+        # (_calculate_drop_state returns "below" for the lower half).
+        if old_index == target_index:
             return
 
         source_item = self.entries[old_index]
@@ -853,15 +855,19 @@ class TelemetryWatch(QWidget):
                 if end < len(self.entries):
                     end += 1
 
-            # 2. Extract the whole block
+            # Dropping a block onto one of its own entries leaves it where it is.
+            if start <= target_index < end:
+                return
+
+            # Extract the whole block
             block = [self.entries.pop(start) for _ in range(end - start)]
             block_size = len(block)
 
-            # 3. Adjust target_index because the list shrank
+            # Adjust target_index because the list shrank
             if start < target_index:
                 target_index -= block_size
 
-            # 4. Smart Target Positioning
+            # Smart Target Positioning
             if action == "below":
                 target_item = self.entries[target_index] if target_index < len(self.entries) else None
 
@@ -883,7 +889,7 @@ class TelemetryWatch(QWidget):
                 else:
                     target_index += 1
 
-            # 5. Re-insert the whole block
+            # Re-insert the whole block
             for i, item in enumerate(block):
                 self.entries.insert(max(0, target_index + i), item)
 
