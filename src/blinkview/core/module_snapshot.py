@@ -346,7 +346,7 @@ class LatestModuleValueTracker:
             # Captured *before* scanning (not after) so a race with data arriving mid-scan can
             # only under-report coverage, never over-report it - see LatestModuleValueTracker's
             # docstring on why an over-reported coverage watermark would be unsafe.
-            pool_newest_at_scan_start = self._log_pool.get_time_bounds()[0]
+            pool_newest_at_scan_start = self._log_pool.get_time_bounds()[1]
 
             # lks is a SEQ_TYPE on the first tick but a plain int (segment.last_sequence_id's
             # cache) afterwards - pin the kernel arg to one type so warmup's single update()

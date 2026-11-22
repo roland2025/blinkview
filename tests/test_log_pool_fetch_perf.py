@@ -420,44 +420,37 @@ class TestBuildSnapshotAsOfScalesWithSegmentCount:
     segment (no binary search at all), making this the most expensive per-irrelevant-segment cost
     of the three bugs found in this audit."""
 
-    def test_going_from_4_to_128_cold_segments_should_not_scale_the_call_time_by_32x(self, tmp_path, id_registry):
+    @pytest.mark.parametrize("n", [4, 128])
+    def test_segments_newer_than_the_anchor_are_skipped_without_a_scan(self, tmp_path, id_registry, monkeypatch, n):
         """Anchored at the OLDEST segment's ts: build_snapshot_as_of scans newest-to-oldest
         looking for the latest row at-or-before the anchor, so here the decoys are every segment
         NEWER than the anchor (the opposite arrangement from the fetch_telemetry_window/
-        scan_history_window tests above, which anchor at the newest segment instead)."""
+        scan_history_window tests above, which anchor at the newest segment instead).
+
+        Counts the segments handed to the per-segment kernel instead of timing the call: a
+        tracker only does the work on its first call at a given anchor (later calls at the same
+        anchor return its scrub cache), so a repeated timed call measures the cache hit."""
+        from blinkview.core import module_snapshot
         from blinkview.core.module_snapshot import LatestModuleValueTracker
+
+        scanned = []
+        real_kernel = module_snapshot.nb_build_snapshot_as_of
+
+        def counting_kernel(segment_bundle, *args):
+            scanned.append(segment_bundle)
+            return real_kernel(segment_bundle, *args)
+
+        monkeypatch.setattr(module_snapshot, "nb_build_snapshot_as_of", counting_kernel)
 
         device = id_registry.get_device("esp32")
         module = device.get_module("wifi")
+        array_pool, log_pool, _, oldest_ts = _build_pool_with_cold_segments(tmp_path, n, module=module.id)
+        tracker = LatestModuleValueTracker(log_pool, id_registry.modules_table, array_pool, lambda: 0)
 
-        array_pool_small, log_pool_small, _, oldest_small = _build_pool_with_cold_segments(
-            tmp_path / "small", 4, module=module.id
-        )
-        array_pool_large, log_pool_large, _, oldest_large = _build_pool_with_cold_segments(
-            tmp_path / "large", 128, module=module.id
-        )
+        with tracker.build_snapshot_as_of(oldest_ts):
+            pass
 
-        def make_call(array_pool, log_pool, oldest_ts):
-            tracker = LatestModuleValueTracker(log_pool, id_registry.modules_table, array_pool, lambda: 0)
-
-            def call():
-                with tracker.build_snapshot_as_of(oldest_ts):
-                    pass
-
-            return call
-
-        small_time = _time_calls(make_call(array_pool_small, log_pool_small, oldest_small))
-        large_time = _time_calls(make_call(array_pool_large, log_pool_large, oldest_large))
-
-        ratio = large_time / small_time if small_time > 0 else float("inf")
-        print(
-            f"\nbuild_snapshot_as_of: 4 segments = {small_time * 1000:.3f} ms, "
-            f"128 segments = {large_time * 1000:.3f} ms, ratio = {ratio:.1f}x"
-        )
-
-        assert ratio < 8, (
-            f"build_snapshot_as_of scaled {ratio:.1f}x going from 4 to 128 cold segments - it "
-            f"isn't using each cold segment's cached ColdSegmentMeta.earliest_ts/latest_ts to "
-            f"skip segments that entirely postdate the query ts, so its cost scales with total "
-            f"segment count instead of relevant row count."
-        )
+        # Only the oldest segment holds a row at or before the anchor. A scan of any newer one
+        # means the cached ColdSegmentMeta start_ts isn't used to skip it, and the call's cost
+        # grows with total segment count instead of relevant row count.
+        assert len(scanned) == 1

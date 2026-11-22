@@ -18,16 +18,15 @@ always rescanned from scratch. The fix caches the previous call's full per-modul
 See plans/expressive-sauteeing-sun.md.
 
 Correctness tests use tests.fakes.real_registry.make_real_registry (hot-tier-only, few rows) -
-same pattern as test_module_snapshot.py. The perf tests build real cold-storage segments (same
-pattern as tests/test_log_pool_fetch_perf.py) with a module that only appears in the very oldest
-segment - mirroring the real-world "one-shot boot/handshake message" shape that made the old
+same pattern as test_module_snapshot.py. The scaling tests build real cold-storage segments (same
+pattern as tests/test_log_pool_fetch_perf.py), mostly with a module that only appears in the very
+oldest segment - mirroring the real-world "one-shot boot/handshake message" shape that made the old
 implementation's cost independent of anchor position (it always had to scan back to that one
-segment to resolve every module)."""
-
-import time
+segment to resolve every module). They count the segments a call scans rather than timing it."""
 
 import pytest
 
+from blinkview.core import module_snapshot
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.cold_segment import ColdSegmentMeta, write_cold_segment_file
 from blinkview.core.module_snapshot import LatestModuleValueTracker
@@ -173,11 +172,34 @@ class TestModuleCountGrowsBetweenCalls:
 
 
 # ---------------------------------------------------------------------------
-# Perf: second (small forward step) call should not scale with total segment count.
+# Scaling: how many segments a call scans must not grow with total segment count.
 # ---------------------------------------------------------------------------
 
 BASE_TS = 1_000_000_000_000
 SEGMENT_SPACING_NS = 10_000_000_000  # 10s apart
+
+
+@pytest.fixture
+def count_scans(monkeypatch):
+    """count_scans(fn) runs fn once and returns how many segments build_snapshot_as_of handed to
+    its per-segment kernel (nb_build_snapshot_as_of). Counted instead of timed: a timed call
+    repeated at the same anchor only measures the cache-hit early return after the first sample,
+    and sub-millisecond timing ratios are noisy anyway."""
+    scanned = []
+    real_kernel = module_snapshot.nb_build_snapshot_as_of
+
+    def counting_kernel(segment_bundle, *args):
+        scanned.append(segment_bundle)
+        return real_kernel(segment_bundle, *args)
+
+    monkeypatch.setattr(module_snapshot, "nb_build_snapshot_as_of", counting_kernel)
+
+    def count(fn):
+        scanned.clear()
+        fn()
+        return len(scanned)
+
+    return count
 
 
 def _make_cold_segment(array_pool, path, index, ts_ns, module):
@@ -199,131 +221,61 @@ def _make_cold_segment(array_pool, path, index, ts_ns, module):
     return PooledLogBatch.from_memmap(str(path), metadata=meta)
 
 
+def _build_pool(tmp_path, module_ids):
+    """One cold segment per entry of module_ids, SEGMENT_SPACING_NS apart, oldest first; segment
+    i holds a single row for module_ids[i]."""
+    array_pool = NumpyArrayPool()
+    log_pool = CircularLogPool(array_pool, max_pieces=1, final_buffer_bytes=64 * 1024)
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    for i, module in enumerate(module_ids):
+        ts_ns = BASE_TS + i * SEGMENT_SPACING_NS
+        path = tmp_path / f"segment_{i:010d}.blkseg"
+        log_pool.cold_segments.append(_make_cold_segment(array_pool, path, i, ts_ns, module))
+
+    return array_pool, log_pool
+
+
 def _build_pool_with_boot_only_module(tmp_path, n, boot_module, chatty_module):
-    """n cold segments, SEGMENT_SPACING_NS apart. Segment 0 (oldest) carries `boot_module`'s
-    only-ever row; every other segment carries `chatty_module`. Resolving "latest as of the
-    newest anchor" for both modules requires scanning all the way back to segment 0 - the same
-    shape as a real one-shot boot/handshake message that made the pre-cache implementation's
-    cost independent of anchor position."""
-    array_pool = NumpyArrayPool()
-    log_pool = CircularLogPool(array_pool, max_pieces=1, final_buffer_bytes=64 * 1024)
-
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    for i in range(n):
-        ts_ns = BASE_TS + i * SEGMENT_SPACING_NS
-        module = boot_module if i == 0 else chatty_module
-        path = tmp_path / f"segment_{i:010d}.blkseg"
-        cold = _make_cold_segment(array_pool, path, i, ts_ns, module)
-        log_pool.cold_segments.append(cold)
-
-    return array_pool, log_pool
+    """n cold segments. Segment 0 (oldest) carries `boot_module`'s only-ever row; every other
+    segment carries `chatty_module`. Resolving "latest as of the newest anchor" for both modules
+    requires scanning all the way back to segment 0 - the same shape as a real one-shot
+    boot/handshake message that made the pre-cache implementation's cost independent of anchor
+    position."""
+    return _build_pool(tmp_path, [boot_module] + [chatty_module] * (n - 1))
 
 
-def _build_pool_all_chatty(tmp_path, n, chatty_module):
-    """n cold segments, SEGMENT_SPACING_NS apart, all carrying `chatty_module`'s rows only - used
-    alongside a separately-registered, never-appearing module to test the persistent
-    first-occurrence "confirmed absent" pre-seed."""
-    array_pool = NumpyArrayPool()
-    log_pool = CircularLogPool(array_pool, max_pieces=1, final_buffer_bytes=64 * 1024)
-
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    for i in range(n):
-        ts_ns = BASE_TS + i * SEGMENT_SPACING_NS
-        path = tmp_path / f"segment_{i:010d}.blkseg"
-        cold = _make_cold_segment(array_pool, path, i, ts_ns, chatty_module)
-        log_pool.cold_segments.append(cold)
-
-    return array_pool, log_pool
+def _newest_ts(n):
+    return BASE_TS + (n - 1) * SEGMENT_SPACING_NS
 
 
-def _build_pool_with_one_module_per_segment(tmp_path, n, module_ids):
-    """n cold segments, SEGMENT_SPACING_NS apart, each carrying exactly one row for a distinct
-    module (module_ids[i] for segment i) - resolving "latest as of the newest anchor" for every
-    module requires visiting every segment, since none of them repeat. Used to test the live-valid
-    (_current_snapshot) pre-seed: after a single update() call has scanned everything once, every
-    module's live-latest is already known, so a fresh build_snapshot_as_of anchored at/after the
-    newest row should resolve everything without touching a single segment."""
-    array_pool = NumpyArrayPool()
-    log_pool = CircularLogPool(array_pool, max_pieces=1, final_buffer_bytes=64 * 1024)
-
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    for i in range(n):
-        ts_ns = BASE_TS + i * SEGMENT_SPACING_NS
-        path = tmp_path / f"segment_{i:010d}.blkseg"
-        cold = _make_cold_segment(array_pool, path, i, ts_ns, module_ids[i])
-        log_pool.cold_segments.append(cold)
-
-    return array_pool, log_pool
-
-
-def _time_calls(fn, repeats=8):
-    samples = []
-    for _ in range(repeats):
-        start = time.perf_counter()
-        fn()
-        samples.append(time.perf_counter() - start)
-    samples.sort()
-    return samples[len(samples) // 2]
+SEGMENT_COUNTS = (4, 128)
 
 
 class TestSecondForwardCallDoesNotScaleWithSegmentCount:
-    def test_going_from_4_to_128_cold_segments(self, tmp_path, id_registry):
+    @pytest.mark.parametrize("n", SEGMENT_COUNTS)
+    def test_small_forward_step_scans_no_segment(self, tmp_path, id_registry, count_scans, n):
         device = id_registry.get_device("esp32")
         boot_module = device.get_module("boot_handshake").id
         chatty_module = device.get_module("telemetry").id
+        array_pool, log_pool = _build_pool_with_boot_only_module(tmp_path, n, boot_module, chatty_module)
+        tracker = LatestModuleValueTracker(log_pool, id_registry.modules_table, array_pool, lambda: 0)
+        newest_ts = _newest_ts(n)
 
-        array_pool_small, log_pool_small = _build_pool_with_boot_only_module(
-            tmp_path / "small", 4, boot_module, chatty_module
-        )
-        array_pool_large, log_pool_large = _build_pool_with_boot_only_module(
-            tmp_path / "large", 128, boot_module, chatty_module
-        )
-
-        def make_calls(array_pool, log_pool, n):
-            tracker = LatestModuleValueTracker(log_pool, id_registry.modules_table, array_pool, lambda: 0)
-            newest_ts = BASE_TS + (n - 1) * SEGMENT_SPACING_NS
-
-            def first_call():
-                with tracker.build_snapshot_as_of(newest_ts):
+        def call_at(ts_ns):
+            def call():
+                with tracker.build_snapshot_as_of(ts_ns):
                     pass
 
-            def second_call_small_forward_step():
-                with tracker.build_snapshot_as_of(newest_ts + 1):
-                    pass
+            return call
 
-            return tracker, first_call, second_call_small_forward_step
+        # The priming call has to reach segment 0 for the boot-only module - the cost the cache
+        # exists to avoid repeating.
+        assert count_scans(call_at(newest_ts)) == n
 
-        tracker_small, first_small, second_small = make_calls(array_pool_small, log_pool_small, 4)
-        tracker_large, first_large, second_large = make_calls(array_pool_large, log_pool_large, 128)
-
-        # First (cold, priming) call is expected to scale with segment count - not the thing
-        # being fixed here, just establishing this scenario actually reproduces the old cost
-        # shape before the fix kicks in on the *next* call.
-        first_small_t = _time_calls(first_small, repeats=1)
-        first_large_t = _time_calls(first_large, repeats=1)
-
-        # The first_small/first_large calls above already primed each tracker's cache at
-        # newest_ts - these second calls exercise the forward-incremental (cache-hit) path, using
-        # the median of several repeats to absorb any one-time Numba compile cost on the first
-        # sample (nb_copy_snapshot_state's first-ever call in this process happens here).
-        second_small_t = _time_calls(second_small, repeats=8)
-        second_large_t = _time_calls(second_large, repeats=8)
-
-        ratio = second_large_t / second_small_t if second_small_t else float("inf")
-        print(
-            f"\nfirst (cold) call: 4 segments = {first_small_t * 1000:.3f} ms, "
-            f"128 segments = {first_large_t * 1000:.3f} ms"
-        )
-        print(
-            f"second (forward-incremental) call: 4 segments = {second_small_t * 1000:.4f} ms, "
-            f"128 segments = {second_large_t * 1000:.4f} ms, ratio = {ratio:.1f}x"
-        )
-
-        assert ratio < 8, (
-            f"forward-incremental build_snapshot_as_of scaled {ratio:.1f}x going from 4 to 128 "
-            f"cold segments on a small forward step - it should only touch segments in the new "
-            f"window, not rescan the whole pool via the cache."
-        )
+        # Nothing lies in (newest_ts, newest_ts + 1], so the forward-incremental path has no
+        # segment to look at.
+        assert count_scans(call_at(newest_ts + 1)) == 0
 
 
 class TestBackwardStepWithinProvenEmptyRangeIsFree:
@@ -331,111 +283,55 @@ class TestBackwardStepWithinProvenEmptyRangeIsFree:
     zero segments (found_mask pre-seeded all-True, remaining=0, the scan loop never runs) -
     regardless of how many total segments exist below it."""
 
-    def test_going_from_4_to_128_cold_segments(self, tmp_path, id_registry):
+    @pytest.mark.parametrize("n", SEGMENT_COUNTS)
+    def test_backward_step_scans_no_segment(self, tmp_path, id_registry, count_scans, n):
         device = id_registry.get_device("esp32")
         boot_module = device.get_module("boot_handshake").id
         chatty_module = device.get_module("telemetry").id
+        array_pool, log_pool = _build_pool_with_boot_only_module(tmp_path, n, boot_module, chatty_module)
+        tracker = LatestModuleValueTracker(log_pool, id_registry.modules_table, array_pool, lambda: 0)
+        # Anchor past the newest real row, leaving margin to step backward without crossing
+        # chatty's actual row.
+        margin_anchor = _newest_ts(n) + SEGMENT_SPACING_NS
 
-        array_pool_small, log_pool_small = _build_pool_with_boot_only_module(
-            tmp_path / "small", 4, boot_module, chatty_module
-        )
-        array_pool_large, log_pool_large = _build_pool_with_boot_only_module(
-            tmp_path / "large", 128, boot_module, chatty_module
-        )
-
-        def make_calls(array_pool, log_pool, n):
-            tracker = LatestModuleValueTracker(log_pool, id_registry.modules_table, array_pool, lambda: 0)
-            # Anchor comfortably past the newest real row so the priming call still resolves
-            # everything (same cost shape as TestSecondForwardCallDoesNotScaleWithSegmentCount),
-            # leaving margin to step backward without crossing chatty's actual row.
-            newest_row_ts = BASE_TS + (n - 1) * SEGMENT_SPACING_NS
-            margin_anchor = newest_row_ts + SEGMENT_SPACING_NS
-
-            def prime():
-                with tracker.build_snapshot_as_of(margin_anchor):
+        def call_at(ts_ns):
+            def call():
+                with tracker.build_snapshot_as_of(ts_ns):
                     pass
 
-            def backward_step_within_margin():
-                with tracker.build_snapshot_as_of(margin_anchor - 1):
-                    pass
+            return call
 
-            return prime, backward_step_within_margin
-
-        prime_small, step_small = make_calls(array_pool_small, log_pool_small, 4)
-        prime_large, step_large = make_calls(array_pool_large, log_pool_large, 128)
-
-        prime_small()
-        prime_large()
-
-        step_small_t = _time_calls(step_small, repeats=8)
-        step_large_t = _time_calls(step_large, repeats=8)
-
-        ratio = step_large_t / step_small_t if step_small_t else float("inf")
-        print(
-            f"\nbackward step within proven-empty range: 4 segments = {step_small_t * 1000:.4f} ms, "
-            f"128 segments = {step_large_t * 1000:.4f} ms, ratio = {ratio:.1f}x"
-        )
-        assert ratio < 8, (
-            f"backward step within an already-proven-empty range scaled {ratio:.1f}x going from "
-            f"4 to 128 cold segments - it should be pre-seeded found and skip scanning entirely."
-        )
+        assert count_scans(call_at(margin_anchor)) == n
+        assert count_scans(call_at(margin_anchor - 1)) == 0
 
 
 class TestBackwardStepOnlyReresolvesInvalidatedModule:
     """A backward step that invalidates only the frequently-logging module (crosses its cached
-    occurrence) should re-resolve just that module by looking at the next-older segment or two -
-    not rescan all the way back to the sparse boot-only module's segment 0."""
+    occurrence) should re-resolve just that module by looking at the next-older segment - not
+    rescan all the way back to the sparse boot-only module's segment 0."""
 
-    def test_going_from_4_to_128_cold_segments(self, tmp_path, id_registry):
+    @pytest.mark.parametrize("n", SEGMENT_COUNTS)
+    def test_backward_step_scans_only_the_next_older_segment(self, tmp_path, id_registry, count_scans, n):
         device = id_registry.get_device("esp32")
         boot_module = device.get_module("boot_handshake").id
         chatty_module = device.get_module("telemetry").id
+        array_pool, log_pool = _build_pool_with_boot_only_module(tmp_path, n, boot_module, chatty_module)
+        tracker = LatestModuleValueTracker(log_pool, id_registry.modules_table, array_pool, lambda: 0)
+        newest_row_ts = _newest_ts(n)
 
-        array_pool_small, log_pool_small = _build_pool_with_boot_only_module(
-            tmp_path / "small", 4, boot_module, chatty_module
-        )
-        array_pool_large, log_pool_large = _build_pool_with_boot_only_module(
-            tmp_path / "large", 128, boot_module, chatty_module
-        )
-
-        def make_calls(array_pool, log_pool, n):
-            tracker = LatestModuleValueTracker(log_pool, id_registry.modules_table, array_pool, lambda: 0)
-            newest_row_ts = BASE_TS + (n - 1) * SEGMENT_SPACING_NS
-
-            def prime():
-                # Touches all n segments (chatty found immediately, boot only found at segment 0).
-                with tracker.build_snapshot_as_of(newest_row_ts):
+        def call_at(ts_ns):
+            def call():
+                with tracker.build_snapshot_as_of(ts_ns):
                     pass
 
-            def backward_step_invalidating_chatty_only():
-                # Between the newest and second-newest chatty rows - invalidates chatty's cached
-                # occurrence (must find the previous segment's row) but boot's cached occurrence
-                # (segment 0, far below) stays valid and pre-seeded.
-                with tracker.build_snapshot_as_of(newest_row_ts - SEGMENT_SPACING_NS // 2):
-                    pass
+            return call
 
-            return prime, backward_step_invalidating_chatty_only
+        assert count_scans(call_at(newest_row_ts)) == n
 
-        prime_small, step_small = make_calls(array_pool_small, log_pool_small, 4)
-        prime_large, step_large = make_calls(array_pool_large, log_pool_large, 128)
-
-        prime_small()
-        prime_large()
-
-        step_small_t = _time_calls(step_small, repeats=8)
-        step_large_t = _time_calls(step_large, repeats=8)
-
-        ratio = step_large_t / step_small_t if step_small_t else float("inf")
-        print(
-            f"\nbackward step re-resolving only the chatty module: 4 segments = "
-            f"{step_small_t * 1000:.4f} ms, 128 segments = {step_large_t * 1000:.4f} ms, "
-            f"ratio = {ratio:.1f}x"
-        )
-        assert ratio < 8, (
-            f"backward step that only invalidates the frequently-logging module scaled "
-            f"{ratio:.1f}x going from 4 to 128 cold segments - it should re-resolve that module "
-            f"from the next-older segment(s), not rescan down to the sparse module's segment."
-        )
+        # Between the newest and second-newest chatty rows: invalidates chatty's cached
+        # occurrence (the previous segment's row is the answer), while boot's cached occurrence
+        # in segment 0 stays valid and pre-seeded.
+        assert count_scans(call_at(newest_row_ts - SEGMENT_SPACING_NS // 2)) == 1
 
 
 class TestFirstEverCallStaysFlatWhenAModuleNeverLogs:
@@ -444,47 +340,26 @@ class TestFirstEverCallStaysFlatWhenAModuleNeverLogs:
     build_snapshot_as_of's very first-ever call for a tracker - no _scrub_cache required at all,
     unlike the cache-based pre-seeding tested elsewhere in this file."""
 
-    def test_going_from_4_to_128_cold_segments(self, tmp_path, id_registry):
+    @pytest.mark.parametrize("n", SEGMENT_COUNTS)
+    @pytest.mark.parametrize("run_update", [True, False], ids=["after_update", "control_without_update"])
+    def test_first_call_scans_no_segment(self, tmp_path, id_registry, count_scans, n, run_update):
         device = id_registry.get_device("esp32")
         chatty_module = device.get_module("telemetry").id
-        never_logs_module = device.get_module("never_logs").id  # registered, but never appears
+        device.get_module("never_logs")  # registered, but never appears in any segment
 
-        def make_tracker(tmp_subdir, n):
-            array_pool, log_pool = _build_pool_all_chatty(tmp_subdir, n, chatty_module)
-            tracker = LatestModuleValueTracker(log_pool, id_registry.modules_table, array_pool, lambda: 0)
+        array_pool, log_pool = _build_pool(tmp_path, [chatty_module] * n)
+        tracker = LatestModuleValueTracker(log_pool, id_registry.modules_table, array_pool, lambda: 0)
+        if run_update:
             tracker.update()  # establishes first-occurrence coverage, confirming never_logs absent
-            newest_ts = BASE_TS + (n - 1) * SEGMENT_SPACING_NS
-            return tracker, newest_ts
 
-        tracker_small, newest_small = make_tracker(tmp_path / "small", 4)
-        tracker_large, newest_large = make_tracker(tmp_path / "large", 128)
+        def call():
+            with tracker.build_snapshot_as_of(_newest_ts(n)):
+                pass
 
-        def first_call(tracker, newest_ts):
-            def call():
-                with tracker.build_snapshot_as_of(newest_ts):
-                    pass
-
-            return call
-
-        # Each tracker's build_snapshot_as_of has never been called before - genuinely the first
-        # ever call, no _scrub_cache in play.
-        assert tracker_small._scrub_cache is None
-        assert tracker_large._scrub_cache is None
-
-        small_t = _time_calls(first_call(tracker_small, newest_small), repeats=8)
-        large_t = _time_calls(first_call(tracker_large, newest_large), repeats=8)
-
-        ratio = large_t / small_t if small_t else float("inf")
-        print(
-            f"\nfirst-ever call, never-logging module: 4 segments = {small_t * 1000:.4f} ms, "
-            f"128 segments = {large_t * 1000:.4f} ms, ratio = {ratio:.1f}x"
-        )
-        assert ratio < 8, (
-            f"first-ever build_snapshot_as_of call scaled {ratio:.1f}x going from 4 to 128 cold "
-            f"segments even though the only unresolved module never logs anything - the "
-            f"first-occurrence table should confirm it absent for free via update(), without "
-            f"scanning to the end of the pool every time."
-        )
+        assert tracker._scrub_cache is None  # genuinely the first-ever call
+        # Without update() nothing vouches for never_logs being absent, so the scan runs to the
+        # oldest segment looking for it.
+        assert count_scans(call) == (0 if run_update else n)
 
 
 class TestFirstEverCallStaysFlatNearLiveEdge:
@@ -492,41 +367,21 @@ class TestFirstEverCallStaysFlatNearLiveEdge:
     build_snapshot_as_of's very first-ever call resolve every module for free when anchored at or
     after the live edge - no _scrub_cache required."""
 
-    def test_going_from_4_to_128_cold_segments(self, tmp_path, id_registry):
+    @pytest.mark.parametrize("n", SEGMENT_COUNTS)
+    @pytest.mark.parametrize("run_update", [True, False], ids=["after_update", "control_without_update"])
+    def test_first_call_scans_no_segment(self, tmp_path, id_registry, count_scans, n, run_update):
         device = id_registry.get_device("esp32")
-
-        def make_tracker(tmp_subdir, n):
-            module_ids = [device.get_module(f"m{i}").id for i in range(n)]
-            array_pool, log_pool = _build_pool_with_one_module_per_segment(tmp_subdir, n, module_ids)
-            tracker = LatestModuleValueTracker(log_pool, id_registry.modules_table, array_pool, lambda: 0)
+        # One distinct module per segment: without _current_snapshot, resolving all of them means
+        # visiting every segment.
+        module_ids = [device.get_module(f"m{i}").id for i in range(n)]
+        array_pool, log_pool = _build_pool(tmp_path, module_ids)
+        tracker = LatestModuleValueTracker(log_pool, id_registry.modules_table, array_pool, lambda: 0)
+        if run_update:
             tracker.update()  # populates _current_snapshot with every module's live-latest value
-            newest_ts = BASE_TS + (n - 1) * SEGMENT_SPACING_NS
-            return tracker, newest_ts
 
-        tracker_small, newest_small = make_tracker(tmp_path / "small", 4)
-        tracker_large, newest_large = make_tracker(tmp_path / "large", 128)
+        def call():
+            with tracker.build_snapshot_as_of(_newest_ts(n)):
+                pass
 
-        def first_call(tracker, newest_ts):
-            def call():
-                with tracker.build_snapshot_as_of(newest_ts):
-                    pass
-
-            return call
-
-        assert tracker_small._scrub_cache is None
-        assert tracker_large._scrub_cache is None
-
-        small_t = _time_calls(first_call(tracker_small, newest_small), repeats=8)
-        large_t = _time_calls(first_call(tracker_large, newest_large), repeats=8)
-
-        ratio = large_t / small_t if small_t else float("inf")
-        print(
-            f"\nfirst-ever call, anchored at live edge: 4 segments = {small_t * 1000:.4f} ms, "
-            f"128 segments = {large_t * 1000:.4f} ms, ratio = {ratio:.1f}x"
-        )
-        assert ratio < 8, (
-            f"first-ever build_snapshot_as_of call scaled {ratio:.1f}x going from 4 to 128 cold "
-            f"segments even though every module's live-latest occurrence already satisfies the "
-            f"query - _current_snapshot should resolve them all for free via update(), without "
-            f"scanning every segment to find each one's own row."
-        )
+        assert tracker._scrub_cache is None
+        assert count_scans(call) == (0 if run_update else n)
