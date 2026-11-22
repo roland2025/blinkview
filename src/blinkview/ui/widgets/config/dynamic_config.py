@@ -59,6 +59,27 @@ def reflow(description: str) -> str:
 
 
 # Empty value per JSON-schema type, for a new entry whose schema has no default.
+def _button_style(bg: str, hover: str) -> str:
+    """Stylesheet for the bottom-row action buttons: filled `bg`, `hover` on hover, gray when disabled."""
+    return f"""
+        QPushButton {{
+            background-color: {bg};
+            color: white;
+            font-weight: bold;
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: none;
+        }}
+        QPushButton:disabled {{
+            background-color: #444444;
+            color: #888888;
+        }}
+        QPushButton:hover:!disabled {{
+            background-color: {hover};
+        }}
+    """
+
+
 _TYPE_SEEDS = {"string": "", "integer": 0, "number": 0.0, "boolean": False, "array": [], "object": {}}
 
 
@@ -165,43 +186,11 @@ class DynamicConfigWidget(QWidget):
 
         self.btn_revert = QPushButton("Revert Changes")
         self.btn_revert.setEnabled(False)
-        self.btn_revert.setStyleSheet("""
-                    QPushButton {
-                        background-color: #6c757d; /* Gray */
-                        color: white; 
-                        font-weight: bold; 
-                        padding: 6px 12px;
-                        border-radius: 4px;
-                        border: none;
-                    }
-                    QPushButton:disabled {
-                        background-color: #444444;
-                        color: #888888;
-                    }
-                    QPushButton:hover:!disabled {
-                        background-color: #5a6268;
-                    }
-                """)
+        self.btn_revert.setStyleSheet(_button_style("#6c757d", "#5a6268"))  # Gray
 
         self.btn_apply = QPushButton("Apply Configuration")
         self.btn_apply.setEnabled(False)
-        self.btn_apply.setStyleSheet("""
-                    QPushButton {
-                        background-color: #0d6efd; /* Blue */
-                        color: white; 
-                        font-weight: bold; 
-                        padding: 6px 12px;
-                        border-radius: 4px;
-                        border: none;
-                    }
-                    QPushButton:disabled {
-                        background-color: #444444; 
-                        color: #888888;          
-                    }
-                    QPushButton:hover:!disabled {
-                        background-color: #0b5ed7; 
-                    }
-                """)
+        self.btn_apply.setStyleSheet(_button_style("#0d6efd", "#0b5ed7"))  # Blue
 
         if False:
             # Using Object Names prevents the red border from cascading to every child widget!
@@ -511,22 +500,32 @@ class DynamicConfigWidget(QWidget):
                     merged_req = set(schema_node.get("required", [])) | set(sub_schema["required"])
                     schema_node["required"] = list(merged_req)
 
-    def _build_static_object(self, key, prop_schema, value, layout, registry, current_path, required_keys):
-        """Builds a standard nested dictionary with known properties."""
+    def _open_group(self, key, prop_schema, registry, required_keys, has_value, entry_type="object"):
+        """Create the group box for a nested node and register it under `key`.
+
+        Returns (group_box, group_layout, child_registry); the caller fills the layout and adds
+        the box to its parent layout.
+        """
         is_required = key in required_keys
         title = prop_schema.get("title", key.replace("_", " ").title())
         description = prop_schema.get("description", "")
-        has_value = value is not None
 
         group_box, group_layout = self._create_group_box(title, description, is_required, has_value)
 
         child_registry = {}
         registry[key] = {
-            "type": "object",
+            "type": entry_type,
             "registry": child_registry,
             "container": group_box,
             "is_required": is_required,
         }
+        return group_box, group_layout, child_registry
+
+    def _build_static_object(self, key, prop_schema, value, layout, registry, current_path, required_keys):
+        """Builds a standard nested dictionary with known properties."""
+        group_box, group_layout, child_registry = self._open_group(
+            key, prop_schema, registry, required_keys, has_value=value is not None
+        )
 
         child_data = value if isinstance(value, dict) else {}
 
@@ -534,68 +533,11 @@ class DynamicConfigWidget(QWidget):
         self._build_ui(prop_schema, child_data, group_layout, child_registry, current_path + [key])
         layout.addRow(group_box)
 
-    def __build_static_object(self, key, prop_schema, value, layout, registry, current_path, required_keys):
-        """Builds a standard nested dictionary with known properties. Hides if empty."""
-        is_required = key in required_keys
-        title = prop_schema.get("title", key.replace("_", " ").title())
-        description = prop_schema.get("description", "")
-        has_value = value is not None
-
-        # --- Check if there is actually anything to render ---
-        # We check 'properties' and also consider if the factory might have injected any
-        has_children = bool(prop_schema.get("properties"))
-
-        # If the object is empty and not checkable (optional), don't show it at all
-        if not has_children and is_required:
-            # Register it so get_config() still sees the empty object/default
-            child_registry = {}
-            registry[key] = {
-                "type": "object",
-                "registry": child_registry,
-                "container": None,  # No widget
-                "is_required": is_required,
-            }
-            return
-
-        # Standard creation if properties exist
-        group_box, group_layout = self._create_group_box(title, description, is_required, has_value)
-
-        child_registry = {}
-        registry[key] = {
-            "type": "object",
-            "registry": child_registry,
-            "container": group_box,
-            "is_required": is_required,
-        }
-
-        child_data = value if isinstance(value, dict) else {}
-
-        # Recurse back to the main dispatcher
-        self._build_ui(prop_schema, child_data, group_layout, child_registry, current_path + [key])
-
-        # Only add to the layout if the group box actually contains something
-        # (or if it's an optional toggle the user might want to enable/disable)
-        if has_children or not is_required:
-            layout.addRow(group_box)
-        else:
-            group_box.deleteLater()
-
     def _build_dynamic_dict(self, key, prop_schema, value, data, layout, registry, current_path, required_keys):
         """Builds a dynamic dictionary where users can add arbitrary string keys."""
-        is_required = key in required_keys
-        title = prop_schema.get("title", key.replace("_", " ").title())
-        description = prop_schema.get("description", "")
-        has_value = key in data
-
-        group_box, group_layout = self._create_group_box(title, description, is_required, has_value)
-
-        child_registry = {}
-        registry[key] = {
-            "type": "object",
-            "registry": child_registry,
-            "container": group_box,
-            "is_required": is_required,
-        }
+        group_box, group_layout, child_registry = self._open_group(
+            key, prop_schema, registry, required_keys, has_value=key in data
+        )
 
         child_data = value if isinstance(value, dict) else {}
         sub_schema = prop_schema["additionalProperties"]
@@ -713,20 +655,9 @@ class DynamicConfigWidget(QWidget):
 
     def _build_complex_array(self, key, prop_schema, value, data, layout, registry, current_path, required_keys):
         """Builds an array of objects or factory plugins supporting hybrid dict/list traversal."""
-        is_required = key in required_keys
-        title = prop_schema.get("title", key.replace("_", " ").title())
-        description = prop_schema.get("description", "")
-        has_value = key in data
-
-        group_box, group_layout = self._create_group_box(title, description, is_required, has_value)
-
-        child_registry = {}
-        registry[key] = {
-            "type": "complex_array",
-            "registry": child_registry,
-            "container": group_box,
-            "is_required": is_required,
-        }
+        group_box, group_layout, child_registry = self._open_group(
+            key, prop_schema, registry, required_keys, has_value=key in data, entry_type="complex_array"
+        )
 
         items_schema = prop_schema.get("items", {})
         child_data = value if isinstance(value, list) else []
