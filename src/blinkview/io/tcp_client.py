@@ -122,10 +122,14 @@ class TCPClientReader(BaseReader):
             feeder = BatchFeeder(self, msg_size_bytes=1024, default_buffer_bytes=self.buffer_size)
             push_view = feeder.push_view
             maybe_flush = feeder.maybe_flush
+            flush = feeder.flush
 
             while not stop_is_set():
                 # Active Client Socket Lifecycle Management
                 if self.client_sock is None:
+                    # Hand on what the last connection delivered (a peer close, or a send_data()
+                    # failure on another thread): while the peer stays down nothing else would.
+                    flush()
                     if self.open() is None:
                         # Wait for the user-configured interval before retrying connection
                         sleep(float(self.reconnect_interval))
@@ -153,6 +157,7 @@ class TCPClientReader(BaseReader):
                 except Exception as e:
                     self.logger_link.error("Stream receive error occurred on client connection", exc=e)
                     self._close_client()
+                    flush()
                     sleep(0.5)
                     continue
 

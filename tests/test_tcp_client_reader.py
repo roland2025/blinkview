@@ -6,6 +6,7 @@
 
 import queue
 import socket
+import struct
 import time
 from types import SimpleNamespace
 
@@ -177,5 +178,61 @@ class TestRunRealSocketIngestion:
                 assert drain_until(parser.queue, expected, timeout=5.0) == expected
             finally:
                 conn.close()
+        finally:
+            reader.stop()
+
+
+def start_running_reader(port: int, parser: QueueParser) -> TCPClientReader:
+    """A live reader whose timed flush cannot fire during the test (delay 60 s), so anything
+    the parser sees was handed on by a flush on the disconnect path. reconnect_interval=1 keeps
+    stop() short while the peer stays down."""
+    reader = make_reader(host="127.0.0.1", port=port, delay=60_000, reconnect_interval=1)
+    reader.enabled = True
+    reader.shared = SimpleNamespace(array_pool=NumpyArrayPool(), time_ns=time.time_ns)
+    reader.subscribe(parser)
+    reader.start()
+    return reader
+
+
+class TestRunFlushesOnDisconnect:
+    """The lines received just before the peer goes away are handed on while the reader is still
+    running and the peer stays down, not held until a reconnect or stop()."""
+
+    def test_peer_close_hands_on_the_last_lines(self, listening_server):
+        port = listening_server.getsockname()[1]
+        parser = QueueParser()
+        expected = b"last line before the peer closed\n"
+
+        reader = start_running_reader(port, parser)
+        try:
+            conn, _ = listening_server.accept()
+            # The peer stays down: reconnects are refused from here on.
+            listening_server.close()
+            conn.sendall(expected)
+            conn.close()
+
+            assert drain_until(parser.queue, expected, timeout=3.0) == expected
+            assert reader._thread.is_alive()
+        finally:
+            reader.stop()
+
+    def test_receive_error_hands_on_the_last_lines(self, listening_server):
+        port = listening_server.getsockname()[1]
+        parser = QueueParser()
+        expected = b"last line before the connection reset\n"
+
+        reader = start_running_reader(port, parser)
+        try:
+            conn, _ = listening_server.accept()
+            listening_server.close()
+            conn.sendall(expected)
+            # Let the reader take the bytes off the socket before the reset discards them.
+            time.sleep(0.3)
+            # Linger 0: close() sends RST, so the reader's recv_into raises instead of returning 0.
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            conn.close()
+
+            assert drain_until(parser.queue, expected, timeout=3.0) == expected
+            assert reader._thread.is_alive()
         finally:
             reader.stop()
