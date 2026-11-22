@@ -103,14 +103,14 @@ class UpdateWidget(QWidget):
         self._setup_ui()
 
         if self.ensure_updater():
-            # Show local cache immediately
-
-            QTimer.singleShot(0, self.list_local_versions)
+            # Show local cache immediately. Every timer here and in showEvent takes self as its
+            # context object, so it is dropped if the widget is closed before it fires.
+            QTimer.singleShot(0, self, self.list_local_versions)
             self.update_status()
 
             # Always attempt an auto-fetch; the Updater will skip it if
             # the cooldown hasn't expired internally.
-            QTimer.singleShot(100, lambda: self.request_fetch(is_auto=True))
+            QTimer.singleShot(100, self, lambda: self.request_fetch(is_auto=True))
 
     def showEvent(self, event):
         """The "updated to X" / "upgrade failed" toast, once this widget is on screen. Not from
@@ -120,7 +120,7 @@ class UpdateWidget(QWidget):
         super().showEvent(event)
         if not self._post_update_checked and self.updater:
             self._post_update_checked = True
-            QTimer.singleShot(0, lambda: check_post_update(self.updater, parent=self))
+            QTimer.singleShot(0, self, lambda: check_post_update(self.updater, parent=self))
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)

@@ -118,7 +118,7 @@ class TestConstruction:
         checked = []
         monkeypatch.setattr(module, "check_post_update", lambda updater, parent=None: checked.append(parent))
         # Timers run at once: no event loop spinning, which would also run other tests' leftovers.
-        monkeypatch.setattr(module, "QTimer", SimpleNamespace(singleShot=lambda ms, fn: fn()))
+        monkeypatch.setattr(module, "QTimer", SimpleNamespace(singleShot=lambda ms, context, fn: fn()))
         w = UpdateWidget(gui_context)
         qtbot.addWidget(w)
 
@@ -151,6 +151,26 @@ class TestConstruction:
         assert "Path not configured" in w.status_label.text()
         assert w.fetch_btn.isEnabled() is False
         assert w.config_btn.isVisible() is True
+
+
+class TestTimersDieWithTheWidget:
+    def test_deleting_the_widget_cancels_its_pending_timers(self, qapp, qtbot, gui_context, monkeypatch):
+        """__init__ schedules list_local_versions (0 ms) and the auto-fetch (100 ms), showEvent
+        the post-update check (0 ms). Closing the widget before they fire must not run them on
+        its deleted Qt children."""
+        import shiboken6
+
+        checked = []
+        monkeypatch.setattr(module, "check_post_update", lambda updater, parent=None: checked.append(parent))
+        w = UpdateWidget(gui_context)
+        w.show()
+
+        shiboken6.delete(w)
+        with qtbot.capture_exceptions() as exceptions:
+            qtbot.wait(300)
+
+        assert exceptions == []
+        assert checked == []
 
 
 class TestChannelChanged:
