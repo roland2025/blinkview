@@ -679,3 +679,84 @@ class TestRunIngestsData:
             thread.join(2.0)
         assert not thread.is_alive()
         assert received.empty()
+
+
+class TestRunFlushesOnDisconnect:
+    """The bytes read just before the session goes away are handed on while the reader is still
+    running and the probe does not come back, not held until it reopens or stop(). delay is 60 s,
+    so the timed flush cannot be what sends them."""
+
+    LINE = b"last line before the target reset\n"
+
+    def start_reader(self):
+        """A live reader whose open() hands out one session, then fails, as for a probe that does
+        not come back. Returns the reader, its thread, the received queue and an Event set once
+        the session's single chunk has been read."""
+        reader = make_reader(delay=60_000)
+        reader.shared = SimpleNamespace(time_ns=time.time_ns, array_pool=NumpyArrayPool())
+
+        received = queue.Queue()
+
+        class Subscriber:
+            def put(self, batch):
+                for _ts, msg, *_rest in batch:
+                    received.put(bytes(msg))
+
+        reader.subscribe(Subscriber())
+
+        line = self.LINE
+        chunk_read = threading.Event()
+        session = SimpleNamespace(connected=True)
+
+        def fake_read(channel, buf, size):
+            if chunk_read.is_set():
+                return 0
+            ctypes.memmove(buf, line, len(line))
+            chunk_read.set()
+            return len(line)
+
+        def fake_open():
+            if getattr(fake_open, "used", False):
+                return None
+            fake_open.used = True
+            jl = FakeJLink()
+            jl._dll = SimpleNamespace(
+                JLINK_RTTERMINAL_Read=fake_read,
+                JLINKARM_IsOpen=lambda: 1,
+                JLINKARM_EMU_IsConnected=lambda: int(session.connected),
+            )
+            return jl
+
+        reader.open = fake_open
+        thread = threading.Thread(target=reader.run, daemon=True)
+        thread.start()
+        return reader, thread, received, chunk_read, session
+
+    def stop(self, reader, thread):
+        reader._stop_event.set()
+        thread.join(3.0)
+        assert not thread.is_alive()
+
+    def test_read_error_hands_on_the_last_lines(self):
+        reader, thread, received, chunk_read, session = self.start_reader()
+        try:
+            assert chunk_read.wait(2.0)
+            # The probe loses the target (power loss, reset): run() raises "connection lost".
+            session.connected = False
+
+            assert received.get(timeout=3.0) == self.LINE
+            assert thread.is_alive()
+        finally:
+            self.stop(reader, thread)
+
+    def test_reconnect_from_another_thread_hands_on_the_last_lines(self):
+        reader, thread, received, chunk_read, _session = self.start_reader()
+        try:
+            assert chunk_read.wait(2.0)
+            # What the rtt_restart command does: close the probe for the loop to open again.
+            assert reader.reconnect() is True
+
+            assert received.get(timeout=3.0) == self.LINE
+            assert thread.is_alive()
+        finally:
+            self.stop(reader, thread)

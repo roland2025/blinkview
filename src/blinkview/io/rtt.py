@@ -259,10 +259,14 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
             feeder = BatchFeeder(self, msg_size_bytes=20, default_buffer_bytes=read_size)
             push_view = feeder.push_view
             maybe_flush = feeder.maybe_flush
+            flush = feeder.flush
 
             while not stop_is_set():
                 # self.open() handles its own internal locking safely
                 if self.jlink is None:
+                    # Hand on what the closed session delivered (reconnect() from rtt_restart or
+                    # the stall watchdog): open() takes seconds, and may keep failing.
+                    flush()
                     created_jl = self.open()
                     if created_jl is None:
                         stop_wait(1.0)
@@ -313,6 +317,7 @@ Leverages the `pylink-square` library under the hood. Batches are accumulated ba
 
                 except Exception as e:
                     self.logger_link.error("Problem.", exc=e)
+                    flush()
                     self.cleanup_jlink()
                     stop_wait(1.0)
 
