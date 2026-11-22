@@ -117,6 +117,7 @@ class TCPReader(BaseReader):
             feeder = BatchFeeder(self, msg_size_bytes=1024, default_buffer_bytes=self.buffer_size)
             push_view = feeder.push_view
             maybe_flush = feeder.maybe_flush
+            flush = feeder.flush
 
             while not stop_is_set():
                 # Master Server Socket Lifecycle Management
@@ -127,6 +128,9 @@ class TCPReader(BaseReader):
 
                 # Connection Management Loop
                 if self.client_sock is None:
+                    # Hand on what the last client delivered (it closed, or send_data() failed on
+                    # another thread): until the next client connects nothing else would.
+                    flush()
                     try:
                         if not waiting_logged:
                             self.logger_link.info("Waiting connection...")
@@ -172,6 +176,7 @@ class TCPReader(BaseReader):
                 except Exception as e:
                     self.logger_link.error("Stream receive error occurred", exc=e)
                     self._close_client()
+                    flush()
                     sleep(0.5)
                     continue
 
