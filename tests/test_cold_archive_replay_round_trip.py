@@ -17,7 +17,8 @@ import time
 import pytest
 
 from blinkview.core.array_pool import NumpyArrayPool
-from blinkview.core.cold_archive import compress_cold_storage_dir
+from blinkview.core.cold_archive import compress_cold_segment_file, compress_cold_storage_dir
+from blinkview.core.cold_segment import write_cold_segment_file
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.numpy_log import CircularLogPool
 from blinkview.utils.log_level import LogLevel
@@ -119,50 +120,66 @@ class TestCompressThenRemountFromArchive:
         finally:
             remounted.release_all()
 
-    def test_a_raw_cold_file_takes_priority_over_its_archive_counterpart(self, global_pool, tmp_path):
-        """If both cold/segment_N.blkseg and cold-archive/segment_N.blkseg.zst exist, mounting
-        must prefer the raw file - see _mount_existing_cold_segments' docstring. Proven here by
-        making the two deliberately disagree (different row content under the same filename) and
-        asserting the mounted segment's content is the raw one's, not the archive's."""
-        from blinkview.core.cold_segment import write_cold_segment_file
+    @staticmethod
+    def _write_segment(global_pool, path, seq):
+        batch = global_pool.create(
+            PooledLogBatch,
+            req_capacity=1,
+            buffer_bytes=1,
+            has_levels=True,
+            has_modules=True,
+            has_devices=True,
+            has_sequences=True,
+        )
+        batch.insert(100 + seq, 100 + seq, b"x", LogLevel.INFO.value, 0, 0, seq)
+        write_cold_segment_file(path, batch.bundle)
+        batch.release()
 
+    def _write_archive_segment(self, global_pool, tmp_path, archive_dir, seq):
+        """Writes cold-archive/segment_0000000000.blkseg.zst. compress_cold_segment_file names
+        the archive after its input file, so the raw file is written under the real segment name
+        in a scratch dir - any other name would not match the mount glob."""
+        scratch_dir = tmp_path / "scratch"
+        scratch_dir.mkdir()
+        scratch = scratch_dir / "segment_0000000000.blkseg"
+        self._write_segment(global_pool, scratch, seq)
+        archive_path = compress_cold_segment_file(scratch, archive_dir)
+        assert archive_path.name == "segment_0000000000.blkseg.zst"
+
+    @staticmethod
+    def _mounted_seqs(global_pool, cold_dir):
+        remounted = CircularLogPool(
+            global_pool, max_pieces=1, cold_max_pieces=4, cold_storage_dir=str(cold_dir), final_buffer_bytes=1024
+        )
+        try:
+            return [int(seg.bundle.sequences[0]) for seg in remounted.cold_segments]
+        finally:
+            remounted.release_all()
+
+    def test_an_archive_alone_is_mounted(self, global_pool, tmp_path):
+        """Control for the priority test below: the archive it writes is one mounting picks up
+        when no raw file shadows it."""
         cold_dir = tmp_path / "session" / "cold"
         cold_dir.mkdir(parents=True)
         archive_dir = tmp_path / "session" / "cold-archive"
         archive_dir.mkdir(parents=True)
 
-        def make_batch(seq):
-            batch = global_pool.create(
-                PooledLogBatch,
-                req_capacity=1,
-                buffer_bytes=1,
-                has_levels=True,
-                has_modules=True,
-                has_devices=True,
-                has_sequences=True,
-            )
-            batch.insert(100 + seq, 100 + seq, b"x", LogLevel.INFO.value, 0, 0, seq)
-            return batch
+        self._write_archive_segment(global_pool, tmp_path, archive_dir, seq=111)
+
+        assert self._mounted_seqs(global_pool, cold_dir) == [111]
+
+    def test_a_raw_cold_file_takes_priority_over_its_archive_counterpart(self, global_pool, tmp_path):
+        """If both cold/segment_N.blkseg and cold-archive/segment_N.blkseg.zst exist, mounting
+        must prefer the raw file - see _mount_existing_cold_segments' docstring. Proven here by
+        making the two deliberately disagree (different row content under the same filename) and
+        asserting the mounted segment's content is the raw one's, not the archive's."""
+        cold_dir = tmp_path / "session" / "cold"
+        cold_dir.mkdir(parents=True)
+        archive_dir = tmp_path / "session" / "cold-archive"
+        archive_dir.mkdir(parents=True)
 
         # The raw file (seq 999) is what mounting must actually pick, not the archive (seq 111).
-        raw_batch = make_batch(999)
-        write_cold_segment_file(cold_dir / "segment_0000000000.blkseg", raw_batch.bundle)
-        raw_batch.release()
+        self._write_segment(global_pool, cold_dir / "segment_0000000000.blkseg", seq=999)
+        self._write_archive_segment(global_pool, tmp_path, archive_dir, seq=111)
 
-        archive_batch = make_batch(111)
-        scratch = tmp_path / "scratch_for_archive_only.blkseg"
-        write_cold_segment_file(scratch, archive_batch.bundle)
-        archive_batch.release()
-        from blinkview.core.cold_archive import compress_cold_segment_file
-
-        compress_cold_segment_file(scratch, archive_dir)  # -> segment_0000000000.blkseg.zst
-
-        remounted = CircularLogPool(
-            global_pool, max_pieces=1, cold_max_pieces=4, cold_storage_dir=str(cold_dir), final_buffer_bytes=1024
-        )
-        try:
-            assert len(remounted.cold_segments) == 1
-            seg = remounted.cold_segments[0]
-            assert int(seg.bundle.sequences[0]) == 999
-        finally:
-            remounted.release_all()
+        assert self._mounted_seqs(global_pool, cold_dir) == [999]

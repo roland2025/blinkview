@@ -76,7 +76,7 @@ def test_update_iso8601_timestamp_cache_fuzzing():
     start_sec = 1577836800
 
     # Check every hour for 10,000 hours (~1.14 years)
-    for hour in range(10, 000):
+    for hour in range(10_000):
         total_sec = start_sec + (hour * 3600)
 
         # Expected value from Python's standard library

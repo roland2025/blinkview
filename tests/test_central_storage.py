@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from blinkview.core import base_daemon
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.central_storage import BaseCentralStorage, CentralFactory, CentralStorage
 from blinkview.core.factory import BaseFactory
@@ -431,9 +432,13 @@ class TestIngestGate:
 
         storage.pause_ingest()
         storage.start()
+        # stop() drops its _thread reference whether or not the join succeeded, so is_running
+        # can't tell a clean exit from a stuck thread - keep our own handle.
+        thread = storage._thread
         try:
             time.sleep(0.1)  # let run() actually enter and park on the gate
         finally:
             storage.stop(timeout=2.0)  # would hang/timeout-fail if the gate weren't opened first
 
-        assert not storage.is_running
+        assert not thread.is_alive()
+        assert base_daemon.stuck_threads() == []
