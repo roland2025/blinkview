@@ -39,7 +39,6 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
     read_offset = f_state.in_offset[0]
     in_frame = f_state.in_frame[0]
     f_buf = nb_view(f_state.buffer)
-    f_ts_buf = nb_view(f_state.ts_buffer)
 
     in_size = in_b.size[0]
 
@@ -120,7 +119,7 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
                     if in_frame:
                         if curr_write + chunk_len <= frame_length_max:
                             src_view = in_b.buffer[in_off + read_offset : in_off + read_offset + chunk_len]
-                            nb_sync_push(f_buf, f_ts_buf, curr_write, src_view, ts_in, chunk_len)
+                            nb_sync_push(f_buf, curr_write, src_view, chunk_len)
 
                             curr_write += chunk_len
                             target_buf = f_buf
@@ -148,7 +147,7 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
                     if decoder_state == STATE_INCOMPLETE:
                         if is_zero_copy:
                             src_view = in_b.buffer[in_off + read_offset : in_off + scan_idx + 1]
-                            nb_sync_push(f_buf, f_ts_buf, 0, src_view, ts_in, chunk_len)
+                            nb_sync_push(f_buf, 0, src_view, chunk_len)
                             curr_write = chunk_len
 
                         read_offset = scan_idx + 1
@@ -208,9 +207,7 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
 
                     unconsumed = (target_end - target_start) - bytes_consumed
                     if unconsumed > 0:
-                        nb_sync_shift_leftovers(
-                            f_buf, f_ts_buf, target_buf, target_start + bytes_consumed, ts_in, is_zero_copy, unconsumed
-                        )
+                        nb_sync_shift_leftovers(f_buf, target_buf, target_start + bytes_consumed, unconsumed)
                         curr_write = unconsumed
                         in_frame = True
                     else:
@@ -227,7 +224,7 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
         if remaining > 0 and in_frame:
             if curr_write + remaining <= frame_length_max:
                 src_view = in_b.buffer[in_off + read_offset : in_off + in_len]
-                nb_sync_push(f_buf, f_ts_buf, curr_write, src_view, ts_in, remaining)
+                nb_sync_push(f_buf, curr_write, src_view, remaining)
                 curr_write += remaining
             else:
                 in_frame = False

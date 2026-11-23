@@ -8,6 +8,7 @@ import numpy as np
 
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.parsing import STATE_COMPLETE, STATE_INCOMPLETE
+from blinkview.ops.buffers import nb_copy_buf, nb_find_byte, nb_find_unprintable
 from blinkview.ops.constants import (
     CHAR_COLON,
     CHAR_CR,
@@ -93,13 +94,18 @@ def nb_decode_adb_long_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
     # --- 1. ORACLE BOUNDARY CHECK ---
     search_start = start + 2 if nb_is_adb_long_header_monotonic(f_buf, start, end) else start
 
+    # The decode loop hands over the whole pending frame on every line, so this runs once per line over the
+    # frame so far: jump from line feed to line feed (8 bytes per step) instead of testing every byte.
     second_header_idx = -1
-
-    for i in range(search_start, end):
-        if f_buf[i] == CHAR_LF:
-            if nb_is_adb_long_header_monotonic(f_buf, i + 1, end):
-                second_header_idx = i + 1  # Point exactly to the '[' of the next header
-                break
+    i = search_start
+    while True:
+        i = nb_find_byte(f_buf, i, end, CHAR_LF)
+        if i >= end:
+            break
+        if nb_is_adb_long_header_monotonic(f_buf, i + 1, end):
+            second_header_idx = i + 1  # Point exactly to the '[' of the next header
+            break
+        i += 1
 
     # search_start = start
     # if nb_is_adb_long_header_iso(f_buf, start, end):
@@ -137,12 +143,17 @@ def nb_decode_adb_long_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
     cursor = out_cursor
     buf_cap = out_buf.shape[0]
 
-    # --- 3. Find the closing bracket ' ]' ---
+    # --- 3. Find the closing bracket ' ]': the first ']' after a space ---
     header_end = -1
-    for i in range(true_start, true_end - 1):
-        if f_buf[i] == CHAR_SPACE and f_buf[i + 1] == CHAR_RBRACKET:
-            header_end = i + 1
+    j = true_start + 1
+    while True:
+        j = nb_find_byte(f_buf, j, true_end, CHAR_RBRACKET)
+        if j >= true_end:
             break
+        if f_buf[j - 1] == CHAR_SPACE:
+            header_end = j
+            break
+        j += 1
 
     # --- 4. Copy Header ---
     if header_end != -1:
@@ -151,10 +162,10 @@ def nb_decode_adb_long_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
                 out_buf[cursor] = CHAR_LBRACKET
                 cursor += 1
 
-        for i in range(true_start, header_end + 1):
-            if cursor < buf_cap:
-                out_buf[cursor] = f_buf[i]
-                cursor += 1
+        header_len = min(header_end + 1 - true_start, buf_cap - cursor)
+        if header_len > 0:
+            nb_copy_buf(f_buf, true_start, out_buf, cursor, header_len)
+            cursor += header_len
         msg_ptr = header_end + 1
     else:
         msg_ptr = true_start
@@ -174,11 +185,24 @@ def nb_decode_adb_long_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
     f_print = f_cfg.filter_printable
     ansi_state = 0
 
-    for i in range(msg_ptr, true_end):
+    i = msg_ptr
+    while i < true_end:
         if cursor >= buf_cap:
             break
 
+        if ansi_state == 0:
+            # Outside an escape sequence every printable byte is copied as is, whatever the filters: copy a
+            # run of them at once. The bytewise path below handles the rest.
+            run_end = nb_find_unprintable(f_buf, i, true_end)
+            if run_end > i:
+                run_len = min(run_end - i, buf_cap - cursor)
+                nb_copy_buf(f_buf, i, out_buf, cursor, run_len)
+                cursor += run_len
+                i += run_len
+                continue
+
         val = f_buf[i]
+        i += 1
 
         if f_ansi:
             if ansi_state == 0:

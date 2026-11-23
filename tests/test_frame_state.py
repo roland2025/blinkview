@@ -26,11 +26,10 @@ def test_bundle_arrays_start_zeroed(pool):
     state.release()
 
 
-def test_buffer_and_ts_buffer_are_at_least_the_requested_size(pool):
+def test_buffer_is_at_least_the_requested_size(pool):
     state = FrameState(pool, size_bytes=64)
 
     assert state.bundle.buffer.nbytes >= 64
-    assert state.bundle.ts_buffer.shape[0] >= 64
 
     state.release()
 
@@ -78,7 +77,6 @@ def test_release_clears_bundle_and_frees_handles(pool):
 
     assert state.bundle is None
     assert state._pool_handle is None
-    assert state._ts_handle is None
 
 
 def test_clear_stitch_state_after_release_is_a_noop():

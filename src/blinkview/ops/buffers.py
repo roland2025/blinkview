@@ -8,9 +8,6 @@ import numpy as np
 
 from blinkview.core.numba_config import NUMBA_DISABLE, app_njit
 
-# Below this size nb_fill_buf loops instead of slice-assigning
-COPY_THRESHOLD = 256
-
 # Constants for the word-at-a-time (SWAR) byte search
 _ONES = np.uint64(0x0101010101010101)
 _HIGH = np.uint64(0x8080808080808080)
@@ -31,6 +28,13 @@ if NUMBA_DISABLE:
         """Index of the first `value` byte in buf[start:end], or `end` if there is none."""
         i = start
         while i < end and buf[i] != value:
+            i += 1
+        return i
+
+    def nb_find_unprintable(buf, start, end):
+        """Index of the first byte in buf[start:end] outside printable ASCII (0x20..0x7E), or `end`."""
+        i = start
+        while i < end and 32 <= buf[i] <= 126:
             i += 1
         return i
 
@@ -118,6 +122,25 @@ else:
             i += 1
         return i
 
+    @app_njit(inline="always")
+    def nb_find_unprintable(buf, start, end):
+        """Index of the first byte in buf[start:end] outside printable ASCII (0x20..0x7E), or `end`.
+
+        Scans 8 bytes per step, then finishes bytewise. Per byte lane of the word w, (w - 0x20) sets the high
+        bit for a byte below 0x20, (w + 0x01) for 0x7F, and w itself for 0x80 and up. A borrow or carry into
+        the next lane only happens next to such a byte, so a clean word never stops the scan."""
+        i = start
+        low = np.uint64(0x20) * _ONES
+        base = np.int64(buf.ctypes.data)
+        while i + 8 <= end:
+            w = _nb_load_u64(base + i)
+            if ((w - low) | (w + _ONES) | w) & _HIGH != np.uint64(0):
+                break
+            i += 8
+        while i < end and 32 <= buf[i] <= 126:
+            i += 1
+        return i
+
 
 @app_njit(inline="always")
 def nb_copy_buf(src, src_off, dst, dst_off, length):
@@ -127,37 +150,17 @@ def nb_copy_buf(src, src_off, dst, dst_off, length):
 
 
 @app_njit(inline="always")
-def nb_fill_buf(dst, dst_off, length, value):
-    """Hybrid fill: Loop for small, Slicing for large."""
-    if length < COPY_THRESHOLD:
-        for i in range(length):
-            dst[dst_off + i] = value
-    else:
-        dst[dst_off : dst_off + length] = value
-
-
-@app_njit(inline="always")
-def nb_sync_push(f_buf, f_ts_buf, write_pos, src_bytes, src_ts, length):
-    """Atomic push to both byte and timestamp buffers."""
+def nb_sync_push(f_buf, write_pos, src_bytes, length):
+    """Appends `length` bytes of src_bytes to the pending frame in f_buf at write_pos."""
     nb_copy_buf(src_bytes, 0, f_buf, write_pos, length)
-    nb_fill_buf(f_ts_buf, write_pos, length, src_ts)
 
 
 @app_njit(inline="always")
-def nb_sync_shift_leftovers(f_buf, f_ts_buf, target_buf, target_off, ts_in, is_zero_copy, length):
-    """Shifts data to start of buffers while preserving/broadcasting timestamps."""
-    if is_zero_copy:
-        # FAST PATH (No Overlap): target_buf is in_b.buffer, f_buf is f_state.buffer
-        # It is perfectly safe to let LLVM use memcpy here.
-        nb_copy_buf(target_buf, target_off, f_buf, 0, length)
-        nb_fill_buf(f_ts_buf, 0, length, ts_in)
-    else:
-        # BUFFER PATH (Overlap!): target_buf IS f_buf.
-        # DO NOT use slice assignment/memcpy. We must use a safe forward loop
-        # to prevent memory corruption during the self-shift.
-        for i in range(length):
-            f_buf[i] = f_buf[target_off + i]
-            f_ts_buf[i] = f_ts_buf[target_off + i]
+def nb_sync_shift_leftovers(f_buf, target_buf, target_off, length):
+    """Moves the unconsumed tail of a frame, target_buf[target_off:target_off + length], to the start of f_buf.
+    target_buf is either the input buffer or f_buf itself; nb_copy_buf is a memmove, so the overlap of the
+    latter is fine."""
+    nb_copy_buf(target_buf, target_off, f_buf, 0, length)
 
 
 @app_njit(inline="always")
