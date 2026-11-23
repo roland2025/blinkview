@@ -322,15 +322,17 @@ class TestOutputBatchFill:
         """The decoder reports "full" after MAX_FRAMES_PER_CALL frames even when the output batch
         has room; the parser used to hand that batch on, so every batch ended at ~8 K rows whatever
         its capacity (measured: ~7 K rows in 16 MB batches, which made the reorder queue's byte
-        bound trip at a third of its row bound). With room for 65536 rows, 20000 lines must come
-        out as one batch, not 8192 + 8192 + 3616."""
+        bound trip at a third of its row bound). With room for 4 x MAX_FRAMES_PER_CALL rows,
+        2.5 x MAX_FRAMES_PER_CALL lines must come out as one batch, not as three."""
         import blinkview.parsers.frame_pipeline_parser as fpp
+
+        line_count = 2 * MAX_FRAMES_PER_CALL + MAX_FRAMES_PER_CALL // 2
 
         class RoomyTuner(fpp.ThroughputAutoTuner):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
-                self.estimated_capacity = 65536
-                self.estimated_buffer_bytes = 1024 * 1024
+                self.estimated_capacity = 4 * MAX_FRAMES_PER_CALL
+                self.estimated_buffer_bytes = 4 * MAX_FRAMES_PER_CALL * 16
 
         monkeypatch.setattr(fpp, "ThroughputAutoTuner", RoomyTuner)
 
@@ -345,8 +347,6 @@ class TestOutputBatchFill:
 
         parser.subscribe(BatchSizes())
 
-        line_count = 20_000
-        assert line_count > 2 * MAX_FRAMES_PER_CALL
         batch = parser.shared.array_pool.create(PooledLogBatch, line_count, line_count * 20)
         for i in range(line_count):
             batch.insert(1000, 1000, b"line %08d\n" % i)

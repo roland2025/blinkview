@@ -9,9 +9,11 @@ import numpy as np
 from blinkview.core import dtypes
 from blinkview.core.types.frames import FrameStateParams
 
-
-# Upper bound on output rows one kernel call may reserve (bounds the per-frame scratch arrays)
-MAX_FRAMES_PER_CALL = 8192
+# Upper bound on output rows one kernel call may reserve (bounds the per-frame scratch arrays, 33 bytes per
+# frame). Every decoder call pays ~70 us of argument unboxing and Python with the GIL held: at 8192 that was ~5%
+# of a short-line parser's time (10% throughput at 4 parser threads), at 32768 ~1%. Bigger gains nothing more:
+# one call is then bounded by the input batch rather than by this.
+MAX_FRAMES_PER_CALL = 32768
 
 
 class FrameState:
