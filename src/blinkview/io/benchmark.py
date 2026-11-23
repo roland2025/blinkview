@@ -11,7 +11,15 @@ from blinkview.core.configurable import configuration_property
 from blinkview.core.constants import SysCat
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
+from blinkview.io.benchmark_templates import TEMPLATES, build_cache
 from blinkview.ops.benchmark import nb_blast_benchmark_cache
+
+
+def warm_up_blast(pool_create, now_ns, c_buf, c_offs, c_lens) -> int:
+    """Compiles the blast kernel by writing the cache's first chunk into a batch that just fits it (a template's
+    chunks are ~3 KB, more than a minimal batch holds). Returns the bytes written."""
+    with pool_create(PooledLogBatch, 1, int(c_lens[0])) as dummy_batch:
+        return nb_blast_benchmark_cache(dummy_batch.bundle, now_ns, 1, c_buf, c_offs, c_lens, len(c_lens))
 
 
 @DeviceFactory.register("benchmark")
@@ -30,6 +38,19 @@ from blinkview.ops.benchmark import nb_blast_benchmark_cache
     default=0,
     description="Maximum messages to generate per second (0 means unlimited)",
 )
+@configuration_property(
+    "template",
+    type="string",
+    default="random",
+    enum=list(TEMPLATES),
+    description="What the generated lines look like. 'random': short 'Random: N' lines (any pipeline). "
+    "'zephyr_deferred': Zephyr deferred log lines (~67 B), for a serial_zephyr_deferred pipeline. "
+    "'adb_long': 'adb logcat -v long' frames (~138 B), for a pipeline with the decode_adb_long_frame decoder "
+    "and the adb_long_frame steps. The text is synthetic; lengths follow real logs. A pipeline that parses the "
+    "device timestamp tops out at ~1 M lines/s: the time projection keeps timestamps at least 1 us apart, so "
+    "faster rows run ahead of the clock and the reorder holds them. Drop the timestamp step to load the parser "
+    "harder.",
+)
 @configuration_property("sources_", type="string", required=True, _reference="/targets", default="")
 @configuration_property(
     "targets_",  # Consider renaming this to "source" (singular) if your backend allows it
@@ -44,6 +65,7 @@ class Benchmark(BaseReader):
     batch_size: int
     max_backlog: int
     max_msg_per_sec: int  # <-- New property
+    template: str
 
     __doc__ = """A synthetic log generator that produces random messages at a configurable rate.\nUseful for benchmarking and testing the system's throughput and backpressure handling."""
 
@@ -87,19 +109,8 @@ class Benchmark(BaseReader):
             effective_max_backlog = self.max_backlog or (self.batch_size * 20)
 
             # --- [PRE-COMPILED CACHE SETUP] ---
-            rows_per_bytes = 50
-            cache_base = [b"Random: %d\n" % i for i in range(1000)]
-            grouped_cache = [
-                b"".join(cache_base[i : i + rows_per_bytes]) for i in range(0, len(cache_base), rows_per_bytes)
-            ]
-            flat_bytes = b"".join(grouped_cache)
-            c_buf = np.frombuffer(flat_bytes, dtype=np.uint8)
-            c_lens = np.array([len(c) for c in grouped_cache], dtype=np.uint32)
-            c_offs = np.zeros(len(c_lens), dtype=np.uint32)
-            current_offset = 0
-            for i in range(len(c_lens)):
-                c_offs[i] = current_offset
-                current_offset += c_lens[i]
+            # Chunks of whole frames; one chunk counts as rows_per_bytes messages in the backlog
+            c_buf, c_offs, c_lens, rows_per_bytes = build_cache(getattr(self, "template", None) or "random")
             c_items = len(c_lens)
             # Bytes of the first k cache entries, so a tick's size is two lookups, not a Python loop
             # over its chunks (that loop held the GIL for ~1 M iterations/s across 4 sources).
@@ -112,9 +123,7 @@ class Benchmark(BaseReader):
             if self.numba_needs_compile:
                 try:
                     logger.info("Warming up benchmark JIT kernels...")
-                    # Create a tiny dummy batch (1 chunk, 1KB buffer)
-                    with pool_create(PooledLogBatch, 1, 1) as dummy_batch:
-                        _ = nb_blast_benchmark_cache(dummy_batch.bundle, time_ns(), 1, c_buf, c_offs, c_lens, c_items)
+                    warm_up_blast(pool_create, time_ns(), c_buf, c_offs, c_lens)
                     logger.info("Benchmark kernels warmed up.")
                 except Exception as e:
                     logger.exception("Failed to warm up benchmark kernels", exc=e)
