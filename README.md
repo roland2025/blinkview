@@ -243,7 +243,7 @@ blink -p rtt --params right
 
 ## Architecture & Performance
 
-BlinkView is designed for high throughput and low overhead. In synthetic benchmarks the pipeline handles about **5 million messages per second per thread** (roughly 300 MB/s of raw input), and the message reordering thread tops out at **12 million messages per second** on the same system. A typical real-world load of 10,000 messages per second barely registers in CPU usage. Ingestion is multi-threaded: each data source runs in its own thread, so a slow or bursty source never blocks the others.
+BlinkView is designed for high throughput and low overhead. In synthetic benchmarks the pipeline handles about **5 million messages per second per thread** (roughly 300 MB/s of raw input), and the thread that merges all sources into timestamp order handles over **40 million messages per second**, even when the sources interleave message by message. A typical real-world load of 10,000 messages per second barely registers in CPU usage. Ingestion is multi-threaded: each data source runs in its own thread, so a slow or bursty source never blocks the others.
 
 <sub>Benchmarks measured on an AMD Ryzen 9 5950X.</sub>
 
