@@ -253,74 +253,18 @@ BlinkView is designed for high throughput and low overhead. In synthetic benchma
 *   **Pooled, Struct-of-Arrays Storage:** Log rows are held as pooled NumPy arrays (not per-message Python objects), with an optional memory-mapped disk tier for older segments—the same filter/search kernels run unmodified whether a segment is in RAM or on disk.
 
 ```mermaid
-graph TD
-    %% Source Nodes
-    StreamSource[Stream Sources <br/> <i>UART / RTT / Socket</i>]
-    CAN[CAN Source]
-    ADB[ADB Source]
-
-    %% Pipeline Subgraphs
-    subgraph Stream_Pipe [Stream Pipeline]
-        Stream_Raw[Raw File Writer]
-        Stream_P[Parser]
-        Stream_KV[KV Extractor]
-    end
-
-    subgraph CAN_Pipe [CAN Pipeline]
-        CAN_Raw[Raw File Writer]
-        CAN_P[Parser]
-        CAN_KV[KV Extractor]
-    end
-
-    subgraph ADB_Pipe [ADB Pipeline]
-        ADB_Raw[Raw File Writer]
-        ADB_P[Parser]
-        ADB_KV[KV Extractor]
-    end
-
-    %% Reorder Logic
-    Reorder{Reorder Layer <br/> <i>Time-Delayed Buffer</i>}
-    
-    %% Central Hub
-    Storage((Central Storage <br/> <i>Thread-Safe Data Store</i>))
-
-    %% Flow: Sources to Reorder
-    StreamSource --> Stream_Raw
-    StreamSource --> Stream_P
-    Stream_P --> Stream_KV
-    Stream_P & Stream_KV --> Reorder
-
-    CAN --> CAN_Raw
-    CAN --> CAN_P
-    CAN_P --> CAN_KV
-    CAN_P & CAN_KV --> Reorder
-
-    ADB --> ADB_Raw
-    ADB --> ADB_P
-    ADB_P --> ADB_KV
-    ADB_P & ADB_KV --> Reorder
-
-    %% Flow: Reorder to Storage
-    Reorder -- Ordered Stream --> Storage
-
-    %% Output Nodes (Consumers)
-    UWriter[Unified File Writer]
-    LogView[Text Log Viewer]
-    WatchCmd[Watch / Command List]
-    Plotter[Plotter]
-
-    %% Data Flow: Storage to Consumers
-    Storage -- Push Stream --> UWriter
-    Storage -.->|Poll 10Hz| LogView
-    Storage -.->|Poll 10Hz| WatchCmd
-    Storage -.->|Poll Variable| Plotter
-
-    %% B&W Styling
-    classDef bw fill:#fff,stroke:#000,stroke-width:2px,color:#000
-    class StreamSource,CAN,ADB,Stream_P,CAN_P,ADB_P,Stream_KV,CAN_KV,ADB_KV,Stream_Raw,CAN_Raw,ADB_Raw,Reorder,Storage,LogView,WatchCmd,Plotter,UWriter bw
-    style Stream_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
-    style CAN_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
-    style ADB_Pipe fill:none,stroke:#000,stroke-dasharray: 5 5
+flowchart TD
+  S1["Serial / UART"] -- bytes --> P1["Parser"]
+  S2["J-Link RTT"] -- bytes --> P2["Parser"]
+  S3["ADB · CAN · TCP · UDP · file"] -- bytes --> P3["Parser"]
+  P1 & P2 & P3 -- "log rows" --> RO["Reorder<br/>merges all devices by timestamp"]
+  RO -- "time-ordered rows" --> CS[("Central storage<br/>recent logs in RAM,<br/>older logs memory-mapped on disk")]
+  CS --> V["Log & table viewers"]
+  CS --> T["Plotter · Watch window"]
+  CS --> PB["Playback<br/>live / replay"]
+  CS --> AG["Agent API (MCP)"]
+  CS -. "unified log" .-> SES[("Session folder")]
+  SES -. "open a past session<br/>(skips reorder)" .-> CS
 ```
 
 ---
