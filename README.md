@@ -243,7 +243,7 @@ blink -p rtt --params right
 
 ## Architecture & Performance
 
-BlinkView is designed for high throughput and low overhead. In synthetic benchmarks the pipeline handles about **5 million messages per second per thread** (roughly 300 MB/s of raw input), and the thread that merges all sources into timestamp order handles over **40 million messages per second**, even when the sources interleave message by message. A typical real-world load of 10,000 messages per second barely registers in CPU usage. Ingestion is multi-threaded: each data source runs in its own thread, so a slow or bursty source never blocks the others.
+BlinkView is designed for high throughput and low overhead. In synthetic benchmarks a parser thread handles about **8 million messages per second** of Zephyr-style text logs (roughly 550 MB/s of raw input), or **3.3 million** of Android logcat's binary format (about 460 MB/s). Parsers scale across threads: four handle 29 M and 12 M messages per second (2.0 and 1.7 GB/s). The thread that merges all sources into timestamp order handles over **40 million messages per second**, even when the sources interleave message by message. With four sources, the whole app reaches **27 M messages per second** of Zephyr logs and **11.6 M** of logcat, with every parsing step on, timestamps included. With short synthetic lines that skip parsing, it reaches **57 M**. A typical real-world load of 10,000 messages per second barely registers in CPU usage. Ingestion is multi-threaded: each data source runs in its own thread, so a slow or bursty source never blocks the others.
 
 <sub>Benchmarks measured on an AMD Ryzen 9 5950X.</sub>
 
