@@ -131,14 +131,40 @@ class NumpyArrayPool:
         #     mb_size = slab_size / (1024 * 1024)
         #     print(f"[POOL] 🚨 DELET  mb={mb_size:.4f} bytes={slab_size} dtype={dtype}")
 
-    def cleanup(self, max_age_seconds):
-        """Evicts arrays that have been idle for too long."""
+    def cleanup(self, max_age_seconds, max_bytes=None):
+        """Evicts arrays idle for max_age_seconds or longer, oldest first, and returns (arrays, bytes) evicted.
+
+        Freeing a large slab holds the GIL (about 50 ms per GB on Windows), so one call evicts at most
+        max_bytes (and always at least one slab); run it often and an idle gigabyte drains over a few seconds
+        instead of in one long stall. max_bytes=None evicts everything that has expired.
+
+        _put appends with a timestamp taken under the lock and acquire pops from the end, so every bucket is
+        sorted by return time and its expired entries are a prefix. Only that prefix is cut under the lock;
+        the arrays are freed after it is released, one at a time with a GIL hand-off in between."""
         now = time.monotonic()
+        evicted = []
+        n_bytes = 0
         with self.lock:
-            for key in list(self.buckets.keys()):
-                bucket = self.buckets[key]
-                # Filter bucket: keep only arrays returned within the time window
-                self.buckets[key] = [(ts, arr) for ts, arr in bucket if (now - ts) < max_age_seconds]
+            for bucket in self.buckets.values():
+                n = 0
+                for ts, arr in bucket:
+                    if now - ts < max_age_seconds:
+                        break
+                    if max_bytes is not None and n_bytes and n_bytes + arr.nbytes > max_bytes:
+                        break
+                    n_bytes += arr.nbytes
+                    n += 1
+                if n:
+                    evicted.extend(arr for _, arr in bucket[:n])
+                    del bucket[:n]
+            arr = None
+
+        count = len(evicted)
+        while evicted:
+            evicted.pop()  # drops the last reference: the slab is freed here
+            if evicted:
+                time.sleep(0)
+        return count, n_bytes
 
     def get(self, element_count, dtype=dtypes.BYTE):
         """Sugar for context manager usage."""

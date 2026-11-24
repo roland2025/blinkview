@@ -216,3 +216,118 @@ class TestCleanup:
 
         bucket_key = (64, np.dtype(dtypes.BYTE))
         assert len(pool.buckets[bucket_key]) == 1
+
+    @staticmethod
+    def _fill(pool, current_time, entries):
+        """Returns one slab per (time, bytes) entry to the pool, in order."""
+        handles = [(t, pool.acquire(n, dtype=dtypes.BYTE)) for t, n in entries]
+        for t, h in handles:
+            current_time[0] = t
+            h.release()
+
+    def test_cleanup_cuts_only_the_expired_prefix_and_reports_it(self, monkeypatch):
+        pool = NumpyArrayPool(min_bytes=64, max_bytes=1024)
+        current_time = [0.0]
+        monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+        self._fill(pool, current_time, [(1000.0, 64), (1010.0, 64), (1090.0, 64)])
+
+        current_time[0] = 1110.0
+        assert pool.cleanup(max_age_seconds=100) == (2, 128)
+
+        key = (64, np.dtype(dtypes.BYTE))
+        assert [ts for ts, _ in pool.buckets[key]] == [1090.0]
+
+    def test_cleanup_stops_at_max_bytes_and_finishes_on_later_calls(self, monkeypatch):
+        pool = NumpyArrayPool(min_bytes=64, max_bytes=1024)
+        current_time = [0.0]
+        monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+        self._fill(pool, current_time, [(1000.0 + i, 256) for i in range(5)])
+
+        current_time[0] = 2000.0
+        assert pool.cleanup(max_age_seconds=100, max_bytes=600) == (2, 512)
+        key = (256, np.dtype(dtypes.BYTE))
+        assert [ts for ts, _ in pool.buckets[key]] == [1002.0, 1003.0, 1004.0]  # oldest went first
+        assert pool.cleanup(max_age_seconds=100, max_bytes=600) == (2, 512)
+        assert pool.cleanup(max_age_seconds=100, max_bytes=600) == (1, 256)
+        assert pool.buckets[key] == []
+        assert pool.cleanup(max_age_seconds=100, max_bytes=600) == (0, 0)
+
+    def test_cleanup_evicts_one_slab_even_when_it_is_larger_than_max_bytes(self, monkeypatch):
+        pool = NumpyArrayPool(min_bytes=64, max_bytes=1024)
+        current_time = [0.0]
+        monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+        self._fill(pool, current_time, [(1000.0, 1024), (1001.0, 1024)])
+
+        current_time[0] = 2000.0
+        assert pool.cleanup(max_age_seconds=100, max_bytes=100) == (1, 1024)
+        assert pool.cleanup(max_age_seconds=100, max_bytes=100) == (1, 1024)
+
+    def test_cleanup_budget_is_shared_across_buckets(self, monkeypatch):
+        pool = NumpyArrayPool(min_bytes=64, max_bytes=1024)
+        current_time = [0.0]
+        monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+        self._fill(pool, current_time, [(1000.0, 512), (1000.0, 512), (1000.0, 64), (1000.0, 64)])
+
+        current_time[0] = 2000.0
+        assert pool.cleanup(max_age_seconds=100, max_bytes=1024 + 64) == (3, 1088)
+        assert sum(len(b) for b in pool.buckets.values()) == 1
+
+    def test_cleanup_frees_the_arrays_after_releasing_the_lock(self, monkeypatch):
+        import weakref
+
+        pool = NumpyArrayPool(min_bytes=64, max_bytes=1024)
+        current_time = [1000.0]
+        monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+        handles = [pool.acquire(64, dtype=dtypes.BYTE) for _ in range(3)]
+        refs = [weakref.ref(h.array) for h in handles]
+        for h in handles:
+            h.release()
+
+        lock_held_at_free = []
+        real_sleep = time.sleep
+
+        def sleep(s):
+            lock_held_at_free.append(pool.lock.locked())
+            real_sleep(s)
+
+        monkeypatch.setattr(time, "sleep", sleep)
+        current_time[0] = 2000.0
+        pool.cleanup(max_age_seconds=100)
+
+        assert all(r() is None for r in refs)
+        assert lock_held_at_free == [False, False]  # one hand-off between each pair of frees
+
+    def test_buckets_stay_sorted_by_return_time_under_concurrent_use(self):
+        """cleanup's prefix cut relies on this: _put stamps under the lock, acquire pops the newest."""
+        import random
+        import threading
+
+        pool = NumpyArrayPool(min_bytes=64, max_bytes=1024)
+        errors = []
+
+        def worker(seed):
+            rng = random.Random(seed)
+            held = []
+            try:
+                for _ in range(3000):
+                    if held and rng.random() < 0.5:
+                        held.pop(rng.randrange(len(held))).release()
+                    else:
+                        held.append(pool.acquire(rng.choice((64, 128)), dtype=dtypes.BYTE))
+                    if rng.random() < 0.05:
+                        pool.cleanup(max_age_seconds=0.001, max_bytes=256)
+                for h in held:
+                    h.release()
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        for bucket in pool.buckets.values():
+            stamps = [ts for ts, _ in bucket]
+            assert stamps == sorted(stamps)

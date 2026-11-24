@@ -953,7 +953,9 @@ class Registry:
         flush_interval = self.reorder.delay / 2 / 1000 if self.reorder is not None and self.reorder.enabled else 0.1
         tasks.run_periodic(flush_interval, self.flush_log_queue)
 
-        tasks.run_periodic(60, self.system_ctx.array_pool.cleanup, max_age_seconds=55.0)
+        # Often and capped: each run frees at most 32 MB (or one slab), so a burst's idle slabs are freed over
+        # a few seconds instead of in one GIL stall.
+        tasks.run_periodic(0.25, self.system_ctx.array_pool.cleanup, max_age_seconds=55.0, max_bytes=32 * 1024 * 1024)
 
         if self.module_value_tracker is None:
             self.module_value_tracker = LatestModuleValueTracker(
