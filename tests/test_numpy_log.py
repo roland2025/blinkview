@@ -130,6 +130,101 @@ class TestSegmentRotationAndEviction:
         finally:
             log_pool.release_all()
 
+    @staticmethod
+    def _tiny_log_pool(array_pool, max_pieces):
+        log_pool = CircularLogPool(array_pool, max_pieces=max_pieces)
+        log_pool.segment_capacity = 4
+        log_pool._optimized = True
+        log_pool.clear()
+        return log_pool
+
+    @staticmethod
+    def _record_releases(monkeypatch, log_pool, segments):
+        """Records, for every release() of one of `segments`, whether log_pool's lock was held."""
+        watched = {id(s) for s in segments}
+        calls = []
+        real_release = PooledLogBatch.release
+
+        def release(self):
+            if id(self) in watched:
+                calls.append(log_pool._lock.locked())
+            return real_release(self)
+
+        monkeypatch.setattr(PooledLogBatch, "release", release)
+        return calls
+
+    def test_batch_append_releases_evicted_segments_after_the_lock(self, monkeypatch):
+        """Freeing an evicted segment's buffer is slow (~10 ms per 128 MB); under the lock it blocked every reader."""
+        tiny_pool = NumpyArrayPool(min_bytes=32, max_bytes=1024 * 1024)
+        log_pool = self._tiny_log_pool(tiny_pool, max_pieces=2)
+        try:
+            first = list(log_pool.segments)
+            batch = make_source_batch(tiny_pool, [f"m{i}".encode() for i in range(4 * 5)])
+            calls = self._record_releases(monkeypatch, log_pool, first)
+            log_pool.batch_append(batch)
+            batch.release()
+
+            assert calls == [False]  # the first segment was evicted, released once, with the lock free
+            assert log_pool._evicted_hot == []
+            assert log_pool.first_retained_sequence() == 13  # still evicted: rows 1-12 are gone
+        finally:
+            log_pool.release_all()
+
+    def test_update_max_pieces_releases_trimmed_segments_after_the_lock(self, monkeypatch):
+        tiny_pool = NumpyArrayPool(min_bytes=32, max_bytes=1024 * 1024)
+        log_pool = self._tiny_log_pool(tiny_pool, max_pieces=5)
+        try:
+            batch = make_source_batch(tiny_pool, [f"m{i}".encode() for i in range(4 * 4)])
+            log_pool.batch_append(batch)
+            batch.release()
+            assert len(log_pool.segments) == 4  # 16 rows fill 4 segments exactly; no 5th is opened yet
+            oldest = list(log_pool.segments)[:2]
+            calls = self._record_releases(monkeypatch, log_pool, oldest)
+
+            log_pool.update_max_pieces(2)
+
+            assert calls == [False, False]
+            assert len(log_pool.segments) == 2
+        finally:
+            log_pool.release_all()
+
+    def test_pooled_segment_buffers_are_reused_across_rotations(self, monkeypatch):
+        """Once the array pool keeps slabs as big as a segment's buffer (CentralStorage calls
+        allow_slab_bytes), rotating at a steady rate stops allocating buffers: each new segment
+        takes the one an earlier eviction returned."""
+        import numpy as np
+
+        tiny_pool = NumpyArrayPool(min_bytes=32, max_bytes=512 * 1024)  # smaller than the 1 MB segment buffer
+        log_pool = self._tiny_log_pool(tiny_pool, max_pieces=2)
+        buffer_bytes = log_pool.current_buffer_bytes
+        allocs = []
+        real_empty = np.empty
+
+        def empty(n, dtype=float, *a, **k):
+            if n * np.dtype(dtype).itemsize == buffer_bytes:
+                allocs.append(n)
+            return real_empty(n, dtype, *a, **k)
+
+        monkeypatch.setattr(np, "empty", empty)
+
+        def rotate_n(n):
+            allocs.clear()
+            for _ in range(n):
+                batch = make_source_batch(tiny_pool, [b"x"] * 4)
+                log_pool.batch_append(batch)
+                batch.release()
+            return len(allocs)
+
+        try:
+            # not pooled: every rotation allocates a fresh buffer (the first batch fits the open segment)
+            assert rotate_n(10) == 9
+            assert rotate_n(10) == 10
+            tiny_pool.allow_slab_bytes(buffer_bytes)
+            rotate_n(3)  # the pool fills up with evicted buffers
+            assert rotate_n(10) == 0
+        finally:
+            log_pool.release_all()
+
     def test_update_max_pieces_trims_immediately(self, global_pool):
         tiny_pool = NumpyArrayPool(min_bytes=32, max_bytes=1024 * 1024)
         log_pool = CircularLogPool(tiny_pool, max_pieces=5)

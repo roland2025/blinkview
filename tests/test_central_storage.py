@@ -116,6 +116,16 @@ class TestApplyConfig:
         assert storage.log_pool is pool
         assert storage.log_pool.max_pieces == storage.max_pieces
 
+    def test_array_pool_keeps_slabs_as_big_as_a_segment_buffer(self):
+        """Otherwise every evicted segment's message buffer is freed (~10 ms of GIL per 128 MB) and the
+        next segment allocates a new one."""
+        storage = make_storage(buffer_size_mb=3)
+        array_pool = storage.shared.array_pool
+        assert array_pool.max_bytes == 4 * 1024 * 1024  # the power-of-two slab a 3 MB buffer is acquired in
+
+        storage.apply_config({"buffer_size_mb": 10})
+        assert array_pool.max_bytes == 16 * 1024 * 1024
+
     def test_cold_storage_enabled_by_default(self):
         storage = make_storage()
         try:

@@ -75,6 +75,10 @@ class NumpyArrayPool:
         # Round up to next power of 2
         return 1 << (size_in_bytes - 1).bit_length()
 
+    def allow_slab_bytes(self, size_in_bytes):
+        """Raises max_bytes (never lowers it) so arrays of size_in_bytes are pooled instead of freed on release."""
+        self.max_bytes = max(self.max_bytes, self._calc_slab_size(size_in_bytes))
+
     def acquire(self, element_count, dtype=dtypes.BYTE):
         """
         Acquires an array capable of holding at least `element_count` items.

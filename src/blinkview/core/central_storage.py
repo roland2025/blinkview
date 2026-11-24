@@ -252,6 +252,9 @@ class CentralStorage(BaseCentralStorage):
         changed = super().apply_config(config)
         if self.log_pool is None:
             buffer_bytes = self.buffer_size_mb * 1024 * 1024
+            # Pool the segments' message buffers: an evicted segment's buffer then goes straight to
+            # the next segment instead of being freed (~10 ms of GIL per 128 MB) and allocated again.
+            self.shared.array_pool.allow_slab_bytes(buffer_bytes)
 
             cold_max_pieces = self.cold_max_pieces if self.cold_storage_enabled else 0
             cold_storage_dir = self._resolve_cold_storage_dir() if cold_max_pieces > 0 else None
@@ -272,6 +275,7 @@ class CentralStorage(BaseCentralStorage):
             self.log_pool.update_max_pieces(self.max_pieces)
 
             new_bytes = self.buffer_size_mb * 1024 * 1024
+            self.shared.array_pool.allow_slab_bytes(new_bytes)
             self.log_pool.update_final_buffer_bytes(new_bytes)
 
             # Cold storage's enabled/dir can only take effect on (re)creation - see

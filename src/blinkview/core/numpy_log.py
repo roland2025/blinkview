@@ -124,6 +124,8 @@ class CircularLogPool:
         # eviction rather than given up on - the retaining reader eventually releases, at which
         # point the file becomes deletable, but nothing else would ever come back for it.
         self._pending_cold_deletions: list[str] = []
+        # Hot segments dropped under self._lock, released by the caller after it (see _evict_hot_segment)
+        self._evicted_hot: list[PooledLogBatch] = []
 
         # True if any pre-existing cold segment files were found and remounted below (from a
         # previous run with cold_storage_persist_on_close enabled) - callers that would otherwise
@@ -281,11 +283,23 @@ class CircularLogPool:
         it outright - the pre-existing, cold-storage-off behavior, also applied to frozen
         segments so they're dropped rather than archived. Shared by _rotate_segment's normal path
         and update_max_pieces' immediate-shrink path so both go through the same archive-or-drop
-        decision."""
+        decision.
+
+        Called with self._lock held. A dropped segment is only queued here: the caller takes the
+        queue with _take_evicted() before leaving the lock and releases it afterwards. A release
+        that frees its message buffer holds the GIL for ~10 ms per 128 MB, and under the lock it
+        also blocked every reader of this pool (the GUI's get_time_bounds) for that long."""
         if self._archiver is not None and self._should_archive_to_cold(hot_segment):
             self._archiver.archive(hot_segment)
         else:
-            hot_segment.release()
+            self._evicted_hot.append(hot_segment)
+
+    def _take_evicted(self) -> list:
+        """The hot segments _evict_hot_segment dropped, for the caller to release outside self._lock."""
+        evicted = self._evicted_hot
+        if evicted:
+            self._evicted_hot = []
+        return evicted
 
     def _evict_cold_segment(self, cold_segment: PooledLogBatch):
         meta = cold_segment.metadata
@@ -547,6 +561,10 @@ class CircularLogPool:
             while self.cold_segments:
                 self.cold_segments.popleft().release()
             self.active_segment = None
+            evicted = self._take_evicted()  # only non-empty if a batch_append raised before releasing them
+
+        for segment in evicted:
+            segment.release()
 
         if self._archiver is not None:
             self._archiver.cleanup()
@@ -672,6 +690,11 @@ class CircularLogPool:
                     else:
                         self._rotate_segment()
 
+            evicted = self._take_evicted()
+
+        for segment in evicted:
+            segment.release()
+
     def clear(self):
         with self._lock:
             while self.segments:
@@ -720,6 +743,10 @@ class CircularLogPool:
             # Immediately evict excess historical chunks if the window was shrunk
             while len(self.segments) > self.max_pieces:
                 self._evict_hot_segment(self.segments.popleft())
+            evicted = self._take_evicted()
+
+        for segment in evicted:
+            segment.release()
 
     def update_final_buffer_bytes(self, new_buffer_bytes: int):
         """

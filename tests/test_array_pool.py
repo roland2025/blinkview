@@ -186,6 +186,22 @@ class TestCreate:
         assert wrapper.tag == "hello"
 
 
+class TestAllowSlabBytes:
+    def test_raises_max_bytes_to_the_slab_size_and_pools_such_arrays(self):
+        pool = NumpyArrayPool(min_bytes=64, max_bytes=1024)
+        pool.allow_slab_bytes(3000)  # rounds up to the 4096-byte slab acquire would use
+        assert pool.max_bytes == 4096
+
+        handle = pool.acquire(3000, dtype=dtypes.BYTE)
+        handle.release()
+        assert len(pool.buckets[(4096, np.dtype(dtypes.BYTE))]) == 1
+
+    def test_never_lowers_max_bytes(self):
+        pool = NumpyArrayPool(min_bytes=64, max_bytes=1 << 20)
+        pool.allow_slab_bytes(1000)
+        assert pool.max_bytes == 1 << 20
+
+
 class TestCleanup:
     def test_cleanup_evicts_entries_older_than_max_age(self, monkeypatch):
         pool = NumpyArrayPool(min_bytes=64, max_bytes=1024)
