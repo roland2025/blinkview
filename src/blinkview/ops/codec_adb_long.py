@@ -26,8 +26,8 @@ from blinkview.ops.constants import (
     CHAR_ZERO,
 )
 from blinkview.ops.decode_loop import nb_decode_loop
-from blinkview.ops.discovery import nb_resolve_module_id
-from blinkview.ops.modules import nb_normalize_name_inplace
+from blinkview.ops.discovery import nb_resolve_module_id_hashed
+from blinkview.ops.modules import FNV_BASIS, NORM, nb_norm_put
 from blinkview.ops.stage_loop import nb_stage_loop_a0, nb_stage_loop_a1, nb_stage_loop_a2
 from blinkview.ops.strings import nb_skip_whitespace
 from blinkview.ops.timestamps import nb_project_synced_ns
@@ -88,16 +88,21 @@ def nb_is_adb_long_header_monotonic(buffer, cursor, limit):
 
 
 @app_njit(inline="always")
-def nb_decode_adb_long_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
+def nb_decode_adb_long_frame(f_buf, start, end, seen_end, out_buf, out_cursor, f_cfg):
+    """A frame ends where the next header starts, so f_buf[start:end] is the pending frame so far: returns
+    STATE_INCOMPLETE until a line feed followed by a header is in it. seen_end: f_buf[start:seen_end] is a
+    frame this function already found incomplete (start: none, scan it all)."""
 
-    # print(f"Raw Frame Slice: {f_buf[start:end].tobytes()}")
     # --- 1. ORACLE BOUNDARY CHECK ---
     search_start = start + 2 if nb_is_adb_long_header_monotonic(f_buf, start, end) else start
 
-    # The decode loop hands over the whole pending frame on every line, so this runs once per line over the
-    # frame so far: jump from line feed to line feed (8 bytes per step) instead of testing every byte.
+    # Find the line feed before the next header, jumping from line feed to line feed (8 bytes per step).
+    # The decode loop hands over the pending frame again on every line. The call on f_buf[start:seen_end]
+    # rejected every line feed in it, and that answer only depended on the bytes before seen_end for a line
+    # feed at least 5 bytes before seen_end (the header test reads 3 bytes and wants 5 before the limit). So
+    # only the line feeds from seen_end - 5 on can have changed: O(frame) per frame instead of O(lines x frame).
     second_header_idx = -1
-    i = search_start
+    i = max(search_start, seen_end - 5)
     while True:
         i = nb_find_byte(f_buf, i, end, CHAR_LF)
         if i >= end:
@@ -362,12 +367,19 @@ def nb_parse_adb_tag(buffer, start_cursor, end_cursor, out_b, out_idx, tracker, 
     if tag_len > 0:
         if write_pos + tag_len > len(t_bytes):
             return -1
-        t_bytes[write_pos : write_pos + tag_len] = buffer[start_cursor:tag_limit]
-        squashed_len = int(nb_normalize_name_inplace(t_bytes, write_pos, tag_len))
+        # One pass: normalize each byte into the tracker (what nb_normalize_name_inplace does to a copy) and
+        # fold it into the FNV-1a hash that nb_resolve_module_id would compute afterwards.
+        w = np.int64(write_pos)
+        hw = w
+        last = 0
+        h = FNV_BASIS
+        for i in range(start_cursor, tag_limit):
+            w, hw, last, h = nb_norm_put(NORM[buffer[i]], t_bytes, w, hw, last, h)
+        squashed_len = hw - write_pos
 
         if squashed_len > 0:
             t_bytes[write_pos + squashed_len] = 0
-            mod_id = nb_resolve_module_id(t_bytes, write_pos, squashed_len, s_table, tracker)
+            mod_id = nb_resolve_module_id_hashed(t_bytes, write_pos, squashed_len, h, s_table, tracker)
             if mod_id == -1:
                 return -1
             out_b.modules[out_idx] = mod_id

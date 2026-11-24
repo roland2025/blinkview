@@ -174,7 +174,7 @@ class TestDecodeAdbLongFrame:
         f_buf = _buf("[ 1.0] android.wifi I/Tag: hello")
         out_buf = np.zeros(128, dtype=dtypes.BYTE)
 
-        status, cursor, consumed = nb_decode_adb_long_frame(f_buf, 0, len(f_buf), out_buf, 0, self._cfg())
+        status, cursor, consumed = nb_decode_adb_long_frame(f_buf, 0, len(f_buf), 0, out_buf, 0, self._cfg())
 
         assert status == 1  # STATE_INCOMPLETE
         assert consumed == 0
@@ -187,7 +187,7 @@ class TestDecodeAdbLongFrame:
         f_buf = _buf(msg)
         out_buf = np.zeros(128, dtype=dtypes.BYTE)
 
-        status, cursor, consumed = nb_decode_adb_long_frame(f_buf, 0, len(f_buf), out_buf, 0, self._cfg())
+        status, cursor, consumed = nb_decode_adb_long_frame(f_buf, 0, len(f_buf), 0, out_buf, 0, self._cfg())
 
         assert status == 0  # STATE_COMPLETE
         assert consumed > 0
@@ -201,7 +201,7 @@ class TestDecodeAdbLongFrame:
         out_buf = np.zeros(128, dtype=dtypes.BYTE)
 
         status, cursor, consumed = nb_decode_adb_long_frame(
-            f_buf, 0, len(f_buf), out_buf, 0, self._cfg(filter_printable=True)
+            f_buf, 0, len(f_buf), 0, out_buf, 0, self._cfg(filter_printable=True)
         )
 
         decoded = bytes(out_buf[:cursor]).decode()

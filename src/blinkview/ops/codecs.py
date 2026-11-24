@@ -6,7 +6,7 @@
 
 from blinkview.core.numba_config import app_njit
 from blinkview.core.types.parsing import STATE_COMPLETE
-from blinkview.ops.buffers import nb_copy_buf
+from blinkview.ops.buffers import nb_copy_buf, nb_find_unprintable
 from blinkview.ops.decode_loop import nb_decode_loop
 
 
@@ -39,7 +39,7 @@ def nb_process_byte_filters(val, ansi_state, filter_ansi, filter_printable):
 
 
 @app_njit(inline="always")
-def nb_decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
+def nb_decode_newline_frame(f_buf, start, end, seen_end, out_buf, out_cursor, f_cfg):
     # For standard newline frames, we always consume the entire chunk up to the \n
     bytes_consumed = end - start
 
@@ -66,10 +66,7 @@ def nb_decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
     needs_filtering = False
 
     if filter_printable:
-        for i in range(start, start + process_len):
-            if not (32 <= f_buf[i] <= 126):
-                needs_filtering = True
-                break
+        needs_filtering = nb_find_unprintable(f_buf, start, start + process_len) < start + process_len
     elif filter_ansi:
         for i in range(start, start + process_len):
             if f_buf[i] == 27:
@@ -81,8 +78,21 @@ def nb_decode_newline_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
         return STATE_COMPLETE, cursor + process_len, bytes_consumed
 
     ansi_state = 0
-    for i in range(start, start + process_len):
+    i = start
+    stop = start + process_len
+    while i < stop:
+        if ansi_state == 0:
+            # Outside an escape sequence every printable byte is copied as is, whatever the filters: copy a
+            # run of them at once. The bytewise path below handles the rest.
+            run_end = nb_find_unprintable(f_buf, i, stop)
+            if run_end > i:
+                nb_copy_buf(f_buf, i, out_buf, cursor, run_end - i)
+                cursor += run_end - i
+                i = run_end
+                continue
+
         val = f_buf[i]
+        i += 1
 
         if filter_ansi:
             if ansi_state == 0:
@@ -257,7 +267,7 @@ def nb_shift_frame_buffer(f_buf, read_ptr, write_ptr):
 
 
 @app_njit(inline="always")
-def nb_decode_passthrough_frame(f_buf, start, end, out_buf, out_cursor, f_cfg):
+def nb_decode_passthrough_frame(f_buf, start, end, seen_end, out_buf, out_cursor, f_cfg):
     """Consumes the whole frame and emits nothing (decoders without a frame function: COBS/SLIP are not
     implemented yet, pre-framed input never reaches the frame function)."""
     return STATE_COMPLETE, out_cursor, end - start

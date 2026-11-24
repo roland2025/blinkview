@@ -182,7 +182,7 @@ def nb_parse_fixed_width_name_stage(out_b0, f_state, n, tracker0, max_length, ta
 
 
 @app_njit(inline="always")
-def _put(nc, nb, w, hw, last, h):
+def nb_norm_put(nc, nb, w, hw, last, h):
     """Streaming normalize of one char (already mapped through NORM) with incremental FNV-1a.
     w = physical write index, hw = index up to which h has folded (excludes pending separators)."""
     if nc != 46 and nc != 95:
@@ -275,7 +275,7 @@ def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx
         tlast = last
         th = h
         if tag_count > 0:
-            tw, thw, tlast, th = _put(46, nb, tw, thw, tlast, th)
+            tw, thw, tlast, th = nb_norm_put(46, nb, tw, thw, tlast, th)
 
         if config.enable_brackets and first_char == CHAR_LBRACKET:
             tag_data_start = curr + 1
@@ -291,7 +291,7 @@ def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx
             if tag_len == 0 or tag_count >= max_depth or raw_len + sep_len + tag_len > max_length:
                 return -1
             for i in range(tag_len):
-                tw, thw, tlast, th = _put(NORM[buffer[tag_data_start + i]], nb, tw, thw, tlast, th)
+                tw, thw, tlast, th = nb_norm_put(NORM[buffer[tag_data_start + i]], nb, tw, thw, tlast, th)
         else:
             tag_data_start = curr
             scan_ptr = curr
@@ -301,7 +301,7 @@ def nb_parse_module_tags_statemachine(buffer, cursor, end_cursor, out_b, out_idx
                 if VALID[c] == 0:
                     break
                 if raw_len + sep_len + (scan_ptr - curr) < max_length:
-                    tw, thw, tlast, th = _put(NORM[c], nb, tw, thw, tlast, th)
+                    tw, thw, tlast, th = nb_norm_put(NORM[c], nb, tw, thw, tlast, th)
                 else:
                     overflow = True
                 scan_ptr += 1

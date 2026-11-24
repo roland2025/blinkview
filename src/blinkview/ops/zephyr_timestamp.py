@@ -4,6 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import numpy as np
+
 from blinkview.core.numba_config import app_njit
 from blinkview.ops.constants import (
     CHAR_COLON,
@@ -26,6 +28,47 @@ from blinkview.ops.views import nb_sync_views
 def nb_parse_zephyr_uptime_formatted(buffer, start_cursor, end_cursor, out_b, out_idx, sync):
     if start_cursor + 10 > end_cursor or buffer[start_cursor] != CHAR_LBRACKET:
         return -1
+
+    s = start_cursor
+    if (
+        s + 18 <= end_cursor
+        and buffer[s + 3] == CHAR_COLON
+        and buffer[s + 6] == CHAR_COLON
+        and buffer[s + 9] == CHAR_DOT
+        and buffer[s + 13] == CHAR_COMMA
+        and buffer[s + 17] == CHAR_RBRACKET
+    ):
+        # Fast path, the layout Zephyr prints: '[hh:mm:ss.mmm,uuu]' with a digit at every other place. The
+        # general loop below gives the same value for it, so only the layout and the digits are checked.
+        d1, d2 = np.int64(buffer[s + 1]) - CHAR_ZERO, np.int64(buffer[s + 2]) - CHAR_ZERO
+        d4, d5 = np.int64(buffer[s + 4]) - CHAR_ZERO, np.int64(buffer[s + 5]) - CHAR_ZERO
+        d7, d8 = np.int64(buffer[s + 7]) - CHAR_ZERO, np.int64(buffer[s + 8]) - CHAR_ZERO
+        d10, d11, d12 = (
+            np.int64(buffer[s + 10]) - CHAR_ZERO,
+            np.int64(buffer[s + 11]) - CHAR_ZERO,
+            np.int64(buffer[s + 12]) - CHAR_ZERO,
+        )
+        d14, d15, d16 = (
+            np.int64(buffer[s + 14]) - CHAR_ZERO,
+            np.int64(buffer[s + 15]) - CHAR_ZERO,
+            np.int64(buffer[s + 16]) - CHAR_ZERO,
+        )
+        # A digit d is 0..9, so d and 9 - d are both >= 0: OR them all, and any byte that is not a digit
+        # makes the result negative.
+        signs = d1 | d2 | d4 | d5 | d7 | d8 | d10 | d11 | d12 | d14 | d15 | d16
+        signs |= (9 - d1) | (9 - d2) | (9 - d4) | (9 - d5) | (9 - d7) | (9 - d8)
+        signs |= (9 - d10) | (9 - d11) | (9 - d12) | (9 - d14) | (9 - d15) | (9 - d16)
+        if signs >= 0:
+            raw_ns = (
+                (d1 * 10 + d2) * 3_600_000_000_000
+                + (d4 * 10 + d5) * 60_000_000_000
+                + (d7 * 10 + d8) * 1_000_000_000
+                + (d10 * 100 + d11 * 10 + d12) * 1_000_000
+                + (d14 * 100 + d15 * 10 + d16) * 1_000
+            )
+            rx_ns = out_b.rx_timestamps[out_idx]
+            out_b.timestamps[out_idx] = nb_project_synced_ns(raw_ns, rx_ns, sync)
+            return nb_skip_whitespace(buffer, s + 18, end_cursor)
 
     ts_end = -1
     for i in range(start_cursor + 1, end_cursor):

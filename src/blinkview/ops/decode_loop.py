@@ -27,10 +27,19 @@ from blinkview.ops.views import nb_log_bundle_views, nb_view
 def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg, o_cfg, out_b0):
     """Framing + decoding loop shared by every frame decoder kernel (Phase A of the stage-major pipeline).
 
-    Splits the input batch into frames, decodes each with `decode_frame(buf, start, end, out_buf, out_cursor,
-    f_cfg) -> (state, final_cursor, bytes_consumed)`, reserves one output row per decoded frame and fills the
-    per-frame scratch arrays in `f_state`. Returns (out_full, nframes). `decode_frame` is the only decoder
-    specific part; it is inlined. Pre-framed input (decode_id 0) is copied through without calling it."""
+    Splits the input batch into frames, decodes each with `decode_frame(buf, start, end, seen_end, out_buf,
+    out_cursor, f_cfg) -> (state, final_cursor, bytes_consumed)`, reserves one output row per decoded frame and
+    fills the per-frame scratch arrays in `f_state`. Returns (out_full, nframes). `decode_frame` is the only
+    decoder specific part; it is inlined. Pre-framed input (decode_id 0) is copied through without calling it.
+
+    A decoder that returns STATE_INCOMPLETE is called again on the same pending frame once the next chunk is
+    appended. `seen_end` says how much of it the last such call saw: buf[start:seen_end] holds the same bytes
+    as that call's whole frame, which it found incomplete (seen_end == start: no such call, or not known).
+    It is not kept across calls of this loop, so the first call on a pending frame in a call gets start.
+
+    A frame that starts in the current input row is decoded where it is (zero copy), also when it spans
+    several chunks or starts with the unconsumed tail of the frame before it. Only a frame still pending at
+    the end of a row is copied to f_state.buffer, to be completed from the next rows."""
     # Meminfo-free views of the arrays used per frame (see ops/views.py); they never leave this call.
     in_b = nb_log_bundle_views(in_b0)
     out_b = nb_log_bundle_views(out_b0)
@@ -41,6 +50,7 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
     f_buf = nb_view(f_state.buffer)
 
     in_size = in_b.size[0]
+    seen = 0  # bytes of the pending frame the decoder saw in a call that returned INCOMPLETE
 
     frame_delimiter = f_cfg.delimiter
     frame_length_min = f_cfg.length_min
@@ -85,6 +95,7 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
         while scan_idx < in_len:
             found_frame = False
             chunk_len = 0
+            line_begin = scan_idx  # where this chunk's own bytes start; before it: the pending frame in this row
 
             if is_pre_framed:
                 chunk_len = in_len
@@ -101,6 +112,15 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
                 if in_frame:
                     if (curr_out_idx >= out_cap) or (curr_out_cursor + curr_write + chunk_len > out_buf_cap):
                         out_full = True
+                        if line_begin > read_offset:
+                            # Part of the pending frame sits in this row. Hand it over in f_buf, so the next
+                            # call starts at this chunk and does not pass its earlier chunks to the decoder
+                            # again (it fits: those chunks passed the frame_length_max test together).
+                            pending = line_begin - read_offset
+                            src_view = in_b.buffer[in_off + read_offset : in_off + line_begin]
+                            nb_sync_push(f_buf, curr_write, src_view, pending)
+                            curr_write += pending
+                            read_offset = line_begin
                         break
 
                 target_buf = f_buf
@@ -129,9 +149,11 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
                         else:
                             # oversized: drop it; its delimiter was just found, so we are still on a boundary
                             curr_write = 0
+                            seen = 0
                     else:
                         in_frame = True
                         curr_write = 0
+                        seen = 0
 
                 if process_frame:
                     if is_pre_framed:
@@ -141,16 +163,22 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
                         decoder_state = STATE_COMPLETE
                     else:
                         decoder_state, final_cursor, bytes_consumed = decode_frame(
-                            target_buf, target_start, target_end, out_b.buffer, curr_out_cursor, f_cfg
+                            target_buf,
+                            target_start,
+                            target_end,
+                            target_start + seen,
+                            out_b.buffer,
+                            curr_out_cursor,
+                            f_cfg,
                         )
 
                     if decoder_state == STATE_INCOMPLETE:
-                        if is_zero_copy:
-                            src_view = in_b.buffer[in_off + read_offset : in_off + scan_idx + 1]
-                            nb_sync_push(f_buf, 0, src_view, chunk_len)
-                            curr_write = chunk_len
-
-                        read_offset = scan_idx + 1
+                        seen = target_end - target_start
+                        if not is_zero_copy:
+                            read_offset = scan_idx + 1
+                        # else the pending frame stays where it is in this row (read_offset keeps pointing at
+                        # its start), so the next chunk is all of it again; the end of the row copies what is
+                        # still pending to f_buf.
                         scan_idx += 1
                         continue
 
@@ -205,11 +233,19 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
                             nframes += 1
                             curr_out_cursor = final_cursor
 
+                    seen = 0
                     unconsumed = (target_end - target_start) - bytes_consumed
                     if unconsumed > 0:
+                        in_frame = True
+                        if unconsumed <= chunk_len:
+                            # The unconsumed tail (the start of the next frame) lies in this row: the target's
+                            # last chunk_len bytes are this row's [read_offset, scan_idx]. Leave it there.
+                            curr_write = 0
+                            read_offset = scan_idx + 1 - unconsumed
+                            scan_idx += 1
+                            continue
                         nb_sync_shift_leftovers(f_buf, target_buf, target_start + bytes_consumed, unconsumed)
                         curr_write = unconsumed
-                        in_frame = True
                     else:
                         curr_write = 0
 
@@ -228,6 +264,7 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
                 curr_write += remaining
             else:
                 in_frame = False
+                seen = 0
 
         in_idx += 1
         read_offset = 0
