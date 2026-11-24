@@ -96,7 +96,11 @@ class Benchmark(BaseReader):
             TICKS_PER_SEC = 1_000_000_000 / INTERVAL_NS
 
             # --- [ADAPTIVE PARAMETERS] ---
+            # max_msg_per_sec caps the controller: it can still slow down on backlog, never go above the cap
+            rate_cap = float(getattr(self, "max_msg_per_sec", 0) or 0)
             current_msg_per_sec = float(self.batch_size * TICKS_PER_SEC)
+            if rate_cap > 0:
+                current_msg_per_sec = min(current_msg_per_sec, rate_cap)
             current_step = 0.20
             dampening = 0.75
             min_step = 0.001
@@ -184,6 +188,8 @@ class Benchmark(BaseReader):
                         log_fn = stats_logger.warn
                     else:
                         current_msg_per_sec *= 1.0 + current_step
+                        if rate_cap > 0:
+                            current_msg_per_sec = min(current_msg_per_sec, rate_cap)
                         log_fn = stats_logger.info
 
                     # Reporting
