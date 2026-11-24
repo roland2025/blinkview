@@ -158,6 +158,17 @@ class TestAutoSyncFallback:
 
         assert int(second) > int(first)
 
+    def test_monotonicity_guard_steps_one_nanosecond(self):
+        # A 1 us step would cap a pipeline at 1 M rows/s of timestamps; rows sharing one
+        # device time must leave 1 ns apart.
+        sync = create_default_sync(now_ns=0, start_enabled=False)
+        nb_auto_sync_fallback(raw_ns=0, rx_ns=1_000_000_000, sync=sync)
+        first = nb_auto_sync_fallback(raw_ns=500_000_000, rx_ns=1_600_000_000, sync=sync)
+
+        outs = [int(nb_auto_sync_fallback(raw_ns=500_000_000, rx_ns=1_600_000_000, sync=sync)) for _ in range(3)]
+
+        assert outs == [int(first) + 1, int(first) + 2, int(first) + 3]
+
 
 class TestAutoSyncFallback2:
     def test_first_call_initializes_and_returns_rx_ns(self):

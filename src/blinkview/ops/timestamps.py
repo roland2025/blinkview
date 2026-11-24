@@ -328,7 +328,7 @@ def nb_auto_sync_fallback_2(raw_ns, rx_ns, sync: SyncState):
 
     # 5. Monotonicity Guard
     if corrected_rx <= last_out:
-        corrected_rx = last_out + 1000
+        corrected_rx = last_out + 1
 
     # Persist state
     sync.auto_last_raw[0] = raw_ns
@@ -369,9 +369,11 @@ def nb_auto_sync_fallback(raw_ns, rx_ns, sync: SyncState):
         sync.auto_window_min_offset[0] = anchor_offset
 
     # 4. Monotonicity Guard
-    # Ensure time always moves forward (handles out-of-order raw_ns or causality clipping)
+    # Ensure time always moves forward (handles out-of-order raw_ns or causality clipping).
+    # The step is 1 ns: a 1 us step capped a pipeline at 1 M rows/s of timestamps, which the
+    # reorder (releasing by wall clock) then held back.
     if projected_rx <= last_out:
-        projected_rx = last_out + 1000
+        projected_rx = last_out + 1
 
     # 5. Persist state
     sync.auto_last_raw[0] = raw_ns
