@@ -45,8 +45,14 @@ IDX_TOTAL_COUNT = 7
 IDX_LAST_MEAN = 8
 IDX_LAST_STD = 9
 IDX_ASYM_RATIO = 10  # <--- NEW: Asymmetry ratio scaled by 1_000_000 (e.g., 500_000 = 50%)
+IDX_PPB_COUNT = 11  # drift samples stored in ppb_hist (capped at its length)
 
-IDX_ARRAY_LENGTH = 11
+# A drift sample is measured from the first clean sample on: over a short baseline a clean sample's own
+# jitter dominates it (0.2 ms over 10 s reads as 20 ppm; seen on the emulator, whose real drift was 0.2 ppm).
+# Below this baseline the drift in force is kept. 60 s: 0.2 ms of jitter is then at most ~3 ppm.
+DRIFT_MIN_BASELINE_NS = 60_000_000_000
+
+IDX_ARRAY_LENGTH = 12
 
 
 class EngineState(NamedTuple):
@@ -227,7 +233,9 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
 
     # 5. Fixed-Point Drift Calculation (ABSOLUTE DRIFT FIX)
     ppb_scale = 1_000_000_000
-    avg_ppb = 0
+    # Only a clean sample measures the drift anew; every other one republishes the drift already in force,
+    # so that the estimate is not reset to 0 between clean samples.
+    avg_ppb = (sync.drift_m[act_idx] * ppb_scale) // sync.drift_d[act_idx] - ppb_scale
 
     # Repurpose these indices to hold BOOT and the ANCHORED PC TIME
     first_boot = sc[IDX_FIRST_PH]
@@ -249,14 +257,18 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
                 current_ppb = int((float(dt_pc - dt_boot) / float(dt_boot)) * ppb_scale)
 
                 if abs(current_ppb) > 10_000_000:
+                    # Implausible: re-anchor (on the raw offset, as the first anchor does) and keep the drift
                     first_boot = phone_boot
-                    first_pc_offset = new_offset
-                else:
+                    first_pc_offset = raw_offset
+                elif dt_boot >= DRIFT_MIN_BASELINE_NS:
                     ptr = sc[IDX_PPB_PTR]
                     ppb_hist[ptr] = current_ppb
                     sc[IDX_PPB_PTR] = (ptr + 1) % len(ppb_hist)
 
-                    filled = min(s_count - 5, len(ppb_hist))
+                    # Average the samples actually stored: counting every accepted sample instead let the
+                    # unfilled slots' zeros pull the average toward 0.
+                    filled = min(sc[IDX_PPB_COUNT] + 1, len(ppb_hist))
+                    sc[IDX_PPB_COUNT] = filled
                     acc = 0
                     for i in range(filled):
                         acc += ppb_hist[i]
