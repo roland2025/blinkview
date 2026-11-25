@@ -110,7 +110,14 @@ def nb_decode_loop(decode_frame, f_cfg, f_state: FrameStateParams, in_b0, p_cfg,
 
             if found_frame:
                 if in_frame:
-                    if (curr_out_idx >= out_cap) or (curr_out_cursor + curr_write + chunk_len > out_buf_cap):
+                    # A frame over frame_length_max is dropped below and never reaches the output buffer, so
+                    # it must not count against it: the buffer can be as small as frame_length_max (an
+                    # untrained tuner), and then a too-long pending frame made every call "full" with no
+                    # frame decoded, forever (adb long frames whose headers did not match).
+                    fits_max = curr_write + chunk_len <= frame_length_max
+                    if (curr_out_idx >= out_cap) or (
+                        fits_max and curr_out_cursor + curr_write + chunk_len > out_buf_cap
+                    ):
                         out_full = True
                         if line_begin > read_offset:
                             # Part of the pending frame sits in this row. Hand it over in f_buf, so the next

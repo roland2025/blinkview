@@ -64,11 +64,19 @@ def nb_is_adb_long_header_iso(buffer, cursor, limit):
     return True
 
 
+# logcat right-aligns the monotonic seconds in a 5-wide field: "[     4.560113500  234:..." on a device
+# up for under 10 s, "[ 12345.678..." from 10000 s on. Spaces accepted after the first one:
+ADB_MONO_HEADER_MAX_PAD = 6
+# nb_is_adb_long_header_monotonic(buf, cursor, limit) gives the same answer for every limit once
+# limit - cursor >= this: it reads at most buf[cursor + 2 + ADB_MONO_HEADER_MAX_PAD].
+ADB_MONO_HEADER_STABLE_LEN = ADB_MONO_HEADER_MAX_PAD + 3
+
+
 @app_njit(inline="always")
 def nb_is_adb_long_header_monotonic(buffer, cursor, limit):
     """
-    Validates monotonic ADB Long Header: '[ 1726228.928'
-    Matches a '[' followed by a space and at least one digit.
+    Validates monotonic ADB Long Header: '[ 1726228.928', or with the seconds padded, '[     4.560'.
+    Matches a '[', a space, up to ADB_MONO_HEADER_MAX_PAD more spaces and a digit.
     """
     # Monotonic headers are shorter, but we need at least 5 bytes to be sure
     # (e.g., "[ 0.0]")
@@ -79,8 +87,14 @@ def nb_is_adb_long_header_monotonic(buffer, cursor, limit):
     if buffer[cursor] != 91 or buffer[cursor + 1] != 32:
         return False
 
-    # Check that the next char is a digit
-    val = buffer[cursor + 2]
+    # Skip the padding, then check that the next char is a digit
+    i = cursor + 2
+    pad_end = min(limit, i + ADB_MONO_HEADER_MAX_PAD)
+    while i < pad_end and buffer[i] == 32:
+        i += 1
+    if i >= limit:
+        return False
+    val = buffer[i]
     if not (48 <= val <= 57):
         return False
 
@@ -99,10 +113,11 @@ def nb_decode_adb_long_frame(f_buf, start, end, seen_end, out_buf, out_cursor, f
     # Find the line feed before the next header, jumping from line feed to line feed (8 bytes per step).
     # The decode loop hands over the pending frame again on every line. The call on f_buf[start:seen_end]
     # rejected every line feed in it, and that answer only depended on the bytes before seen_end for a line
-    # feed at least 5 bytes before seen_end (the header test reads 3 bytes and wants 5 before the limit). So
-    # only the line feeds from seen_end - 5 on can have changed: O(frame) per frame instead of O(lines x frame).
+    # feed whose header test (at the byte after it) had ADB_MONO_HEADER_STABLE_LEN bytes before seen_end. So
+    # only the line feeds from seen_end - ADB_MONO_HEADER_STABLE_LEN on can have changed: O(frame) per frame
+    # instead of O(lines x frame).
     second_header_idx = -1
-    i = max(search_start, seen_end - 5)
+    i = max(search_start, seen_end - ADB_MONO_HEADER_STABLE_LEN)
     while True:
         i = nb_find_byte(f_buf, i, end, CHAR_LF)
         if i >= end:
@@ -472,9 +487,12 @@ def nb_parse_adb_timestamp_monotonic(buffer, start_cursor, end_cursor, out_b, ou
     if start_cursor + 5 > end_cursor or buffer[start_cursor] != 91:
         return -1
 
+    # The seconds are right-aligned ("[     4.560..." on a device up for under 10 s): skip the padding
+    ts_start = nb_skip_whitespace(buffer, start_cursor + 1, end_cursor)
+
     # Find the end of the timestamp (the space after the number)
     ts_end = -1
-    for i in range(start_cursor + 2, end_cursor):
+    for i in range(ts_start, end_cursor):
         if buffer[i] == 32:  # Space
             ts_end = i
             break
@@ -483,7 +501,7 @@ def nb_parse_adb_timestamp_monotonic(buffer, start_cursor, end_cursor, out_b, ou
         return -1
 
     # Parse and Project
-    raw_ns = nb_parse_monotonic_to_ns(buffer, start_cursor + 2, ts_end)
+    raw_ns = nb_parse_monotonic_to_ns(buffer, ts_start, ts_end)
 
     # This is the 'now' timestamp the AdbReader captured when it read the chunk.
     rx_ns = out_b.rx_timestamps[out_idx]

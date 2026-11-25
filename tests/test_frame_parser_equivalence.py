@@ -38,7 +38,11 @@ from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.core.types.frames import FrameStateParams
 from blinkview.core.types.parsing import STATE_COMPLETE, STATE_ERROR, STATE_INCOMPLETE
 from blinkview.ops.buffers import nb_copy_buf, nb_find_byte, nb_report_error, nb_sync_push, nb_sync_shift_leftovers
-from blinkview.ops.codec_adb_long import nb_decode_adb_long_frame, nb_is_adb_long_header_monotonic
+from blinkview.ops.codec_adb_long import (
+    nb_decode_adb_long_frame,
+    nb_decode_frames_adb_long,
+    nb_is_adb_long_header_monotonic,
+)
 from blinkview.ops.constants import (
     CHAR_COLON,
     CHAR_COMMA,
@@ -335,7 +339,17 @@ def adb_frame(rng, t_ms, tags):
     pid = rng.choice([1, 57, 345, 2680, 12345, 31000])
     tid = pid + rng.randint(0, 300)
     level = rng.choices(["I", "D", "W", "E", "V", "F", "Q"], [50, 30, 10, 5, 2, 1, 1])[0]
-    header = "[ %d.%03d  %d: %d %s/%s ]" % (t_ms // 1000, t_ms % 1000, pid, tid, level, rng.choice(tags))
+    # logcat right-aligns the seconds in 5 columns: padded on a device up for under 10000 s (the stream's
+    # clock starts past that, so a padded header gets a small seconds value)
+    padded = rng.random() < 0.3
+    header = ("[ " + ("%5d" if padded else "%d") + ".%03d  %d: %d %s/%s ]") % (
+        (t_ms // 1000) % 1000 if padded else t_ms // 1000,
+        t_ms % 1000,
+        pid,
+        tid,
+        level,
+        rng.choice(tags),
+    )
     n = rng.choice([1, 20, 36, 56, 80, 101, 144, 200]) if rng.random() < 0.97 else rng.randint(300, 3900)
     msg = _filler(rng, n)
     kind = rng.random()
@@ -457,6 +471,8 @@ def test_adb_frame_decoder_matches_the_reference_copy(seed):
 # Lines that start like a header ('[', '[ ', '[ 1') and are shorter than the header test's 5 bytes, so whether
 # the line feed before them starts a header is only known once more bytes arrive.
 _SHORT_LINES = [b"", b"[", b"[ ", b"[ 1", b"[ 12", b"[ x", b"x", b" [ 1", b"[ 1.5 ]", b"\r", b"[ 1\r"]
+# ...and their padded forms (logcat right-aligns the seconds), up to and past the padding the header test takes
+_SHORT_LINES += [b"[  ", b"[    ", b"[     1", b"[      1", b"[       1", b"[        1", b"[    x", b"[   \r"]
 
 
 def short_line_stream(rng, n_lines):
@@ -464,7 +480,8 @@ def short_line_stream(rng, n_lines):
     out = []
     for i in range(n_lines):
         if rng.random() < 0.25:
-            out.append(b"[ %d.%03d  %d: %d I/Tag%d ]" % (i, i % 1000, 1 + i % 7, 2 + i % 5, i % 9))
+            seconds = b"%5d" % (i % 100) if rng.random() < 0.5 else b"%d" % i  # padded as on a fresh boot
+            out.append(b"[ %s.%03d  %d: %d I/Tag%d ]" % (seconds, i % 1000, 1 + i % 7, 2 + i % 5, i % 9))
         else:
             out.append(rng.choice(_SHORT_LINES))
     return b"\n".join(out) + b"\n"
@@ -527,6 +544,30 @@ def test_adb_short_line_stream_matches_the_reference_copy(seed):
     assert len(expected) > 3000
     for max_frames in (1, 7, MAX_FRAMES_PER_CALL):
         assert run_parser("adb", batches, max_frames=max_frames) == expected, max_frames
+
+
+def test_a_pending_frame_that_never_ends_does_not_stall_the_parser():
+    """An adb frame ends where the next header starts. An emulator's padded headers ("[     4.560...") used to
+    match no header, so the pending frame grew to frame_length_maximum; with an output buffer no bigger than
+    that (an untrained tuner), every decoder call then said "full" with no frame decoded and run() spun at
+    100% CPU forever. The over-long frame must be dropped and the parser carry on."""
+    data = b"".join(b"a line with no header after it %05d\n" % i for i in range(2000))  # ~74 kB
+    data += b"[ 1.000  1: 1 I/Tag ]\nfirst\n\n[ 2.000  1: 1 I/Tag ]\nsecond\n\n[ 3.000  1: 1 I/Tag ]\n"
+    rows = [data[i : i + 64] for i in range(0, len(data), 64)]
+    batches = [rows[i : i + 16] for i in range(0, len(rows), 16)]
+
+    calls = 0
+
+    def bounded_kernel(*args):
+        nonlocal calls
+        calls += 1
+        if calls > 50_000:  # the input is ~1200 rows: a stalled loop runs into this, not into a hang
+            raise RuntimeError("the decoder keeps being called without consuming the input")
+        return nb_decode_frames_adb_long(*args)
+
+    out = run_parser("adb", batches, decoder_kernel=bounded_kernel)
+
+    assert [r[0] for r in out if r[-1] == "tag"] == [b"first", b"second"]  # the tag step lowercases names
 
 
 _TAG_CHARS = "abcXYZ019 ._-:[]/\t\x01\x7f\xe9"

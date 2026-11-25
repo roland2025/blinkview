@@ -22,6 +22,8 @@ from blinkview.core.types.parsing import (
     create_default_sync,
 )
 from blinkview.ops.codec_adb_long import (
+    ADB_MONO_HEADER_MAX_PAD,
+    ADB_MONO_HEADER_STABLE_LEN,
     nb_decode_adb_long_frame,
     nb_is_adb_long_header_iso,
     nb_is_adb_long_header_monotonic,
@@ -104,6 +106,30 @@ class TestIsAdbLongHeaderMonotonic:
     def test_missing_space_is_false(self):
         assert nb_is_adb_long_header_monotonic(_buf("[123.456]"), 0, 9) is False
 
+    def test_padded_seconds_are_a_header(self):
+        # logcat right-aligns the seconds in a 5-wide field: an emulator up for 4 s sends this
+        msg = "[     4.560113500  234:  234 I/lowmemorykiller ]"
+        assert nb_is_adb_long_header_monotonic(_buf(msg), 0, len(msg)) is True
+
+    def test_padding_up_to_the_limit(self):
+        msg = "[ " + " " * ADB_MONO_HEADER_MAX_PAD + "1.0]"
+        assert nb_is_adb_long_header_monotonic(_buf(msg), 0, len(msg)) is True
+
+    def test_more_padding_than_the_limit_is_false(self):
+        msg = "[ " + " " * (ADB_MONO_HEADER_MAX_PAD + 1) + "1.0]"
+        assert nb_is_adb_long_header_monotonic(_buf(msg), 0, len(msg)) is False
+
+    def test_padding_up_to_the_end_is_false(self):
+        assert nb_is_adb_long_header_monotonic(_buf("[     "), 0, 6) is False
+
+    def test_answer_does_not_change_past_the_stable_length(self):
+        """The decoder's resumed scan relies on this: nothing past ADB_MONO_HEADER_STABLE_LEN bytes is read."""
+        for text in ("[ 1.0", "[      1.0", "[       1.0", "[ x", "[      x", "x"):
+            buf = _buf(text + " " * 20)
+            stable = nb_is_adb_long_header_monotonic(buf, 0, ADB_MONO_HEADER_STABLE_LEN)
+            for limit in range(ADB_MONO_HEADER_STABLE_LEN, len(buf) + 1):
+                assert nb_is_adb_long_header_monotonic(buf, 0, limit) is stable, (text, limit)
+
 
 class TestParseMonotonicToNs:
     def test_parses_seconds_and_nanoseconds(self):
@@ -137,6 +163,18 @@ class TestParseAdbTimestampMonotonic:
         # nb_auto_sync_fallback's init branch, which just anchors and echoes rx_ns back.
         assert int(out_b.timestamps[0]) == 123_456_789
         assert _buf(msg)[next_cursor : next_cursor + 4].tobytes() == b"rest"
+
+    def test_padded_seconds(self):
+        """A device up for under 10000 s pads the seconds: "[     4.560113500  234:  234 I/Tag ]"."""
+        msg = "[     4.560113500  234:  234 I/Tag ]"
+        out_b = _out_bundle()
+        # enabled, anchored at 0 with a 1:1 drift: the projection is the parsed device time itself
+        sync = create_default_sync(now_ns=0, start_enabled=True)
+
+        next_cursor = nb_parse_adb_timestamp_monotonic(_buf(msg), 0, len(msg), out_b, 0, sync)
+
+        assert int(out_b.timestamps[0]) == 4_560_113_500
+        assert _buf(msg)[next_cursor : next_cursor + 4].tobytes() == b"234:"
 
     def test_missing_leading_bracket_returns_negative_one(self):
         msg = "5.5]"
