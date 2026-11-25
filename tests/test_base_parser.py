@@ -62,8 +62,18 @@ def test_apply_config_without_time_sync_leaves_syncer_unset():
     assert parser.sync_state is None
 
 
-def test_apply_config_with_time_sync_builds_and_subscribes_a_syncer():
+# time_sync only runs when enabled (an `enabled` flag, like every daemon); a type picks the syncer
+FAKE_SYNC = {"type": "fake", "enabled": True}
+
+
+def test_apply_config_with_time_sync_not_enabled_builds_no_syncer():
     parser = make_parser(time_sync={"type": "fake"})
+    assert parser.time_syncer is None
+    assert parser.sync_state is not None
+
+
+def test_apply_config_with_time_sync_builds_and_subscribes_a_syncer():
+    parser = make_parser(time_sync=FAKE_SYNC)
 
     assert isinstance(parser.time_syncer, FakeTimeSyncer)
     assert parser.time_syncer in parser.subscribers
@@ -72,20 +82,20 @@ def test_apply_config_with_time_sync_builds_and_subscribes_a_syncer():
 
 
 def test_apply_config_with_time_sync_builds_with_expected_args():
-    parser = make_parser(time_sync={"type": "fake"})
+    parser = make_parser(time_sync=FAKE_SYNC)
 
     category, config, system_ctx, local_ctx = parser.shared.factories.built[0]
     assert category == "time_sync"
-    assert config == {"type": "fake"}
+    assert config == FAKE_SYNC
     assert system_ctx is parser.shared
     assert local_ctx.parser is parser
 
 
 def test_reapplying_time_sync_config_stops_and_replaces_the_old_syncer():
-    parser = make_parser(time_sync={"type": "fake"})
+    parser = make_parser(time_sync=FAKE_SYNC)
     old_syncer = parser.time_syncer
 
-    parser.apply_config({"time_sync": {"type": "fake"}})
+    parser.apply_config({"time_sync": FAKE_SYNC})
 
     assert old_syncer.stopped is True
     assert old_syncer not in parser.subscribers

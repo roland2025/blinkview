@@ -276,47 +276,6 @@ class TestGetPidFromName:
         assert reader.get_pid_from_name("com.example.app") is None
 
 
-class TestGetBestCoarseAnchor:
-    def test_picks_the_sample_with_the_lowest_rtt(self):
-        reader = make_reader()
-        # Two samples: first has a big RTT (10ms), second a small one (1ms) - the anchor should
-        # come from the second, lower-RTT sample.
-        clock = iter([0, 10_000_000, 20_000_000, 20_500_000])
-        reader.shared = SimpleNamespace(time_ns=lambda: next(clock))
-        reader.query = lambda cmd: ["1733138.750000000 0"]
-
-        phone_ns, pc_ns, rtt = reader._get_best_coarse_anchor(num_tries=2)
-
-        assert rtt == 500_000  # the second, tighter sample
-        assert phone_ns == 1_733_138_750_000_000
-
-    def test_falls_back_when_no_sample_parses(self):
-        reader = make_reader()
-        reader.shared = SimpleNamespace(time_ns=lambda: 42_000)
-        reader.query = lambda cmd: []  # no output at all
-
-        phone_ns, pc_ns, rtt = reader._get_best_coarse_anchor(num_tries=3)
-
-        assert (phone_ns, pc_ns, rtt) == (42_000, 42_000, 0)
-
-
-class TestCalculateSleepOffsetNs:
-    def test_returns_the_median_of_valid_samples(self):
-        reader = make_reader()
-        # boot=10s, mono=9s -> offset = 1s in ns, consistent across samples
-        reader.query = lambda cmd: ["10.0 9.0"]
-
-        offset = reader._calculate_sleep_offset_ns(num_samples=3)
-
-        assert offset == 1_000_000_000
-
-    def test_returns_zero_when_no_valid_samples(self):
-        reader = make_reader()
-        reader.query = lambda cmd: ["garbage output"]
-
-        assert reader._calculate_sleep_offset_ns(num_samples=2) == 0
-
-
 class FakeProc:
     def __init__(self, pid=1234, terminate_raises=None, wait_raises=None):
         self.pid = pid

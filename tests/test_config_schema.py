@@ -234,8 +234,6 @@ def test_for_agent_drops_only_the_editor_only_keys(factories):
 _UNDESCRIBED_TYPES = {
     ("time_sync", "adb_time_syncer"),
     ("time_sync", "serial_time_syncer"),
-    ("parser", "adb_time_syncer"),
-    ("parser", "serial_time_syncer"),
     ("parser", "time_sync_profiler"),
 }
 

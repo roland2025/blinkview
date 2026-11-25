@@ -105,6 +105,8 @@ class UARTReader(BaseReader):
 
 Leverages PySerial's URL handler system under the hood, making it highly versatile for both direct hardware debugging and remote telemetry acquisition. Batches are accumulated based on the configured delay to minimize downstream processing overhead."""
 
+    time_syncer_type = "serial_time_syncer"
+
     type: str
     url: str
     baudrate: int

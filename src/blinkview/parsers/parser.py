@@ -91,35 +91,72 @@ class BaseParser(BaseDaemon):
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
 
-        factory_build = self.shared.factories.build
-
         try:
             time_sync_conf = getattr(self, "time_sync", None)
             self.logger.debug("time_sync config: %s", time_sync_conf)
-            if time_sync_conf is not None:
-                if self.sync_state is None:
-                    self.sync_state: SyncState = create_default_sync(self.shared.time_ns())
-
-                    # print(f"FramePipelineParser initial sync state: {self.sync_state}")
-                sync_ctx = SimpleNamespace(
-                    get_logger=self.logger.child_creator("time"),
-                    parser=self,
-                )
-                if self.time_syncer is not None:
-                    self.time_syncer.stop()
-
-                    self.unsubscribe(self.time_syncer)
-
-                    self.unregister_child(self.time_syncer)
-                    self.time_syncer = None
-                self.time_syncer = factory_build(
-                    FactoryCategory.TIME_SYNC, time_sync_conf, system_ctx=self.shared, local_ctx=sync_ctx
-                )
-                self.subscribe(self.time_syncer)
-                self.register_child(self.time_syncer)
+            if time_sync_conf is not None and self.sync_state is None:
+                self.sync_state: SyncState = create_default_sync(self.shared.time_ns())
+            # A config change rebuilds the syncer (or removes it when time sync is now off)
+            self._remove_time_syncer()
+            self._load_time_syncer()
         except Exception as e:
             self.logger.exception("failed to init timesync.", exc=e)
         return changed
+
+    def track_subscription(self, source_obj):
+        super().track_subscription(source_obj)
+        try:
+            if self.time_syncer is None:
+                self._load_time_syncer()
+        except Exception as e:
+            self.logger.exception("failed to load timesync.", exc=e)
+
+    def _load_time_syncer(self):
+        """Builds the time syncer when the `time_sync` setting is enabled. Its `type` picks the
+        syncer; without one, the syncer is the one this pipeline's source declares
+        (BaseReader.time_syncer_type), loaded once the pipeline is bound to such a source
+        (track_subscription). The first bound source with a syncer type is the one used."""
+        time_sync_conf = getattr(self, "time_sync", None)
+        if not time_sync_conf or not time_sync_conf.get("enabled", False):
+            return
+
+        with self._subscribers_lock:
+            sources = list(self._subscriptions)
+        source = next((s for s in sources if getattr(s, "time_syncer_type", None)), None)
+
+        syncer_type = time_sync_conf.get("type")
+        if syncer_type is None:
+            if source is None:
+                return  # not bound to a source with a syncer (yet)
+            syncer_type = source.time_syncer_type
+            self.logger.info("Loading time syncer '%s' for source %s", syncer_type, source)
+        elif source is None and sources:
+            source = sources[0]
+
+        self._build_time_syncer({**time_sync_conf, "type": syncer_type}, source=source)
+
+    def _remove_time_syncer(self):
+        if self.time_syncer is not None:
+            self.time_syncer.stop()
+            self.unsubscribe(self.time_syncer)
+            self.unregister_child(self.time_syncer)
+            self.time_syncer = None
+
+    def _build_time_syncer(self, time_sync_conf: dict, source):
+        """`source` is the reader the syncer sends its pings through; None leaves the syncer to
+        take this pipeline's first upstream subscription."""
+        self._remove_time_syncer()
+
+        sync_ctx = SimpleNamespace(
+            get_logger=self.logger.child_creator("time"),
+            parser=self,
+            source=source,
+        )
+        self.time_syncer = self.shared.factories.build(
+            FactoryCategory.TIME_SYNC, time_sync_conf, system_ctx=self.shared, local_ctx=sync_ctx
+        )
+        self.subscribe(self.time_syncer)
+        self.register_child(self.time_syncer)
 
 
 @register_factory_category(FactoryCategory.PARSER)

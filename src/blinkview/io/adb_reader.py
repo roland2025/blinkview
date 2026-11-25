@@ -4,19 +4,14 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-import datetime
 import os
-import statistics
 import subprocess
 from threading import Lock
-from time import perf_counter, sleep
+from time import sleep
 
 from blinkview.core.configurable import configuration_property, override_property
-from blinkview.core.time_sync_engine import TimeSyncEngine
-from blinkview.core.types.parsing import SyncState
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
 from blinkview.io.batch_feeder import BatchFeeder
-from blinkview.parsers.frame_pipeline_parser import FramePipelineParser
 from blinkview.utils.adb import detect_adb_path
 
 
@@ -68,6 +63,8 @@ class AdbReader(BaseReader):
 
 This reader batches incoming standard output using unbuffered OS reads (`read1`), 
 ensuring high throughput without pipeline stalls."""
+
+    time_syncer_type = "adb_time_syncer"
 
     type: str
     device_id: str
@@ -490,140 +487,3 @@ ensuring high throughput without pipeline stalls."""
                 except ValueError:
                     continue
         return None
-
-    def _get_best_coarse_anchor(self, num_tries: int = 3) -> tuple[int, int, int]:
-        time_ns = self.shared.time_ns
-        best_rtt = 2**63 - 1
-        best_phone_ns = 0
-        best_pc_ns = 0
-
-        self.logger.info("Synchronizing coarse monotonic baseline (tries=%s)...", num_tries)
-
-        for i in range(num_tries):
-            t0 = time_ns()
-            # /proc/uptime returns: "1733138.75 3456.78" (uptime_seconds idle_seconds)
-            res = self.query("cat /proc/uptime")
-            t1 = time_ns()
-
-            if res:
-                parts = res[0].split()
-                if parts:
-                    try:
-                        # Parse the float and convert to nanoseconds
-                        phone_time_sec = float(parts[0])
-                        phone_time = int(phone_time_sec * 1_000_000_000)
-                        rtt = t1 - t0
-
-                        if rtt < best_rtt:
-                            best_rtt = rtt
-                            best_phone_ns = phone_time
-                            best_pc_ns = t0 + (rtt // 2)
-                    except ValueError:
-                        continue
-
-        if best_phone_ns == 0:
-            self.logger.warning("Coarse anchor failed. Falling back to PC-only identity.")
-            now = time_ns()
-            return now, now, 0
-
-        return best_phone_ns, best_pc_ns, best_rtt
-
-    def _calculate_sleep_offset_ns(self, num_samples: int = 7) -> int:
-        """
-        Calculates the sleep offset by taking multiple samples using a clean,
-        silent chained shell command.
-        """
-        offsets = []
-
-        # Chained command that silences stderr and filters for only the numbers
-        cmd = (
-            'BOOT=$(cat /proc/uptime 2>/dev/null | cut -d" " -f1); '
-            r'MONO=$(logcat -v monotonic -v nsec -t 1 2>/dev/null | grep -oE "[0-9]+\.[0-9]{9}" | head -n 1); '
-            'echo "$BOOT $MONO"'
-        )
-
-        self.logger.info("Synchronizing sleep offset (samples=%s)...", num_samples)
-
-        for i in range(num_samples):
-            res = self.query(cmd)
-
-            if res and len(res[0].split()) == 2:
-                try:
-                    boot_s, mono_s = res[0].split()
-                    boot_ns = int(float(boot_s) * 1_000_000_000)
-                    mono_ns = int(float(mono_s) * 1_000_000_000)
-
-                    offsets.append(boot_ns - mono_ns)
-                except (ValueError, IndexError):
-                    continue
-
-        if not offsets:
-            self.logger.error("Failed to capture any valid sleep offset samples.")
-            return 0
-
-        # Median kills the outliers if the shell was slow on one specific sample
-        stable_offset = int(statistics.median(offsets))
-
-        # Optional: Log the jitter to see how 'clean' the phone is behaving
-        jitter_ms = (max(offsets) - min(offsets)) / 1_000_000.0
-        self.logger.info("Offset synced: %.6fs (Jitter: %.3fms)", stable_offset / 1e9, jitter_ms)
-
-        return stable_offset
-
-    def _shell_sync_handler(self):
-        """
-        Fallback syncer that uses the ADB shell to 'ping' the device.
-        Lacks microsecond precision but prevents long-term drift.
-        """
-        # 1. Capture PC Transmit Time
-        t_tx = self.shared.time_ns()
-
-        # 2. Get Phone time via Shell (This is the 'Pong')
-        # We fetch BOOT and MONO in one shot to minimize internal jitter
-        res = self.query(
-            'B=$(cat /proc/uptime 2>/dev/null | cut -d" " -f1); '
-            r'M=$(logcat -v monotonic -v nsec -t 1 2>/dev/null | grep -oE "[0-9]+\.[0-9]{9}" | head -n 1); '
-            'echo "$B $M"'
-        )
-
-        # 3. Capture PC Receive Time
-        t_rx = self.shared.time_ns()
-
-        if res and len(res[0].split()) == 2:
-            try:
-                boot_s, mono_s = res[0].split()
-                phone_boot = int(float(boot_s) * 1_000_000_000)
-                phone_mono = int(float(mono_s) * 1_000_000_000)
-
-                # 4. Feed the engine as if it were a pong
-                # The 'pc_rx' is our t_rx, but we treat the phone_mono
-                # as occurring exactly at the midpoint of t_tx and t_rx.
-                self._syncer_engine.feed(pc_tx=t_tx, phone_mono=phone_mono, phone_boot=phone_boot, pc_rx=t_rx)
-            except (ValueError, IndexError):
-                pass
-
-    # --- LEGACY / REFERENCE METHODS (DO NOT DELETE) ---
-
-    def _perform_legacy_coarse_sync(self, sync_state_obj):
-        """
-        Original logic to guess the clock offset before the first ping.
-        Keeping this here for reference or for boot-date calculation.
-        """
-        try:
-            phone_boot_ns, pc_ns, rtt = self._get_best_coarse_anchor(num_tries=5)
-            sleep_offset = self._calculate_sleep_offset_ns(num_samples=7)
-            phone_mono_ns = phone_boot_ns - sleep_offset
-
-            # Forensic Boot Date Calculation
-            boot_time_sec = (pc_ns - phone_boot_ns) / 1e9
-            dt = datetime.datetime.fromtimestamp(boot_time_sec).astimezone()
-            self.logger.info("Legacy Anchor Found. Approx Phone Boot: %s", dt.strftime("%Y-%m-%d %H:%M:%S"))
-
-            # Prime the bridge
-            sync_state_obj.ref_time[:] = [phone_mono_ns, phone_mono_ns]
-            sync_state_obj.offset[:] = [pc_ns, pc_ns]
-            sync_state_obj.drift_m[:] = [10**9, 10**9]
-            sync_state_obj.drift_d[:] = [10**9, 10**9]
-            sync_state_obj.enabled[0] = 1
-        except Exception:
-            self.logger.debug("Legacy coarse sync skipped.")

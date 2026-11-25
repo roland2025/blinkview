@@ -59,6 +59,10 @@ class BaseReader(BaseDaemon):
     # below. Such a reader can lend its port to an external tool (io/source_borrow.py) when it
     # declares the `allow_borrow` / `borrow_name` / `borrow_timeout_s` config options.
     supports_pause = False
+    # The TimeSyncerFactory type a pipeline bound to this reader loads when its `time_sync` setting
+    # is enabled without a type (see BaseParser._load_time_syncer); None = no BlinkSync ping/pong
+    # on this transport.
+    time_syncer_type: Optional[str] = None
 
     stall_warn_s: int
     stall_reconnect_s: int

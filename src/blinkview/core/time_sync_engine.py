@@ -12,6 +12,7 @@ from blinkview.core import dtypes
 from blinkview.core.dtypes import SEQ_NONE
 from blinkview.core.types.parsing import SyncState, create_default_sync
 from blinkview.core.warmup_registry import register_warmup
+from blinkview.ops.blinksync import KEY_BOOT, KEY_MONO, KEY_SEQ, PONG_PREFIX, nb_find_and_parse_next_pong
 from blinkview.ops.segments import nb_find_next_module_index, nb_find_next_module_match
 from blinkview.ops.timesync import (
     IDX_ARRAY_LENGTH,
@@ -30,6 +31,25 @@ from blinkview.utils.dev_mode import dev_print
 
 if TYPE_CHECKING:
     from blinkview.core.warmup import NumbaWarmupHelper
+
+
+# The time syncers' `asymmetry_ratio` setting (configuration_property keyword arguments), read by
+# TimeSyncEngine.set_asymmetry. Millionths: 0 would mean "not set" to nb_sync_kernel (it takes 50% then),
+# hence the minimum of 1.
+ASYMMETRY_RATIO_PROPERTY = dict(
+    type="integer",
+    title="Asymmetry ratio",
+    description=(
+        "Where in the ping's round trip the device read its clock, in millionths of the round trip: "
+        "500000 = halfway (the host-to-device and device-to-host delays are equal), lower = earlier "
+        "(the ping reaches the device faster than the pong comes back)."
+    ),
+    required=True,
+    default=500_000,
+    minimum=1,
+    maximum=1_000_000,
+    ui_order=41,
+)
 
 
 class TimeSyncEngine:
@@ -52,7 +72,9 @@ class TimeSyncEngine:
         )
 
     def set_asymmetry(self, val):
-        self.engine.scalars[IDX_ASYM_RATIO] = val
+        """`val`: millionths of the round trip (ASYMMETRY_RATIO_PROPERTY). Clamped to 1..1_000_000 here, as the
+        config check does not look inside a pipeline's `time_sync`; 0 would read as "not set" (50%)."""
+        self.engine.scalars[IDX_ASYM_RATIO] = max(1, min(1_000_000, int(val)))
 
     def feed(self, pc_tx: int, phone_mono: int, phone_boot: int, pc_rx: int) -> bool:
         # Pass phone_boot to the kernel
@@ -141,6 +163,16 @@ class TimeSyncEngine:
                 b = segment.bundle
                 nb_find_next_module_match(b, dtypes.ID_TYPE(helper.warmup_mod.id), SEQ_NONE)
                 nb_find_next_module_index(b, dtypes.ID_TYPE(helper.warmup_mod.id), dtypes.SEQ_TYPE(SEQ_NONE))
+                # the time syncers' pong lookup, with the same argument types they pass
+                nb_find_and_parse_next_pong(
+                    b,
+                    dtypes.ID_TYPE(helper.warmup_mod.id),
+                    dtypes.SEQ_TYPE(SEQ_NONE),
+                    PONG_PREFIX,
+                    KEY_SEQ,
+                    KEY_MONO,
+                    KEY_BOOT,
+                )
                 break
 
         dev_print("[Warmup] TimeSyncEngine ... done")
