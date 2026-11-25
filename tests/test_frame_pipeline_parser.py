@@ -16,7 +16,11 @@ from blinkview.core.logger import PrintLogger
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.parsers.frame_decoders import FrameDecoderFactory
 from blinkview.parsers.frame_parsers import FrameParserFactory, FrameSectionParserFactory
-from blinkview.parsers.frame_pipeline_parser import FramePipelineParser, RsyslogFileFormatParser
+from blinkview.parsers.frame_pipeline_parser import (
+    AdbLogcatLongParser,
+    FramePipelineParser,
+    RsyslogFileFormatParser,
+)
 from blinkview.parsers.state import MAX_FRAMES_PER_CALL
 from blinkview.utils.log_level import LogLevel
 
@@ -74,9 +78,9 @@ def drain(q, count, timeout=5.0):
     return items
 
 
-def make_rsyslog_parser(id_registry, device_name="rsyslog_parser_test", **config_overrides):
-    parser = RsyslogFileFormatParser()
-    parser.logger = PrintLogger("test.rsyslog_parser")
+def make_preset_parser(preset_cls, id_registry, device_name, **config_overrides):
+    parser = preset_cls()
+    parser.logger = PrintLogger("test." + device_name)
     parser.shared = make_shared(id_registry)
     parser.local = SimpleNamespace(device_id=id_registry.get_device(device_name))
     config = {"delay": 20}
@@ -287,7 +291,7 @@ class TestRsyslogFileFormatParser:
     'tag[pid]: ' TAG field, matching rsyslog's default RSYSLOG_FileFormat template."""
 
     def test_parses_hostname_tag_pid_and_message(self, id_registry):
-        parser = make_rsyslog_parser(id_registry, delay=20)
+        parser = make_preset_parser(RsyslogFileFormatParser, id_registry, "rsyslog_parser_test", delay=20)
         parser.enabled = True
         device = parser.local.device_id
 
@@ -315,6 +319,38 @@ class TestRsyslogFileFormatParser:
         _msg1, _level1, module1 = rows[1]
         assert module0 == device.get_module("sshd").id
         assert module1 == device.get_module("kernel").id
+
+
+class TestAdbLogcatLongParser:
+    """Runs the real 'adb_logcat_long' preset end to end on `adb logcat -v long` frames."""
+
+    def test_parses_level_tag_and_message(self, id_registry):
+        parser = make_preset_parser(AdbLogcatLongParser, id_registry, "adb_logcat_long_test", delay=20)
+        parser.enabled = True
+        device = parser.local.device_id
+
+        subscriber = QueueParser()
+        parser.subscribe(subscriber)
+
+        batch = parser.shared.array_pool.create(PooledLogBatch, 8, 512)
+        batch.insert(1000, 1000, b"[ 1700000000.123  345: 400 I/ActivityManager ]\nstart proc\n\n")
+        batch.insert(1000, 1000, b"[ 1700000000.456  57: 57 E/Wifi ]\nlink down\n\n")
+        # a frame ends where the next header starts
+        batch.insert(1000, 1000, b"[ 1700000000.789  1: 1 D/Init ]\n")
+        parser.put(batch)
+
+        parser.start()
+        try:
+            rows = drain(subscriber.queue, count=2)
+        finally:
+            parser.stop()
+
+        assert [msg for msg, _level, _module in rows] == [b"start proc", b"link down"]
+        assert [level for _msg, level, _module in rows] == [LogLevel.INFO, LogLevel.ERROR]
+        assert [module for _msg, _level, module in rows] == [
+            device.get_module("ActivityManager").id,
+            device.get_module("Wifi").id,
+        ]
 
 
 class TestOutputBatchFill:

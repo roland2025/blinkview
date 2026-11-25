@@ -573,6 +573,36 @@ class EspIdfV1Parser(SerialParserThread):
     __doc__ = "ESP-IDF V1 parser"
 
 
+@ParserFactory.register("adb_logcat_long")
+@override_property(
+    "frame_decoder",
+    default={
+        "type": "decode_adb_long_frame",
+        "filter_trim_r": True,
+        "filter_printable": True,
+        "filter_ansi": True,
+        "frame_length_minimum": 1,
+        "frame_length_maximum": 4096,
+    },
+)
+@override_property(
+    "frame_parser",
+    default={
+        "type": "default",
+        "steps": [
+            {"type": "timestamp_adb_long_frame"},
+            {"type": "process_pid_tid_adb_long_frame"},
+            {"type": "log_level_adb_long_frame"},
+            {"type": "module_name_adb_long_frame"},
+        ],
+    },
+)
+class AdbLogcatLongParser(FramePipelineParser):
+    __doc__ = """`adb logcat -v long` output, as the adb source reads it: a "[ sec.ms  pid: tid L/Tag ]"
+header line, the message lines, and a blank line between entries. Takes the timestamp, pid/tid,
+level and tag from the header."""
+
+
 @ParserFactory.register("rsyslog_file_format")
 @override_property(
     "frame_decoder",
