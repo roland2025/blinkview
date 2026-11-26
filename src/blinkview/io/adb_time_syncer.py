@@ -13,11 +13,15 @@ from blinkview.subscribers.subscriber import BaseSubscriber, TimeSyncerFactory
 
 
 @TimeSyncerFactory.register("adb_time_syncer")
-@configuration_property("asymmetry_ratio", **ASYMMETRY_RATIO_PROPERTY)
+# 0.93: `am broadcast` start-up puts the pong's clock read ~26 of a ~32 ms round trip in (measured on a phone over
+# USB and on the emulator); 0.5 stamps ADB rows ~20 ms early
+@configuration_property("asymmetry_ratio", **{**ASYMMETRY_RATIO_PROPERTY, "default": 930_000})
+# False: the rows carry logcat's `-v monotonic` time, which is the pong's `m` (System.nanoTime). Anchoring on
+# `b` (elapsedRealtimeNanos) puts every row off by the time the phone has spent asleep (14 days on one test phone).
 @configuration_property(
     "time_source_boot",
     type="boolean",
-    default=True,
+    default=False,
     hidden=True,
     required=True,
     # ui_order=40,

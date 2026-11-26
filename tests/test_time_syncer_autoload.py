@@ -92,18 +92,19 @@ class TestEnabledWithoutType:
         assert syncer in pipeline._children
         assert syncer.enabled is True  # a disabled child would never start with the pipeline
 
-    def test_syncer_gets_its_config_defaults(self, id_registry):
+    @pytest.mark.parametrize("syncer_type, asymmetry", [("serial_time_syncer", 500_000), ("adb_time_syncer", 930_000)])
+    def test_syncer_gets_its_config_defaults(self, id_registry, syncer_type, asymmetry):
         pipeline = make_pipeline(id_registry, time_sync=AUTO)
-        FakeReader("serial_time_syncer").subscribe(pipeline)
+        FakeReader(syncer_type).subscribe(pipeline)
 
-        assert pipeline.time_syncer.asymmetry_ratio == 500_000
+        assert pipeline.time_syncer.asymmetry_ratio == asymmetry
+        # Both anchor on the clock the rows are stamped with: logcat -v monotonic is the pong's m, not b
         assert pipeline.time_syncer.time_source_boot is False
 
     @pytest.mark.parametrize("syncer_type", ["serial_time_syncer", "adb_time_syncer"])
-    def test_asymmetry_ratio_defaults_to_half_and_is_configurable(self, id_registry, syncer_type):
+    def test_asymmetry_ratio_is_configurable(self, id_registry, syncer_type):
         pipeline = make_pipeline(id_registry, time_sync=AUTO)
         FakeReader(syncer_type).subscribe(pipeline)
-        assert pipeline.time_syncer.asymmetry_ratio == 500_000
 
         # a config change rebuilds the syncer for the source it is already bound to
         pipeline.apply_config({**BASE_CONFIG, "time_sync": {**AUTO, "asymmetry_ratio": 300_000}})
