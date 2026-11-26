@@ -1124,7 +1124,7 @@ class TelemetryWatch(QWidget):
                     device_combo = RequestComboBox()
                     device_combo.aboutToShowPopup.connect(self._trigger_device_fetch)
                     if entry.target_device:
-                        device_combo.addItem(f"ID: {entry.target_device}", entry.target_device)
+                        device_combo.addItem(self._get_device_display_name(entry.target_device), entry.target_device)
                     else:
                         device_combo.addItem("None", "")
                     device_combo.currentIndexChanged.connect(
@@ -1624,12 +1624,13 @@ class TelemetryWatch(QWidget):
         """
         self.print(f"Backend returned {len(new_devices)} devices. Updating cache...")
 
-        # Update local cache
+        # Update the local cache only. Saving here would echo the config back and
+        # apply_config/rebuild_ui would reset the combo whose popup is opening to a
+        # single item; the cache is persisted with the next real save.
         for dev_id, dev_name in new_devices:
             self.device_cache[dev_id] = dev_name
 
         # Notify all waiting single-shot listeners
-        self.save_config()
         self.signal_devices_updated.emit(new_devices)
 
     def _update_single_combo(self, combo: QComboBox, device_data: List[tuple]):
@@ -1680,7 +1681,20 @@ class TelemetryWatch(QWidget):
         """Returns human readable name from cache, or fallback if unknown."""
         if not device_id or device_id == "None":
             return "None"
-        return self.device_cache.get(device_id, f"ID: {device_id}")
+        name = self.device_cache.get(device_id)
+        if name is None:
+            name = self._lookup_live_source_name(device_id)
+            if name is not None:
+                self.device_cache[device_id] = name
+        return name if name is not None else f"ID: {device_id}"
+
+    def _lookup_live_source_name(self, device_id: str) -> str | None:
+        """Name of a currently registered source, or None if it is not loaded."""
+        try:
+            source = self.gui_context.registry.sources.sources.get(device_id)
+        except AttributeError:
+            return None
+        return getattr(source, "name", None) if source is not None else None
 
     def _send_command_to_target(self, command, target):
         val_with_newline = f"{command}\n"
