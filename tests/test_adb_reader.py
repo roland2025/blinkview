@@ -79,48 +79,183 @@ class TestIsConnected:
         assert reader.is_connected()
 
 
+class LiveFakeShell(FakeShell):
+    """A FakeShell that is still running (poll() is None) until killed; a killed one reads EOF."""
+
+    def __init__(self, response_chunks=(), block_reads=False, write_raises=None):
+        super().__init__(response_chunks)
+        self.returncode = None
+        self.killed = False
+        self._block = block_reads
+        self._write_raises = write_raises
+        self._killed_event = __import__("threading").Event()
+        if write_raises is not None:
+            self.stdin.write = self._raise_on_write
+        if block_reads:
+            self.stdout.read1 = self._blocking_read1
+
+    def _raise_on_write(self, data):
+        raise self._write_raises
+
+    def _blocking_read1(self, _size):
+        self._killed_event.wait(5)
+        return b""
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+        self._killed_event.set()
+
+
+def connected_reader(shell):
+    reader = make_reader()
+    reader._shell = shell
+    reader._process = object()  # logcat is up
+    reader._base_cmd = ["adb"]
+    return reader
+
+
 class TestQuery:
-    def test_returns_empty_list_without_a_shell(self):
+    def test_returns_empty_list_when_not_connected(self):
         reader = make_reader()
         reader._shell = None
         assert reader.query("echo hi") == []
 
-    def test_writes_the_command_with_sentinel_and_returns_stripped_lines(self):
-        reader = make_reader()
-        reader._shell = FakeShell(response_chunks=[b"line one\nline two\n__BlinkSync_Done__\n"])
+    def test_runs_the_command_in_its_own_sh_and_returns_stripped_lines(self):
+        reader = connected_reader(LiveFakeShell([b"line one\nline two\n__BlinkSync_Done__ 0\n"]))
 
         result = reader.query("some command")
 
         assert result == ["line one", "line two"]
-        assert reader._shell.stdin.written == b"some command; echo __BlinkSync_Done__\n"
+        assert reader._shell.stdin.written == b"sh -c 'some command' </dev/null 2>&1; echo __BlinkSync_Done__ $?\n"
 
-    def test_stops_reading_once_the_sentinel_appears_but_keeps_trailing_text_on_its_line(self):
-        # replace() only strips the sentinel substring itself - text sharing its chunk/line
-        # (here "extra ignored") is not truncated, since the read loop stops pulling *more*
-        # chunks once the sentinel shows up, but doesn't trim what already arrived alongside it.
-        reader = make_reader()
-        reader._shell = FakeShell(response_chunks=[b"a\n", b"b\n__BlinkSync_Done__extra ignored"])
+    def test_sentinel_split_across_chunks(self):
+        reader = connected_reader(LiveFakeShell([b"a\n__BlinkSync_Do", b"ne_", b"_ 0", b"\r\n"]))
 
-        result = reader.query("cmd")
+        assert reader.query("cmd") == ["a"]
 
-        assert result == ["a", "b", "extra ignored"]
+    def test_echoed_input_does_not_count_as_the_sentinel(self):
+        # A shell with a pty echoes the line it was sent, which contains the sentinel text
+        echoed = b"sh -c 'cmd' </dev/null 2>&1; echo __BlinkSync_Done__ $?\r\n"
+        reader = connected_reader(LiveFakeShell([echoed, b"out\n__BlinkSync_Done__ 0\n"]))
 
-    def test_empty_output_before_sentinel_returns_empty_list(self):
-        reader = make_reader()
-        reader._shell = FakeShell(response_chunks=[])  # read1 immediately returns b""
+        assert reader.query("cmd")[-1] == "out"
+
+    def test_shell_ending_before_the_sentinel_returns_empty_list_and_drops_the_shell(self):
+        shell = LiveFakeShell([b"partial\n"])
+        reader = connected_reader(shell)
 
         assert reader.query("cmd") == []
+        assert reader._shell is None
+        assert shell.killed
+
+
+class TestRunIsolatesTheCommand:
+    def test_trailing_newline_is_quoted_away(self):
+        # The bug: "cmd\n; echo SENTINEL" put "; echo" on its own line, a syntax error that made
+        # the non-interactive shell exit after the first send.
+        reader = connected_reader(LiveFakeShell([b"__BlinkSync_Done__ 0\n"]))
+
+        reader.send_data("am broadcast -a X --es msg hi\n")
+
+        assert reader._shell.stdin.written == (
+            b"sh -c 'am broadcast -a X --es msg hi' </dev/null 2>&1; echo __BlinkSync_Done__ $?\n"
+        )
+
+    def test_quotes_and_shell_syntax_stay_inside_the_sh_c_argument(self):
+        import shlex
+
+        text = "echo 'it''s' \"x\"; exit; (unclosed"
+        reader = connected_reader(LiveFakeShell([b"__BlinkSync_Done__ 0\n"]))
+
+        reader.send_data(text)
+
+        wire = bytes(reader._shell.stdin.written).decode()
+        assert shlex.split(wire.split(" </dev/null")[0]) == ["sh", "-c", text]
 
 
 class TestSendData:
-    def test_delegates_to_query(self):
+    def test_returns_quietly_on_exit_code_zero(self):
+        reader = connected_reader(LiveFakeShell([b"Broadcast completed\n__BlinkSync_Done__ 0\n"]))
+
+        reader.send_data("am broadcast")  # must not raise
+
+    def test_nonzero_exit_code_raises_with_the_last_output_line(self):
+        import pytest
+
+        from blinkview.io.adb_reader import AdbShellError
+
+        reader = connected_reader(LiveFakeShell([b"sh: amm: inaccessible or not found\n__BlinkSync_Done__ 127\n"]))
+
+        with pytest.raises(AdbShellError, match="127.*amm: inaccessible"):
+            reader.send_data("amm broadcast")
+
+    def test_raises_when_not_connected(self):
+        import pytest
+
+        from blinkview.io.adb_reader import AdbShellError
+
         reader = make_reader()
-        calls = []
-        reader.query = lambda cmd: calls.append(cmd) or []
+        with pytest.raises(AdbShellError, match="not connected"):
+            reader.send_data("am broadcast")
 
-        reader.send_data("some command")
+    def test_closed_pipe_restarts_the_shell_and_delivers_the_command_once(self):
+        # The symptom: OSError(22) writing to a shell that had exited
+        dead = LiveFakeShell(write_raises=OSError(22, "Invalid argument"))
+        fresh = LiveFakeShell([b"__BlinkSync_Done__ 0\n"])
+        reader = connected_reader(dead)
+        reader._start_shell = lambda base_cmd: fresh
 
-        assert calls == ["some command"]
+        reader.send_data("am broadcast")
+
+        assert dead.killed
+        assert reader._shell is fresh
+        assert fresh.stdin.written.count(b"am broadcast") == 1
+
+    def test_exited_shell_is_restarted_before_writing(self):
+        dead = LiveFakeShell()
+        dead.returncode = 1
+        fresh = LiveFakeShell([b"__BlinkSync_Done__ 0\n"])
+        reader = connected_reader(dead)
+        reader._start_shell = lambda base_cmd: fresh
+
+        reader.send_data("am broadcast")
+
+        assert dead.stdin.written == b""
+        assert fresh.stdin.written.count(b"am broadcast") == 1
+
+    def test_shell_ending_mid_command_raises_and_is_not_retried(self):
+        import pytest
+
+        from blinkview.io.adb_reader import AdbShellError
+
+        shell = LiveFakeShell([b"Broadcasting: Intent\n"])
+        reader = connected_reader(shell)
+        starts = []
+        reader._start_shell = lambda base_cmd: starts.append(1) or LiveFakeShell()
+
+        with pytest.raises(AdbShellError, match="ended before"):
+            reader.send_data("am broadcast")
+
+        assert starts == []  # the command may have run: no second attempt
+        assert reader._shell is None
+
+    def test_a_stuck_command_is_killed_after_the_timeout(self):
+        import pytest
+
+        from blinkview.io.adb_reader import AdbShellError
+
+        shell = LiveFakeShell(block_reads=True)
+        reader = connected_reader(shell)
+
+        with pytest.raises(AdbShellError, match="no reply"):
+            reader._run("top", timeout_s=0.2)
+
+        assert shell.killed
+        assert reader._shell is None
 
 
 class TestPidHistoryKey:
@@ -187,7 +322,7 @@ class TestRefreshProcessIds:
     def test_populates_process_ids_from_ps_output(self):
         reader = make_reader()
         reader.reference_id = "adb1"
-        reader.query = lambda cmd: ["NAME PID", "com.example.app 1234", "system_server 55"]
+        reader._run = lambda cmd: (0, ["NAME PID", "com.example.app 1234", "system_server 55"])
         reader.shared = SimpleNamespace(
             time_ns=lambda: 1_000,
             pid_history=IdHistory(),
@@ -200,7 +335,7 @@ class TestRefreshProcessIds:
 
     def test_skips_malformed_lines(self):
         reader = make_reader()
-        reader.query = lambda cmd: ["not-a-valid-line-at-all", "good_proc 99"]
+        reader._run = lambda cmd: (0, ["not-a-valid-line-at-all", "good_proc 99"])
         reader.shared = SimpleNamespace(
             time_ns=lambda: 1_000,
             pid_history=IdHistory(),
@@ -214,7 +349,7 @@ class TestRefreshProcessIds:
     def test_feeds_pid_history_for_each_owning_device(self):
         reader = make_reader()
         history = IdHistory()
-        reader.query = lambda cmd: ["app_a 10"]
+        reader._run = lambda cmd: (0, ["app_a 10"])
         reader._owning_pipeline_device_ids = lambda: [7]
         reader.shared = SimpleNamespace(time_ns=lambda: 5_000, pid_history=history)
 
@@ -229,10 +364,10 @@ class TestRefreshProcessIds:
         reader._owning_pipeline_device_ids = lambda: [7]
         reader.shared = SimpleNamespace(time_ns=lambda: 1_000, pid_history=history)
 
-        reader.query = lambda cmd: ["app_a 10"]
+        reader._run = lambda cmd: (0, ["app_a 10"])
         reader._refresh_process_ids()
 
-        reader.query = lambda cmd: []  # app_a's pid is gone this poll
+        reader._run = lambda cmd: (0, [])  # app_a's pid is gone this poll
         reader.shared = SimpleNamespace(time_ns=lambda: 2_000, pid_history=history)
         reader._refresh_process_ids()
 
@@ -241,6 +376,28 @@ class TestRefreshProcessIds:
         assert history.resolve(key, ts_ns=2_500) is None
         # But it did exist at the earlier timestamp, before the close.
         assert history.resolve(key, ts_ns=1_500) == "app_a"
+
+
+class TestRefreshProcessIdsOnShellFailure:
+    def test_failed_poll_keeps_the_known_pids_open(self):
+        from blinkview.io.adb_reader import AdbShellError
+
+        reader = make_reader()
+        history = IdHistory()
+        reader._owning_pipeline_device_ids = lambda: [7]
+        reader.shared = SimpleNamespace(time_ns=lambda: 1_000, pid_history=history)
+        reader._run = lambda cmd: (0, ["app_a 10"])
+        reader._refresh_process_ids()
+
+        def fail(cmd):
+            raise AdbShellError("ADB shell ended")
+
+        reader._run = fail
+        reader.shared = SimpleNamespace(time_ns=lambda: 2_000, pid_history=history)
+        reader._refresh_process_ids()  # must not raise
+
+        assert reader._process_ids == {"app_a": 10}
+        assert history.resolve(AdbReader._pid_history_key(7, 10), ts_ns=2_500) == "app_a"
 
 
 class TestGetNameFromPid:
@@ -457,3 +614,4 @@ class TestRunRealPipeIngestion:
             reader.stop()
 
         assert received == expected
+

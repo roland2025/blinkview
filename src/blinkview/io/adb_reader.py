@@ -5,14 +5,39 @@
 # Copyright (c) 2026 Roland Uuesoo
 
 import os
+import re
+import shlex
 import subprocess
-from threading import Lock
+from threading import Event, Lock, Timer
 from time import sleep
 
 from blinkview.core.configurable import configuration_property, override_property
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
 from blinkview.io.batch_feeder import BatchFeeder
 from blinkview.utils.adb import detect_adb_path
+
+# Ends every command's output on the persistent shell, followed by the command's exit code.
+SENTINEL = b"__BlinkSync_Done__"
+# Needs the digits: a shell that echoes its input would otherwise match on "echo ... $?".
+_SENTINEL_RE = re.compile(re.escape(SENTINEL) + rb" (\d+)\r?\n")
+# How long one command may run before the shell is killed (ps -A on a phone takes ~0.1 s).
+QUERY_TIMEOUT_S = 10.0
+
+
+class AdbShellError(RuntimeError):
+    """A command could not be run on the device's shell; the message says why."""
+
+
+def _shorten(text: str, limit: int = 80) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _kill_quietly(proc: subprocess.Popen):
+    try:
+        proc.kill()
+    except Exception:
+        pass
 
 
 @DeviceFactory.register("adb")
@@ -83,6 +108,7 @@ ensuring high throughput without pipeline stalls."""
 
         self._shell = None  # The persistent command shell
         self._shell_lock = Lock()
+        self._base_cmd: list[str] | None = None  # adb [-s serial], to restart the shell with
 
         self._syncer = None
 
@@ -197,26 +223,12 @@ ensuring high throughput without pipeline stalls."""
             if self.device_id:
                 base_cmd.extend(["-s", self.device_id])
 
-            # 1. Start Persistent Shell FIRST (Necessary for the Anchor)
-            self.logger.debug("Opening ADB shell...")
-            self._shell = subprocess.Popen(
-                [*base_cmd, "shell"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False,
-                bufsize=-1,
-            )
+            self._base_cmd = base_cmd
 
-            # Give it a moment to fail
-            sleep(0.1)
-            if self._shell.poll() is not None:
-                # If we're here, the shell died immediately
-                _, err = self._shell.communicate()
-                err_msg = err.strip() if err else "No devices found"
-                raise ConnectionError(err_msg)
+            # Start the persistent shell first (necessary for the anchor)
+            self._shell = self._start_shell(base_cmd)
 
-            # 5. Clear logs if requested (Now safe to do since shell is open)
+            # Clear logs if requested (now safe to do since shell is open)
             # if self.clear_log or True:
             #     self.logger.info("Clearing device logs...")
             #     subprocess.run([*base_cmd, "logcat", "-c"], check=False, capture_output=True)
@@ -238,7 +250,7 @@ ensuring high throughput without pipeline stalls."""
                 bufsize=-1,
             )
 
-            # 7. Finalize Environment
+            # Finalize environment
             self._refresh_process_ids()
             self._pid_poll_task_id = self.shared.tasks.run_periodic(15.0, self._refresh_process_ids)
 
@@ -258,6 +270,28 @@ ensuring high throughput without pipeline stalls."""
 
             self._cleanup_process()
             return None
+
+    def _start_shell(self, base_cmd: list[str]) -> subprocess.Popen:
+        """Starts the persistent `adb shell` that send_data() and query() write their commands to.
+
+        stderr goes into stdout: an undrained stderr pipe would fill up over a long session and
+        block the shell, and an error then arrives in the reply instead of being lost."""
+        self.logger.debug("Opening ADB shell...")
+        shell = subprocess.Popen(
+            [*base_cmd, "shell"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=False,
+            bufsize=-1,
+        )
+
+        # Give it a moment to fail
+        sleep(0.1)
+        if shell.poll() is not None:
+            out, _ = shell.communicate()
+            raise ConnectionError(out.decode(errors="replace").strip() if out else "No devices found")
+        return shell
 
     def is_connected(self):
         return self.enabled and self._shell and self._process
@@ -327,47 +361,126 @@ ensuring high throughput without pipeline stalls."""
 
     def send_data(self, data: str):
         """
-        Sends a command string to the persistent ADB shell and waits for completion.
-        This prevents 'Pipe Pollution' by ensuring all output is consumed.
+        Runs `data` as a shell command on the device (like `adb shell <data>`) and waits for it
+        to finish, so all its output is consumed before the next command.
+
+        Raises AdbShellError, after logging why, when the command could not be delivered or
+        exited non-zero.
         """
-        # Simply delegate to query and ignore the return list.
-        # The sentinel inside query() acts as a synchronization barrier.
-        _ = self.query(data)
+        rc, lines = self._run(data)
+        if rc != 0:
+            detail = lines[-1] if lines else "no output"
+            self.logger.warning("send: %r exited with %s: %s", _shorten(data), rc, detail)
+            raise AdbShellError(f"command exited with {rc}: {detail}")
 
     def query(self, cmd: str) -> list[str]:
-        if self._shell is None:
+        """The output lines of `cmd`, for BlinkView's own lookups (ps, /proc): [] when not
+        connected or the shell failed, which is logged. Never raises."""
+        try:
+            return self._run(cmd)[1]
+        except AdbShellError as e:
+            self.logger.debug("query %r failed: %s", _shorten(cmd), e)
             return []
 
-        # Use bytes for the sentinel
-        sentinel = b"__BlinkSync_Done__"
-        results = []
+    def _run(self, cmd: str, timeout_s: float = QUERY_TIMEOUT_S) -> tuple[int, list[str]]:
+        """Runs `cmd` on the persistent shell and returns (exit code, output lines).
+
+        The command runs in its own `sh -c` with stdin from /dev/null, so nothing in it reaches
+        the persistent shell's parser or input: a trailing newline (the MCP `send` and watch
+        buttons add one), a syntax error or `exit` would otherwise make the non-interactive
+        shell exit, and a command reading stdin would eat the sentinel. A shell that died
+        anyway is restarted; when the write itself failed the command never ran and is retried
+        once. Raises AdbShellError, after logging it, when the command can't be run."""
+        wire = f"sh -c {shlex.quote(cmd.rstrip())} </dev/null 2>&1; echo {SENTINEL.decode()} $?\n".encode()
 
         with self._shell_lock:
-            # Encode command to bytes
-            self._shell.stdin.write(f"{cmd}; echo {sentinel.decode()}\n".encode())
-            self._shell.stdin.flush()
+            for attempt in range(2):
+                shell = self._ensure_shell()
+                try:
+                    shell.stdin.write(wire)
+                    shell.stdin.flush()
+                    break
+                except (OSError, ValueError) as e:
+                    # The pipe is closed: the shell is gone, the command never left this PC
+                    self.logger.warning("ADB shell pipe is closed (%s); restarting the shell", e)
+                    self._drop_shell(shell)
+            else:
+                raise self._fail("could not write to a fresh ADB shell")
 
+            # A shell that stops answering is killed, which ends the read below with EOF
+            timed_out = Event()
+
+            def on_timeout():
+                timed_out.set()
+                _kill_quietly(shell)
+
+            timer = Timer(timeout_s, on_timeout)
+            timer.daemon = True
+            timer.start()
             output = b""
-            while True:
-                # .buffer is not needed because the stream is already binary
-                chunk = self._shell.stdout.read1(4096)
-                if not chunk:
-                    break
-                output += chunk
-                if sentinel in output:
-                    break
+            try:
+                while True:
+                    match = _SENTINEL_RE.search(output)
+                    if match:
+                        break
+                    chunk = shell.stdout.read1(4096)
+                    if not chunk:
+                        break
+                    output += chunk
+            except (OSError, ValueError):
+                match = None
+            finally:
+                timer.cancel()
 
-            # Decode once at the end
-            decoded_output = output.replace(sentinel, b"").decode(errors="ignore")
-            return [line.strip() for line in decoded_output.splitlines() if line.strip()]
+            if match is None:
+                self._drop_shell(shell)
+                if timed_out.is_set():
+                    raise self._fail(f"no reply to {_shorten(cmd)!r} within {timeout_s:.0f}s; the ADB shell was killed")
+                tail = output.decode(errors="replace").strip().splitlines()
+                detail = tail[-1] if tail else "no output"
+                raise self._fail(f"ADB shell ended before {_shorten(cmd)!r} finished ({detail})")
+
+            body = output[: match.start()].decode(errors="ignore")
+            lines = [line.strip() for line in body.splitlines() if line.strip()]
+            return int(match.group(1)), lines
+
+    def _ensure_shell(self) -> subprocess.Popen:
+        """The live persistent shell, restarted if it exited. Call with _shell_lock held."""
+        shell = self._shell
+        if shell is not None and shell.poll() is None:
+            return shell
+        if shell is not None:
+            self.logger.warning("ADB shell had exited (code %s); restarting it", shell.returncode)
+            self._drop_shell(shell)
+        if self._process is None or self._base_cmd is None:
+            raise self._fail("ADB source is not connected")
+        try:
+            self._shell = self._start_shell(self._base_cmd)
+        except Exception as e:
+            raise self._fail(f"could not restart the ADB shell: {e}")
+        self.logger.info("ADB shell restarted")
+        return self._shell
+
+    def _drop_shell(self, shell: subprocess.Popen):
+        if self._shell is shell:
+            self._shell = None
+        _kill_quietly(shell)
+
+    def _fail(self, message: str) -> "AdbShellError":
+        self.logger.error("ADB send failed: %s", message)
+        return AdbShellError(message)
 
     def _refresh_process_ids(self):
         """Uses the persistent shell to map all process names to PIDs. Also feeds the shared,
         Numba-backed IdHistory (self.shared.pid_history) so that a PID's process name can later
         be resolved as of any past timestamp, not just "whatever currently holds it" - Android
         recycles PIDs, so the two are not the same thing over the life of a session."""
-        # Use ps -A -o NAME,PID for modern Android compatibility
-        lines = self.query("ps -A -o NAME,PID")
+        # Use ps -A -o NAME,PID for modern Android compatibility. A failed run (already logged)
+        # skips this poll: an empty list would close every PID's history interval.
+        try:
+            lines = self._run("ps -A -o NAME,PID")[1]
+        except AdbShellError:
+            return
 
         logger = self.logger
 

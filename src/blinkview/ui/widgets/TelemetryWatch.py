@@ -435,9 +435,12 @@ class TelemetryWatch(QWidget):
     signal_destroy = Signal(QWidget)
 
     signal_devices_updated = Signal(list)
+    signal_send_failed = Signal(str, str)  # target, why
 
     def __init__(self, gui_context, state=None, parent=None):
         super().__init__(parent)
+
+        self.signal_send_failed.connect(self._on_send_failed)
 
         self.default_target = ""
 
@@ -1684,9 +1687,21 @@ class TelemetryWatch(QWidget):
         try:
             tasks = self.gui_context.registry.system_ctx.tasks
             devices = self.gui_context.registry.sources
-            tasks.run_task(devices.send_data, target, val_with_newline)
+            future = tasks.run_task(devices.send_data, target, val_with_newline)
         except Exception as e:
-            print(f"Error sending to '{target}': {e}")
+            self._on_send_failed(target, str(e))
+            return
+        # The send runs on a worker thread; a failure comes back to the GUI thread as a signal
+        future.add_done_callback(
+            lambda f, t=target: f.exception() is not None and self.signal_send_failed.emit(t, str(f.exception()))
+        )
+
+    def _on_send_failed(self, target: str, message: str):
+        """Shows a failed send where it was clicked: the watch button or the command input."""
+        name = self._get_device_display_name(target)
+        text = f"Send to '{name}' failed: {message}"
+        self.print(text)
+        QToolTip.showText(QCursor.pos(), text, self)
 
     def _show_row_context_menu(self, pos, entry: RowEntry, widget: QLabel):
         rect = self._calculate_entry_row_rect(entry)

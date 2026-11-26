@@ -6,16 +6,18 @@
 
 from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtGui import QCursor
-from qtpy.QtWidgets import QInputDialog, QMenu, QToolButton
+from qtpy.QtWidgets import QInputDialog, QMenu, QToolButton, QToolTip
 
 from blinkview.ui.utils.window_title import titled
 
 
 class BaseToolButtonWidget(QToolButton):
     types_fetched = Signal(list)
+    send_failed = Signal(str, str)  # target, why
 
     def __init__(self, config_node, gui_context, button_text: str, factory_key: str, input_title: str):
         super().__init__()
+        self.send_failed.connect(self._on_send_failed)
         self.config_node = config_node
         self.gui_context = gui_context
         self.factory_key = factory_key
@@ -160,9 +162,19 @@ class BaseToolButtonWidget(QToolButton):
         try:
             tasks = self.gui_context.registry.system_ctx.tasks
             devices = self.gui_context.registry.sources
-            tasks.run_task(devices.send_data, target, val_with_newline)
+            future = tasks.run_task(devices.send_data, target, val_with_newline)
         except Exception as e:
-            print(f"Error sending to '{target}': {e}")
+            self._on_send_failed(target, str(e))
+            return
+        # The send runs on a worker thread; a failure comes back to the GUI thread as a signal
+        future.add_done_callback(
+            lambda f, t=target: f.exception() is not None and self.send_failed.emit(t, str(f.exception()))
+        )
+
+    def _on_send_failed(self, target: str, message: str):
+        text = f"Send to '{target}' failed: {message}"
+        print(text)
+        QToolTip.showText(self.mapToGlobal(self.rect().bottomLeft()), text, self)
 
     def generate_config_payload(self, name: str, item_type: str, parent_config: dict) -> tuple[str, dict]:
         raise NotImplementedError("Subclasses must define explicit generation config payloads.")

@@ -14,8 +14,16 @@ class FakeTasks:
         self.ran = []
 
     def run_task(self, fn, *args):
+        # Like TaskManager.run_task: a Future that holds the call's result or exception
+        from concurrent.futures import Future
+
         self.ran.append((fn, args))
-        fn(*args)
+        future = Future()
+        try:
+            future.set_result(fn(*args))
+        except Exception as e:
+            future.set_exception(e)
+        return future
 
 
 class FakeSources:
@@ -393,6 +401,21 @@ class TestSendDataPrompt:
         gui_context.registry.system_ctx.tasks = BrokenTasks()
 
         button._send_data_to_target("hello", "src1")  # must not raise
+
+    def test_a_failed_send_is_shown_on_the_button(self, qapp, qtbot, button, gui_context, monkeypatch):
+        def failing_send(target, payload):
+            raise RuntimeError("ADB source is not connected")
+
+        gui_context.registry.sources.send_data = failing_send
+        shown = []
+        monkeypatch.setattr(button, "_on_send_failed", lambda target, msg: shown.append((target, msg)))
+        button.send_failed.disconnect()
+        button.send_failed.connect(button._on_send_failed)
+
+        button._send_data_to_target("hello", "src1")
+
+        qtbot.waitUntil(lambda: bool(shown), timeout=1000)
+        assert shown == [("src1", "ADB source is not connected")]
 
 
 class TestToggleItemState:

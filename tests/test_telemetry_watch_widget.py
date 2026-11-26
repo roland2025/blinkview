@@ -26,6 +26,18 @@ from blinkview.ui.widgets.TelemetryWatch import (
 from tests.fakes.real_registry import make_real_gui_context, make_real_registry
 
 
+def done_future(exc: Exception | None = None):
+    """What TaskManager.run_task returns, already finished."""
+    from concurrent.futures import Future
+
+    future = Future()
+    if exc is None:
+        future.set_result(None)
+    else:
+        future.set_exception(exc)
+    return future
+
+
 def _seed_watches_section(registry):
     """Seeds an empty '/watches' container directly in the backend config before any
     TelemetryWatch's ConfigNode touches it. See
@@ -303,7 +315,7 @@ class TestButtonCommandExecution:
 
     def test_execute_button_command_sends_to_button_specific_target(self, watch):
         calls = []
-        watch.gui_context.registry.system_ctx.tasks.run_task = lambda fn, *a: calls.append((fn, a))
+        watch.gui_context.registry.system_ctx.tasks.run_task = lambda fn, *a: calls.append((fn, a)) or done_future()
 
         entry = ButtonEntry(label="Btn", command_payload="ping", target_device="dev1")
         watch.execute_button_command(entry)
@@ -313,13 +325,33 @@ class TestButtonCommandExecution:
 
     def test_execute_button_command_falls_back_to_default_target(self, watch):
         calls = []
-        watch.gui_context.registry.system_ctx.tasks.run_task = lambda fn, *a: calls.append(a)
+        watch.gui_context.registry.system_ctx.tasks.run_task = lambda fn, *a: calls.append(a) or done_future()
         watch.default_target = "default_dev"
 
         entry = ButtonEntry(label="Btn", command_payload="ping", target_device="")
         watch.execute_button_command(entry)
 
         assert calls[0] == ("default_dev", "ping\n")
+
+    def test_a_failed_send_reaches_the_gui_thread_feedback(self, watch, qtbot, monkeypatch):
+        shown = []
+        monkeypatch.setattr(watch, "_on_send_failed", lambda target, msg: shown.append((target, msg)))
+        # Reconnect so the signal calls the patched slot
+        watch.signal_send_failed.disconnect()
+        watch.signal_send_failed.connect(watch._on_send_failed)
+        watch.gui_context.registry.system_ctx.tasks.run_task = lambda fn, *a: done_future(
+            RuntimeError("ADB shell ended before 'am broadcast' finished")
+        )
+
+        watch.execute_button_command(ButtonEntry(label="Btn", command_payload="am broadcast", target_device="dev1"))
+
+        qtbot.waitUntil(lambda: bool(shown), timeout=1000)
+        assert shown == [("dev1", "ADB shell ended before 'am broadcast' finished")]
+
+    def test_send_failure_text_names_the_target(self, watch, capsys):
+        watch._on_send_failed("dev1", "not connected")
+
+        assert "Send to 'ID: dev1' failed: not connected" in capsys.readouterr().out
 
 
 class TestGenericCommand:
@@ -337,7 +369,7 @@ class TestGenericCommand:
 
     def test_command_sent_and_recorded_in_history(self, watch):
         calls = []
-        watch.gui_context.registry.system_ctx.tasks.run_task = lambda fn, *a: calls.append(a)
+        watch.gui_context.registry.system_ctx.tasks.run_task = lambda fn, *a: calls.append(a) or done_future()
         watch.default_target = "dev1"
         watch.command_input.setEditText("hello")
 
@@ -347,7 +379,7 @@ class TestGenericCommand:
         assert calls[0] == ("dev1", "hello\n")
 
     def test_repeated_command_moves_to_front_not_duplicated(self, watch):
-        watch.gui_context.registry.system_ctx.tasks.run_task = lambda fn, *a: None
+        watch.gui_context.registry.system_ctx.tasks.run_task = lambda fn, *a: done_future()
         watch.default_target = "dev1"
 
         watch.command_input.setEditText("first")
