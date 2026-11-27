@@ -215,6 +215,40 @@ class TestProjectSyncedNs:
         assert int(result) == 9_000_000_000
 
 
+S = 1_000_000_000
+HOST = 1_795_000_000 * S
+
+
+def _synced_at(device_s):
+    """A published model mapping device time `device_s` to HOST, identity drift."""
+    sync = create_default_sync(now_ns=0, start_enabled=False)
+    prime_sync_state(sync, phone_ns=device_s * S, pc_ns=HOST)
+    sync.enabled[0] = 1
+    return sync
+
+
+class TestProjectAfterAClockRestart:
+    """A reboot restarts the device clock far below the model's ref_time. Projected with that model, the new boot's
+    rows landed as far in the past as the old uptime (2 h 27 min on the BlinkSync rig) until the next pong."""
+
+    def test_rows_of_a_restarted_clock_are_stamped_from_their_receive_time(self):
+        sync = _synced_at(1500)
+
+        first = nb_project_synced_ns(raw_ns=2 * S, rx_ns=HOST + 10 * S, sync=sync)
+        second = nb_project_synced_ns(raw_ns=3 * S, rx_ns=HOST + 11 * S + 3_000_000, sync=sync)
+
+        assert int(first) == HOST + 10 * S
+        # then device-time spacing from that first row, as the fallback does before any pong
+        assert int(second) == HOST + 11 * S
+
+    def test_a_late_row_from_before_the_last_pong_still_uses_the_model(self):
+        sync = _synced_at(1500)
+
+        result = nb_project_synced_ns(raw_ns=1495 * S, rx_ns=HOST + 1 * S, sync=sync)
+
+        assert int(result) == HOST - 5 * S
+
+
 class TestParseUnifiedLogTsNs:
     """Cross-checks nb_parse_unified_log_ts_ns's manual integer date math against the
     datetime.strptime-based formula it replaced in parsers/unified_log_replay.py (see

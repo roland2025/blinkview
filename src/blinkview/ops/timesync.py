@@ -192,9 +192,6 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
     act_idx = act_arr[0]
     write_idx = 1 - act_idx
 
-    # The device's clock restarted (reboot): set in step 4b, acted on in step 5 too.
-    clock_restarted = False
-
     # 4b. Phase loop-filter (this is what removes the staircase).
     #
     # The old code wrote raw_offset (pc_tx + rtt/2) straight into the
@@ -221,11 +218,10 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
         dt_anchor = current_anchor_time - prev_ref
 
         if dt_anchor < 0:
-            # Anchor clock went backwards (device reboot) - nothing sane to
-            # extrapolate: step, and start over as on a cold start, so the
-            # next PHASE_WARMUP_SAMPLES snap too.
+            # Anchor clock went backwards (a reboot, or a 32-bit `m` that
+            # wrapped) - nothing sane to extrapolate: step, and start over as
+            # on a cold start, so the next PHASE_WARMUP_SAMPLES snap too.
             new_offset = raw_offset
-            clock_restarted = True
             s_count = 1
         else:
             # float math here (matching the style used below for ppb) avoids
@@ -263,10 +259,11 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
     first_rtt = sc[IDX_FIRST_RTT]
     last_clean_pc = sc[IDX_LAST_CLEAN_PC]
 
-    if first_boot != 0 and (clock_restarted or phone_boot < first_boot):
-        # Reboot: the anchor belongs to the old boot, where dt_boot would stay negative for as long as the old
-        # uptime. Drop it and the drift samples measured against it; the drift in force stays published until
-        # the new baseline gives a sample.
+    if first_boot != 0 and phone_boot < first_boot:
+        # Reboot: `b` (64-bit time since boot) only goes backwards when the device restarts; `m` can also wrap
+        # (32-bit cycle counter), which must not cost the drift history. The anchor belongs to the old boot,
+        # where dt_boot would stay negative for as long as the old uptime. Drop it and the drift samples
+        # measured against it; the drift in force stays published until the new baseline gives a sample.
         first_boot = 0
         first_pc_offset = 0
         first_rtt = 0
@@ -332,5 +329,8 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
 
     act_arr[0] = write_idx
     sync.enabled[0] = 1
+    # The receive-time fallback restarts from the next row that needs it (nb_project_synced_ns): what it
+    # tracked before this model belongs to an older stretch of the device clock.
+    sync.auto_init[0] = 0
 
     return True, quality, mean_ms, stddev_ms

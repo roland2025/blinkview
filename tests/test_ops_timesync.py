@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from blinkview.core.types.parsing import create_default_sync
+from blinkview.ops.timestamps import nb_project_synced_ns
 from blinkview.ops.timesync import (
     DRIFT_MIN_BASELINE_NS,
     IDX_ARRAY_LENGTH,
@@ -230,11 +231,12 @@ def _simulate_drift(device_ppm, n_samples, seed=1, clean_fraction=0.2):
     return engine, sync, published_ppm, true_host
 
 
-def _run_link(n_samples, link, device_ppm=50, seed=1, reboot_at=None, uptime_s=1500):
+def _run_link(n_samples, link, device_ppm=50, seed=1, reboot_at=None, uptime_s=1500, mono_wrap_ns=None):
     """One ping per host second from a device `device_ppm` fast, `uptime_s` into its boot. `link(i, rng)` gives
     pong i's (rtt, outbound) in ns: the device reads its clock `outbound` after the ping was sent, +-20 us, so
-    `rtt - outbound` is the return path. At pong `reboot_at` the device clock restarts at 2 s. Returns the
-    engine, the sync state, each pong's published drift in ppm and the index of each pong that was accepted."""
+    `rtt - outbound` is the return path. At pong `reboot_at` the device clock restarts at 2 s. `m` is the boot
+    time modulo `mono_wrap_ns` when given (a 32-bit cycle counter), else the boot time. Returns the engine, the
+    sync state and each pong's published drift in ppm."""
     rng = random.Random(seed)
     engine, sync = _engine(), _sync()
     host0 = 1_795_000_000_000_000_000
@@ -249,7 +251,8 @@ def _run_link(n_samples, link, device_ppm=50, seed=1, reboot_at=None, uptime_s=1
         rtt, outbound = link(i, rng)
         read = tx + outbound + rng.randint(-20_000, 20_000)
         dev = int((read - boot_host) * rate)
-        nb_sync_kernel(tx, dev, dev, tx + rtt, engine, sync, False)
+        mono = dev % mono_wrap_ns if mono_wrap_ns else dev
+        nb_sync_kernel(tx, mono, dev, tx + rtt, engine, sync, False)
         idx = int(sync.active_idx[0])
         published_ppm.append((int(sync.drift_m[idx]) / int(sync.drift_d[idx]) - 1) * 1e6)
 
@@ -327,6 +330,18 @@ class TestDriftAfterReboot:
         assert all(ppm == published[399] for ppm in published[400:430])
         assert int(engine.scalars[IDX_PPB_COUNT]) == 0  # the old boot's samples are dropped
 
+    def test_a_wrapping_mono_clock_is_not_a_reboot(self):
+        """`m` from a 32-bit cycle counter (nRF at 32768 Hz: every 36.4 h) wraps while `b` keeps counting; the
+        drift history is measured on `b` and must survive the wrap."""
+        wrap_ns = (2**32 * 1_000_000_000) // 32768
+        uptime_s = wrap_ns // 1_000_000_000 - 400  # wraps ~393 pongs in (the device runs 50 ppm fast)
+        engine, _, published = _run_link(700, self._link, uptime_s=uptime_s, mono_wrap_ns=wrap_ns)
+
+        assert int(engine.scalars[IDX_PPB_COUNT]) == 15
+        # samples again after the 5-pong warmup; a reset anchor would pause them for a 60 s baseline (to ~460)
+        assert _drift_changes(published[400:450]) > 0
+        assert -52 < published[-1] < -48, published[-1]
+
     def test_the_offset_tracks_the_new_boot(self):
         """The pongs after a reboot snap to the new clock as on a cold start."""
         _, sync, _ = _run_link(410, self._link, reboot_at=400, device_ppm=0)
@@ -336,6 +351,48 @@ class TestDriftAfterReboot:
         # the last pong was read at tx + 1 ms, 2 s + 9 s + 1 ms into the new boot
         error_ns = int(sync.offset[idx]) + (11_001_000_000 - int(sync.ref_time[idx])) - (tx + 1_000_000)
         assert abs(error_ns) < 100_000, error_ns
+
+
+class TestRowsAfterReboot:
+    """Rows projected the way the parsers do (nb_project_synced_ns) between pongs (nb_sync_kernel) across two
+    reboots. The first pongs after a reboot are lost while the board boots, as on the rig (esp_b: 2 pings timed
+    out). Before the fix the boot rows were stamped as far in the past as the old uptime."""
+
+    @staticmethod
+    def _run(reboots):
+        """`reboots`: {pong index: device time the clock restarts at, s}. Returns each row's stamp error in s."""
+        engine, sync = _engine(), _sync()
+        host0 = 1_795_000_000_000_000_000
+        boot_host = host0 - 1500 * 1_000_000_000
+        lost = set()
+        errors = []
+        for i in range(1200):
+            tx = host0 + i * 1_000_000_000
+            if i in reboots:
+                boot_host = tx - reboots[i] * 1_000_000_000
+                lost = {i, i + 1}
+            # a row logged 0.3 s before the ping, received 1 ms after it was logged
+            row_host = tx - 300_000_000
+            row_dev = row_host - boot_host
+            if row_dev >= 0:
+                stamp = int(nb_project_synced_ns(row_dev, row_host + 1_000_000, sync))
+                errors.append((stamp - row_host) / 1e9)
+            if i not in lost:
+                dev = tx + 1_000_000 - boot_host
+                nb_sync_kernel(tx, dev, dev, tx + 2_000_000, engine, sync, False)
+        return errors
+
+    def test_boot_rows_are_stamped_near_their_receive_time(self):
+        errors = self._run({300: 2})
+
+        assert max(abs(e) for e in errors) < 0.01, max(errors, key=abs)
+
+    def test_a_second_reboot_does_not_reuse_the_first_reboots_fallback(self):
+        """The second boot's first rows (raw 10 s) sit above where the first reboot's fallback stopped (raw 3 s):
+        a fallback that kept its old anchor would stamp them ~10 min early."""
+        errors = self._run({300: 2, 900: 10})
+
+        assert max(abs(e) for e in errors) < 0.01, max(errors, key=abs)
 
 
 def _project(sync, dev_ns):

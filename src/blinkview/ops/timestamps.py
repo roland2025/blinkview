@@ -382,12 +382,23 @@ def nb_auto_sync_fallback(raw_ns, rx_ns, sync: SyncState):
     return dtypes.TS_TYPE(projected_rx)
 
 
+# A row this far below the published model's ref_time is from a restarted device clock (a reboot, or a counter
+# that wrapped), not a late row: the model belongs to the old run of the clock and would stamp it as far in the past
+# as the old uptime (hours, on the BlinkSync rig). Rows logged before the last pong and delivered late are a few
+# seconds old at most (a Zephyr log thread holds a line up to 1 s).
+CLOCK_RESTART_NS = 10_000_000_000
+
+
 @app_njit(inline="always")
 def nb_project_synced_ns(raw_ns, rx_ns, sync: SyncState):
     # Delegate to Auto-Sync if hardware sync isn't ready
     if not sync.enabled[0]:
         return nb_auto_sync_fallback(raw_ns, rx_ns, sync)
 
-    # Delegate to Formal Sync
     i = sync.active_idx[0]
+    if np.int64(raw_ns) < np.int64(sync.ref_time[i]) - CLOCK_RESTART_NS:
+        # Restarted clock: stamp from the receive time until the time syncer publishes a model for it
+        return nb_auto_sync_fallback(raw_ns, rx_ns, sync)
+
+    # Delegate to Formal Sync
     return nb_apply_drift_projection(raw_ns, sync.ref_time[i], sync.offset[i], sync.drift_m[i], sync.drift_d[i])
