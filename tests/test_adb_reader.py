@@ -10,6 +10,8 @@ import subprocess
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from blinkview.core.array_pool import NumpyArrayPool
 from blinkview.core.id_history import IdHistory
 from blinkview.core.logger import PrintLogger
@@ -642,6 +644,15 @@ class TestParseAdbDevices:
         assert parse_adb_devices("List of devices attached\n\n") == []
 
 
+@pytest.fixture
+def fresh_device_list_cache():
+    """The device list is cached across AdbReader instances; start each test without it."""
+    AdbReader._reset_device_list_cache()
+    yield
+    AdbReader._reset_device_list_cache()
+
+
+@pytest.mark.usefixtures("fresh_device_list_cache")
 class TestConfigSchemaDeviceList:
     def test_device_id_lists_connected_devices(self, monkeypatch):
         import blinkview.io.adb_reader as mod
@@ -663,3 +674,127 @@ class TestConfigSchemaDeviceList:
         prop = AdbReader.get_config_schema()["properties"]["device_id"]
 
         assert "enum" not in prop
+
+
+@pytest.mark.usefixtures("fresh_device_list_cache")
+class TestDeviceListCache:
+    """`adb devices -l` costs ~40 ms (seconds while the server starts or hangs), and the schema
+    is built on every construct/hydrate/apply/editor open/save - so the list is reused for
+    DEVICE_LIST_TTL_S seconds after a fetch finishes."""
+
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        import blinkview.io.adb_reader as mod
+
+        now = [1000.0]
+        monkeypatch.setattr(mod, "monotonic", lambda: now[0])
+        return now
+
+    @pytest.fixture
+    def fetches(self, monkeypatch):
+        import blinkview.io.adb_reader as mod
+
+        calls = []
+
+        def fake():
+            calls.append(1)
+            return [(f"SER{len(calls)}", "dev")]
+
+        monkeypatch.setattr(mod, "list_adb_devices", fake)
+        return calls
+
+    @staticmethod
+    def _enum():
+        return AdbReader.get_config_schema()["properties"]["device_id"].get("enum")
+
+    def test_calls_within_the_ttl_share_one_fetch(self, clock, fetches):
+        from blinkview.io.adb_reader import DEVICE_LIST_TTL_S
+
+        first = self._enum()
+        clock[0] += DEVICE_LIST_TTL_S - 0.1
+        AdbReader()  # construction builds the schema too
+        AdbReader.hydrate_config({})
+
+        assert len(fetches) == 1
+        assert self._enum() == first == ["", "SER1"]
+
+    def test_refetches_after_the_ttl(self, clock, fetches):
+        from blinkview.io.adb_reader import DEVICE_LIST_TTL_S
+
+        self._enum()
+        clock[0] += DEVICE_LIST_TTL_S
+
+        assert self._enum() == ["", "SER2"]
+        assert len(fetches) == 2
+
+    def test_ttl_counts_from_when_the_fetch_finished(self, clock, monkeypatch):
+        """A fetch that hung for its whole timeout must not be stale the moment it returns."""
+        import blinkview.io.adb_reader as mod
+        from blinkview.io.adb_reader import DEVICE_LIST_TTL_S
+
+        calls = []
+
+        def slow():
+            calls.append(1)
+            clock[0] += 3.0  # the 3 s timeout
+            return [("SER", "dev")]
+
+        monkeypatch.setattr(mod, "list_adb_devices", slow)
+        self._enum()
+        clock[0] += DEVICE_LIST_TTL_S - 0.1
+        self._enum()
+
+        assert len(calls) == 1
+
+    def test_failure_is_cached_too_then_retried(self, clock, monkeypatch):
+        """A hanging adb (3 s timeout per call) must not cost 3 s on every schema build."""
+        import blinkview.io.adb_reader as mod
+        from blinkview.io.adb_reader import DEVICE_LIST_TTL_S
+
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired("adb", 3)
+            return [("SER", "dev")]
+
+        monkeypatch.setattr(mod, "list_adb_devices", flaky)
+
+        assert self._enum() is None
+        assert self._enum() is None
+        assert len(calls) == 1
+
+        clock[0] += DEVICE_LIST_TTL_S
+        assert self._enum() == ["", "SER"]
+
+    def test_concurrent_callers_share_one_fetch(self, monkeypatch):
+        import threading
+
+        import blinkview.io.adb_reader as mod
+
+        calls = []
+        release = threading.Event()
+
+        def slow():
+            calls.append(1)
+            release.wait(2)
+            return [("SER", "dev")]
+
+        monkeypatch.setattr(mod, "list_adb_devices", slow)
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(self._enum())) for _ in range(4)]
+        for t in threads:
+            t.start()
+        time.sleep(0.1)
+        release.set()
+        for t in threads:
+            t.join()
+
+        assert len(calls) == 1
+        assert results == [["", "SER"]] * 4
+
+    def test_schema_callers_cannot_mutate_the_cached_list(self, fetches):
+        AdbReader.get_config_schema()["properties"]["device_id"]["enum"].append("junk")
+
+        assert self._enum() == ["", "SER1"]

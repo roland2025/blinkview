@@ -9,7 +9,7 @@ import re
 import shlex
 import subprocess
 from threading import Event, Lock, Timer
-from time import sleep
+from time import monotonic, sleep
 
 from blinkview.core.configurable import configuration_property, override_property
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
@@ -22,6 +22,8 @@ SENTINEL = b"__BlinkSync_Done__"
 _SENTINEL_RE = re.compile(re.escape(SENTINEL) + rb" (\d+)\r?\n")
 # How long one command may run before the shell is killed (ps -A on a phone takes ~0.1 s).
 QUERY_TIMEOUT_S = 10.0
+# How long the config schema reuses one `adb devices -l` result (see AdbReader._connected_devices).
+DEVICE_LIST_TTL_S = 5.0
 
 
 class AdbShellError(RuntimeError):
@@ -134,15 +136,42 @@ ensuring high throughput without pipeline stalls."""
         self._pid_poll_task_id = None
         self._ps_has_elapsed = True  # cleared once a device's ps rejects `-o ETIME`
 
+    # Shared by every AdbReader: (devices or None when adb failed, monotonic time the fetch ended)
+    _device_list_lock = Lock()
+    _device_list: list[tuple[str, str]] | None = None
+    _device_list_at: float | None = None
+
+    @classmethod
+    def _connected_devices(cls) -> list[tuple[str, str]] | None:
+        """`adb devices -l`, reused for DEVICE_LIST_TTL_S after a fetch finishes. The schema is
+        built on every construct, hydrate, apply, editor open and save (on the UI or MCP
+        thread), and one fetch costs ~40 ms - seconds while the adb server starts, up to the
+        3 s timeout when adb hangs, so a failure is cached too. Concurrent callers wait for
+        the one fetch in progress rather than starting their own."""
+        with cls._device_list_lock:
+            at = cls._device_list_at
+            if at is None or monotonic() - at >= DEVICE_LIST_TTL_S:
+                try:
+                    cls._device_list = list_adb_devices()
+                except Exception:
+                    # adb missing, server slow to start, etc.
+                    cls._device_list = None
+                cls._device_list_at = monotonic()
+            return cls._device_list
+
+    @classmethod
+    def _reset_device_list_cache(cls):
+        with cls._device_list_lock:
+            cls._device_list = None
+            cls._device_list_at = None
+
     @classmethod
     def get_config_schema(cls) -> dict:
         schema = super().get_config_schema()
 
-        try:
-            devices = list_adb_devices()
-        except Exception:
-            # adb missing, server slow to start, etc.: leave device_id as free text
-            return schema
+        devices = cls._connected_devices()
+        if devices is None:
+            return schema  # leave device_id as free text
 
         if "device_id" in schema["properties"]:
             prop = schema["properties"]["device_id"]
