@@ -952,19 +952,7 @@ class TelemetryTable(QWidget):
         return self.model.modules[mod_id]
 
     def open_log_viewer(self, module, include_children=False):
-        if not module:
-            return
-
-        title = f"Logs: {module.device.name}.{module.name}"
-        if include_children:
-            title += " (+ Children)"
-
-        self.gui_context.create_widget(
-            WidgetName.LOG_VIEWER,
-            title,
-            as_window=True,
-            params={"filtered_module": module, "include_children": include_children, "force_live": self.force_live},
-        )
+        self._trigger_module_action("view_logs_children" if include_children else "view_logs", module)
 
     def sort_by_device(self):
         header = self.view.horizontalHeader()

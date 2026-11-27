@@ -12,6 +12,7 @@ from qtpy.QtWidgets import QMenu
 
 from blinkview.core.numpy_batch_manager import PooledLogBatch
 from blinkview.ui.widgets.action_button_delegate import TelemetryCol
+from blinkview.ui.widgets.log_viewer import LogViewerWidget
 from blinkview.ui.widgets.telemetry_table import TelemetryTable, TelemetryTableModel
 from tests.fakes.real_registry import make_real_gui_context, make_real_registry
 
@@ -371,6 +372,28 @@ class TestTriggerModuleAction:
 
     def test_no_module_is_a_noop(self, table):
         table._trigger_module_action("copy_name", None)  # must not raise
+
+
+class TestOpenLogViewer:
+    @pytest.mark.parametrize("include_children", [True, False])
+    def test_opened_viewer_honours_include_children(self, table, registry, qtbot, include_children):
+        """The params must be ones LogViewerWidget actually reads: they used to carry
+        "include_children", which the viewer ignores, so a "+ Children" tab showed only the
+        module itself."""
+        dev = registry.id_registry.get_device("openlogsdev")
+        mod = dev.get_module("openlogsmod")
+        created = []
+        table.gui_context.create_widget = lambda cls_name, title, **kw: created.append((cls_name, title, kw))
+
+        table.open_log_viewer(mod, include_children=include_children)
+
+        cls_name, title, kw = created[0]
+        assert cls_name == "LogViewerWidget"
+        viewer = LogViewerWidget(table.gui_context, state={**kw["params"], "tab_name": title})
+        qtbot.addWidget(viewer)
+        assert viewer.filtered_module == mod
+        assert viewer.filtered_module_children is include_children
+        assert viewer.log_filter.filtered_module_children is include_children
 
 
 class TestDoubleClick:
