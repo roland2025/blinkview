@@ -8,7 +8,8 @@ import json
 from base64 import b64decode, b64encode
 from copy import deepcopy
 
-from qtpy.QtCore import QByteArray, QTimer
+from qtpy.QtCore import QByteArray, Qt, QTimer
+from qtpy.QtWidgets import QToolBar
 from shiboken6 import isValid
 
 from blinkview.ui.utils.window_manager import get_window_geometry_data, restore_window_geometry_safe
@@ -194,10 +195,31 @@ class UIStateHandler:
 
             self.on_ui_restoration_complete()
 
+    def _restore_window_state(self, state: QByteArray):
+        """restoreState() matches saved toolbar entries by objectName against every QToolBar
+        under the window, including the ones embedded in widgets (the dock sidebars' action bars).
+        A layout saved while the main toolbar had no objectName holds an unnamed entry, which then
+        adopts the first unnamed embedded toolbar into the top toolbar area: an empty slot in front
+        of the main toolbar, saved again on every exit. Only the window's own toolbar belongs in a
+        toolbar area, so anything else that restoreState() placed there is taken back out."""
+        own_toolbar = getattr(self.window, "toolbar", None)
+        embedded = {
+            tb: tb.isHidden()
+            for tb in self.window.findChildren(QToolBar)
+            if tb is not own_toolbar and tb.parentWidget() is not self.window
+        }
+
+        self.window.restoreState(state)
+
+        for tb, was_hidden in embedded.items():
+            if self.window.toolBarArea(tb) != Qt.NoToolBarArea:
+                self.window.removeToolBar(tb)
+                tb.setHidden(was_hidden)
+
     def _restore_docks(self, data: dict):
         """Dock/toolbar layout plus the visibility flags saveState() doesn't reliably cover."""
         if "window_state" in data:
-            self.window.restoreState(QByteArray(b64decode(data["window_state"])))
+            self._restore_window_state(QByteArray(b64decode(data["window_state"])))
 
         # Explicitly sync dock visibility (if saveState didn't catch it)
         if "sources_visible" in data:

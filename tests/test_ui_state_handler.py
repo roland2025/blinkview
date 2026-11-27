@@ -54,6 +54,9 @@ class FakeWindow:
     def restoreState(self, qbytearray):
         self.restored_state = bytes(qbytearray)
 
+    def findChildren(self, _type):
+        return []
+
     def create_widget(self, **kwargs):
         self.create_widget_calls.append(kwargs)
         result = self._create_widget_result
@@ -558,3 +561,67 @@ class TestRestoreWindowGeometry:
         handler.restore_window_geometry(state_file, on_complete=lambda: calls.append(True))
 
         assert calls == [True]
+
+
+class TestRestoreWindowStateEmbeddedToolbars:
+    """A layout saved while the main toolbar had no objectName holds an unnamed toolbar entry.
+    restoreState() matches it against every unnamed QToolBar under the window - the dock
+    sidebars' action bars - and adopted one into the top toolbar area: an empty slot pushed the
+    main toolbar ~100 px to the right, and every exit saved the slot again. Qt 6.12 adopts it;
+    6.11 dropped the unmatched entry, so on 6.11 this passes without the fix too."""
+
+    @staticmethod
+    def _stale_state(qtbot):
+        from qtpy.QtWidgets import QMainWindow, QToolBar, QWidget
+
+        old = QMainWindow()
+        qtbot.addWidget(old)
+        old.setCentralWidget(QWidget())
+        unnamed = QToolBar("old main toolbar, before it had an objectName")
+        unnamed.addAction("Menu")
+        old.addToolBar(unnamed)
+        main = QToolBar("Main Toolbar")
+        main.setObjectName("MainToolbar")
+        main.addAction("View")
+        old.addToolBar(main)
+        old.show()
+        qtbot.waitExposed(old)
+        return old.saveState()
+
+    def test_an_unnamed_saved_entry_does_not_adopt_a_sidebar_toolbar(self, qtbot):
+        from qtpy.QtCore import Qt
+        from qtpy.QtWidgets import QDockWidget, QMainWindow, QToolBar, QVBoxLayout, QWidget
+
+        state = self._stale_state(qtbot)
+
+        window = QMainWindow()
+        qtbot.addWidget(window)
+        window.setCentralWidget(QWidget())
+        window.toolbar = QToolBar("Main Toolbar")
+        window.toolbar.setObjectName("MainToolbar")
+        window.toolbar.addAction("Menu")
+        window.addToolBar(window.toolbar)
+
+        sidebar = QWidget()
+        sidebar_toolbar = QToolBar("Device Actions", sidebar)
+        sidebar_toolbar.addAction("Add")
+        QVBoxLayout(sidebar).addWidget(sidebar_toolbar)
+        dock = QDockWidget("Sources", window)
+        dock.setObjectName("SourcesDock")
+        dock.setWidget(sidebar)
+        window.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        window.show()
+        qtbot.waitExposed(window)
+
+        UIStateHandler(window)._restore_docks({"window_state": _b64(state)})
+
+        assert window.toolBarArea(sidebar_toolbar) == Qt.NoToolBarArea
+        assert not sidebar_toolbar.isHidden()
+        assert window.toolBarArea(window.toolbar) == Qt.TopToolBarArea
+        qtbot.waitUntil(lambda: window.toolbar.geometry().x() == 0)
+
+
+def _b64(qbytearray) -> str:
+    from base64 import b64encode
+
+    return b64encode(bytes(qbytearray.data())).decode("utf-8")
