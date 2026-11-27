@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 from qtpy.QtCore import QRect, Qt, QTimer
-from qtpy.QtGui import QAction, QColor, QFontMetrics, QPainter
+from qtpy.QtGui import QAction, QColor, QFontMetrics, QKeySequence, QPainter
 from qtpy.QtWidgets import (
     QAbstractScrollArea,
     QActionGroup,
@@ -813,15 +813,22 @@ class LogTableCanvas(QAbstractScrollArea):
         super().__init__(parent)
         self.store = store
 
-        # Single-row click-to-highlight selection, keyed by backend sequence id (not row index)
-        # so it survives a live tick shifting row indices via eviction - mirrors the persistent-
-        # index behavior QTableView gave for free.
+        # Contiguous row selection between two backend sequence ids (not row indices), so it
+        # survives a live tick or a history rebuild shifting rows around. selected_seq is the
+        # last clicked/dragged-to row, _anchor_seq where the range started (Shift+click and drag
+        # move only selected_seq); rows are seq-ascending in every store window, so "between the
+        # two seqs" is exactly the rows shown between them under the current filter.
         self.selected_seq = None
+        self._anchor_seq = None
+        self._dragging = False
 
-        # Callback the owning widget hooks to react to "scrolled up while live" (enters history
-        # mode) - kept as a plain attribute rather than a Qt signal since there's exactly one
-        # subscriber and it's always set before first use.
+        # Callbacks the owning widget hooks - plain attributes rather than Qt signals since
+        # there's exactly one subscriber each, always set before first use.
+        # on_wheel_up_while_live: "scrolled up while live" (enters history mode).
+        # on_range_selection_started: the selection just grew past one row (pauses the live
+        # tail so the selected rows don't scroll away, like the text viewer's selection freeze).
         self.on_wheel_up_while_live = None
+        self.on_range_selection_started = None
 
         self._col_order = list(LogTableCol)
         self._col_visible = {col: True for col in LogTableCol}
@@ -836,6 +843,7 @@ class LogTableCanvas(QAbstractScrollArea):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # LIVE mode default - no scrollback to reach
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # MESSAGE stretches to fill remaining width
         self.setFrameShape(QAbstractScrollArea.NoFrame)
+        self.setFocusPolicy(Qt.StrongFocus)  # Ctrl+C / Ctrl+A
         self.verticalScrollBar().valueChanged.connect(lambda _v: self.viewport().update())
 
         self._recompute_message_column_width()
@@ -925,7 +933,8 @@ class LogTableCanvas(QAbstractScrollArea):
         offsets = self._column_x_offsets()
         visible_columns = self._visible_columns()
         viewport_width = self.viewport().width()
-        selected_seq = self.selected_seq
+        selection = self.selected_range()
+        sel_lo, sel_hi = selection if selection is not None else (1, 0)  # empty range
         default_color = self.palette().text().color()
         highlight_brush = self.palette().highlight()
         highlight_text_color = self.palette().highlightedText().color()
@@ -933,7 +942,7 @@ class LogTableCanvas(QAbstractScrollArea):
         painter.save()
         for offset, row in enumerate(range(first, last)):
             y = HEADER_HEIGHT + offset * ROW_HEIGHT
-            is_selected = selected_seq is not None and store.seq_for_row(row) == selected_seq
+            is_selected = sel_lo <= store.seq_for_row(row) <= sel_hi
 
             if is_selected:
                 painter.fillRect(QRect(0, y, viewport_width, ROW_HEIGHT), highlight_brush)
@@ -959,25 +968,134 @@ class LogTableCanvas(QAbstractScrollArea):
             return row
         return None
 
-    def mousePressEvent(self, event):
-        row = self._row_at(event.pos())
-        self.selected_seq = self.store.seq_for_row(row) if row is not None else None
+    def selected_range(self):
+        """(lo_seq, hi_seq) inclusive, or None when nothing is selected."""
+        if self.selected_seq is None:
+            return None
+        anchor = self._anchor_seq if self._anchor_seq is not None else self.selected_seq
+        return min(anchor, self.selected_seq), max(anchor, self.selected_seq)
+
+    def selected_rows(self) -> np.ndarray:
+        """Rows of the current store window inside the selection, in log order. Only what's
+        loaded: rows selected earlier that the window no longer holds aren't included."""
+        selection = self.selected_range()
+        store = self.store
+        if selection is None or store.row_count == 0:
+            return np.empty(0, dtype=np.int64)
+        window = store.seq[store._valid_start : store._valid_start + store.row_count]
+        return np.nonzero((window >= selection[0]) & (window <= selection[1]))[0]
+
+    def _is_row_selected(self, row: int) -> bool:
+        selection = self.selected_range()
+        seq = self.store.seq_for_row(row)
+        return selection is not None and seq is not None and selection[0] <= seq <= selection[1]
+
+    def _select_row(self, row: Optional[int], extend: bool = False):
+        """Selects `row` alone, or (extend) moves the range's free end to it. None clears."""
+        seq = self.store.seq_for_row(row) if row is not None else None
+        if seq is None:
+            self.selected_seq = self._anchor_seq = None
+        elif extend and self.selected_seq is not None:
+            was_single = self.selected_range()[0] == self.selected_range()[1]
+            if self._anchor_seq is None:
+                self._anchor_seq = self.selected_seq
+            self.selected_seq = seq
+            lo, hi = self.selected_range()
+            if was_single and lo != hi and self.on_range_selection_started is not None:
+                self.on_range_selection_started()
+        else:
+            self.selected_seq = self._anchor_seq = seq
         self.viewport().update()
+
+    def select_all(self):
+        """Every row of the loaded window. Pauses first (when live), so the window it selects
+        is the frozen one rather than a live tail about to move."""
+        if self.store.row_count == 0:
+            return
+        if self.on_range_selection_started is not None:
+            self.on_range_selection_started()
+        store = self.store
+        if store.row_count == 0:
+            return
+        self._anchor_seq = store.seq_for_row(0)
+        self.selected_seq = store.seq_for_row(store.row_count - 1)
+        self.viewport().update()
+
+    def _row_text(self, row: int) -> str:
+        """One row as a log line in the text viewer's layout - the visible columns separated
+        by spaces, "module:" before the message."""
+        parts = []
+        for col in self._visible_columns():
+            text = self.store.get_cell(row, col) or ""
+            parts.append(f"{text}:" if col == LogTableCol.MODULE else text)
+        return " ".join(parts)
+
+    def copy_selected_rows(self):
+        rows = self.selected_rows()
+        if rows.size:
+            QApplication.clipboard().setText("\n".join(self._row_text(int(r)) for r in rows))
+
+    def copy_selected_messages(self):
+        rows = self.selected_rows()
+        if rows.size:
+            QApplication.clipboard().setText(
+                "\n".join(self.store.get_cell(int(r), LogTableCol.MESSAGE) or "" for r in rows)
+            )
+
+    def mousePressEvent(self, event):
+        self.setFocus(Qt.MouseFocusReason)
+        row = self._row_at(event.pos())
+        if event.button() == Qt.LeftButton:
+            self._select_row(row, extend=bool(event.modifiers() & Qt.ShiftModifier))
+            self._dragging = row is not None
+        elif event.button() == Qt.RightButton and row is not None and not self._is_row_selected(row):
+            self._select_row(row)
         super().mousePressEvent(event)
 
-    def contextMenuEvent(self, event):
-        row = self._row_at(event.pos())
-        if row is None:
+    def mouseMoveEvent(self, event):
+        if self._dragging and event.buttons() & Qt.LeftButton:
+            row = self._row_at(event.pos())
+            if row is not None and self.store.seq_for_row(row) != self.selected_seq:
+                self._select_row(row, extend=True)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = False
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.Copy):
+            self.copy_selected_rows()
             return
+        if event.matches(QKeySequence.SelectAll):
+            self.select_all()
+            return
+        super().keyPressEvent(event)
 
+    def build_context_menu(self, row: Optional[int]) -> Optional[QMenu]:
+        """Right-clicking a row outside the selection selects just that row first (the press
+        already did, see mousePressEvent) - the actions always act on the selection."""
+        if row is None:
+            return None
+        if not self._is_row_selected(row):
+            self._select_row(row)
+
+        count = int(self.selected_rows().size)
         menu = QMenu(self)
-        action_copy = QAction("Copy Message", self)
-        action_copy.triggered.connect(lambda: self._copy_message(row))
-        menu.addAction(action_copy)
-        menu.exec_(event.globalPos())
+        action_rows = QAction(f"Copy {count} Rows" if count > 1 else "Copy Row", menu)
+        action_rows.setShortcut(QKeySequence.Copy)
+        action_rows.triggered.connect(self.copy_selected_rows)
+        menu.addAction(action_rows)
+        action_messages = QAction(f"Copy {count} Messages" if count > 1 else "Copy Message", menu)
+        action_messages.triggered.connect(self.copy_selected_messages)
+        menu.addAction(action_messages)
+        return menu
 
-    def _copy_message(self, row: int):
-        QApplication.clipboard().setText(self.store.get_cell(row, LogTableCol.MESSAGE) or "")
+    def contextMenuEvent(self, event):
+        menu = self.build_context_menu(self._row_at(event.pos()))
+        if menu is not None:
+            menu.exec_(event.globalPos())
 
     def wheelEvent(self, event):
         if self.store.mode == LogViewMode.LIVE and event.angleDelta().y() > 0:
@@ -1068,8 +1186,8 @@ class LogTableViewerWidget(QWidget):
         # Last seen Registry.session_generation - see _sync_session_generation().
         self._session_generation = session_generation_of(self.gui_context.registry)
 
-        # Same Pause button highlight scheme as LogViewerWidget, so both viewers present
-        # auto vs. manual pausing identically.
+        # Same Pause button highlight and active-filter border scheme as LogViewerWidget, so
+        # both viewers present them identically.
         self.setStyleSheet("""QToolButton {
     border-radius: 4px;
     padding: 2px;
@@ -1086,6 +1204,10 @@ QToolButton[autoPaused="true"] {
 QToolButton[manualPaused="true"] {
     background-color: #886622;
     color: white;
+}
+
+QToolButton[filterEnabled="true"] {
+    border: 2px solid #ff4444;
 }
 """)
 
@@ -1267,6 +1389,8 @@ QToolButton[manualPaused="true"] {
         self.filter_sidebar.restore_state(self.filter_sidebar_state)
         # Also covers the sidebar's Enable toggle: its set_enabled() emits filter_changed
         self.filter_sidebar.log_filter.filter_changed.connect(self._reload_and_redraw)
+        self.filter_sidebar.action_enable.toggled.connect(self._sync_filter_button_style)
+        self._sync_filter_button_style(self.filter_sidebar.action_enable.isChecked())
         self.filter_sidebar.setMinimumWidth(200)
         self.splitter.addWidget(self.filter_sidebar)
         self.filter_sidebar.setVisible(self.show_module_filter)
@@ -1276,6 +1400,7 @@ QToolButton[manualPaused="true"] {
         self.view = LogTableCanvas(self.model)
         self.view.setMinimumWidth(300)
         self.view.on_wheel_up_while_live = self._on_scrolled_away_from_live
+        self.view.on_range_selection_started = self._on_range_selection_started
         self.view.set_column_visible(LogTableCol.RX_TIMESTAMP, self.show_rx_ts)
         self.view.set_column_visible(LogTableCol.PROCESS, self.show_process_thread)
         self.view.set_column_visible(LogTableCol.THREAD, self.show_process_thread)
@@ -1417,6 +1542,14 @@ QToolButton[manualPaused="true"] {
         action = self._playback.handle(FollowEvent.ScrolledAway(), self._clock_snapshot(self._clock()))
         self._apply_freeze(action)
 
+    def _on_range_selection_started(self):
+        """Wired to LogTableCanvas.on_range_selection_started - mirrors LogViewerWidget's
+        _on_selection_started: a multi-row selection pauses the view so the selected rows don't
+        scroll away. The selection is keyed by seq, so the history rebuild keeps it."""
+        action = self._playback.handle(FollowEvent.TogglePause(True), self._clock_snapshot(self._clock()))
+        if action.kind is FollowActionKind.FREEZE:
+            self._apply_freeze(action)
+
     def apply_updates(self):
         now_ns = self.gui_context.registry.now_ns
         t_start = now_ns()
@@ -1551,6 +1684,16 @@ QToolButton[manualPaused="true"] {
     def _toggle_module_filter(self, checked):
         self.show_module_filter = checked
         self.filter_sidebar.setVisible(checked)
+
+    def _sync_filter_button_style(self, enabled: bool):
+        """Red border on "⧨ Filter" while the sidebar's module filter is enabled - shows a
+        filter is active even with the sidebar closed (mirrors LogViewerWidget)."""
+        button = self.toolbar.widgetForAction(self.action_toggle_filter)
+        if button:
+            button.setProperty("filterEnabled", enabled)
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.update()
 
     def _toggle_rx_ts(self, checked):
         self.show_rx_ts = checked
