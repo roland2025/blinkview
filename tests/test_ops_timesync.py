@@ -14,6 +14,7 @@ from blinkview.ops.timesync import (
     DRIFT_MIN_BASELINE_NS,
     IDX_ARRAY_LENGTH,
     IDX_BEST_RTT,
+    IDX_PPB_COUNT,
     IDX_SAMPLE_COUNT,
     IDX_SKIPS,
     IDX_TOTAL_COUNT,
@@ -229,6 +230,114 @@ def _simulate_drift(device_ppm, n_samples, seed=1, clean_fraction=0.2):
     return engine, sync, published_ppm, true_host
 
 
+def _run_link(n_samples, link, device_ppm=50, seed=1, reboot_at=None, uptime_s=1500):
+    """One ping per host second from a device `device_ppm` fast, `uptime_s` into its boot. `link(i, rng)` gives
+    pong i's (rtt, outbound) in ns: the device reads its clock `outbound` after the ping was sent, +-20 us, so
+    `rtt - outbound` is the return path. At pong `reboot_at` the device clock restarts at 2 s. Returns the
+    engine, the sync state, each pong's published drift in ppm and the index of each pong that was accepted."""
+    rng = random.Random(seed)
+    engine, sync = _engine(), _sync()
+    host0 = 1_795_000_000_000_000_000
+    rate = 1 + device_ppm * 1e-6
+    boot_host = host0 - uptime_s * 1_000_000_000  # host time at which the device clock read 0
+
+    published_ppm = []
+    for i in range(n_samples):
+        tx = host0 + i * 1_000_000_000
+        if reboot_at is not None and i == reboot_at:
+            boot_host = tx - 2_000_000_000
+        rtt, outbound = link(i, rng)
+        read = tx + outbound + rng.randint(-20_000, 20_000)
+        dev = int((read - boot_host) * rate)
+        nb_sync_kernel(tx, dev, dev, tx + rtt, engine, sync, False)
+        idx = int(sync.active_idx[0])
+        published_ppm.append((int(sync.drift_m[idx]) / int(sync.drift_d[idx]) - 1) * 1e6)
+
+    return engine, sync, published_ppm
+
+
+def _drift_changes(published):
+    return sum(1 for a, b in zip(published, published[1:]) if a != b)
+
+
+class TestDriftDoesNotFreeze:
+    """A pong measures drift when its RTT is close to the anchor pong's, and a lasting change of the RTT level
+    re-anchors. Judging "clean" against an all-time best RTT froze the drift for good on hardware after one short
+    pong (ESP32) or a load rise (nRF, 2.0 -> 2.85 ms) - wiki:reports/blinksync-hw-time-sync."""
+
+    def test_one_short_pong_does_not_freeze_the_drift(self):
+        """The ESP32 case: ~2.95 ms pongs, one comes back 1.3 ms faster (a shorter return path)."""
+
+        def link(i, rng):
+            rtt = rng.randint(2_900_000, 3_000_000)
+            return (rtt - 1_300_000 if i == 100 else rtt), 1_450_000
+
+        _, _, published = _run_link(600, link)
+
+        assert _drift_changes(published[-300:]) > 250
+        assert -52 < published[-1] < -48, published[-1]
+
+    def test_a_lasting_rtt_rise_resumes_the_drift(self):
+        """The nRF case: the return path grows by 0.85 ms under load and stays there."""
+
+        def link(i, rng):
+            rtt = rng.randint(2_000_000, 2_100_000)
+            return (rtt + 850_000 if i >= 300 else rtt), 1_000_000
+
+        _, _, published = _run_link(900, link)
+
+        # a minute without a clean pong, then a new anchor and a minute of baseline
+        assert _drift_changes(published[300:300 + 115]) == 0
+        assert _drift_changes(published[-300:]) > 250
+        assert -52 < published[-1] < -48, published[-1]
+
+    @pytest.mark.parametrize("seed", [1, 2, 3])
+    def test_bimodal_rtt_does_not_make_up_drift(self, seed):
+        """One pong in ten 1.3 ms faster: mixing the two RTT levels in one baseline would read their 1.3 ms
+        offset difference as drift (~20 ppm over a minute)."""
+
+        def link(i, rng):
+            rtt = rng.randint(2_900_000, 3_000_000)
+            return (rtt - 1_300_000 if rng.random() < 0.1 else rtt), 1_450_000
+
+        _, _, published = _run_link(900, link, device_ppm=0, seed=seed)
+
+        assert max(abs(ppm) for ppm in published) < 2, max(published, key=abs)
+
+
+class TestDriftAfterReboot:
+    """A reboot restarts the device clock below the drift anchor; the anchor has to go with it, or no drift is
+    measured for as long as the old uptime (24 min for a board that was up 24 min)."""
+
+    def _link(self, i, rng):
+        return rng.randint(2_000_000, 2_100_000), 1_000_000
+
+    def test_drift_is_measured_again_a_minute_after_a_reboot(self):
+        engine, _, published = _run_link(700, self._link, reboot_at=400, uptime_s=1500)
+
+        after = published[400:]
+        first_change = next(k for k, (a, b) in enumerate(zip(after, after[1:])) if a != b)
+        # 5 pongs of warmup, then DRIFT_MIN_BASELINE_NS of baseline
+        assert first_change < 70, first_change
+        assert -52 < published[-1] < -48, published[-1]
+
+    def test_the_drift_in_force_is_kept_across_the_reboot(self):
+        engine, _, published = _run_link(430, self._link, reboot_at=400)
+
+        assert all(ppm == published[399] for ppm in published[400:430])
+        assert int(engine.scalars[IDX_PPB_COUNT]) == 0  # the old boot's samples are dropped
+
+    def test_the_offset_tracks_the_new_boot(self):
+        """The pongs after a reboot snap to the new clock as on a cold start."""
+        _, sync, _ = _run_link(410, self._link, reboot_at=400, device_ppm=0)
+        idx = int(sync.active_idx[0])
+        tx = 1_795_000_000_000_000_000 + 409 * 1_000_000_000
+
+        # the last pong was read at tx + 1 ms, 2 s + 9 s + 1 ms into the new boot
+        error_ns = int(sync.offset[idx]) + (11_001_000_000 - int(sync.ref_time[idx])) - (tx + 1_000_000)
+        assert abs(error_ns) < 100_000, error_ns
+
+
 def _project(sync, dev_ns):
     idx = int(sync.active_idx[0])
     return int(sync.offset[idx]) + (dev_ns - int(sync.ref_time[idx])) * int(sync.drift_m[idx]) / int(sync.drift_d[idx])
@@ -274,6 +383,13 @@ class TestDriftEstimate:
         error_ns = _project(sync, dev_later) - true_host(dev_later)
 
         assert abs(error_ns) < 300_000, error_ns
+
+    def test_drift_is_measured_on_most_pongs(self):
+        """Every pong within DRIFT_CLEAN_WINDOW_NS of the anchor's RTT measures drift, not only the lucky ones."""
+        engine, _, published = _run_link(600, lambda i, rng: (rng.randint(2_000_000, 2_100_000), 1_000_000))
+
+        assert _drift_changes(published[-300:]) > 250
+        assert int(engine.scalars[IDX_PPB_COUNT]) == 15
 
     def test_soft_reset_keeps_the_drift(self):
         engine, sync, _, _ = _simulate_drift(50, 300)

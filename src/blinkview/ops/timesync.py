@@ -46,13 +46,24 @@ IDX_LAST_MEAN = 8
 IDX_LAST_STD = 9
 IDX_ASYM_RATIO = 10  # <--- NEW: Asymmetry ratio scaled by 1_000_000 (e.g., 500_000 = 50%)
 IDX_PPB_COUNT = 11  # drift samples stored in ppb_hist (capped at its length)
+IDX_FIRST_RTT = 12  # RTT of the pong the drift anchor (IDX_FIRST_PH/IDX_FIRST_PC) was taken from
+IDX_LAST_CLEAN_PC = 13  # pc_tx of the last pong that was clean against the drift anchor
 
 # A drift sample is measured from the first clean sample on: over a short baseline a clean sample's own
 # jitter dominates it (0.2 ms over 10 s reads as 20 ppm; seen on the emulator, whose real drift was 0.2 ppm).
 # Below this baseline the drift in force is kept. 60 s: 0.2 ms of jitter is then at most ~3 ppm.
 DRIFT_MIN_BASELINE_NS = 60_000_000_000
 
-IDX_ARRAY_LENGTH = 12
+# A pong is "clean" (measures drift) when its RTT is within this of the anchor pong's RTT. Two pongs whose RTTs
+# differ by more read their offsets on different delay splits: a 1.3 ms shorter ESP32 return path moves the raw
+# offset by ~0.65 ms, 10 ppm over a 60 s baseline.
+DRIFT_CLEAN_WINDOW_NS = 200_000
+# With no clean pong for this long the link has changed (e.g. the RTT rose under load), so the next pong near the
+# recent minimum RTT becomes the new anchor. Judging "clean" against an all-time best RTT instead froze the drift
+# for good after one short pong or a load change (wiki:reports/blinksync-hw-time-sync).
+DRIFT_REANCHOR_NS = 60_000_000_000
+
+IDX_ARRAY_LENGTH = 14
 
 
 class EngineState(NamedTuple):
@@ -130,11 +141,14 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
 
     mean_ns = 0.0
     stddev_ns = 0.0
+    recent_min_rtt = int(rtt)  # lowest RTT of the accepted pongs in rtt_hist
 
     if window_size > 0:
         sum_rtt = 0.0
         for i in range(window_size):
             sum_rtt += float(rtt_hist[i])
+            if int(rtt_hist[i]) < recent_min_rtt:
+                recent_min_rtt = int(rtt_hist[i])
         mean_ns = sum_rtt / window_size
 
         sum_sq_diff = 0.0
@@ -178,6 +192,9 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
     act_idx = act_arr[0]
     write_idx = 1 - act_idx
 
+    # The device's clock restarted (reboot): set in step 4b, acted on in step 5 too.
+    clock_restarted = False
+
     # 4b. Phase loop-filter (this is what removes the staircase).
     #
     # The old code wrote raw_offset (pc_tx + rtt/2) straight into the
@@ -204,9 +221,12 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
         dt_anchor = current_anchor_time - prev_ref
 
         if dt_anchor < 0:
-            # Anchor clock went backwards (out-of-order call, counter
-            # reset) - nothing sane to extrapolate, just step.
+            # Anchor clock went backwards (device reboot) - nothing sane to
+            # extrapolate: step, and start over as on a cold start, so the
+            # next PHASE_WARMUP_SAMPLES snap too.
             new_offset = raw_offset
+            clock_restarted = True
+            s_count = 1
         else:
             # float math here (matching the style used below for ppb) avoids
             # int64 overflow on long sessions; precision loss is sub-ns.
@@ -237,19 +257,32 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
     # so that the estimate is not reset to 0 between clean samples.
     avg_ppb = (sync.drift_m[act_idx] * ppb_scale) // sync.drift_d[act_idx] - ppb_scale
 
-    # Repurpose these indices to hold BOOT and the ANCHORED PC TIME
+    # The drift anchor: the device BOOT time and the RAW offset (not the smoothed one) of one pong, and its RTT
     first_boot = sc[IDX_FIRST_PH]
     first_pc_offset = sc[IDX_FIRST_PC]
+    first_rtt = sc[IDX_FIRST_RTT]
+    last_clean_pc = sc[IDX_LAST_CLEAN_PC]
 
-    rtt_is_clean = (int(rtt) - best_rtt) <= 200_000
+    if first_boot != 0 and (clock_restarted or phone_boot < first_boot):
+        # Reboot: the anchor belongs to the old boot, where dt_boot would stay negative for as long as the old
+        # uptime. Drop it and the drift samples measured against it; the drift in force stays published until
+        # the new baseline gives a sample.
+        first_boot = 0
+        first_pc_offset = 0
+        first_rtt = 0
+        ppb_hist[:] = 0
+        sc[IDX_PPB_PTR] = 0
+        sc[IDX_PPB_COUNT] = 0
 
-    if s_count > 5 and rtt_is_clean:
+    rtt_i = int(rtt)
+    near_recent_min = (rtt_i - recent_min_rtt) <= DRIFT_CLEAN_WINDOW_NS
+    take_anchor = False
+
+    if s_count > 5:
         if first_boot == 0:
-            first_boot = phone_boot
-            # CORE FIX: Anchor the physics math to the RAW offset, not the smoothed one
-            first_pc_offset = raw_offset
-        else:
-            # CORE FIX: Calculate the delta using the RAW offset
+            take_anchor = near_recent_min
+        elif abs(rtt_i - first_rtt) <= DRIFT_CLEAN_WINDOW_NS:
+            last_clean_pc = pc_tx
             dt_pc = raw_offset - first_pc_offset
             dt_boot = phone_boot - first_boot
 
@@ -257,9 +290,8 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
                 current_ppb = int((float(dt_pc - dt_boot) / float(dt_boot)) * ppb_scale)
 
                 if abs(current_ppb) > 10_000_000:
-                    # Implausible: re-anchor (on the raw offset, as the first anchor does) and keep the drift
-                    first_boot = phone_boot
-                    first_pc_offset = raw_offset
+                    # Implausible: re-anchor and keep the drift
+                    take_anchor = True
                 elif dt_boot >= DRIFT_MIN_BASELINE_NS:
                     ptr = sc[IDX_PPB_PTR]
                     ppb_hist[ptr] = current_ppb
@@ -273,6 +305,15 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
                     for i in range(filled):
                         acc += ppb_hist[i]
                     avg_ppb = acc // filled
+        elif pc_tx - last_clean_pc > DRIFT_REANCHOR_NS and near_recent_min:
+            # Not clean against the anchor for a minute: the RTT level moved, re-anchor on the new level
+            take_anchor = True
+
+    if take_anchor:
+        first_boot = phone_boot
+        first_pc_offset = raw_offset
+        first_rtt = rtt_i
+        last_clean_pc = pc_tx
 
     # 6. Atomic Swap
     sync.offset[write_idx] = new_offset
@@ -284,6 +325,8 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
     sc[IDX_SAMPLE_COUNT] = s_count
     sc[IDX_FIRST_PH] = first_boot  # Save the Boot anchor
     sc[IDX_FIRST_PC] = first_pc_offset  # Save the PC Offset anchor
+    sc[IDX_FIRST_RTT] = first_rtt
+    sc[IDX_LAST_CLEAN_PC] = last_clean_pc
     sc[IDX_LAST_MEAN] = int(mean_ns)
     sc[IDX_LAST_STD] = int(stddev_ns)
 
