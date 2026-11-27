@@ -265,6 +265,87 @@ class TestToggles:
         assert mod.id in table.model.visible_mod_ids.tolist()
 
 
+class TestColumnAutoSize:
+    @pytest.fixture
+    def shown_table(self, table, qtbot):
+        table._toggle_hide_empty(False)  # Modules get a row on registration, without data
+        table.show()
+        qtbot.waitExposed(table)
+        table.resize_timer.stop()
+        table.auto_size_columns()
+        return table
+
+    def test_hidden_table_does_not_resize_on_insert(self, table, registry, monkeypatch):
+        table._toggle_hide_empty(False)
+        table.resize_timer.stop()
+        header = table.view.horizontalHeader()
+        before = header.sectionSize(TelemetryCol.NAME)
+        calls = []
+        monkeypatch.setattr(table.view, "resizeColumnToContents", calls.append)
+
+        registry.id_registry.get_device("hiddendev").get_module("a_rather_long_logcat_tag_name_x")
+        table.model._sync_registry(registry.id_registry.module_list)
+        table.auto_size_columns()
+
+        assert header.sectionSize(TelemetryCol.NAME) == before
+        assert calls == []
+
+    def test_row_insert_widens_name_without_a_full_resize(self, shown_table, registry, monkeypatch):
+        calls = []
+        monkeypatch.setattr(shown_table.view, "resizeColumnToContents", calls.append)
+        header = shown_table.view.horizontalHeader()
+        before = header.sectionSize(TelemetryCol.NAME)
+
+        dev = registry.id_registry.get_device("sizedev")
+        dev.get_module("a_rather_long_logcat_tag_name_x")
+        shown_table.model._sync_registry(registry.id_registry.module_list)
+
+        assert header.sectionSize(TelemetryCol.NAME) > before
+        assert calls == []
+        assert not shown_table.resize_timer.isActive()
+
+    def test_row_insert_width_is_capped(self, shown_table, registry):
+        dev = registry.id_registry.get_device("capdev")
+        dev.get_module("w" * 300)
+        shown_table.model._sync_registry(registry.id_registry.module_list)
+
+        assert shown_table.view.horizontalHeader().sectionSize(TelemetryCol.NAME) == 400
+
+    def test_row_insert_does_not_shrink(self, shown_table, registry):
+        header = shown_table.view.horizontalHeader()
+        header.resizeSection(TelemetryCol.NAME, 350)
+
+        dev = registry.id_registry.get_device("shortdev")
+        dev.get_module("s")
+        shown_table.model._sync_registry(registry.id_registry.module_list)
+
+        assert header.sectionSize(TelemetryCol.NAME) == 350
+
+
+class TestHiddenSkipsUpdates:
+    def test_unforced_tick_is_skipped_while_hidden(self, table, registry, monkeypatch):
+        calls = []
+        monkeypatch.setattr(table.model, "apply_updates", lambda force=False: calls.append(force))
+
+        table.apply_updates()
+
+        assert calls == []
+
+    def test_show_catches_up_and_resizes(self, table, registry, qtbot):
+        table._toggle_hide_empty(False)
+        dev = registry.id_registry.get_device("showdev")
+        mod = dev.get_module("m")
+        _emit(registry, dev, mod, "hello")
+        table.apply_updates()  # Hidden: skipped
+        assert _msg_for(table, mod) != "hello"
+
+        table.show()
+        qtbot.waitExposed(table)
+
+        assert _msg_for(table, mod) == "hello"
+        assert table.resize_timer.isActive()
+
+
 class TestGetModuleAtIndex:
     def test_returns_module_for_name_column(self, table, registry):
         dev = registry.id_registry.get_device("idxdev")

@@ -12,7 +12,6 @@ from time import perf_counter, perf_counter_ns
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
-from PySide6.QtWidgets import QToolButton
 from qtpy.QtCore import (
     QAbstractTableModel,
     QEvent,
@@ -31,6 +30,7 @@ from qtpy.QtWidgets import (
     QMenu,
     QTableView,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -768,7 +768,10 @@ class TelemetryTable(QWidget):
 
         self.model.layout_changed.connect(self.auto_size_columns_delayed)
 
-        self.model.rowsInserted.connect(self.auto_size_columns_delayed)
+        # Not auto_size_columns: resizeColumnToContents calls the Python data() for up to 1000
+        # rows per column. Sources that keep registering modules (ADB logcat tags) insert rows
+        # on every tick, which kept the UI thread in that scan ~90% of the time.
+        self.model.rowsInserted.connect(self._grow_columns_for_rows)
 
         self.resize_timer = QTimer(self)
         self.resize_timer.setSingleShot(True)
@@ -790,6 +793,10 @@ class TelemetryTable(QWidget):
 
     def apply_updates(self, force: bool = False):
         """Pass update execution to our isolated table model."""
+        # Hidden (closed log-viewer sidebar, background tab): skip the regular tick, showEvent
+        # catches up. Every LogViewerWidget owns one of these, so hidden ones add up.
+        if not force and not self.isVisible():
+            return
         self._sync_force_live_visibility()
         self.model.apply_updates(force=force)
 
@@ -880,10 +887,19 @@ class TelemetryTable(QWidget):
             "force_live": self.force_live,
         }
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # The tracker doesn't exist yet when shown during construction/restore; the next tick covers it
+        if getattr(self.gui_context.registry, "module_value_tracker", None) is not None:
+            self.apply_updates(force=True)
+        self.auto_size_columns_delayed()
+
     def auto_size_columns_delayed(self):
         self.resize_timer.start(50)
 
     def auto_size_columns(self):
+        if not self.isVisible():
+            return  # showEvent resizes
         header = self.view.horizontalHeader()
 
         self.view.resizeColumnToContents(TelemetryCol.DEVICE)
@@ -897,6 +913,35 @@ class TelemetryTable(QWidget):
             header.resizeSection(TelemetryCol.NAME, 100)
         if header.sectionSize(TelemetryCol.NAME) > 400:
             header.resizeSection(TelemetryCol.NAME, 400)
+
+    def _grow_columns_for_rows(self, parent, first: int, last: int):
+        """Widens DEVICE/NAME to fit only the inserted rows, up to the auto_size_columns caps.
+
+        Never shrinks: a shrink can only follow a filter/sort/reset, which goes through
+        layout_changed and the full auto_size_columns.
+        """
+        if self.resize_timer.isActive() or not self.isVisible():
+            return  # A pending full resize, or the one in showEvent, covers these rows
+
+        header = self.view.horizontalHeader()
+        metrics = self.view.fontMetrics()
+        style = self.view.style()
+        # QStyledItemDelegate's text margin on each side, plus the grid line
+        margin = (style.pixelMetric(style.PixelMetric.PM_FocusFrameHMargin, None, self.view) + 1) * 2 + 1
+        model = self.model
+
+        for col, cap in ((TelemetryCol.DEVICE, 200), (TelemetryCol.NAME, 400)):
+            if self.view.isColumnHidden(col):
+                continue
+            current = header.sectionSize(col)
+            if current >= cap:
+                continue
+            widest = max(
+                metrics.horizontalAdvance(model.data(model.index(row, col)) or "") for row in range(first, last + 1)
+            )
+            needed = min(widest + margin, cap)
+            if needed > current:
+                header.resizeSection(col, needed)
 
     def _toggle_device_column(self, visible: bool):
         self.show_device_column = visible
