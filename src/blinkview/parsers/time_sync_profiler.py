@@ -38,6 +38,75 @@ def nb_bundle_parse_states(bundle, index, key_seq, key_target, key_pin):
     return has_seq, seq, has_target, target, has_pin, pin
 
 
+# What a board logs when its edge counter is set (`sync seq <n>`): `new_seq_nr: <n>`
+SEQ_RESET_PREFIX = b"new_seq_nr"
+
+# An edge row waits this long (PC receive time) for its partner. Longer than any honest delay between the source's
+# row and a consumer's (a Zephyr log thread may hold rows for a second), shorter than the gap between two runs, so
+# that a row left unpaired by one run cannot pair with the next run's edge of the same seq.
+PAIR_MAX_AGE_NS = 30_000_000_000
+PAIR_MAX_ENTRIES = 8192
+
+
+class SeqPairBook:
+    """The source's and the consumers' edge rows waiting for their partner, keyed by `seq`.
+
+    Each entry is `(ts, state, rx_ts)`. An entry is dropped once it is PAIR_MAX_AGE_NS older (by receive time) than
+    the newest row of its board, or when its board resets its counter (`reset`). A source row stays after pairing,
+    as every consumer pairs with it; a consumer row is removed when it pairs."""
+
+    def __init__(self, consumer_ids, max_age_ns: int = PAIR_MAX_AGE_NS, max_entries: int = PAIR_MAX_ENTRIES):
+        self.server: dict[int, tuple[int, int, int]] = {}
+        self.consumers: dict[int, dict[int, tuple[int, int, int]]] = {dev: {} for dev in consumer_ids}
+        self.max_age_ns = max_age_ns
+        self.max_entries = max_entries
+
+    def reset_server(self):
+        self.server.clear()
+
+    def reset_consumer(self, dev_id):
+        self.consumers[dev_id].clear()
+
+    def _evict(self, book: dict, rx_ts: int):
+        cutoff = rx_ts - self.max_age_ns
+        while book:
+            oldest_seq = next(iter(book))
+            if book[oldest_seq][2] >= cutoff and len(book) <= self.max_entries:
+                break
+            del book[oldest_seq]
+
+    def add_server(self, seq, ts, state, rx_ts):
+        """Stores a source edge; returns `(consumer_id, (ts, state), (ts, state))` for each consumer row that was
+        waiting for it (source first)."""
+        book = self.server
+        book.pop(seq, None)  # re-insert at the end: eviction goes by insertion order
+        book[seq] = (ts, state, rx_ts)
+        self._evict(book, rx_ts)
+        matches = []
+        for dev_id, waiting in self.consumers.items():
+            self._evict(waiting, rx_ts)
+            entry = waiting.pop(seq, None)
+            if entry is not None:
+                matches.append((dev_id, (ts, state), (entry[0], entry[1])))
+        return matches
+
+    def add_consumer(self, dev_id, seq, ts, state, rx_ts):
+        """Stores a consumer edge, or pairs it at once with the source's row of that seq; returns
+        `(consumer_id, (ts, state), (ts, state))` for the pair made (source first), else None. A second row of the
+        same seq while the first one waits is ignored."""
+        self._evict(self.server, rx_ts)
+        waiting = self.consumers[dev_id]
+        self._evict(waiting, rx_ts)
+        src = self.server.get(seq)
+        if src is not None:
+            first = waiting.pop(seq, None)
+            pin = (first[0], first[1]) if first is not None else (ts, state)
+            return dev_id, (src[0], src[1]), pin
+        if seq not in waiting:
+            waiting[seq] = (ts, state, rx_ts)
+        return None
+
+
 @ParserFactory.register("time_sync_profiler")
 @override_property(
     "sources_",
@@ -208,10 +277,34 @@ class TimeSyncProfiler(BaseParser):
             batch_out_capacity = batch_out.capacity
             batch_out_buf_limit = batch_out.buffer_capacity() * 0.9
 
-        # --- State Tracking ---
-        server_seq_times = {}
-        consumer_seq_times = {dev_id: {} for dev_id in source_device_ids}
-        last_cleanup_time = _time_ns()
+        book = SeqPairBook(source_device_ids)
+        reset_prefix_len = len(SEQ_RESET_PREFIX)
+
+        def emit(pair, seq, rx_ts, level):
+            dev_id, (t_target, target_val), (t_pin, pin_val) = pair
+            if target_val != pin_val:
+                logger.warning(
+                    "Desync detected on device %s at seq %s! Expected target state %s, got pin state %s.",
+                    dev_id,
+                    seq,
+                    target_val,
+                    pin_val,
+                )
+                return
+            if dev_id not in out_module_ids:
+                return
+            diff_ms = (t_pin - t_target) / 1_000_000.0
+            try:
+                batch_out.insert(
+                    ts_ns=t_target,
+                    rx_ts_ns=rx_ts,
+                    msg_bytes=f"{diff_ms:.3f}".encode("ascii"),
+                    level=level,
+                    module=out_module_ids[dev_id],
+                    device=local_device_id_int,
+                )
+            except Exception:
+                pass
 
         stop_is_set = self._stop_event.is_set
 
@@ -275,95 +368,24 @@ class TimeSyncProfiler(BaseParser):
                         if has_seq:
                             ts = timestamps[idx]
                             rx_ts = rx_timestamps[idx]
-                            orig_level = levels[idx]
 
-                            # --- Handle Server Output ---
                             if device_id_int == server_device_id_int and has_target:
-                                # Store both timestamp and the target state value
-                                server_seq_times[seq] = (ts, target_val)
+                                for pair in book.add_server(seq, ts, target_val, rx_ts):
+                                    emit(pair, seq, rx_ts, levels[idx])
 
-                                if len(server_seq_times) > 50:
-                                    del server_seq_times[next(iter(server_seq_times))]
-
-                                # Safely cross-match if a consumer packet arrived earlier
-                                for dev_id in source_device_ids:
-                                    if seq in consumer_seq_times[dev_id]:
-                                        t_target, stored_target_val = server_seq_times[seq]
-                                        t_pin, stored_pin_val = consumer_seq_times[dev_id][seq]
-
-                                        del consumer_seq_times[dev_id][seq]
-
-                                        # Desync Check: Ensure the target state matches the pin state
-                                        if stored_target_val != stored_pin_val:
-                                            logger.warning(
-                                                "Desync detected on device %s at seq %s! Expected target state %s, got pin state %s.",
-                                                dev_id,
-                                                seq,
-                                                stored_target_val,
-                                                stored_pin_val,
-                                            )
-                                            continue
-
-                                        diff_ns = t_pin - t_target
-                                        diff_ms = diff_ns / 1_000_000.0
-
-                                        # --- Distribute Result Downstream ---
-                                        if dev_id in out_module_ids:
-                                            try:
-                                                batch_out.insert(
-                                                    ts_ns=t_target,
-                                                    rx_ts_ns=rx_ts,
-                                                    msg_bytes=f"{diff_ms:.3f}".encode("ascii"),
-                                                    level=orig_level,
-                                                    module=out_module_ids[dev_id],
-                                                    device=local_device_id_int,
-                                                )
-                                            except Exception:
-                                                pass
-
-                            # --- Handle Consumer Input & Diff Calculation ---
                             elif device_id_int in source_device_ids and has_pin:
-                                # Safely isolate by ensuring device_id_int belongs to the consumers
-                                if seq not in consumer_seq_times[device_id_int]:
-                                    # Store both timestamp and the pin state value
-                                    consumer_seq_times[device_id_int][seq] = (ts, pin_val)
+                                pair = book.add_consumer(device_id_int, seq, ts, pin_val, rx_ts)
+                                if pair is not None:
+                                    emit(pair, seq, rx_ts, levels[idx])
 
-                                if len(consumer_seq_times[device_id_int]) > 50:
-                                    del consumer_seq_times[device_id_int][next(iter(consumer_seq_times[device_id_int]))]
-
-                                if seq in server_seq_times:
-                                    t_target, stored_target_val = server_seq_times[seq]
-                                    t_pin, stored_pin_val = consumer_seq_times[device_id_int][seq]
-
-                                    del consumer_seq_times[device_id_int][seq]
-
-                                    # Desync Check: Ensure the target state matches the pin state
-                                    if stored_target_val != stored_pin_val:
-                                        logger.warning(
-                                            "Desync detected on device %s at seq %s! Expected target state %s, got pin state %s.",
-                                            device_id_int,
-                                            seq,
-                                            stored_target_val,
-                                            stored_pin_val,
-                                        )
-                                        continue
-
-                                    diff_ns = t_pin - t_target
-                                    diff_ms = diff_ns / 1_000_000.0
-
-                                    # --- Distribute Result Downstream ---
-                                    if device_id_int in out_module_ids:
-                                        try:
-                                            batch_out.insert(
-                                                ts_ns=t_target,
-                                                rx_ts_ns=rx_ts,
-                                                msg_bytes=f"{diff_ms:.3f}".encode("ascii"),
-                                                level=orig_level,
-                                                module=out_module_ids[device_id_int],
-                                                device=local_device_id_int,
-                                            )
-                                        except Exception:
-                                            pass
+                        elif b.lengths[idx] >= reset_prefix_len:
+                            # `sync seq <n>` restarts the board's counter: its waiting rows are from the last run
+                            msg_start = int(b.offsets[idx])
+                            if b.buffer[msg_start : msg_start + reset_prefix_len].tobytes() == SEQ_RESET_PREFIX:
+                                if device_id_int == server_device_id_int:
+                                    book.reset_server()
+                                elif device_id_int in source_device_ids:
+                                    book.reset_consumer(device_id_int)
 
                         cursor = idx + 1
                 finally:
