@@ -245,6 +245,87 @@ class TestRunRealIngestion:
         assert [msg for msg, *_r in first_rows] == [b"first batch line"]
         assert [msg for msg, *_r in second_rows] == [b"second batch line"]
 
+    def test_a_restart_keeps_the_stream_state(self, id_registry):
+        """A config edit restarts the parser thread. It used to rebuild the decoder state in
+        resync mode and drop the first frame after every restart (wiki finding
+        py-every-parser-thread-restart-drops-the-first-frame-it-sees-ru): here the frame split by
+        the restart and, with it, the whole line after it."""
+        parser = make_parser(id_registry, delay=20)  # resync on start, as on a UART
+        parser.enabled = True
+        subscriber = QueueParser()
+        parser.subscribe(subscriber)
+        pool = parser.shared.array_pool
+
+        def put(*chunks):
+            batch = pool.create(PooledLogBatch, 8, 256)
+            for chunk in chunks:
+                batch.insert(1000, 1000, chunk)
+            parser.put(batch)
+
+        put(b"joined mid-line\n", b"line1\n", b"split ")
+        parser.start()
+        try:
+            before = drain(subscriber.queue, count=1)
+            parser.restart()
+            put(b"across the restart\n", b"line3\n")
+            after = drain(subscriber.queue, count=2)
+            parser.restart()
+            put(b"line4\n")
+            last = drain(subscriber.queue, count=1)
+        finally:
+            parser.stop()
+
+        assert [msg for msg, *_r in before + after + last] == [
+            b"line1",
+            b"split across the restart",
+            b"line3",
+            b"line4",
+        ]
+
+    def test_a_new_frame_decoder_config_starts_over_with_a_resync(self, id_registry):
+        parser = make_parser(id_registry, delay=20)
+        parser.enabled = True
+        subscriber = QueueParser()
+        parser.subscribe(subscriber)
+        pool = parser.shared.array_pool
+
+        parser.start()
+        try:
+            parser.apply_config({"frame_decoder": {"type": "line_decoder", "filter_trim_r": False}})
+            parser.restart()
+            batch = pool.create(PooledLogBatch, 8, 256)
+            batch.insert(1000, 1000, b"dropped by the resync\n")
+            batch.insert(1000, 1000, b"kept\n")
+            parser.put(batch)
+            rows = drain(subscriber.queue, count=2, timeout=1.0)
+        finally:
+            parser.stop()
+
+        assert [msg for msg, *_r in rows] == [b"kept"]
+
+    def test_stop_releases_the_stream_state_and_a_new_start_resyncs(self, id_registry):
+        parser = make_parser(id_registry, delay=20)
+        parser.enabled = True
+        subscriber = QueueParser()
+        parser.subscribe(subscriber)
+        pool = parser.shared.array_pool
+
+        parser.start()
+        parser.stop()
+        assert parser._frame_state is None
+
+        batch = pool.create(PooledLogBatch, 8, 256)
+        batch.insert(1000, 1000, b"dropped by the resync\n")
+        batch.insert(1000, 1000, b"kept\n")
+        parser.put(batch)
+        parser.start()
+        try:
+            rows = drain(subscriber.queue, count=2, timeout=1.0)
+        finally:
+            parser.stop()
+
+        assert [msg for msg, *_r in rows] == [b"kept"]
+
     def test_a_big_input_batch_does_not_make_oversized_output_batches(self, id_registry):
         """The finding's case: a 128 MB input batch made ~292 MB output batches (rows derived from
         bytes, buffer at 1.5x the input), of which ~0.2% was used. A 20 MB input batch, above the

@@ -4,6 +4,8 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+from copy import deepcopy
+from threading import get_ident
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -93,8 +95,48 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
         self.sync_state: SyncState = None
 
+        # The decoder's stream state, kept across restart() (see _take_frame_state).
+        self._frame_state: FrameState | None = None
+        self._frame_state_key = None
+        self._frame_state_owner = None  # ident of the run() thread using it
+        self._restarting = False
+
         self.logger_batch = None
         self.logger_post = None
+
+    def restart(self):
+        self._restarting = True
+        try:
+            super().restart()
+        finally:
+            self._restarting = False
+
+    def _take_frame_state(self, pool, codec) -> FrameState:
+        """The previous run's decoder state when the thread only restarted for a config edit: a
+        restart is no join mid-stream, so a frame split across it is completed instead of the
+        resync dropping it (and with it the first whole frame after the restart). A changed
+        frame_decoder config, or a previous thread that never stopped, gets a fresh state."""
+        key = (deepcopy(getattr(self, "frame_decoder", None)), codec.frame_length_maximum)
+        state = self._frame_state
+        if state is not None and self._frame_state_owner is None and self._frame_state_key == key:
+            return state
+        if state is not None and self._frame_state_owner is None:
+            state.release()
+        state = FrameState(pool, codec.frame_length_maximum, start_synced=not codec.frame_resync_on_start)
+        self._frame_state = state
+        self._frame_state_key = key
+        return state
+
+    def _return_frame_state(self, state: FrameState):
+        if self._frame_state is not state:
+            state.release()  # replaced while this thread was stuck: nobody else holds it
+            return
+        self._frame_state_owner = None
+        if not self._restarting:
+            # Stopped for good (or disabled): the next start joins the stream anew.
+            self._frame_state = None
+            self._frame_state_key = None
+            state.release()
 
     def apply_config(self, config: dict):
         changed = super().apply_config(config)
@@ -144,6 +186,7 @@ Each stage is configurable via the factory system, allowing users to mix and mat
         dev_id.id_registry.rename_device(dev_id, name)
 
     def run(self):
+        frame_state = None
         try:
             self.logger.info("Starting parser thread")
             get = self.input_queue.get
@@ -164,7 +207,8 @@ Each stage is configurable via the factory system, allowing users to mix and mat
 
             codec = self._frame_codec
 
-            frame_state = FrameState(pool, codec.frame_length_maximum, start_synced=not codec.frame_resync_on_start)
+            frame_state = self._take_frame_state(pool, codec)
+            self._frame_state_owner = get_ident()
             f_state = frame_state.bundle
             # One decoder call reserves at most this many output rows (the frame trackers' length);
             # a call that stops at exactly this many has run out of trackers, not of batch room.
@@ -315,7 +359,9 @@ Each stage is configurable via the factory system, allowing users to mix and mat
             flush()
         except Exception as e:
             self.logger.exception("run failure", exc=e)
-        # Flush any remaining batch on exit
+        finally:
+            if frame_state is not None:
+                self._return_frame_state(frame_state)
 
     @staticmethod
     def _warmup_config(helper: "NumbaWarmupHelper", frame_config, parser_config):
