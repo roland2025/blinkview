@@ -23,6 +23,8 @@ from blinkview.ops.constants import (
     CHAR_Z,
     CHAR_ZERO,
 )
+from blinkview.ops.id_history import NOT_FOUND, IdHistoryTable
+from blinkview.ops.process_filter import nb_row_process_name_id
 
 
 @app_njit()
@@ -79,6 +81,7 @@ def nb_segment_estimate_out_size(
     segment: LogBundle,
     tables: RegistryParams,
     cfg: FormattingConfig,
+    procs: IdHistoryTable,
 ) -> int:
     l_len, l_count = tables.levels.lens, tables.levels.count
     # l_vals is no longer needed here since we aren't searching IDs row-by-row!
@@ -101,6 +104,8 @@ def nb_segment_estimate_out_size(
 
     # --- Precalculate Max Level Length ---
     max_lvl_len = nb_table_get_max_string_len(tables.levels, fallback_default=3)
+    show_proc = cfg.show_proc
+    max_proc_len = procs.max_name_len if procs.max_name_len > 1 else 1  # "-" when unknown
 
     total_size = 0
     for i in range(count):
@@ -139,6 +144,13 @@ def nb_segment_estimate_out_size(
             if not is_first:
                 row_size += 1
             row_size += max_lvl_len
+            is_first = False
+
+        # --- Process name (pid_history) ---
+        if show_proc:
+            if not is_first:
+                row_size += 1
+            row_size += max_proc_len
             is_first = False
 
         # --- 5. Module (Direct Index) ---
@@ -375,10 +387,13 @@ def nb_segment_format(
     tables: RegistryParams,
     cfg: FormattingConfig,
     tz_offset_sec: int,
+    procs: IdHistoryTable,
 ):
     # 1. Unpack Tables
     # 1. Unpack Tables via explicit attribute access
     levels_tbl = tables.levels
+    show_proc = cfg.show_proc
+    p_buf, p_offs, p_lens = procs.name_buf, procs.name_offs, procs.name_lens
 
     modules_tbl = tables.modules
 
@@ -474,6 +489,19 @@ def nb_segment_format(
                 out[curr] = CHAR_SPACE
                 curr += 1
             curr = nb_table_lookup_copy_entry(out, curr, levels_tbl, s_lvls[idx], UNKNOWN_LEVEL)
+            first_field = False
+
+        # --- Process name (pid_history), after the level so LogHighlighter still finds it ---
+        if show_proc:
+            if not first_field:
+                out[curr] = CHAR_SPACE
+                curr += 1
+            name_id = nb_row_process_name_id(procs, segment, idx)
+            if name_id != NOT_FOUND:
+                curr = nb_copy_bytes(out, curr, p_buf, p_offs[name_id], p_lens[name_id])
+            else:
+                out[curr] = CHAR_DASH
+                curr += 1
             first_field = False
 
         # --- 4. Module (Direct Index) ---

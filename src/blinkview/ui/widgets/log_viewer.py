@@ -99,6 +99,7 @@ QToolButton[filterEnabled="true"] {
         self.show_mod = True
         self.show_date = False
         self.show_rx_ts = False
+        self.show_proc = False
         self.saved_sizes = None
 
         self.show_hidden = False
@@ -250,6 +251,12 @@ QToolButton[filterEnabled="true"] {
         self.column_actions["show_lvl"] = self._add_toggle(
             "LVL", self.show_lvl, lambda c: self._toggle_col("show_lvl", c)
         )
+        self.column_actions["show_proc"] = self._add_toggle(
+            "PROC", self.show_proc, lambda c: self._toggle_col("show_proc", c)
+        )
+        self.column_actions["show_proc"].setToolTip(
+            "Show the process name (resolved from PID history - populated by ADB sources only)"
+        )
         self.column_actions["show_mod"] = self._add_toggle(
             "MOD", self.show_mod, lambda c: self._toggle_col("show_mod", c)
         )
@@ -351,11 +358,13 @@ QToolButton[filterEnabled="true"] {
             self.log_filter,
             get_sidebar_filter=self.filter_sidebar.get_filter,
             get_show_hidden=self.filter_sidebar.action_show_non_essential.isChecked,
+            get_pid_history=self._pid_history,
         )
         self._fetcher = LogTextFetcher(
             self._scanner,
             self.gui_context.registry.system_ctx.array_pool,
             tables_provider=self.gui_context.id_registry.bundle,
+            procs_provider=lambda: self._pid_history().table(),
         )
 
         self.filter_sidebar.restore_state(self.filter_sidebar_state)
@@ -470,6 +479,7 @@ QToolButton[filterEnabled="true"] {
         self.show_mod = view_state.get("show_mod", default_show_mod)
         self.show_date = view_state.get("show_date", self.show_date)
         self.show_rx_ts = view_state.get("show_rx_ts", self.show_rx_ts)
+        self.show_proc = view_state.get("show_proc", self.show_proc)
         self.ts_precision = view_state.get("ts_precision", self.ts_precision)
 
         self.show_telemetry = view_state.get("show_telemetry", self.show_telemetry)
@@ -497,6 +507,7 @@ QToolButton[filterEnabled="true"] {
                 "show_mod": self.show_mod,
                 "show_date": self.show_date,
                 "show_rx_ts": self.show_rx_ts,
+                "show_proc": self.show_proc,
                 "ts_precision": self.ts_precision,
                 "show_module_filter": self.show_module_filter,
                 "show_telemetry": self.show_telemetry,
@@ -632,6 +643,21 @@ QToolButton[filterEnabled="true"] {
 
         self._refresh_view()
 
+    def _pid_history(self):
+        return self.gui_context.registry.pid_history
+
+    def _format_config(self) -> FormattingConfig:
+        return FormattingConfig(
+            self.show_ts,
+            self.show_dev,
+            self.show_lvl,
+            self.show_mod,
+            self.ts_precision,
+            show_date=self.show_date,
+            show_rx_ts=self.show_rx_ts,
+            show_proc=self.show_proc,
+        )
+
     def reload_and_redraw(self):
         """Public method to clear current logs and reload from the source with current filters."""
         self._scanner.invalidate_mask()
@@ -758,15 +784,7 @@ QToolButton[filterEnabled="true"] {
         self.prev_apply = t_start
 
         tz_offset_sec = get_local_utc_offset_seconds()
-        format_cfg = FormattingConfig(
-            self.show_ts,
-            self.show_dev,
-            self.show_lvl,
-            self.show_mod,
-            self.ts_precision,
-            show_date=self.show_date,
-            show_rx_ts=self.show_rx_ts,
-        )
+        format_cfg = self._format_config()
 
         result = self._fetcher.fetch_live_tail(
             max_rows=self.max_rows, format_cfg=format_cfg, tz_offset_sec=tz_offset_sec
@@ -935,15 +953,7 @@ QToolButton[filterEnabled="true"] {
         after_cap = self.HISTORY_AFTER if after_cap is None else after_cap
 
         tz_offset_sec = get_local_utc_offset_seconds()
-        format_cfg = FormattingConfig(
-            self.show_ts,
-            self.show_dev,
-            self.show_lvl,
-            self.show_mod,
-            self.ts_precision,
-            show_date=self.show_date,
-            show_rx_ts=self.show_rx_ts,
-        )
+        format_cfg = self._format_config()
 
         result = self._fetcher.fetch_history_window(
             anchor_seq=anchor_seq,

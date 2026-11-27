@@ -29,6 +29,10 @@ class KvFilterLineEdit(QLineEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setPlaceholderText('logfmt filter: key=value key2="val 2"...')
+        self.setToolTip(
+            "key=value conditions in the message, all must match.\n"
+            "process=NAME keeps rows whose process name (ADB sources) contains NAME."
+        )
         self.setClearButtonEnabled(True)
 
         self._timer = QTimer(self)

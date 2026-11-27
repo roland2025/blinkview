@@ -28,6 +28,19 @@ class AdbShellError(RuntimeError):
     """A command could not be run on the device's shell; the message says why."""
 
 
+_PS_ELAPSED_RE = re.compile(r"^(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)$")
+
+
+def parse_ps_elapsed_s(text: str) -> int | None:
+    """Seconds from toybox ps's ELAPSED column (`-o ETIME`): `[[dd-]hh:]mm:ss`. None when it
+    doesn't look like one."""
+    match = _PS_ELAPSED_RE.match(text)
+    if match is None:
+        return None
+    days, hours, minutes, seconds = (int(g) if g else 0 for g in match.groups())
+    return ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+
+
 def _shorten(text: str, limit: int = 80) -> str:
     text = text.strip()
     return text if len(text) <= limit else text[: limit - 3] + "..."
@@ -119,6 +132,7 @@ ensuring high throughput without pipeline stalls."""
         self._process_ids: dict[str, int] = {}
         self._last_polled_pids: set[int] = set()
         self._pid_poll_task_id = None
+        self._ps_has_elapsed = True  # cleared once a device's ps rejects `-o ETIME`
 
     def run(self):
         # Setup and Localize Lookups
@@ -470,46 +484,63 @@ ensuring high throughput without pipeline stalls."""
         self.logger.error("ADB send failed: %s", message)
         return AdbShellError(message)
 
+    def _run_ps(self) -> list[str]:
+        """`ps` lines with each process's elapsed run time as a third column when the device's ps
+        supports it (toybox: `-o ETIME`, header ELAPSED), else NAME,PID only. A ps that rejects
+        the field says so on its output, not its exit code; then NAME,PID is used from then on."""
+        if self._ps_has_elapsed:
+            lines = self._run("ps -A -o NAME,PID,ETIME")[1]
+            if not any(line.startswith("ps:") for line in lines[:2]):
+                return lines
+            self._ps_has_elapsed = False
+            self.logger.info("ps has no ETIME column; process start times fall back to poll times")
+        return self._run("ps -A -o NAME,PID")[1]
+
     def _refresh_process_ids(self):
         """Uses the persistent shell to map all process names to PIDs. Also feeds the shared,
         Numba-backed IdHistory (self.shared.pid_history) so that a PID's process name can later
         be resolved as of any past timestamp, not just "whatever currently holds it" - Android
-        recycles PIDs, so the two are not the same thing over the life of a session."""
-        # Use ps -A -o NAME,PID for modern Android compatibility. A failed run (already logged)
-        # skips this poll: an empty list would close every PID's history interval.
+        recycles PIDs, so the two are not the same thing over the life of a session.
+
+        Each new PID's interval starts at the process's start time (now minus ps's elapsed time,
+        rounded down by ps's 1 s resolution), not at this poll - the poll runs every 15 s, so
+        otherwise an app's startup logs would never resolve to its name."""
+        # A failed run (already logged) skips this poll: an empty list would close every PID's
+        # history interval.
         try:
-            lines = self._run("ps -A -o NAME,PID")[1]
+            lines = self._run_ps()
         except AdbShellError:
             return
 
+        now_ns = self.shared.time_ns()
         logger = self.logger
 
-        pids: dict[str, int] = {}
-
-        # We skip the header 'NAME PID' if it exists in the output
+        # Every (pid, name, started_ns), including several PIDs sharing a name (sh, app helper
+        # processes). The header line has no integer PID and is skipped.
+        processes: list[tuple[int, str, int | None]] = []
         for line in lines:
             parts = line.split()
-            if len(parts) >= 2:
-                name = parts[0]
-                try:
-                    # The PID is usually the second column
-                    pid = int(parts[1])
-                    pids[name] = pid
-                    logger.debug("pid=%s name=%s", pid, name)
-                except ValueError:
-                    continue
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[1])
+            except ValueError:
+                continue
+            elapsed_s = parse_ps_elapsed_s(parts[2]) if len(parts) >= 3 else None
+            started_ns = None if elapsed_s is None else now_ns - (elapsed_s + 1) * 1_000_000_000
+            processes.append((pid, parts[0], started_ns))
+            logger.debug("pid=%s name=%s elapsed_s=%s", pid, parts[0], elapsed_s)
 
-        self._process_ids = pids
-        logger.info("Captured %s application PIDs via shell.", len(self._process_ids))
+        self._process_ids = {name: pid for pid, name, _ in processes}
+        logger.info("Captured %s application PIDs via shell.", len(processes))
 
-        now_ns = self.shared.time_ns()
         history = self.shared.pid_history
-        current_pids = set(pids.values())
+        current_pids = {pid for pid, _, _ in processes}
         device_ids = self._owning_pipeline_device_ids()
 
         for device_id in device_ids:
-            for name, pid in pids.items():
-                history.update(self._pid_history_key(device_id, pid), name, now_ns)
+            for pid, name, started_ns in processes:
+                history.update(self._pid_history_key(device_id, pid), name, now_ns, started_ns=started_ns)
 
             # Any PID we saw last poll but not this one is gone (process died) - close its
             # interval rather than leaving it open forever.

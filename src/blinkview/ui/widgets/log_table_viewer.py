@@ -131,6 +131,7 @@ class LogTableStore:
             self.log_filter,
             get_sidebar_filter=self.filter_sidebar.get_filter,
             get_show_hidden=self.filter_sidebar.action_show_non_essential.isChecked,
+            get_pid_history=lambda: self.gui_context.registry.pid_history,
         )
 
         self.viewport_rows = 100  # LIVE mode fetch bound; the widget keeps this in sync with the view's height
@@ -226,6 +227,7 @@ class LogTableStore:
         self._prev_fetch_mask = None
         self._prev_fetch_kv = None
         self._prev_fetch_text = None
+        self._prev_fetch_proc = None
 
         self.logger = self.gui_context.logger.child("log_table", enabled=True)
         self.logger_fetch = self.logger.child("fetch")
@@ -591,6 +593,8 @@ class LogTableStore:
         self._scanner.ensure_effective_mask()
         kv = self.log_filter.bake_kv_arrays()
         text = self.log_filter.bake_text_search()
+        # Also re-baked when pid_history learns a process, while a process filter is active
+        proc = self._scanner.bake_process_filter()
 
         # A full rescan is unavoidable on the very first fetch, whenever the caller explicitly
         # forces one (viewport resize, mode transitions, clear), or when the filter itself
@@ -602,6 +606,7 @@ class LogTableStore:
             self._prev_fetch_mask is not self._scanner.effective_mask
             or self._prev_fetch_kv is not kv
             or self._prev_fetch_text is not text
+            or self._prev_fetch_proc is not proc
         )
 
         if force or self._last_backend_seq is None or filter_changed:
@@ -614,6 +619,7 @@ class LogTableStore:
         self._prev_fetch_mask = self._scanner.effective_mask
         self._prev_fetch_kv = kv
         self._prev_fetch_text = text
+        self._prev_fetch_proc = proc
 
     def _fetch_live_full(self):
         """Full backward rescan across the entire backend, capped at viewport_rows matches -

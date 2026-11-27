@@ -17,6 +17,7 @@ from blinkview.core.types.log_batch import LogBundle
 from blinkview.ops.buffers import nb_copy_buf
 from blinkview.ops.constants import CHAR_EQUALS, CHAR_SPACE
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS, nb_row_matches_kv_conditions
+from blinkview.ops.process_filter import EMPTY_PROC_FILTER, nb_row_process_in_mask
 from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH, nb_bytes_contains_ci
 
 
@@ -139,6 +140,7 @@ def segment_filter_reversed(
     kv_field_delim=CHAR_SPACE,
     kv_kv_delim=CHAR_EQUALS,
     text=EMPTY_TEXT_SEARCH,  # TextSearchArrays
+    proc=EMPTY_PROC_FILTER,  # ProcessFilter
 ):
     return nb_segment_filter_reversed(
         segment,
@@ -153,6 +155,7 @@ def segment_filter_reversed(
         kv_field_delim,
         kv_kv_delim,
         text,
+        proc,
     )
 
 
@@ -170,6 +173,7 @@ def nb_segment_filter_reversed(
     kv_field_delim,
     kv_kv_delim,
     text,
+    proc,
 ):
     count = segment.size[0]
     timestamps = segment.timestamps
@@ -229,11 +233,17 @@ def nb_segment_filter_reversed(
         text_ok = text.needle_len == 0 or (
             (devices[i] < len(text.dev_mask) and text.dev_mask[devices[i]])
             or (modules[i] < len(text.mod_mask) and text.mod_mask[modules[i]])
+            or (proc.text_active and nb_row_process_in_mask(proc.table, proc.text_mask, segment, i))
             or nb_bytes_contains_ci(
                 segment.buffer, segment.offsets[i], segment.lengths[i], text.needle_buf, text.needle_len
             )
         )
-        is_match = level_ok and kv_ok and text_ok
+        is_match = (
+            level_ok
+            and kv_ok
+            and text_ok
+            and (not proc.require or nb_row_process_in_mask(proc.table, proc.require_mask, segment, i))
+        )
 
         if is_match:
             out_indices[match_count] = i
@@ -335,6 +345,7 @@ def segment_filter(
     kv_field_delim=CHAR_SPACE,
     kv_kv_delim=CHAR_EQUALS,
     text=EMPTY_TEXT_SEARCH,  # TextSearchArrays
+    proc=EMPTY_PROC_FILTER,  # ProcessFilter
 ):
     return nb_filter_segment(
         segment,  # LogBundle
@@ -348,6 +359,7 @@ def segment_filter(
         kv_field_delim,
         kv_kv_delim,
         text,
+        proc,
     )
 
 
@@ -364,6 +376,7 @@ def nb_filter_segment(
     kv_field_delim,
     kv_kv_delim,
     text,
+    proc,
 ):
     count = segment.size[0]
     timestamps = segment.timestamps
@@ -416,11 +429,17 @@ def nb_filter_segment(
         text_ok = text.needle_len == 0 or (
             (devices[i] < len(text.dev_mask) and text.dev_mask[devices[i]])
             or (modules[i] < len(text.mod_mask) and text.mod_mask[modules[i]])
+            or (proc.text_active and nb_row_process_in_mask(proc.table, proc.text_mask, segment, i))
             or nb_bytes_contains_ci(
                 segment.buffer, segment.offsets[i], segment.lengths[i], text.needle_buf, text.needle_len
             )
         )
-        is_match = level_ok and kv_ok and text_ok
+        is_match = (
+            level_ok
+            and kv_ok
+            and text_ok
+            and (not proc.require or nb_row_process_in_mask(proc.table, proc.require_mask, segment, i))
+        )
 
         # Branchless Append
         out_indices[match_count] = i

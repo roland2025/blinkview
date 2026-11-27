@@ -4,12 +4,19 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
+import threading
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
 from blinkview.core.warmup_registry import register_warmup
-from blinkview.ops.id_history import NOT_FOUND, nb_resolve_id_at
+from blinkview.ops.id_history import (
+    EMPTY_ID_HISTORY_TABLE,
+    NOT_FOUND,
+    IdHistoryTable,
+    nb_resolve_id_at,
+    nb_resolve_name_id,
+)
 from blinkview.utils.dev_mode import dev_print
 
 if TYPE_CHECKING:
@@ -36,9 +43,18 @@ class IdHistory:
     events are rare relative to log volume), so growth and key->row lookup stay in plain Python
     (a dict is simpler and fast enough at this frequency). Only the timestamp resolution walk -
     the part a future hot-path caller (bulk row rendering, a logfmt-style filter) might call a
-    lot - is Numba-backed."""
+    lot - is Numba-backed.
+
+    Written by a source's polling thread (AdbReader's ps poll) while UI threads resolve and
+    snapshot it, so every method takes self._lock. table() hands kernels an immutable snapshot
+    (IdHistoryTable), rebuilt only when `version` - bumped by every real change - has moved."""
 
     def __init__(self, initial_capacity: int = 64):
+        self._lock = threading.Lock()
+        self.version = 0
+        self._table_version = -1
+        self._table: IdHistoryTable = EMPTY_ID_HISTORY_TABLE
+
         self._capacity = max(1, initial_capacity)
         self._count = 0
 
@@ -96,40 +112,99 @@ class IdHistory:
         self._count += 1
         return row
 
-    def update(self, key: int, name: str, ts_ns: int) -> None:
+    def update(self, key: int, name: str, ts_ns: int, started_ns: Optional[int] = None) -> None:
         """Records that `key` is (now) named `name` as of `ts_ns`. A no-op if `key`'s currently
         open interval already has this name (avoids opening a pointless new row every poll
-        tick). Otherwise closes the previous open interval (if any) at `ts_ns` and appends a new
-        open one."""
-        name_id = self._intern(name)
-        prev = self._latest_row.get(key, _NO_ROW)
+        tick). Otherwise opens a new interval and ends the previous one where the new one starts.
 
-        if prev != _NO_ROW and self._valid_until[prev] == OPEN_UNTIL:
-            if self._name_ids[prev] == name_id:
-                return  # unchanged - nothing to record
-            self._valid_until[prev] = ts_ns
+        `started_ns`: when the name really took hold, if the caller knows it to be earlier than
+        `ts_ns` (a process's start time from `ps`, seen at the next poll) - the new interval
+        starts there instead, so rows logged between the start and the poll still resolve. It's
+        clamped to [previous interval's start, ts_ns], and a previous interval still running (or
+        closed later, at the poll that saw it gone) is cut back to it: a key holds one name at a
+        time."""
+        start = ts_ns if started_ns is None else min(started_ns, ts_ns)
+        with self._lock:
+            name_id = self._intern(name)
+            prev = self._latest_row.get(key, _NO_ROW)
 
-        self._latest_row[key] = self._append(key, name_id, ts_ns, prev)
+            if prev != _NO_ROW:
+                if self._valid_until[prev] == OPEN_UNTIL and self._name_ids[prev] == name_id:
+                    return  # unchanged - nothing to record
+                start = max(start, int(self._valid_from[prev]))
+                if self._valid_until[prev] > start:
+                    self._valid_until[prev] = start
+
+            self._latest_row[key] = self._append(key, name_id, start, prev)
+            self.version += 1
 
     def close(self, key: int, ts_ns: int) -> None:
         """Marks `key` as no longer valid as of `ts_ns` (e.g. process death), with no replacement
         interval opened."""
-        row = self._latest_row.get(key, _NO_ROW)
-        if row != _NO_ROW and self._valid_until[row] == OPEN_UNTIL:
-            self._valid_until[row] = ts_ns
+        with self._lock:
+            row = self._latest_row.get(key, _NO_ROW)
+            if row != _NO_ROW and self._valid_until[row] == OPEN_UNTIL:
+                self._valid_until[row] = ts_ns
+                self.version += 1
 
     def resolve(self, key: int, ts_ns: int) -> Optional[str]:
         """Returns the name `key` held at `ts_ns`, or None if `key` is unknown or had no name at
         that time."""
-        row = self._latest_row.get(key, _NO_ROW)
-        if row == _NO_ROW:
-            return None
+        with self._lock:
+            row = self._latest_row.get(key, _NO_ROW)
+            if row == _NO_ROW:
+                return None
 
-        found = nb_resolve_id_at(row, ts_ns, self._valid_from, self._valid_until, self._prev_row)
-        if found == NOT_FOUND:
-            return None
+            found = nb_resolve_id_at(row, ts_ns, self._valid_from, self._valid_until, self._prev_row)
+            if found == NOT_FOUND:
+                return None
 
-        return self._names[self._name_ids[found]]
+            return self._names[self._name_ids[found]]
+
+    def names(self) -> tuple[str, ...]:
+        """Every interned name, indexed by name id (what IdHistoryTable.name_ids refer to). Ids
+        are append-only, so a tuple taken after a table() covers every id in that table."""
+        with self._lock:
+            return tuple(self._names)
+
+    def table(self) -> IdHistoryTable:
+        """Immutable snapshot for kernels (see ops/id_history.py's nb_resolve_name_id). Cached
+        until the next real change - the same object is returned in between, so callers can
+        compare by identity. EMPTY_ID_HISTORY_TABLE while nothing has been recorded."""
+        with self._lock:
+            if self._table_version == self.version:
+                return self._table
+
+            if self._count == 0:
+                table = EMPTY_ID_HISTORY_TABLE
+            else:
+                count = self._count
+                keys = np.fromiter(self._latest_row.keys(), dtype=np.uint64, count=len(self._latest_row))
+                latest = np.fromiter(self._latest_row.values(), dtype=np.int32, count=len(self._latest_row))
+                order = np.argsort(keys, kind="stable")
+
+                encoded = [name.encode("utf-8") for name in self._names]
+                name_lens = np.fromiter((len(b) for b in encoded), dtype=np.int64, count=len(encoded))
+                name_offs = np.zeros(len(encoded), dtype=np.int64)
+                if len(encoded) > 1:
+                    np.cumsum(name_lens[:-1], out=name_offs[1:])
+
+                table = IdHistoryTable(
+                    keys=keys[order],
+                    latest_rows=latest[order],
+                    valid_from=self._valid_from[:count].copy(),
+                    valid_until=self._valid_until[:count].copy(),
+                    prev_row=self._prev_row[:count].copy(),
+                    name_ids=self._name_ids[:count].copy(),
+                    name_buf=np.frombuffer(b"".join(encoded), dtype=np.uint8),
+                    name_offs=name_offs,
+                    name_lens=name_lens,
+                    max_name_len=int(name_lens.max()) if len(encoded) else 0,
+                )
+
+            self._table = table
+            self._table_version = self.version
+            return table
 
     @staticmethod
     @register_warmup
@@ -144,5 +219,9 @@ class IdHistory:
         history.resolve(1, 50)
         history.resolve(1, 999)
         history.resolve(999, 0)  # unknown key
+
+        table = history.table()
+        nb_resolve_name_id(table, np.uint64(1), np.int64(50))
+        nb_resolve_name_id(EMPTY_ID_HISTORY_TABLE, np.uint64(1), np.int64(50))
 
         dev_print("[Warmup] IdHistory ... done")

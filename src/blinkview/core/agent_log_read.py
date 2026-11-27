@@ -312,6 +312,7 @@ def _make_scanner(registry, args: dict) -> LogSegmentScanner:
         log_filter,
         get_sidebar_filter=sidebar_filter,
         get_show_hidden=lambda: True,
+        get_pid_history=lambda: registry.pid_history,
     )
 
 

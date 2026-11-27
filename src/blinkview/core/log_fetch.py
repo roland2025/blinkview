@@ -35,7 +35,9 @@ from blinkview.ops.formatting import (
     nb_segment_format,
     nb_segment_format_log_rows,
 )
+from blinkview.ops.id_history import EMPTY_ID_HISTORY_TABLE
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS
+from blinkview.ops.process_filter import EMPTY_PROC_FILTER, ProcessFilter
 from blinkview.ops.segments import segment_filter, segment_filter_reversed
 from blinkview.ops.text_filter import EMPTY_TEXT_SEARCH
 from blinkview.utils.dev_mode import dev_print
@@ -79,8 +81,13 @@ class LogSegmentScanner:
         log_filter: "LogFilter",
         get_sidebar_filter: Callable[[], tuple],
         get_show_hidden: Callable[[], bool],
+        get_pid_history: Optional[Callable[[], object]] = None,
     ):
         self.id_registry = id_registry
+        # The registry's IdHistory, for process-name filtering (`process=` and the free-text
+        # search, see LogFilter.bake_process_filter). Without it a `process=` condition matches
+        # nothing and the search ignores process names.
+        self.get_pid_history = get_pid_history or (lambda: None)
         # A callable, not a captured pool reference - GUIContext.registry.central.log_pool is
         # read fresh on every scan rather than once at construction time, matching the original
         # per-consumer code (LogViewerWidget/LogTableStore both did `pool =
@@ -177,6 +184,11 @@ class LogSegmentScanner:
 
         return mod_count
 
+    def bake_process_filter(self) -> ProcessFilter:
+        """The current ProcessFilter (see LogFilter.bake_process_filter) - also read by
+        LogTableStore to tell a filter change (full rescan) from new rows (incremental)."""
+        return self.log_filter.bake_process_filter(self.get_pid_history())
+
     def scan_tail(self, *, start_seq: int, max_rows: int, consume: MatchConsumer) -> LiveScanResult:
         """Scans pool.get_reversed_snapshot() (newest-to-oldest segments) for rows with
         seq > start_seq passing the current effective_mask/kv/text filter, invoking
@@ -195,6 +207,7 @@ class LogSegmentScanner:
         self.ensure_effective_mask()
         kv = self.log_filter.bake_kv_arrays()
         text = self.log_filter.bake_text_search()
+        proc = self.bake_process_filter()
         start_seq = max(start_seq, self.floor_seq)
 
         total_new_rows = 0
@@ -231,6 +244,7 @@ class LogSegmentScanner:
                     start_seq=start_seq,
                     kv=kv,
                     text=text,
+                    proc=proc,
                 )
 
                 if match_count > 0:
@@ -268,6 +282,7 @@ class LogSegmentScanner:
         self.ensure_effective_mask()
         kv = self.log_filter.bake_kv_arrays()
         text = self.log_filter.bake_text_search()
+        proc = self.bake_process_filter()
 
         has_seq_anchor = anchor_seq is not None and anchor_seq > dtypes.SEQ_START
         has_ts_anchor = anchor_ts is not None
@@ -313,6 +328,7 @@ class LogSegmentScanner:
                         start_seq=floor_seq,
                         kv=kv,
                         text=text,
+                        proc=proc,
                         **before_kwargs,
                     )
 
@@ -366,6 +382,7 @@ class LogSegmentScanner:
                     max_matches=allowed,
                     kv=kv,
                     text=text,
+                    proc=proc,
                     **after_kwargs,
                 )
 
@@ -413,6 +430,7 @@ class LogSegmentScanner:
                     start_seq=0,
                     kv=EMPTY_KV_CONDITIONS,
                     text=EMPTY_TEXT_SEARCH,
+                    proc=EMPTY_PROC_FILTER,
                 )
 
                 # scan_history_window's "before" shape: end_seq passed explicitly.
@@ -424,6 +442,7 @@ class LogSegmentScanner:
                     end_seq=dtypes.SEQ_START,
                     kv=EMPTY_KV_CONDITIONS,
                     text=EMPTY_TEXT_SEARCH,
+                    proc=EMPTY_PROC_FILTER,
                 )
 
                 # scan_history_window's "after" shape: nb_filter_segment with start_seq bound.
@@ -435,6 +454,7 @@ class LogSegmentScanner:
                     start_seq=0,
                     kv=EMPTY_KV_CONDITIONS,
                     text=EMPTY_TEXT_SEARCH,
+                    proc=EMPTY_PROC_FILTER,
                 )
                 break
 
@@ -465,10 +485,19 @@ class LogTextFetcher:
     (`latest_seq_seen`) - a plain per-consumer counter, not scanner state (see
     LogSegmentScanner's docstring)."""
 
-    def __init__(self, scanner: LogSegmentScanner, array_pool, tables_provider: Callable[[], object]):
+    def __init__(
+        self,
+        scanner: LogSegmentScanner,
+        array_pool,
+        tables_provider: Callable[[], object],
+        procs_provider: Optional[Callable[[], object]] = None,
+    ):
         self._scanner = scanner
         self._array_pool = array_pool
         self._tables_provider = tables_provider
+        # pid_history's IdHistoryTable, for FormattingConfig.show_proc (IdHistory.table); without
+        # it every row's process prints as "-".
+        self._procs_provider = procs_provider or (lambda: EMPTY_ID_HISTORY_TABLE)
         self.latest_seq_seen = SEQ_NONE
 
     def invalidate_mask(self) -> None:
@@ -480,12 +509,15 @@ class LogTextFetcher:
     def _make_format_consumer(self, format_cfg: FormattingConfig, tz_offset_sec: int, out_batches, out_seqs):
         array_pool = self._array_pool
         tables = self._tables_provider()
+        procs = self._procs_provider() if format_cfg.show_proc else EMPTY_ID_HISTORY_TABLE
 
         def _consume(segment, indices_array, match_count):
-            req_bytes = nb_segment_estimate_out_size(indices_array, match_count, segment.bundle, tables, format_cfg)
+            req_bytes = nb_segment_estimate_out_size(
+                indices_array, match_count, segment.bundle, tables, format_cfg, procs
+            )
             with array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
                 bytes_written = nb_segment_format(
-                    handle.array, indices_array, match_count, segment.bundle, tables, format_cfg, tz_offset_sec
+                    handle.array, indices_array, match_count, segment.bundle, tables, format_cfg, tz_offset_sec, procs
                 )
                 out_batches.append(handle.array[:bytes_written].tobytes().decode("utf-8", errors="replace"))
             # indices_array is a pooled buffer reused next iteration - copy the matched rows'
@@ -564,7 +596,10 @@ class LogTextFetcher:
         effective_mask[helper.floats_mod.id] = LogLevel.ALL.value
         effective_mask[helper.warmup_mod.id] = LogLevel.ALL.value
 
-        format_cfg = FormattingConfig(True, True, True, True)
+        # show_proc on: same compiled code either way (bool fields aren't literals, numba-njit
+        # skill Sec 3), and the empty table is typed like a real one (ops/id_history.py).
+        format_cfg = FormattingConfig(True, True, True, True, show_proc=True)
+        procs = EMPTY_ID_HISTORY_TABLE
 
         with helper.log_pool.get_snapshot() as segments, helper.log_pool.acquire_indices_buffer() as indices:
             for segment in segments:
@@ -576,11 +611,12 @@ class LogTextFetcher:
                     start_seq=0,
                     kv=EMPTY_KV_CONDITIONS,
                     text=EMPTY_TEXT_SEARCH,
+                    proc=EMPTY_PROC_FILTER,
                 )
 
                 if match_count > 0:
                     req_bytes = nb_segment_estimate_out_size(
-                        indices.array, match_count, segment.bundle, helper.registry.bundle(), format_cfg
+                        indices.array, match_count, segment.bundle, helper.registry.bundle(), format_cfg, procs
                     )
                     with helper.array_pool.get(req_bytes, dtype=dtypes.BYTE) as handle:
                         nb_segment_format(
@@ -591,6 +627,7 @@ class LogTextFetcher:
                             helper.registry.bundle(),
                             format_cfg,
                             0,
+                            procs,
                         )
                 break
 
@@ -639,6 +676,7 @@ class LogRowTextFetcher(LogTextFetcher):
                     start_seq=0,
                     kv=EMPTY_KV_CONDITIONS,
                     text=EMPTY_TEXT_SEARCH,
+                    proc=EMPTY_PROC_FILTER,
                 )
 
                 if match_count > 0:

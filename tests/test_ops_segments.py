@@ -13,6 +13,7 @@ from blinkview.core.types.log_batch import LogBundle
 from blinkview.ops.buffers import nb_copy_buf
 from blinkview.ops.constants import CHAR_EQUALS, CHAR_SPACE
 from blinkview.ops.kv_filter import EMPTY_KV_CONDITIONS, build_kv_condition_arrays
+from blinkview.ops.process_filter import EMPTY_PROC_FILTER
 from blinkview.ops.segments import (
     LEVEL_SLOTS,
     nb_bundle_extend,
@@ -112,6 +113,7 @@ def test_nb_segment_extract_fields_basic_roundtrip():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
     assert match_count == 3
 
@@ -173,6 +175,7 @@ def test_nb_segment_extract_fields_respects_mask_filtering():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     # Only rows with level==5 (indices 1 and 3) should match.
@@ -207,6 +210,7 @@ def test_nb_segment_extract_fields_truncates_long_messages():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
     assert match_count == 1
 
@@ -253,6 +257,7 @@ def test_nb_segment_extract_fields_writes_at_row_offset():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
     assert match_count == 1
 
@@ -314,6 +319,7 @@ def test_nb_segment_filter_reversed_end_seq_bounds_history_before_fetch():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 3
@@ -347,6 +353,7 @@ def test_nb_segment_filter_reversed_end_seq_default_is_unbounded():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 3
@@ -422,6 +429,7 @@ def test_filter_segment_forward_ascending_matches_from_start_seq():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 3
@@ -459,6 +467,7 @@ def test_nb_segment_filter_reversed_end_ts_is_inclusive_upper_bound():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 3
@@ -496,6 +505,7 @@ def test_filter_segment_forward_start_ts_is_inclusive_lower_bound():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 3
@@ -704,6 +714,7 @@ def test_segment_filter_reversed_start_seq_excludes_older_rows():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 3
@@ -737,6 +748,7 @@ def test_segment_filter_reversed_start_ts_excludes_older_rows():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 3
@@ -770,6 +782,7 @@ def test_segment_filter_reversed_empty_range_returns_zero():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 0
@@ -801,6 +814,7 @@ def test_filter_segment_forward_end_ts_bounds_upper_range():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 3
@@ -832,6 +846,7 @@ def test_filter_segment_forward_empty_range_returns_zero():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 0
@@ -862,6 +877,7 @@ def test_filter_segment_forward_respects_max_matches_cutoff():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 2
@@ -940,6 +956,7 @@ def test_filter_segment_respects_kv_conditions():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=EMPTY_TEXT_SEARCH,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 1
@@ -972,6 +989,7 @@ def test_filter_segment_respects_text_needle_in_message_body():
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=text,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 1
@@ -1017,6 +1035,7 @@ def test_filter_segment_text_matches_via_module_name_mask_even_without_body_hit(
         kv_field_delim=CHAR_SPACE,
         kv_kv_delim=CHAR_EQUALS,
         text=text,
+        proc=EMPTY_PROC_FILTER,
     )
 
     assert match_count == 1

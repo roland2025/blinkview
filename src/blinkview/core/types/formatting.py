@@ -15,3 +15,5 @@ class FormattingConfig(NamedTuple):
     ts_precision: int = 3
     show_date: bool = True
     show_rx_ts: bool = False
+    # Process name from pid_history (ADB sources), between level and module; "-" when unknown.
+    show_proc: bool = False

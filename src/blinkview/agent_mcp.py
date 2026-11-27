@@ -86,8 +86,12 @@ _FILTER_PROPERTIES = {
     "device": {"type": "string", "description": "Only this device's lines (a device name as shown in the lines)."},
     "module": {"type": "string", "description": "Only this module and its submodules; needs 'device'."},
     "min_level": {"type": "string", "enum": ["ALL", "TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "CRITICAL"]},
-    "contains": {"type": "string", "description": "Text search over device, module and message."},
-    "kv": {"type": "string", "description": "key=value conditions, all must match, e.g. `state=ok id=42`."},
+    "contains": {"type": "string", "description": "Text search over device, module, process name and message."},
+    "kv": {
+        "type": "string",
+        "description": "key=value conditions, all must match, e.g. `state=ok id=42`. `process=NAME` keeps "
+        "lines whose process name (ADB sources) contains NAME, case-insensitive.",
+    },
     "include_system": {
         "type": "boolean",
         "description": "Also return BlinkView's own lines (device 'system'), hidden by default.",
