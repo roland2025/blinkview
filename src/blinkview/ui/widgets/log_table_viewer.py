@@ -1265,8 +1265,8 @@ QToolButton[manualPaused="true"] {
             gui_context=self.gui_context, target_filter=self.log_filter, parent=self, show_hidden=self.show_hidden
         )
         self.filter_sidebar.restore_state(self.filter_sidebar_state)
+        # Also covers the sidebar's Enable toggle: its set_enabled() emits filter_changed
         self.filter_sidebar.log_filter.filter_changed.connect(self._reload_and_redraw)
-        self.filter_sidebar.action_enable.toggled.connect(lambda _checked: self._reload_and_redraw())
         self.filter_sidebar.setMinimumWidth(200)
         self.splitter.addWidget(self.filter_sidebar)
         self.filter_sidebar.setVisible(self.show_module_filter)
