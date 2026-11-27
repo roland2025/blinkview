@@ -4,8 +4,6 @@
 #
 # Copyright (c) 2026 Roland Uuesoo
 
-from time import sleep
-
 import numpy as np
 
 from blinkview.core import dtypes
@@ -49,23 +47,28 @@ PAIR_MAX_ENTRIES = 8192
 
 
 class SeqPairBook:
-    """The source's and the consumers' edge rows waiting for their partner, keyed by `seq`.
+    """The boards' edge rows waiting for their partner, keyed by `seq`. Any board can be the source: the board whose
+    `target_state` rows come in (`add_source`) is it, and every other board's `pin_state` rows (`add_consumer`)
+    pair with those.
 
     Each entry is `(ts, state, rx_ts)`. An entry is dropped once it is PAIR_MAX_AGE_NS older (by receive time) than
     the newest row of its board, or when its board resets its counter (`reset`). A source row stays after pairing,
-    as every consumer pairs with it; a consumer row is removed when it pairs."""
+    as every consumer pairs with it; a consumer row is removed when it pairs. When another board starts logging
+    source rows, the old source's rows and the new source's own waiting consumer rows are dropped: they are from the
+    last run."""
 
-    def __init__(self, consumer_ids, max_age_ns: int = PAIR_MAX_AGE_NS, max_entries: int = PAIR_MAX_ENTRIES):
-        self.server: dict[int, tuple[int, int, int]] = {}
-        self.consumers: dict[int, dict[int, tuple[int, int, int]]] = {dev: {} for dev in consumer_ids}
+    def __init__(self, board_ids, max_age_ns: int = PAIR_MAX_AGE_NS, max_entries: int = PAIR_MAX_ENTRIES):
+        self.source_id: int | None = None
+        self.source: dict[int, tuple[int, int, int]] = {}
+        self.consumers: dict[int, dict[int, tuple[int, int, int]]] = {dev: {} for dev in board_ids}
         self.max_age_ns = max_age_ns
         self.max_entries = max_entries
 
-    def reset_server(self):
-        self.server.clear()
-
-    def reset_consumer(self, dev_id):
+    def reset(self, dev_id):
+        """`dev_id` restarted its edge counter (`new_seq_nr`): its waiting rows are from the last run."""
         self.consumers[dev_id].clear()
+        if dev_id == self.source_id:
+            self.source.clear()
 
     def _evict(self, book: dict, rx_ts: int):
         cutoff = rx_ts - self.max_age_ns
@@ -75,15 +78,21 @@ class SeqPairBook:
                 break
             del book[oldest_seq]
 
-    def add_server(self, seq, ts, state, rx_ts):
-        """Stores a source edge; returns `(consumer_id, (ts, state), (ts, state))` for each consumer row that was
-        waiting for it (source first)."""
-        book = self.server
+    def add_source(self, source_id, seq, ts, state, rx_ts):
+        """Stores an edge of board `source_id` as source; returns `(consumer_id, (ts, state), (ts, state))` for each
+        consumer row that was waiting for it (source first)."""
+        if source_id != self.source_id:
+            self.source.clear()
+            self.consumers[source_id].clear()
+            self.source_id = source_id
+        book = self.source
         book.pop(seq, None)  # re-insert at the end: eviction goes by insertion order
         book[seq] = (ts, state, rx_ts)
         self._evict(book, rx_ts)
         matches = []
         for dev_id, waiting in self.consumers.items():
+            if dev_id == source_id:
+                continue
             self._evict(waiting, rx_ts)
             entry = waiting.pop(seq, None)
             if entry is not None:
@@ -93,11 +102,12 @@ class SeqPairBook:
     def add_consumer(self, dev_id, seq, ts, state, rx_ts):
         """Stores a consumer edge, or pairs it at once with the source's row of that seq; returns
         `(consumer_id, (ts, state), (ts, state))` for the pair made (source first), else None. A second row of the
-        same seq while the first one waits is ignored."""
-        self._evict(self.server, rx_ts)
+        same seq while the first one waits is ignored. The source's own consumer rows (it was switched to consumer
+        for the next run) wait for the next source."""
+        self._evict(self.source, rx_ts)
         waiting = self.consumers[dev_id]
         self._evict(waiting, rx_ts)
-        src = self.server.get(seq)
+        src = self.source.get(seq) if dev_id != self.source_id else None
         if src is not None:
             first = waiting.pop(seq, None)
             pin = (first[0], first[1]) if first is not None else (ts, state)
@@ -112,7 +122,15 @@ class SeqPairBook:
     "sources_",
     items={"type": "string", "_reference": "/pipelines"},
 )
-@configuration_property("server", type="string", required=True, _reference="/pipelines", default="")
+@configuration_property(
+    "server",
+    type="string",
+    required=False,
+    _reference="/pipelines",
+    default="",
+    description="One more board to pair, besides the sources. Any board can be the source: the one that logs "
+    "`target_state` rows is it.",
+)
 @configuration_property(
     "time_source_boot",
     type="boolean",
@@ -139,27 +157,19 @@ class TimeSyncProfiler(BaseParser):
         max_timeout = actual_delay / 1000.0
         max_timeout_ns = int(max_timeout * 1e9)
 
-        # --- Device Identification ---
-        pipeline_server = registry.get_reference_target(self.server)
-        server_device_id = pipeline_server.local.device_id
-        server_device_id_int = server_device_id.id
-
-        logger.info("server: %s (%s)", server_device_id, server_device_id_int)
-
-        pipeline_sources = [registry.get_reference_target(src) for src in self.sources_]
-
-        if pipeline_server in pipeline_sources:
-            pipeline_sources.remove(pipeline_server)
-        source_devices = [src.local.device_id for src in pipeline_sources]
-
-        source_device_ids = {dev.id for dev in source_devices}
-        logger.info("sources: %s", source_devices)
-
-        consumer_loggers = {dev.id: logger.child(str(dev.name)) for dev in source_devices}
+        # --- Boards ---
+        # Every board can be the source of a run; the profiler only listens. It used to make `server` the source
+        # and send `sync seq 0` to all on every (re)start, which fought the line when another board was the source.
+        board_refs = list(self.sources_)
+        if self.server and self.server not in board_refs:
+            board_refs.append(self.server)
+        board_devices = [registry.get_reference_target(ref).local.device_id for ref in board_refs]
+        board_names = {dev.id: str(dev.name) for dev in board_devices}
+        logger.info("boards: %s", board_devices)
 
         # --- Cache Modules ---
         main_module_ids = {}
-        for dev in [server_device_id] + source_devices:
+        for dev in board_devices:
             try:
                 main_module_ids[dev.id] = dev.get_module("main").id
             except Exception as e:
@@ -167,89 +177,14 @@ class TimeSyncProfiler(BaseParser):
 
         local_device_id_int = self.local.device_id.id
 
-        # The module ID to tag our outgoing metric batches with
+        # The module ID to tag our outgoing metric batches with: one per board, the board's offset from the source
         out_module_ids = {}
-        for dev in source_devices:
-            consumer_name = str(dev.name)
+        for dev in board_devices:
+            board_name = str(dev.name)
             try:
-                out_module_ids[dev.id] = self.local.device_id.get_module(consumer_name).id
+                out_module_ids[dev.id] = self.local.device_id.get_module(board_name).id
             except Exception as e:
-                logger.warning("Could not cache output module '%s' on local device: %s", consumer_name, e)
-
-        def get_pipeline_source(_pipe):
-            try:
-                with _pipe._subscribers_lock:
-                    if _pipe._subscriptions:
-                        return _pipe._subscriptions[0]
-            except Exception:
-                pass
-            return None
-
-        # --- Wait for Devices to Connect ---
-        connection_timeout = 5.0
-        poll_interval = 0.1
-        start_time = _time_ns()
-        timeout_ns = int(connection_timeout * 1e9)
-
-        logger.info("Waiting up to 5 seconds for all pipeline devices to connect...")
-
-        while True:
-            # 1. Evaluate Server Connection
-            server_connected = True
-            if hasattr(pipeline_server, "is_connected"):
-                server_connected = _connected(pipeline_server)
-            else:
-                # Fall back to checking the target's underlying source subscription
-                resolved_server = get_pipeline_source(pipeline_server)
-                if resolved_server and hasattr(resolved_server, "is_connected"):
-                    server_connected = _connected(resolved_server)
-
-            # 2. Evaluate Sources Connections
-            sources_connected = True
-            for src in pipeline_sources:
-                src_connected = True
-                if hasattr(src, "is_connected"):
-                    src_connected = _connected(src)
-                else:
-                    # Try to extract the true underlying subscriber from the pipeline
-                    resolved_src = get_pipeline_source(src)
-                    if resolved_src and hasattr(resolved_src, "is_connected"):
-                        src_connected = _connected(resolved_src)
-
-                if not src_connected:
-                    sources_connected = False
-                    break  # Short-circuit current iteration loop if any source is down
-
-            # 3. Check loop breaking conditions
-            if server_connected and sources_connected:
-                logger.info("All pipeline devices successfully connected.")
-                break
-
-            if (_time_ns() - start_time) > timeout_ns:
-                logger.warning("Timed out waiting for some devices to connect. Proceeding anyway.")
-                break
-
-            sleep(poll_interval)
-
-        # --- Helpers ---
-        def send_cmd(pipeline, cmd_str):
-            try:
-                pipe_src = get_pipeline_source(pipeline)
-                if pipe_src is not None:
-                    pipe_src.send_data(f"{cmd_str}\n")
-                    logger.debug("Sent command to %s: %s  ((%s))", pipeline.local.device_id, cmd_str, pipe_src)
-            except Exception as e:
-                logger.error("Failed to send command '%s' to %s: %s", cmd_str, pipeline.local.device_id, e)
-
-        # --- 1. Initialization Commands ---
-        send_cmd(pipeline_server, "sync source")
-        send_cmd(pipeline_server, "sync seq 0")
-
-        for pipeline in pipeline_sources:
-            send_cmd(pipeline, "sync consumer")
-            send_cmd(pipeline, "sync seq 0")
-
-        sleep(0.1)
+                logger.warning("Could not cache output module '%s' on local device: %s", board_name, e)
 
         # --- Output Batch Management ---
         def batch_acquire():
@@ -277,7 +212,7 @@ class TimeSyncProfiler(BaseParser):
             batch_out_capacity = batch_out.capacity
             batch_out_buf_limit = batch_out.buffer_capacity() * 0.9
 
-        book = SeqPairBook(source_device_ids)
+        book = SeqPairBook(main_module_ids)
         reset_prefix_len = len(SEQ_RESET_PREFIX)
 
         def emit(pair, seq, rx_ts, level):
@@ -369,11 +304,13 @@ class TimeSyncProfiler(BaseParser):
                             ts = timestamps[idx]
                             rx_ts = rx_timestamps[idx]
 
-                            if device_id_int == server_device_id_int and has_target:
-                                for pair in book.add_server(seq, ts, target_val, rx_ts):
+                            if has_target:
+                                if device_id_int != book.source_id:
+                                    logger.info("source: %s", board_names[device_id_int])
+                                for pair in book.add_source(device_id_int, seq, ts, target_val, rx_ts):
                                     emit(pair, seq, rx_ts, levels[idx])
 
-                            elif device_id_int in source_device_ids and has_pin:
+                            elif has_pin:
                                 pair = book.add_consumer(device_id_int, seq, ts, pin_val, rx_ts)
                                 if pair is not None:
                                     emit(pair, seq, rx_ts, levels[idx])
@@ -382,10 +319,7 @@ class TimeSyncProfiler(BaseParser):
                             # `sync seq <n>` restarts the board's counter: its waiting rows are from the last run
                             msg_start = int(b.offsets[idx])
                             if b.buffer[msg_start : msg_start + reset_prefix_len].tobytes() == SEQ_RESET_PREFIX:
-                                if device_id_int == server_device_id_int:
-                                    book.reset_server()
-                                elif device_id_int in source_device_ids:
-                                    book.reset_consumer(device_id_int)
+                                book.reset(device_id_int)
 
                         cursor = idx + 1
                 finally:
@@ -403,9 +337,3 @@ class TimeSyncProfiler(BaseParser):
                 flush()
             else:
                 batch_out.release()
-
-
-def _connected(obj) -> bool:
-    """`is_connected` is a property on some readers (UART, RTT) and a method on others (ADB)."""
-    value = obj.is_connected
-    return value() if callable(value) else bool(value)
