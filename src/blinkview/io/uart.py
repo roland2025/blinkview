@@ -55,7 +55,9 @@ from blinkview.io.batch_feeder import BatchFeeder
     "suppress_auto_reset",
     type="boolean",
     default=False,
-    description="Prevents the device from resetting when the port opens by pulling DTR and RTS low. Essential for ESP32 and Arduino boards.",
+    description="Keep DTR and RTS low from before the port opens, so a board whose auto-reset circuit hangs on them "
+    "(ESP32 DevKits, Arduinos) doesn't reboot when the port opens or closes. The `reset` command still works. Leave "
+    "it off for USB CDC devices that only send once DTR is set.",
 )
 @configuration_property(
     "serial_exclusive",
@@ -320,21 +322,22 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                 inter_byte_timeout=0.01,
                 # pyserial's own lock (flock on POSIX) only keeps out tools that also take it.
                 exclusive=True if self.serial_exclusive else None,
+                do_not_open=True,
             )
+            if self.suppress_auto_reset:
+                # Before open(): otherwise pyserial sets both lines inside open(), the bridge
+                # applies them one after the other and an ESP32 DevKit's EN dips low - a reboot
+                # that lowering them afterwards can't undo. Held low, the close is clean too.
+                self.logger.info("Opening with DTR/RTS low")
+                ser.dtr = False
+                ser.rts = False
+            ser.open()
             if self.serial_exclusive:
                 self._lock_tty_exclusive(ser)
 
             with self._serial_lock:
                 self.serial = ser
                 self.serial_broken = False
-
-            # --- ESP32 DTR/RTS Logic ---
-            if self.suppress_auto_reset:
-                self.logger.info("Setting DTR/RTS to 0")
-                ser.dtr = False
-                ser.rts = False
-                sleep(0.1)
-            # ---------------------------
 
             try:
                 ser.set_buffer_size(rx_size=BUF_SIZE)

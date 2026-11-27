@@ -148,6 +148,80 @@ class TestResetDevice:
         assert reader.serial_broken is True
 
 
+class LineOrderSerial:
+    """Records, in order, every DTR/RTS write and the open() of a port made by serial_for_url."""
+
+    def __init__(self, events, do_not_open):
+        self.events = events
+        self.is_open = False
+        if not do_not_open:
+            self.open()
+
+    def open(self):
+        self.is_open = True
+        self.events.append("open")
+
+    def __setattr__(self, name, value):
+        if name in ("dtr", "rts"):
+            self.events.append((name, value))
+        object.__setattr__(self, name, value)
+
+    def set_buffer_size(self, rx_size):
+        pass
+
+
+class TestOpenLineState:
+    """An ESP32 DevKit's auto-reset circuit reboots the board when pyserial sets DTR and RTS
+    inside open(), so suppress_auto_reset must set them before open() (wiki finding
+    py-opening-or-closing-an-esp32-devkit-s-com-port-in-uartreader)."""
+
+    @pytest.fixture
+    def events(self, monkeypatch):
+        import serial
+
+        events = []
+        monkeypatch.setattr(
+            serial, "serial_for_url", lambda url, do_not_open=False, **kw: LineOrderSerial(events, do_not_open)
+        )
+        return events
+
+    def test_suppress_sets_both_lines_low_before_open_and_not_after(self, events):
+        reader = make_reader(url="COM99", suppress_auto_reset=True, serial_exclusive=False)
+
+        assert reader.open() is not None
+
+        assert events == [("dtr", False), ("rts", False), "open"]
+
+    def test_without_suppress_the_lines_are_left_to_pyserial(self, events):
+        reader = make_reader(url="COM99", serial_exclusive=False)
+
+        assert reader.open() is not None
+
+        assert events == ["open"]
+
+    def test_reset_still_pulses_rts_from_the_held_low_state(self, events):
+        reader = make_reader(url="COM99", suppress_auto_reset=True, serial_exclusive=False)
+        reader.open()
+        events.clear()
+
+        reader.reset_device()
+
+        # EN low (RTS set, DTR clear), then EN high with GPIO0 high: run mode.
+        assert events == [("dtr", False), ("rts", True), ("rts", False), ("dtr", False)]
+
+    @pytest.mark.parametrize("suppress, expected", [(True, False), (False, True)])
+    def test_real_pyserial_port_opens_with_the_preset_lines(self, suppress, expected):
+        reader = make_reader(url="loop://", suppress_auto_reset=suppress, serial_exclusive=False)
+
+        ser = reader.open()
+        try:
+            assert ser.is_open
+            assert ser.dtr is expected
+            assert ser.rts is expected
+        finally:
+            ser.close()
+
+
 class TestIsConnected:
     """A property, like BaseReader's: the stall watchdog reads `source.is_connected` without
     calling it, and a bound method there was always truthy."""
