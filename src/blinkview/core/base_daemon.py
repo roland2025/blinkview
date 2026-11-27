@@ -101,8 +101,10 @@ class BaseDaemon:
         try:
             logging_cfg = config.get("logging")
             if logging_cfg is not None:
-                # logging_cfg["enabled"] = self.enabled
-                logging_cfg["name"] = self.name
+                # A copy: logging_cfg is the dict apply_base_config just stored as self.logging.
+                # A "name" written into it made the next apply see self.logging != the profile's
+                # block, so every edit restarted all of the manager's sources/pipelines.
+                logging_cfg = {**logging_cfg, "name": self.name}
 
                 if self.logger and dev_mode:
                     self.logger.info("Logging conf: %s", logging_cfg)

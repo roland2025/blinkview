@@ -89,6 +89,7 @@ class BaseParser(BaseDaemon):
         self.time_syncer = None
 
     def apply_config(self, config: dict):
+        old_time_sync = getattr(self, "time_sync", None)
         changed = super().apply_config(config)
 
         try:
@@ -96,9 +97,14 @@ class BaseParser(BaseDaemon):
             self.logger.debug("time_sync config: %s", time_sync_conf)
             if time_sync_conf is not None and self.sync_state is None:
                 self.sync_state: SyncState = create_default_sync(self.shared.time_ns())
-            # A config change rebuilds the syncer (or removes it when time sync is now off)
-            self._remove_time_syncer()
-            self._load_time_syncer()
+            # Only a change to time_sync itself rebuilds the syncer (or removes it when time sync
+            # is now off). The manager applies every pipeline's config on any pipeline edit, and a
+            # rebuilt syncer starts a new engine that has to learn the drift again (~70 s).
+            if time_sync_conf != old_time_sync:
+                self._remove_time_syncer()
+                self._load_time_syncer()
+            elif self.time_syncer is None:
+                self._load_time_syncer()
         except Exception as e:
             self.logger.exception("failed to init timesync.", exc=e)
         return changed

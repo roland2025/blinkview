@@ -91,16 +91,28 @@ def test_apply_config_with_time_sync_builds_with_expected_args():
     assert local_ctx.parser is parser
 
 
-def test_reapplying_time_sync_config_stops_and_replaces_the_old_syncer():
+def test_changing_time_sync_config_stops_and_replaces_the_old_syncer():
     parser = make_parser(time_sync=FAKE_SYNC)
     old_syncer = parser.time_syncer
 
-    parser.apply_config({"time_sync": FAKE_SYNC})
+    parser.apply_config({"time_sync": {**FAKE_SYNC, "asymmetry_ratio": 300_000}})
 
     assert old_syncer.stopped is True
     assert old_syncer not in parser.subscribers
     assert parser.time_syncer is not old_syncer
     assert parser.time_syncer in parser.subscribers
+
+
+def test_reapplying_unchanged_time_sync_config_keeps_the_syncer():
+    parser = make_parser(time_sync=FAKE_SYNC)
+    old_syncer = parser.time_syncer
+
+    parser.apply_config({"time_sync": dict(FAKE_SYNC), "name": "renamed"})
+
+    assert old_syncer.stopped is False
+    assert parser.time_syncer is old_syncer
+    assert old_syncer in parser.subscribers
+    assert len(parser.shared.factories.built) == 1
 
 
 def test_parser_factory_is_a_base_factory_for_base_parser():

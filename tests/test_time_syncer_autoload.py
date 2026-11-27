@@ -110,6 +110,24 @@ class TestEnabledWithoutType:
         pipeline.apply_config({**BASE_CONFIG, "time_sync": {**AUTO, "asymmetry_ratio": 300_000}})
         assert pipeline.time_syncer.asymmetry_ratio == 300_000
 
+    @pytest.mark.parametrize(
+        "other_change",
+        [{}, {"name": "renamed"}, {"frame_decoder": {"type": "line_decoder", "frame_length_minimum": 4}}],
+        ids=["unchanged", "name", "frame_decoder"],
+    )
+    def test_config_without_a_time_sync_change_keeps_the_syncer(self, id_registry, other_change):
+        """Regression: any /pipelines edit applies every pipeline's config, and each apply
+        rebuilt the syncer, so every board lost its drift estimate on an unrelated edit."""
+        pipeline = make_pipeline(id_registry, time_sync=AUTO)
+        FakeReader("serial_time_syncer").subscribe(pipeline)
+        syncer = pipeline.time_syncer
+
+        pipeline.apply_config({**BASE_CONFIG, "time_sync": dict(AUTO), **other_change})
+
+        assert pipeline.time_syncer is syncer
+        assert syncer in pipeline.subscribers
+        assert syncer in pipeline._children
+
 
 class TestEngineAsymmetry:
     @pytest.mark.parametrize("value, stored", [(300_000, 300_000), (0, 1), (-5, 1), (2_000_000, 1_000_000)])
