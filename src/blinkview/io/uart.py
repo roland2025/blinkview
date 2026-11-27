@@ -256,18 +256,14 @@ Leverages PySerial's URL handler system under the hood, making it highly versati
                         # Start record
                         push(now, first_byte)
 
-                        # Drain remaining burst and Append (a burst too big for the batch goes
-                        # into a new one sized for it)
+                        # Drain what is already buffered and append it (a burst too big for the
+                        # batch goes into a new one sized for it). Nothing buffered: back to
+                        # read(1), so the next bytes get their own arrival time. Waiting here for
+                        # more (read(1024) up to the read timeout) gave every line of up to 100 ms
+                        # the first byte's time, a time-sync pong included.
                         waiting = ser.in_waiting
                         if waiting:
-                            # Already buffered: returns at once
                             append(now, _read(waiting))
-                        else:
-                            # Nothing buffered yet: waits for up to 1024 bytes, which can take up
-                            # to the port's read timeout (delay), so the flush check needs a fresh
-                            # clock. The rows keep the first byte's timestamp.
-                            append(now, _read(1024))
-                            now = time_ns()
 
                     maybe_flush(now)
 
