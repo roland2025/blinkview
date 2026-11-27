@@ -615,3 +615,51 @@ class TestRunRealPipeIngestion:
 
         assert received == expected
 
+
+ADB_DEVICES_OUTPUT = """* daemon not running; starting now at tcp:5037
+* daemon started successfully
+List of devices attached
+NZ5HAQLJ5DK7V48T       device usb:1-3 product:garnet_global model:2311DRK48G device:garnet transport_id:4
+emulator-5554          device product:sdk_gphone64_x86_64 model:sdk_gphone64_x86_64 device:emu64xa transport_id:1
+R58M12345              unauthorized usb:1-1 transport_id:2
+
+"""
+
+
+class TestParseAdbDevices:
+    def test_parses_serials_models_and_states(self):
+        from blinkview.utils.adb import parse_adb_devices
+
+        assert parse_adb_devices(ADB_DEVICES_OUTPUT) == [
+            ("NZ5HAQLJ5DK7V48T", "2311DRK48G"),
+            ("emulator-5554", "sdk gphone64 x86 64"),
+            ("R58M12345", "R58M12345 (unauthorized)"),
+        ]
+
+    def test_no_devices(self):
+        from blinkview.utils.adb import parse_adb_devices
+
+        assert parse_adb_devices("List of devices attached\n\n") == []
+
+
+class TestConfigSchemaDeviceList:
+    def test_device_id_lists_connected_devices(self, monkeypatch):
+        import blinkview.io.adb_reader as mod
+
+        monkeypatch.setattr(mod, "list_adb_devices", lambda: [("SER1", "Pixel 8"), ("SER2", "x (offline)")])
+        prop = AdbReader.get_config_schema()["properties"]["device_id"]
+
+        assert prop["enum"] == ["", "SER1", "SER2"]
+        assert prop["enum_tooltips"][1:] == ["Pixel 8", "x (offline)"]
+        assert prop["_allow_custom"] is True
+
+    def test_adb_failure_leaves_free_text(self, monkeypatch):
+        import blinkview.io.adb_reader as mod
+
+        def boom():
+            raise subprocess.TimeoutExpired("adb", 3)
+
+        monkeypatch.setattr(mod, "list_adb_devices", boom)
+        prop = AdbReader.get_config_schema()["properties"]["device_id"]
+
+        assert "enum" not in prop

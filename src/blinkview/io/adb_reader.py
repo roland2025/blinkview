@@ -14,7 +14,7 @@ from time import sleep
 from blinkview.core.configurable import configuration_property, override_property
 from blinkview.io.BaseReader import BaseReader, DeviceFactory
 from blinkview.io.batch_feeder import BatchFeeder
-from blinkview.utils.adb import detect_adb_path
+from blinkview.utils.adb import detect_adb_path, list_adb_devices
 
 # Ends every command's output on the persistent shell, followed by the command's exit code.
 SENTINEL = b"__BlinkSync_Done__"
@@ -133,6 +133,24 @@ ensuring high throughput without pipeline stalls."""
         self._last_polled_pids: set[int] = set()
         self._pid_poll_task_id = None
         self._ps_has_elapsed = True  # cleared once a device's ps rejects `-o ETIME`
+
+    @classmethod
+    def get_config_schema(cls) -> dict:
+        schema = super().get_config_schema()
+
+        try:
+            devices = list_adb_devices()
+        except Exception:
+            # adb missing, server slow to start, etc.: leave device_id as free text
+            return schema
+
+        if "device_id" in schema["properties"]:
+            prop = schema["properties"]["device_id"]
+            prop["enum"] = [""] + [serial for serial, _ in devices]
+            prop["enum_tooltips"] = ["Default / only connected device"] + [desc for _, desc in devices]
+            prop["_allow_custom"] = True
+
+        return schema
 
     def run(self):
         # Setup and Localize Lookups
