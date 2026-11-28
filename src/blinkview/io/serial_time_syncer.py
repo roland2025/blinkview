@@ -11,6 +11,9 @@ from blinkview.core.time_sync_engine import ASYMMETRY_RATIO_PROPERTY, TimeSyncEn
 from blinkview.ops.blinksync import KEY_BOOT, KEY_MONO, KEY_SEQ, PONG_PREFIX, nb_find_and_parse_next_pong
 from blinkview.subscribers.subscriber import BaseSubscriber, TimeSyncerFactory
 
+SEQ_FIRST = 100_000  # ping seqs stay 6 digits: 100000..999999
+SEQ_WRAP = 1_000_000
+
 
 @TimeSyncerFactory.register("serial_time_syncer")
 @configuration_property("time_source_boot", type="boolean", required=True, ui_order=40, default=False)
@@ -23,6 +26,7 @@ class SerialTimeSyncerSubscriber(BaseSubscriber):
 
         self._syncer_engine = None
         self._syncer_task_id = None
+        self._seq = None  # last ping seq sent; kept across warm restarts of run()
 
     def run(self):
         logger = self.logger
@@ -63,7 +67,13 @@ class SerialTimeSyncerSubscriber(BaseSubscriber):
             logger.debug("module_pong=%s id=%s", module_pong, module_pong_id)
 
             # Simplified Ping-Pong State Machine
-            seq_num = 0
+            # A restarted syncer must not count from 1 again: the pong to the previous run's last ping can still
+            # be on its way and would match the new "bsync p 1" (on the rig a time_sync toggle restarted it twice
+            # within 2 ms; the stale pong read as a 0.07 ms RTT). A new syncer starts at a 6-digit value from the
+            # clock, which also keeps the pong the same length for days (its length is return-path time).
+            if self._seq is None:
+                self._seq = SEQ_FIRST + (time_ns() // 1_000_000) % (SEQ_WRAP - SEQ_FIRST)
+            seq_num = self._seq
             pending_seq = -1
             pending_tx_ns = 0
 
@@ -99,7 +109,8 @@ class SerialTimeSyncerSubscriber(BaseSubscriber):
                             send_ping = True
 
                     if send_ping:
-                        seq_num += 1
+                        seq_num = seq_num + 1 if seq_num + 1 < SEQ_WRAP else SEQ_FIRST
+                        self._seq = seq_num
                         now = time_ns()  # Refresh time just before sending
 
                         last_ping_ns = now

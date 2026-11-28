@@ -48,6 +48,7 @@ IDX_ASYM_RATIO = 10  # <--- NEW: Asymmetry ratio scaled by 1_000_000 (e.g., 500_
 IDX_PPB_COUNT = 11  # drift samples stored in ppb_hist (capped at its length)
 IDX_FIRST_RTT = 12  # RTT of the pong the drift anchor (IDX_FIRST_PH/IDX_FIRST_PC) was taken from
 IDX_LAST_CLEAN_PC = 13  # pc_tx of the last pong that was clean against the drift anchor
+IDX_GATED_RUN = 14  # consecutive pongs the offset gate kept from moving the offset
 
 # A drift sample is measured from the first clean sample on: over a short baseline a clean sample's own
 # jitter dominates it (0.2 ms over 10 s reads as 20 ppm; seen on the emulator, whose real drift was 0.2 ppm).
@@ -63,13 +64,47 @@ DRIFT_CLEAN_WINDOW_NS = 200_000
 # for good after one short pong or a load change (wiki:reports/blinksync-hw-time-sync).
 DRIFT_REANCHOR_NS = 60_000_000_000
 
-IDX_ARRAY_LENGTH = 14
+# Offset gate: a pong moves the offset only when its RTT is within max(floor, mult x MAD) of the median RTT of
+# the recent accepted pongs. A pong that waited on one leg (behind a log line on a Zephyr board; or stamped early
+# by a delayed reader, wiki finding py-uartreader-stamps-bytes-that-arrive-while-it-is-delayed-afte) gets a wrong
+# offset from the fixed asymmetry ratio: up to +330 us for a stretch of seconds on the BlinkSync rig. Gated, the
+# model coasts on its drift. The gate holds during the warm-up snaps too, where one such pong is a full error.
+# MAD keeps the band wide on a jittery link (ADB, BLE), so it does not shut out most pongs there.
+OFFSET_GATE_FLOOR_NS = 150_000
+OFFSET_GATE_MAD_MULT = 3
+OFFSET_GATE_MIN_WINDOW = 3  # fewer accepted RTTs than this: no gate yet
+OFFSET_GATE_MAX_RUN = 30  # after this many gated pongs in a row the next one moves the offset regardless
+
+IDX_ARRAY_LENGTH = 15
 
 
 class EngineState(NamedTuple):
     scalars: np.ndarray  # int64[IDX_ARRAY_LENGTH]
     ppb_hist: np.ndarray  # int64[15]
     rtt_hist: np.ndarray  # uint64[100]
+
+
+@app_njit()
+def nb_rtt_rank(rtt_hist, n, k, center):
+    """The k-th smallest (0-based) of rtt_hist[:n], or of |rtt_hist[i] - center| when center >= 0, by counting
+    ranks: no sorted copy, and n is at most the window length (50)."""
+    for i in range(n):
+        vi = int(rtt_hist[i])
+        if center >= 0:
+            vi = abs(vi - center)
+        below = 0
+        equal = 0
+        for j in range(n):
+            vj = int(rtt_hist[j])
+            if center >= 0:
+                vj = abs(vj - center)
+            if vj < vi:
+                below += 1
+            elif vj == vi:
+                equal += 1
+        if below <= k < below + equal:
+            return vi
+    return 0
 
 
 @app_njit()
@@ -192,6 +227,19 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
     act_idx = act_arr[0]
     write_idx = 1 - act_idx
 
+    # Offset gate (see OFFSET_GATE_FLOOR_NS): is this pong's RTT typical of the recent ones?
+    gated_run = sc[IDX_GATED_RUN]
+    offset_gated = False
+    if window_size >= OFFSET_GATE_MIN_WINDOW:
+        median_rtt = nb_rtt_rank(rtt_hist, window_size, window_size // 2, -1)
+        mad_rtt = nb_rtt_rank(rtt_hist, window_size, window_size // 2, median_rtt)
+        band = max(OFFSET_GATE_FLOOR_NS, OFFSET_GATE_MAD_MULT * mad_rtt)
+        if abs(int(rtt) - median_rtt) > band and gated_run < OFFSET_GATE_MAX_RUN:
+            offset_gated = True
+            gated_run += 1
+        else:
+            gated_run = 0
+
     # 4b. Phase loop-filter (this is what removes the staircase).
     #
     # The old code wrote raw_offset (pc_tx + rtt/2) straight into the
@@ -238,7 +286,17 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
                 int(stddev_ns * PHASE_STEP_THRESHOLD_SIGMA_MULT),
             )
 
-            if s_count <= PHASE_WARMUP_SAMPLES or abs(phase_error) > dynamic_step_threshold:
+            if window_size < OFFSET_GATE_MIN_WINDOW:
+                # A restarted engine (soft_reset) with a model still in force: too few RTTs yet to tell a typical
+                # pong from a stale or delayed one (the first pong after a restart took 7 ms on the rig), so the
+                # model stays until there are. Only a cold start's very first pong is taken unchecked.
+                new_offset = predicted_offset
+            elif offset_gated:
+                # An untypical RTT: its offset is off by however long one leg waited. Coast on the drift - also in
+                # the warm-up, whose snap would take that error in full, and also past the step threshold, which a
+                # stale or misattributed pong can exceed.
+                new_offset = predicted_offset
+            elif s_count <= PHASE_WARMUP_SAMPLES or abs(phase_error) > dynamic_step_threshold:
                 # Cold start, or a real step. Smoothing a genuine step just
                 # makes the filter chase it slowly, which looks worse than
                 # one clean jump.
@@ -324,6 +382,7 @@ def nb_sync_kernel(pc_tx, phone_mono, phone_boot, pc_rx, engine: EngineState, sy
     sc[IDX_FIRST_PC] = first_pc_offset  # Save the PC Offset anchor
     sc[IDX_FIRST_RTT] = first_rtt
     sc[IDX_LAST_CLEAN_PC] = last_clean_pc
+    sc[IDX_GATED_RUN] = gated_run
     sc[IDX_LAST_MEAN] = int(mean_ns)
     sc[IDX_LAST_STD] = int(stddev_ns)
 

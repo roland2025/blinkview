@@ -14,13 +14,17 @@ from blinkview.ops.timestamps import nb_project_synced_ns
 from blinkview.ops.timesync import (
     DRIFT_MIN_BASELINE_NS,
     IDX_ARRAY_LENGTH,
+    IDX_ASYM_RATIO,
     IDX_BEST_RTT,
+    IDX_GATED_RUN,
     IDX_PPB_COUNT,
     IDX_SAMPLE_COUNT,
     IDX_SKIPS,
     IDX_TOTAL_COUNT,
     MAX_RTT_SKIPS,
+    OFFSET_GATE_MAX_RUN,
     EngineState,
+    nb_rtt_rank,
     nb_sync_kernel,
 )
 
@@ -290,7 +294,7 @@ class TestDriftDoesNotFreeze:
         _, _, published = _run_link(900, link)
 
         # a minute without a clean pong, then a new anchor and a minute of baseline
-        assert _drift_changes(published[300:300 + 115]) == 0
+        assert _drift_changes(published[300 : 300 + 115]) == 0
         assert _drift_changes(published[-300:]) > 250
         assert -52 < published[-1] < -48, published[-1]
 
@@ -458,3 +462,160 @@ class TestDriftEstimate:
         idx = int(sync.active_idx[0])
 
         assert -55 < (int(sync.drift_m[idx]) / int(sync.drift_d[idx]) - 1) * 1e6 < -45
+
+
+def _gate_link(n_samples, link, ratio_ppm=500_000, device_ppm=20, seed=1):
+    """One ping per host second; `link(i, rng)` gives pong i's (rtt, outbound) in ns and the device reads its
+    clock `outbound` after the ping was sent. Returns the engine and, after each pong, the model's error in ns
+    at that ping's send time (projected device time minus true host time)."""
+    rng = random.Random(seed)
+    engine, sync = _engine(), _sync()
+    engine.scalars[IDX_ASYM_RATIO] = ratio_ppm
+    host0 = 1_795_000_000_000_000_000
+    rate = 1 + device_ppm * 1e-6
+    boot_host = host0 - 1_500_000_000_000
+
+    errors, gated = [], []
+    for i in range(n_samples):
+        tx = host0 + i * 1_000_000_000
+        rtt, outbound = link(i, rng)
+        dev = int((tx + outbound - boot_host) * rate)
+        nb_sync_kernel(tx, dev, dev, tx + rtt, engine, sync, False)
+        errors.append(_project(sync, int((tx - boot_host) * rate)) - tx)
+        gated.append(int(engine.scalars[IDX_GATED_RUN]) > 0)
+    return engine, errors, gated
+
+
+class TestOffsetGate:
+    """A pong whose RTT is far from the recent median moved the offset by ratio x the extra delay, as if both legs
+    had waited. On the BlinkSync rig a Zephyr pong queued behind a log line (+0.85 ms on the return path) for
+    stretches of seconds swung the offset by up to +330 us, and an ESP32 pong riding an earlier USB transfer
+    came back up to 2.4 ms early (wiki finding py-nrf-offset-swings-330-us-whenever-pings-land-just-behind-an)."""
+
+    def test_pongs_delayed_on_the_return_path_do_not_move_the_offset(self):
+        def link(i, rng):
+            rtt = rng.randint(2_050_000, 2_150_000)
+            return (rtt + 850_000 if 300 <= i < 310 else rtt), 1_050_000
+
+        _, errors, gated = _gate_link(400, link)
+
+        assert all(gated[300:310])
+        assert max(abs(e) for e in errors[250:400]) < 40_000, max(errors[250:400], key=abs)
+
+    def test_pongs_back_early_do_not_move_the_offset(self):
+        """The ESP32 ramp: a ~3.0 ms link whose device reads its clock 0.4 ms in (ratio 0.133), then four pongs
+        2.69, 1.64, 1.01 and 0.55 ms long, the same outbound leg."""
+        ramp = {300: 2_690_000, 301: 1_640_000, 302: 1_010_000, 303: 550_000}
+
+        def link(i, rng):
+            return ramp.get(i, rng.randint(2_980_000, 3_080_000)), 400_000
+
+        _, errors, gated = _gate_link(400, link, ratio_ppm=133_333)
+
+        assert all(gated[300:304])
+        assert max(abs(e) for e in errors[250:400]) < 25_000, max(errors[250:400], key=abs)
+
+    def test_a_jittery_link_is_not_shut_out(self):
+        """ADB/BLE-like: both legs jitter by ~1 ms. The band follows the MAD, so most pongs still move the offset,
+        and the error averages down."""
+
+        def link(i, rng):
+            out = 2_000_000 + abs(int(rng.gauss(0, 1_000_000)))
+            return out + 2_000_000 + abs(int(rng.gauss(0, 1_000_000))), out
+
+        _, errors, gated = _gate_link(600, link)
+
+        assert sum(gated[100:]) < 0.1 * len(gated[100:])
+        tail = errors[300:]
+        assert abs(sum(tail) / len(tail)) < 300_000
+
+    def test_a_lasting_rtt_rise_is_followed(self):
+        """Both legs 0.5 ms slower from pong 300 on: once the median has moved, the offset follows the new split."""
+
+        def link(i, rng):
+            rtt = rng.randint(2_000_000, 2_100_000) + (1_000_000 if i >= 300 else 0)
+            return rtt, rtt // 2
+
+        _, errors, _ = _gate_link(500, link)
+
+        assert max(abs(e) for e in errors[400:500]) < 30_000, max(errors[400:500], key=abs)
+        assert max(abs(e) for e in errors[300:400]) < 60_000, max(errors[300:400], key=abs)
+
+    @pytest.mark.parametrize("run, moved", [(0, False), (OFFSET_GATE_MAX_RUN, True)])
+    def test_a_long_gated_run_lets_the_next_pong_through(self, run, moved):
+        """A steady 2.05 ms link, then one pong 1 ms longer on the return path: gated it leaves the model where it
+        was, unless OFFSET_GATE_MAX_RUN pongs in a row were gated already; then it moves the offset by 1/8 of
+        the 0.5 ms it reads."""
+        engine, sync = _engine(), _sync()
+        host0, dev0 = 1_795_000_000_000_000_000, 10**12
+        for i in range(100):
+            dev = dev0 + i * 10**9 + 1_025_000
+            nb_sync_kernel(host0 + i * 10**9, dev, dev, host0 + i * 10**9 + 2_050_000, engine, sync, False)
+        probe = dev0 + 100 * 10**9
+        before = _project(sync, probe)
+        engine.scalars[IDX_GATED_RUN] = run
+
+        dev, tx = probe + 1_025_000, host0 + 100 * 10**9
+        accepted, *_ = nb_sync_kernel(tx, dev, dev, tx + 3_050_000, engine, sync, False)
+
+        assert accepted
+        shift = _project(sync, probe) - before
+        if moved:
+            assert 50_000 < shift < 75_000, shift
+        else:
+            assert abs(shift) < 1_000, shift
+
+
+def test_rtt_rank_matches_a_sort():
+    values = [5, 1, 4, 4, 9, 2, 0]
+    hist = np.array(values + [7], dtype=np.uint64)
+    for k in range(len(values)):
+        assert nb_rtt_rank(hist, len(values), k, -1) == sorted(values)[k]
+        assert nb_rtt_rank(hist, len(values), k, 4) == sorted(abs(v - 4) for v in values)[k]
+
+
+def test_a_delayed_pong_in_the_warm_up_is_not_snapped_to():
+    """The warm-up snaps fully to its first pongs. On the rig a rebuilt engine's 8th pong had waited 1 ms on the
+    return path and the snap put the offset 0.7 ms late, worked off by the 1/8 loop over ~8 s. Gated from the third
+    RTT on, it leaves the model where the typical pongs put it."""
+
+    def link(i, rng):
+        rtt = rng.randint(1_950_000, 2_050_000)
+        return (rtt + 1_000_000 if i == 6 else rtt), 1_000_000
+
+    _, errors, gated = _gate_link(30, link, device_ppm=0)
+
+    assert gated[6]
+    assert max(abs(e) for e in errors[3:30]) < 60_000, max(errors[3:30], key=abs)
+
+
+def test_a_warm_restart_keeps_the_model_until_a_few_pongs_agree():
+    """TimeSyncEngine.soft_reset (a parser restart) clears the RTT history. The first pong after it took 7 ms on the
+    rig, 5 ms above the link's usual 2.1 ms; snapped to, it put the offset 3.4 ms late. The published model now stays
+    in force until three new RTTs are in, and a typical pong moves it from there."""
+    from blinkview.core.time_sync_engine import TimeSyncEngine
+
+    def link(i, rng):
+        return rng.randint(2_050_000, 2_150_000), 1_050_000
+
+    engine, errors, _ = _gate_link(120, link, device_ppm=0)
+    sync = _sync()
+    # carry on from where _gate_link left the model: rebuild that state into a TimeSyncEngine wrapper
+    wrapper = TimeSyncEngine.__new__(TimeSyncEngine)
+    wrapper.engine, wrapper.sync, wrapper.logger, wrapper.logger_sync = engine, sync, None, None
+    host0 = 1_795_000_000_000_000_000
+    boot_host = host0 - 1_500_000_000_000
+    for i in range(120):  # the same steady link into this sync state
+        tx = host0 + i * 1_000_000_000
+        dev = tx + 1_050_000 - boot_host
+        nb_sync_kernel(tx, dev, dev, tx + 2_100_000, engine, sync, False)
+    wrapper.soft_reset()
+    assert int(sync.enabled[0]) == 1
+
+    errs = []
+    for k, rtt in enumerate([7_000_000, 2_100_000, 2_120_000, 2_080_000, 2_100_000]):
+        tx = host0 + (120 + k) * 1_000_000_000
+        dev = tx + 1_050_000 - boot_host
+        nb_sync_kernel(tx, dev, dev, tx + rtt, engine, sync, False)
+        errs.append(_project(sync, tx - boot_host) - tx)
+    assert max(abs(e) for e in errs) < 30_000, errs

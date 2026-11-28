@@ -18,6 +18,7 @@ from blinkview.ops.timesync import (
     IDX_ARRAY_LENGTH,
     IDX_ASYM_RATIO,
     IDX_BEST_RTT,
+    IDX_GATED_RUN,
     IDX_LAST_MEAN,
     IDX_LAST_STD,
     IDX_RTT_PTR,
@@ -123,8 +124,10 @@ class TimeSyncEngine:
         sc[IDX_SKIPS] = 0
         sc[IDX_LAST_MEAN] = 0
         sc[IDX_LAST_STD] = 0
-
-        self.sync.enabled[0] = 0
+        sc[IDX_GATED_RUN] = 0
+        # The published model stays in force: rows keep their synced stamps across the restart, and nb_sync_kernel
+        # moves it again once a few new RTTs show which pongs are typical. Clearing `enabled` made the next pong
+        # "the first ever" and snapped the model to it, whatever its RTT.
 
         if log := self.logger:
             log.info("Network RTT history cleared for warm-start. Clock anchors retained.")
